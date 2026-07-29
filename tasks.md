@@ -98,7 +98,7 @@ edit those files.
 | P0-T01 | DONE | Codex | Record accepted design and distributed task plan | - | `docs/design.md`, `tasks.md` |
 | P0-T02 | DONE | Codex | Scaffold Go module, project layout, base lint/test config, and CI | P0-T01 | `go.mod`, `go.sum`, `.golangci.yml`, `.github/workflows/**`, empty package roots |
 | P0-T03 | DONE | Codex | Golden capability spike: decode, references, Plan/Apply, nested executor, variable loading | P0-T02 | `internal/goldenprobe/**`, `docs/spikes/golden.md` |
-| P0-T04 | READY | - | Official Copilot SDK capability spike: session fields, tools, skills, filters, permission, close | P0-T02 | `internal/copilotprobe/**`, `docs/spikes/copilot.md` |
+| P0-T04 | DONE | Codex | Official Copilot SDK capability spike: session fields, tools, skills, filters, permission, close | P0-T02 | `internal/copilotprobe/**`, `docs/spikes/copilot.md` |
 | P1-T01 | DONE | Codex | Core domain types, Issue/ToolResponse invariants, cty type utilities | P0-T02 | `internal/spec/**` |
 | P1-T02 | READY | - | Source loader, HCL functions (`env`, `tool_name`), diagnostics, address model | P0-T02, P0-T03, P1-T01 | `internal/config/**` |
 | P1-T03 | READY | - | `model_provider` schema, auth one-of, retry merge and classifier | P1-T01 | `internal/provider/**` |
