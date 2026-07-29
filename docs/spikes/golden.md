@@ -95,3 +95,25 @@ attributes, and evaluates every remaining attribute into a typed
 `map[string]cty.Value`. The probe demonstrates the closed-schema failure,
 string and number inputs, source decoding, an explicit dependency, and expanded
 `for_each` instances.
+
+## Native Go Fields
+
+Golden decodes HCL primitive attributes directly into Go `string`, `bool`,
+`int`, and `[]string` fields. An optional primitive can use a pointer such as
+`*int`: an omitted attribute remains `nil`, while an explicit zero remains a
+non-nil pointer to zero. r42 blocks should therefore use native Go fields for
+primitive attributes instead of routing them through `cty.Value`.
+
+Golden reapplies `default` tags after decoding, and the defaults library treats
+Go zero values as unset. A default tag can therefore overwrite an explicitly
+configured `false`, `0`, or empty string. Fields where an explicit zero differs
+from omission must use a pointer and apply their default during r42 validation.
+`cty.Value` remains appropriate for block traversals, dynamically typed DSL
+values, and values that must retain cty marks.
+
+For a two-segment root block reference such as `go_tool.finish`, the block must
+implement `golden.SingleValueBlock`. Its `Value()` may return a `cty.Object`;
+Golden then decodes the traversal directly into a consumer's `cty.Value` field
+and records the implicit dependency. A small object containing the block address,
+kind, and public block attributes preserves typed reference semantics. Returning
+an address string instead would erase the referenced block's object shape.
