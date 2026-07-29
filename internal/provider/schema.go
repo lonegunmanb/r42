@@ -10,21 +10,22 @@ import (
 	"github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
-	"github.com/zclconf/go-cty/cty/gocty"
 )
 
 type ModelProviderBlock struct {
 	*golden.BaseBlock
-	ProviderType   string       `hcl:"type"`
-	Endpoint       string       `hcl:"endpoint"`
-	WireAPIValue   cty.Value    `hcl:"wire_api,optional"`
-	TransportValue cty.Value    `hcl:"transport,optional"`
-	Headers        cty.Value    `hcl:"headers,optional"`
-	APIKey         cty.Value    `hcl:"api_key,optional"`
-	APIKeyRef      cty.Value    `hcl:"api_key_ref,optional"`
-	BearerToken    cty.Value    `hcl:"bearer_token,optional"`
-	BearerTokenRef cty.Value    `hcl:"bearer_token_ref,optional"`
-	RetryBlocks    []RetryBlock `hcl:"retry,block"`
+	ProviderType         Type         `hcl:"type"`
+	Endpoint             string       `hcl:"endpoint"`
+	WireAPI              *WireAPI     `hcl:"wire_api,optional"`
+	Transport            *Transport   `hcl:"transport,optional"`
+	Headers              cty.Value    `hcl:"headers,optional"`
+	APIKey               *string      `hcl:"api_key,optional"`
+	APIKeyRef            *string      `hcl:"api_key_ref,optional"`
+	BearerToken          *string      `hcl:"bearer_token,optional"`
+	BearerTokenRef       *string      `hcl:"bearer_token_ref,optional"`
+	RetryBlocks          []RetryBlock `hcl:"retry,block"`
+	APIKeyAttribute      cty.Value    `attribute:"api_key"`
+	BearerTokenAttribute cty.Value    `attribute:"bearer_token"`
 
 	planned Config
 }
@@ -38,6 +39,9 @@ func (*ModelProviderBlock) AddressLength() int { return 2 }
 func (*ModelProviderBlock) CanExecutePrePlan() bool { return false }
 
 func (b *ModelProviderBlock) ExecuteDuringPlan() error {
+	if err := b.validateStringAttributes(); err != nil {
+		return err
+	}
 	config, err := b.toConfig()
 	if err != nil {
 		return err
@@ -45,7 +49,37 @@ func (b *ModelProviderBlock) ExecuteDuringPlan() error {
 	if err = config.Validate(); err != nil {
 		return err
 	}
+	b.APIKeyAttribute = sensitiveString(b.APIKey)
+	b.BearerTokenAttribute = sensitiveString(b.BearerToken)
 	b.planned = config
+	return nil
+}
+
+func (b *ModelProviderBlock) validateStringAttributes() error {
+	if b.BaseBlock == nil {
+		return nil
+	}
+	for _, name := range []string{
+		"type", "endpoint", "wire_api", "transport", "api_key", "api_key_ref", "bearer_token", "bearer_token_ref",
+	} {
+		attribute, ok := b.HclBlock().Body.Attributes[name]
+		if !ok {
+			continue
+		}
+		value, diagnostics := attribute.Expr.Value(b.EvalContext())
+		if diagnostics.HasErrors() {
+			// note: untested because Golden evaluates this expression during native decoding first.
+			return fmt.Errorf("evaluate %s: %w", name, diagnostics)
+		}
+		unmarked, _ := value.UnmarkDeep()
+		if !unmarked.IsWhollyKnown() {
+			// note: untested because Golden rejects unknown values while decoding native strings first.
+			return fmt.Errorf("%s must be known during plan", name)
+		}
+		if !unmarked.Type().Equals(cty.String) {
+			return fmt.Errorf("%s must be a string", name)
+		}
+	}
 	return nil
 }
 
@@ -53,12 +87,26 @@ func (b *ModelProviderBlock) ProviderConfig() Config {
 	return b.planned
 }
 
+func (b *ModelProviderBlock) APIKeyValue() cty.Value {
+	if b.APIKeyAttribute.Type().Equals(cty.NilType) {
+		return sensitiveString(b.APIKey)
+	}
+	return b.APIKeyAttribute
+}
+
+func (b *ModelProviderBlock) BearerTokenValue() cty.Value {
+	if b.BearerTokenAttribute.Type().Equals(cty.NilType) {
+		return sensitiveString(b.BearerToken)
+	}
+	return b.BearerTokenAttribute
+}
+
 type RetryBlock struct {
-	LifecycleRetries   cty.Value `hcl:"lifecycle_retries,optional"`
-	ModelCallRetries   cty.Value `hcl:"model_call_retries,optional"`
-	IntervalSeconds    cty.Value `hcl:"interval_seconds,optional"`
-	MaxIntervalSeconds cty.Value `hcl:"max_interval_seconds,optional"`
-	ErrorMessageRegex  []string  `hcl:"error_message_regex,optional"`
+	LifecycleRetries   *int     `hcl:"lifecycle_retries,optional"`
+	ModelCallRetries   *int     `hcl:"model_call_retries,optional"`
+	IntervalSeconds    *int     `hcl:"interval_seconds,optional"`
+	MaxIntervalSeconds *int     `hcl:"max_interval_seconds,optional"`
+	ErrorMessageRegex  []string `hcl:"error_message_regex,optional"`
 }
 
 func (b *ModelProviderBlock) toConfig() (Config, error) {
@@ -66,30 +114,6 @@ func (b *ModelProviderBlock) toConfig() (Config, error) {
 		return Config{}, errors.New("model provider must have at most one retry block")
 	}
 
-	wireAPI, err := optionalString(b.WireAPIValue, "wire_api")
-	if err != nil {
-		return Config{}, err
-	}
-	transport, err := optionalString(b.TransportValue, "transport")
-	if err != nil {
-		return Config{}, err
-	}
-	apiKey, err := optionalSecret(&b.APIKey, "api_key")
-	if err != nil {
-		return Config{}, err
-	}
-	apiKeyRef, err := optionalString(b.APIKeyRef, "api_key_ref")
-	if err != nil {
-		return Config{}, err
-	}
-	bearerToken, err := optionalSecret(&b.BearerToken, "bearer_token")
-	if err != nil {
-		return Config{}, err
-	}
-	bearerTokenRef, err := optionalString(b.BearerTokenRef, "bearer_token_ref")
-	if err != nil {
-		return Config{}, err
-	}
 	headers, err := normalizeHeaders(b.Headers)
 	if err != nil {
 		return Config{}, err
@@ -97,21 +121,15 @@ func (b *ModelProviderBlock) toConfig() (Config, error) {
 	b.Headers = headers
 
 	config := Config{
-		Type:           Type(b.ProviderType),
+		Type:           b.ProviderType,
 		Endpoint:       b.Endpoint,
+		WireAPI:        clonePointer(b.WireAPI),
+		Transport:      clonePointer(b.Transport),
 		Headers:        headers,
-		APIKey:         apiKey,
-		APIKeyRef:      apiKeyRef,
-		BearerToken:    bearerToken,
-		BearerTokenRef: bearerTokenRef,
-	}
-	if wireAPI != nil {
-		value := WireAPI(*wireAPI)
-		config.WireAPI = &value
-	}
-	if transport != nil {
-		value := Transport(*transport)
-		config.Transport = &value
+		APIKey:         clonePointer(b.APIKey),
+		APIKeyRef:      clonePointer(b.APIKeyRef),
+		BearerToken:    clonePointer(b.BearerToken),
+		BearerTokenRef: clonePointer(b.BearerTokenRef),
 	}
 	if len(b.RetryBlocks) == 1 {
 		config.Retry, err = b.RetryBlocks[0].override()
@@ -150,14 +168,6 @@ func objectMarksToMapPaths(marks []cty.PathValueMarks) []cty.PathValueMarks {
 }
 
 func (b RetryBlock) override() (RetryOverride, error) {
-	lifecycle, err := optionalInt(b.LifecycleRetries, "lifecycle_retries")
-	if err != nil {
-		return RetryOverride{}, err
-	}
-	modelCalls, err := optionalInt(b.ModelCallRetries, "model_call_retries")
-	if err != nil {
-		return RetryOverride{}, err
-	}
 	interval, err := optionalDuration(b.IntervalSeconds, "interval_seconds")
 	if err != nil {
 		return RetryOverride{}, err
@@ -167,61 +177,36 @@ func (b RetryBlock) override() (RetryOverride, error) {
 		return RetryOverride{}, err
 	}
 	return RetryOverride{
-		LifecycleRetries:  lifecycle,
-		ModelCallRetries:  modelCalls,
+		LifecycleRetries:  clonePointer(b.LifecycleRetries),
+		ModelCallRetries:  clonePointer(b.ModelCallRetries),
 		Interval:          interval,
 		MaxInterval:       maxInterval,
 		ErrorMessageRegex: append([]string{}, b.ErrorMessageRegex...),
 	}, nil
 }
 
-func optionalSecret(value *cty.Value, name string) (*string, error) {
-	result, err := optionalString(*value, name)
-	if err != nil || result == nil {
-		return result, err
+func sensitiveString(value *string) cty.Value {
+	if value == nil {
+		return cty.NilVal
 	}
-	*value = spec.MarkSensitive(*value)
-	return result, nil
+	return spec.MarkSensitive(cty.StringVal(*value))
 }
 
-func optionalString(value cty.Value, name string) (*string, error) {
-	if value.Type().Equals(cty.NilType) || value.IsNull() {
+func optionalDuration(seconds *int, name string) (*time.Duration, error) {
+	if seconds == nil {
 		return nil, nil
 	}
-	unmarked, _ := value.UnmarkDeep()
-	if !unmarked.IsWhollyKnown() {
-		return nil, fmt.Errorf("%s must be known during plan", name)
-	}
-	if !unmarked.Type().Equals(cty.String) {
-		return nil, fmt.Errorf("%s must be a string", name)
-	}
-	result := unmarked.AsString()
-	return &result, nil
-}
-
-func optionalInt(value cty.Value, name string) (*int, error) {
-	if value.Type().Equals(cty.NilType) || value.IsNull() {
-		return nil, nil
-	}
-	unmarked, _ := value.UnmarkDeep()
-	if !unmarked.IsWhollyKnown() || !unmarked.Type().Equals(cty.Number) {
-		return nil, fmt.Errorf("%s must be a known integer", name)
-	}
-	var result int
-	if err := gocty.FromCtyValue(unmarked, &result); err != nil {
-		return nil, fmt.Errorf("%s must be an integer: %w", name, err)
-	}
-	return &result, nil
-}
-
-func optionalDuration(value cty.Value, name string) (*time.Duration, error) {
-	seconds, err := optionalInt(value, name)
-	if err != nil || seconds == nil {
-		return nil, err
-	}
-	if *seconds > math.MaxInt64/int(time.Second) {
+	if *seconds < math.MinInt64/int(time.Second) || *seconds > math.MaxInt64/int(time.Second) {
 		return nil, fmt.Errorf("%s is too large", name)
 	}
 	result := time.Duration(*seconds) * time.Second
 	return &result, nil
+}
+
+func clonePointer[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }

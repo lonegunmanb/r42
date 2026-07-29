@@ -55,6 +55,7 @@ model_provider "primary" {
 	assert.Equal(t, "model_provider.primary", block.Address())
 
 	planned := block.ProviderConfig()
+	assertNativeProviderFields(t, block.WireAPI, block.Transport, block.APIKeyRef)
 	assert.Equal(t, provider.TypeAzure, planned.Type)
 	assert.Equal(t, "https://example.openai.azure.com", planned.Endpoint)
 	assert.Equal(t, provider.WireAPIResponses, *planned.WireAPI)
@@ -67,6 +68,7 @@ model_provider "primary" {
 	assert.Equal(t, 2*time.Second, retry.Interval)
 	assert.Equal(t, 30*time.Second, retry.MaxInterval)
 	assert.Equal(t, []string{"temporarily unavailable"}, retry.ErrorMessageRegex)
+	assert.True(t, block.APIKeyValue().Type().Equals(cty.NilType))
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -85,13 +87,136 @@ model_provider "minimal" {
 	require.Len(t, blocks, 1)
 	block := blocks[0]
 	assert.False(t, block.CanExecutePrePlan())
-	assert.True(t, spec.IsSensitive(block.APIKey))
+	require.NotNil(t, block.APIKey)
+	assert.Equal(t, "secret", *block.APIKey)
+	assert.True(t, spec.IsSensitive(block.APIKeyValue()))
+	assert.True(t, spec.IsSensitive(golden.Value(block)["api_key"]))
 	planned := block.ProviderConfig()
 	require.NotNil(t, planned.APIKey)
 	assert.Equal(t, "secret", *planned.APIKey)
 	assert.Nil(t, planned.WireAPI)
 	assert.Nil(t, planned.Transport)
 	assert.Empty(t, planned.Retry.ErrorMessageRegex)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestModelProviderBlockPreservesOptionalRetryZeroValues(t *testing.T) {
+	registerProviderBlock.Do(func() { golden.RegisterBlock(new(provider.ModelProviderBlock)) })
+	config := parseProviderConfig(t, `
+model_provider "zero" {
+  type     = "openai"
+  endpoint = "https://models.example.test"
+  retry {
+    lifecycle_retries = 0
+    interval_seconds  = 0
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	blocks := golden.Blocks[*provider.ModelProviderBlock](config)
+	require.Len(t, blocks, 1)
+	retry := blocks[0].RetryBlocks[0]
+	require.NotNil(t, retry.LifecycleRetries)
+	require.NotNil(t, retry.IntervalSeconds)
+	assert.Zero(t, *retry.LifecycleRetries)
+	assert.Zero(t, *retry.IntervalSeconds)
+	assert.Nil(t, retry.ModelCallRetries)
+	assert.Nil(t, retry.MaxIntervalSeconds)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestModelProviderBlockKeepsPlannedConfigIndependentFromDecodedFields(t *testing.T) {
+	registerProviderBlock.Do(func() { golden.RegisterBlock(new(provider.ModelProviderBlock)) })
+	config := parseProviderConfig(t, `
+model_provider "snapshot" {
+  type      = "openai"
+  endpoint  = "https://models.example.test"
+  wire_api  = "responses"
+  transport = "http"
+  api_key   = "original"
+  retry {
+    lifecycle_retries  = 7
+    model_call_retries = 3
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	blocks := golden.Blocks[*provider.ModelProviderBlock](config)
+	require.Len(t, blocks, 1)
+	block := blocks[0]
+
+	*block.WireAPI = provider.WireAPI("changed")
+	*block.Transport = provider.Transport("changed")
+	*block.APIKey = "changed"
+	*block.RetryBlocks[0].LifecycleRetries = 99
+	*block.RetryBlocks[0].ModelCallRetries = 98
+
+	planned := block.ProviderConfig()
+	assert.Equal(t, provider.WireAPIResponses, *planned.WireAPI)
+	assert.Equal(t, provider.TransportHTTP, *planned.Transport)
+	assert.Equal(t, "original", *planned.APIKey)
+	assert.Equal(t, 7, *planned.Retry.LifecycleRetries)
+	assert.Equal(t, 3, *planned.Retry.ModelCallRetries)
+}
+
+func TestModelProviderBlockKeepsPlannedAuthenticationIndependentFromDecodedFields(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		configure func(*provider.ModelProviderBlock, *string)
+		planned   func(provider.Config) *string
+	}{
+		{
+			name: "api key",
+			configure: func(block *provider.ModelProviderBlock, value *string) {
+				block.APIKey = value
+			},
+			planned: func(config provider.Config) *string { return config.APIKey },
+		},
+		{
+			name: "api key environment reference",
+			configure: func(block *provider.ModelProviderBlock, value *string) {
+				block.APIKeyRef = value
+			},
+			planned: func(config provider.Config) *string { return config.APIKeyRef },
+		},
+		{
+			name: "bearer token",
+			configure: func(block *provider.ModelProviderBlock, value *string) {
+				block.BearerToken = value
+			},
+			planned: func(config provider.Config) *string { return config.BearerToken },
+		},
+		{
+			name: "bearer token environment reference",
+			configure: func(block *provider.ModelProviderBlock, value *string) {
+				block.BearerTokenRef = value
+			},
+			planned: func(config provider.Config) *string { return config.BearerTokenRef },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			credential := "original"
+			block := provider.ModelProviderBlock{
+				ProviderType: provider.TypeOpenAI,
+				Endpoint:     "https://models.example.test",
+			}
+			tt.configure(&block, &credential)
+			require.NoError(t, block.ExecuteDuringPlan())
+
+			credential = "changed"
+			planned := tt.planned(block.ProviderConfig())
+			require.NotNil(t, planned)
+			assert.Equal(t, "original", *planned)
+		})
+	}
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -142,14 +267,14 @@ api_key = 42`,
 			body: `type = "openai"
 endpoint = "https://models.example.test"
 retry { lifecycle_retries = 1.5 }`,
-			expectedError: "lifecycle_retries must be an integer",
+			expectedError: "value must be a whole number",
 		},
 		{
 			name: "retry count wrong type",
 			body: `type = "openai"
 endpoint = "https://models.example.test"
 retry { model_call_retries = "five" }`,
-			expectedError: "model_call_retries must be a known integer",
+			expectedError: "a number is required",
 		},
 		{
 			name: "duration too large",
@@ -157,6 +282,13 @@ retry { model_call_retries = "five" }`,
 endpoint = "https://models.example.test"
 retry { interval_seconds = ` + fmtInt(math.MaxInt64/int64(time.Second)+1) + ` }`,
 			expectedError: "interval_seconds is too large",
+		},
+		{
+			name: "negative duration too large",
+			body: `type = "openai"
+endpoint = "https://models.example.test"
+retry { max_interval_seconds = ` + fmtInt(math.MinInt64/int64(time.Second)-1) + ` }`,
+			expectedError: "max_interval_seconds is too large",
 		},
 	}
 
@@ -168,18 +300,6 @@ retry { interval_seconds = ` + fmtInt(math.MaxInt64/int64(time.Second)+1) + ` }`
 			assert.ErrorContains(t, err, tt.expectedError)
 		})
 	}
-}
-
-func TestModelProviderBlockRejectsUnknownPlanValues(t *testing.T) {
-	t.Parallel()
-
-	block := provider.ModelProviderBlock{
-		ProviderType: "openai",
-		Endpoint:     "https://models.example.test",
-		WireAPIValue: cty.UnknownVal(cty.String),
-	}
-	err := block.ExecuteDuringPlan()
-	assert.EqualError(t, err, "wire_api must be known during plan")
 }
 
 func TestModelProviderBlockPreservesDeepHeaderSensitivity(t *testing.T) {
@@ -201,8 +321,26 @@ func TestModelProviderBlockPreservesDeepHeaderSensitivity(t *testing.T) {
 	assert.False(t, spec.IsSensitive(headers.Index(cty.StringVal("X-Project"))))
 }
 
+func TestModelProviderBlockMarksBearerTokenValueSensitive(t *testing.T) {
+	t.Parallel()
+
+	secret := "secret"
+	block := provider.ModelProviderBlock{BearerToken: &secret}
+	value := block.BearerTokenValue()
+	assert.True(t, spec.IsSensitive(value))
+	unmarked, _ := value.Unmark()
+	assert.Equal(t, secret, unmarked.AsString())
+}
+
 func fmtInt(value int64) string {
 	return fmt.Sprintf("%d", value)
+}
+
+func assertNativeProviderFields(t *testing.T, wireAPI *provider.WireAPI, transport *provider.Transport, apiKeyRef *string) {
+	t.Helper()
+	require.NotNil(t, wireAPI)
+	require.NotNil(t, transport)
+	require.NotNil(t, apiKeyRef)
 }
 
 func parseProviderConfig(t *testing.T, source string) *providerTestConfig {
