@@ -99,12 +99,12 @@ edit those files.
 | P0-T02 | DONE | Codex | Scaffold Go module, project layout, base lint/test config, and CI | P0-T01 | `go.mod`, `go.sum`, `.golangci.yml`, `.github/workflows/**`, empty package roots |
 | P0-T03 | DONE | Codex | Golden capability spike: decode, references, Plan/Apply, nested executor, variable loading | P0-T02 | `internal/goldenprobe/**`, `docs/spikes/golden.md` |
 | P0-T04 | READY | - | Official Copilot SDK capability spike: session fields, tools, skills, filters, permission, close | P0-T02 | `internal/copilotprobe/**`, `docs/spikes/copilot.md` |
-| P1-T01 | READY | - | Core domain types, Issue/ToolResponse invariants, cty type utilities | P0-T02 | `internal/spec/**` |
-| P1-T02 | BLOCKED | - | Source loader, HCL functions (`env`, `tool_name`), diagnostics, address model | P0-T02, P0-T03, P1-T01 | `internal/config/**` |
-| P1-T03 | BLOCKED | - | `model_provider` schema, auth one-of, retry merge and classifier | P1-T01 | `internal/provider/**` |
-| P1-T04 | BLOCKED | - | `go_tool` and `external_tool` schemas plus cty/JSON schema derivation | P1-T01 | `internal/tool/spec/**` |
-| P1-T05 | BLOCKED | - | `research`, nested `qc`, artifact, and session-policy schemas | P1-T01 | `internal/research/spec/**` |
-| P1-T06 | BLOCKED | - | Terraform-like variable/module/output schemas, source resolution, cycle detection | P0-T03, P1-T01 | `internal/module/spec/**` |
+| P1-T01 | DONE | Codex | Core domain types, Issue/ToolResponse invariants, cty type utilities | P0-T02 | `internal/spec/**` |
+| P1-T02 | READY | - | Source loader, HCL functions (`env`, `tool_name`), diagnostics, address model | P0-T02, P0-T03, P1-T01 | `internal/config/**` |
+| P1-T03 | READY | - | `model_provider` schema, auth one-of, retry merge and classifier | P1-T01 | `internal/provider/**` |
+| P1-T04 | READY | - | `go_tool` and `external_tool` schemas plus cty/JSON schema derivation | P1-T01 | `internal/tool/spec/**` |
+| P1-T05 | READY | - | `research`, nested `qc`, artifact, and session-policy schemas | P1-T01 | `internal/research/spec/**` |
+| P1-T06 | READY | - | Terraform-like variable/module/output schemas, source resolution, cycle detection | P0-T03, P1-T01 | `internal/module/spec/**` |
 | P2-T01 | BLOCKED | - | Inline Go AST/type validator, wrapper generator, compiler cache, temp cleanup | P1-T04 | `internal/tool/gotool/**` |
 | P2-T02 | BLOCKED | - | External tool JSON protocol, limits, stderr policy, process-tree cancellation | P1-T04 | `internal/tool/external/**` |
 | P2-T03 | BLOCKED | - | Run/workspace manager, artifact paths and recursive validation | P1-T05 | `internal/run/**`, `internal/artifact/**` |

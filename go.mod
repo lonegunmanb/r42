@@ -5,7 +5,9 @@ go 1.25.0
 require (
 	github.com/Azure/golden v0.0.0-20260603014844-1d1c394b55ea
 	github.com/github/copilot-sdk/go v1.0.8
+	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/stretchr/testify v1.11.1
+	github.com/zclconf/go-cty v1.18.1
 	go.uber.org/goleak v1.3.0
 )
 
@@ -50,7 +52,6 @@ require (
 	github.com/hashicorp/go-version v1.7.0 // indirect
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/hashicorp/hcl/v2 v2.24.0 // indirect
 	github.com/hashicorp/packer-plugin-sdk v0.6.1 // indirect
 	github.com/hashicorp/serf v0.10.1 // indirect
 	github.com/hashicorp/vault/api v1.14.0 // indirect
@@ -70,7 +71,6 @@ require (
 	github.com/ryanuber/go-glob v1.0.0 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/timandy/routine v1.1.5 // indirect
-	github.com/zclconf/go-cty v1.18.1 // indirect
 	github.com/zclconf/go-cty-yaml v1.1.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/otel v1.35.0 // indirect
