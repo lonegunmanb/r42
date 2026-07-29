@@ -13,9 +13,9 @@ provides configuration evaluation, implicit dependency discovery, Plan, and
 Apply. A leaf `research` block owns exactly one GitHub Copilot SDK research
 session and, when configured, exactly one QC session.
 
-The Go implementation must use the repository-approved
-`lonegunmanb/copilot-sdk` adapter. It must not import the official Copilot Go SDK
-directly.
+The Go implementation must use the official upstream
+`github.com/github/copilot-sdk/go` module directly. It must not introduce a
+third-party fork or adapter.
 
 ### Goals
 
