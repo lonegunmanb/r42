@@ -9,9 +9,9 @@ example disagree, the explicit rules in this document win.
 ## 1. Purpose
 
 r42 is a high-level HCL DSL and execution engine for research DAGs. Azure/golden
-provides configuration evaluation, implicit dependency discovery, Plan, and
-Apply. A leaf `research` block owns exactly one GitHub Copilot SDK research
-session and, when configured, exactly one QC session.
+provides configuration evaluation, implicit dependency discovery, Plan hooks,
+and the Apply block protocol. A leaf `research` block owns exactly one GitHub
+Copilot SDK research session and, when configured, exactly one QC session.
 
 The Go implementation must use the official upstream
 `github.com/github/copilot-sdk/go` module directly. It must not introduce a
@@ -54,6 +54,11 @@ a convenience form that performs a complete in-memory Plan before Apply.
 Golden owns graph construction and dependency evaluation. References create
 implicit dependencies. `depends_on` is available for dependencies that cannot be
 expressed through values, matching Terraform's model.
+
+The pinned Golden version mutates its live block graph during Plan and exposes
+no Plan serialization or nested executor API. r42 owns the immutable
+serializable Plan, persists nested Plans, and traverses Golden `ApplyBlock`
+values from that saved representation.
 
 Any block failure or timeout triggers fail-fast cancellation of the entire DAG.
 An interrupted Apply cannot resume; another Apply creates a new run and starts
