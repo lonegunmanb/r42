@@ -1,0 +1,44 @@
+version: "2"
+
+run:
+  concurrency: 4
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - asciicheck
+    - bidichk
+    - copyloopvar
+    - durationcheck
+    - errcheck
+    - errorlint
+    - forcetypeassert
+    - gocritic
+    - godot
+    - govet
+    - ineffassign
+    - misspell
+    - modernize
+    - nilerr
+    - nolintlint
+    - paralleltest
+    - predeclared
+    - staticcheck
+    - testifylint
+    - thelper
+    - unconvert
+    - unused
+    - usetesting
+  settings:
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+  settings:
+    gofumpt:
+      extra-rules: true
