@@ -1,0 +1,17 @@
+external_tool "blocker" {
+  description = "Block until the research run is cancelled."
+  program     = [__PROGRAM__, "-test.run=TestE2EHelperProcess", "--", "block", __STARTED_FILE__]
+  input_type  = object({})
+  output_type = string
+}
+
+research "slow" {
+  model         = "test-model"
+  system_prompt = "RUN_EXTERNAL_CHILD"
+  tools         = [external_tool.blocker]
+}
+
+research "failure" {
+  model         = "test-model"
+  system_prompt = "TRIGGER_FAIL_FAST"
+}

@@ -117,7 +117,7 @@ edit those files.
 | P3-T05 | DONE | Codex | Debug event files, prompt/transcript capture, normal-mode redaction | P2-T03, P2-T04, P3-T01 | `internal/debuglog/**` |
 | P4-T01 | DONE | Codex | Top-level executor wiring, fail-fast cancellation, ordered cleanup | P3-T02, P3-T03, P3-T04, P3-T05 | `internal/executor/**` |
 | P4-T02 | DONE | Codex | CLI `plan`/`apply`, direct-directory Apply, flags, diagnostics, exit codes | P4-T01 | `cmd/r42/**`, `internal/cli/**` |
-| P4-T03 | READY | - | End-to-end fixtures and acceptance tests across Plan, Apply, modules, QC, cancellation | P4-T02 | `testdata/**`, `internal/e2e/**`, `docs/examples/**` |
+| P4-T03 | DONE | Codex | End-to-end fixtures and acceptance tests across Plan, Apply, modules, QC, cancellation | P4-T02 | `testdata/**`, `internal/e2e/**`, `docs/examples/**` |
 
 ## Task Contracts
 

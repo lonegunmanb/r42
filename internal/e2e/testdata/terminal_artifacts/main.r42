@@ -1,0 +1,49 @@
+go_tool "finish" {
+  description = "Finish research"
+  source = <<-GO
+    import "context"
+
+    type Input struct {
+      Summary string
+    }
+
+    type Output string
+
+    func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
+      output := Output(input.Summary)
+      return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+    }
+  GO
+}
+
+research "source" {
+  model          = "test-model"
+  system_prompt  = "Write the required report and evidence."
+  terminate_tool = go_tool.finish
+
+  artifact "report" {
+    type      = "file"
+    path      = "report.md"
+    required  = true
+    non_empty = true
+  }
+
+  artifact "evidence" {
+    type      = "directory"
+    path      = "evidence"
+    required  = true
+    non_empty = true
+  }
+}
+
+output "summary" {
+  value = research.source.result
+}
+
+output "report_path" {
+  value = research.source.artifacts.report.path
+}
+
+output "evidence_path" {
+  value = research.source.artifacts.evidence.path
+}
