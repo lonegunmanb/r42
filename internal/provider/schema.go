@@ -30,6 +30,8 @@ type ModelProviderBlock struct {
 	planned Config
 }
 
+var _ golden.SingleValueBlock = (*ModelProviderBlock)(nil)
+
 func (*ModelProviderBlock) Type() string { return "" }
 
 func (*ModelProviderBlock) BlockType() string { return "model_provider" }
@@ -37,6 +39,13 @@ func (*ModelProviderBlock) BlockType() string { return "model_provider" }
 func (*ModelProviderBlock) AddressLength() int { return 2 }
 
 func (*ModelProviderBlock) CanExecutePrePlan() bool { return false }
+
+func (b *ModelProviderBlock) Value() cty.Value {
+	return cty.ObjectVal(map[string]cty.Value{
+		"address": cty.StringVal(b.Address()),
+		"kind":    cty.StringVal("provider"),
+	})
+}
 
 func (b *ModelProviderBlock) ExecuteDuringPlan() error {
 	if err := b.validateStringAttributes(); err != nil {

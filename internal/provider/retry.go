@@ -35,6 +35,30 @@ type RetryPolicy struct {
 	compiledRegex     []*regexp.Regexp
 }
 
+func (o RetryOverride) Validate() error {
+	if o.LifecycleRetries != nil && *o.LifecycleRetries < 0 {
+		return errors.New("lifecycle retries must not be negative")
+	}
+	if o.ModelCallRetries != nil && *o.ModelCallRetries < 0 {
+		return errors.New("model call retries must not be negative")
+	}
+	if o.Interval != nil && *o.Interval < 0 {
+		return errors.New("retry interval must not be negative")
+	}
+	if o.MaxInterval != nil && *o.MaxInterval < 0 {
+		return errors.New("maximum retry interval must not be negative")
+	}
+	if o.Interval != nil && o.MaxInterval != nil && *o.MaxInterval < *o.Interval {
+		return errors.New("maximum retry interval must not be less than retry interval")
+	}
+	for _, expression := range o.ErrorMessageRegex {
+		if _, err := regexp.Compile(expression); err != nil {
+			return fmt.Errorf("compile error message regex %q: %w", expression, err)
+		}
+	}
+	return nil
+}
+
 func DefaultRetryPolicy() RetryPolicy {
 	return RetryPolicy{
 		LifecycleRetries:  10,
@@ -49,6 +73,9 @@ func DefaultRetryPolicy() RetryPolicy {
 }
 
 func MergeRetry(base RetryPolicy, override RetryOverride) (RetryPolicy, error) {
+	if err := override.Validate(); err != nil {
+		return RetryPolicy{}, err
+	}
 	result := base
 	result.Multiplier = retryMultiplier
 	result.Jitter = retryJitter
