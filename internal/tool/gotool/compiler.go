@@ -39,6 +39,20 @@ type Response struct {
 	Stderr   string           `json:"-"`
 }
 
+type InvocationError struct {
+	cause  error
+	stdout string
+	stderr string
+}
+
+func (e *InvocationError) Error() string { return e.cause.Error() }
+
+func (e *InvocationError) Unwrap() error { return e.cause }
+
+func (e *InvocationError) Stdout() string { return e.stdout }
+
+func (e *InvocationError) Stderr() string { return e.stderr }
+
 func NewCompiler() (*Compiler, error) {
 	directory, err := os.MkdirTemp("", "r42-go-tools-")
 	if err != nil {
@@ -125,19 +139,29 @@ func (p *Program) Invoke(ctx context.Context, input json.RawMessage) (Response, 
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
 		if contextError := ctx.Err(); contextError != nil {
-			return Response{}, fmt.Errorf("running inline Go tool: %w", contextError)
+			return Response{}, invocationError(
+				fmt.Errorf("running inline Go tool: %w", contextError), stdout.String(), stderr.String(),
+			)
 		}
-		return Response{}, fmt.Errorf("running inline Go tool: %w: %s", err, strings.TrimSpace(stderr.String()))
+		return Response{}, invocationError(
+			fmt.Errorf("running inline Go tool: %w: %s", err, strings.TrimSpace(stderr.String())),
+			stdout.String(), stderr.String(),
+		)
 	}
 
 	decoder := json.NewDecoder(&stdout)
 	var response Response
 	if err := decoder.Decode(&response); err != nil {
-		return Response{}, fmt.Errorf("decoding inline Go tool response: %w", err)
+		return Response{}, invocationError(
+			fmt.Errorf("decoding inline Go tool response: %w", err), stdout.String(), stderr.String(),
+		)
 	}
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return Response{}, fmt.Errorf("decoding inline Go tool response: expected exactly one JSON value")
+		return Response{}, invocationError(
+			errors.New("decoding inline Go tool response: expected exactly one JSON value"),
+			stdout.String(), stderr.String(),
+		)
 	}
 	validation := corespec.ToolResponse[json.RawMessage]{
 		Accepted: response.Accepted,
@@ -145,10 +169,16 @@ func (p *Program) Invoke(ctx context.Context, input json.RawMessage) (Response, 
 		Issues:   response.Issues,
 	}
 	if err := validation.Validate(); err != nil {
-		return Response{}, fmt.Errorf("validating inline Go tool response: %w", err)
+		return Response{}, invocationError(
+			fmt.Errorf("validating inline Go tool response: %w", err), stdout.String(), stderr.String(),
+		)
 	}
 	response.Stderr = stderr.String()
 	return response, nil
+}
+
+func invocationError(cause error, stdout, stderr string) error {
+	return &InvocationError{cause: cause, stdout: stdout, stderr: stderr}
 }
 
 func sourceKey(source string) string {

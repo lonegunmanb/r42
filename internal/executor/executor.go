@@ -16,6 +16,10 @@ type Factory interface {
 	New(context.Context, plan.NodeSpec, *r42concurrency.Scope) (golden.ApplyBlock, error)
 }
 
+type OutputResolver interface {
+	ResolveOutputs(*plan.Plan) (map[string]cty.Value, error)
+}
+
 type CleanupBlock interface {
 	Cleanup(context.Context) error
 }
@@ -37,6 +41,27 @@ func (e *Executor) Apply(
 	planned *plan.Plan,
 	parallelism int,
 ) (map[string]cty.Value, error) {
+	scope, err := r42concurrency.NewScope(parallelism)
+	if err != nil {
+		return nil, err
+	}
+	return e.apply(ctx, planned, scope, true)
+}
+
+func (e *Executor) ApplyInScope(
+	ctx context.Context,
+	planned *plan.Plan,
+	scope *r42concurrency.Scope,
+) (map[string]cty.Value, error) {
+	return e.apply(ctx, planned, scope, false)
+}
+
+func (e *Executor) apply(
+	ctx context.Context,
+	planned *plan.Plan,
+	scope *r42concurrency.Scope,
+	closeDebug bool,
+) (map[string]cty.Value, error) {
 	e.applyMu.Lock()
 	defer e.applyMu.Unlock()
 	e.setWarnings(nil)
@@ -47,17 +72,16 @@ func (e *Executor) Apply(
 	if planned == nil {
 		return nil, fmt.Errorf("saved plan is required")
 	}
-	scope, err := r42concurrency.NewScope(parallelism)
-	if err != nil {
-		return nil, err
+	if scope == nil {
+		return nil, fmt.Errorf("concurrency scope is required")
 	}
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	nodes := planned.Nodes()
 	state := newRunState(nodes, cancel)
-	if err = ctx.Err(); err != nil {
-		state.fail(err)
+	if contextErr := ctx.Err(); contextErr != nil {
+		state.fail(contextErr)
 	}
 	events := make(chan nodeEvent, max(1, len(nodes)*2))
 	for _, node := range nodes {
@@ -78,21 +102,37 @@ func (e *Executor) Apply(
 	}
 
 	warnings := state.warnings
-	if e.debug != nil {
+	outputs := plannedOutputs(planned)
+	failure := state.failureError()
+	if failure == nil {
+		if resolver, ok := e.factory.(OutputResolver); ok {
+			resolved, resolveErr := resolver.ResolveOutputs(planned)
+			if resolveErr != nil {
+				failure = fmt.Errorf("resolve apply outputs: %w", resolveErr)
+			} else {
+				outputs = resolved
+			}
+		}
+	}
+	if closeDebug && e.debug != nil {
 		if closeErr := e.debug.Close(); closeErr != nil {
 			warnings = append(warnings, fmt.Errorf("close debug log: %w", closeErr))
 		}
 	}
 	e.setWarnings(warnings)
-	if failure := state.failureError(); failure != nil {
+	if failure != nil {
 		return nil, &ApplyError{cause: failure, cleanup: warnings}
 	}
+	return outputs, nil
+}
+
+func plannedOutputs(planned *plan.Plan) map[string]cty.Value {
 	outputs := planned.Outputs()
 	result := make(map[string]cty.Value, len(outputs))
 	for name, output := range outputs {
 		result[name] = output.Value
 	}
-	return result, nil
+	return result
 }
 
 func (e *Executor) Warnings() []error {

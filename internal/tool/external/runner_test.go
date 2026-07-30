@@ -115,6 +115,7 @@ func TestRunnerReportsNonzeroExitWithStderrTail(t *testing.T) {
 
 	var executionError *ExecutionError
 	require.ErrorAs(t, err, &executionError)
+	assert.Contains(t, executionError.Stdout(), "ignored stdout")
 	assert.Greater(t, len(executionError.Stderr()), ErrorStderrTailBytes)
 	assert.Contains(t, executionError.Stderr(), "BEGIN")
 	assert.NotContains(t, err.Error(), "BEGIN")

@@ -233,6 +233,60 @@ func TestPlanUnknownValuesRoundTripAsKnownAfterApply(t *testing.T) {
 	assert.Contains(t, display, "<sensitive>")
 }
 
+func TestPlanApplyEvaluationRecipeRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	contextValues := map[string]cty.Value{
+		"var": cty.ObjectVal(map[string]cty.Value{"prefix": cty.StringVal("market")}),
+		"research": cty.ObjectVal(map[string]cty.Value{
+			"source": cty.ObjectVal(map[string]cty.Value{"result": cty.UnknownVal(cty.String)}),
+		}),
+	}
+	planned, err := plan.NewWithContext("D:/research", nil, map[string]plan.OutputSpec{
+		"summary": {
+			Value:      cty.UnknownVal(cty.String),
+			Expression: `"${var.prefix}: ${research.source.result}"`,
+		},
+	}, contextValues)
+	require.NoError(t, err)
+
+	contextValues["var"] = cty.EmptyObjectVal
+	encoded, err := plan.Marshal(planned)
+	require.NoError(t, err)
+	decoded, err := plan.Unmarshal(encoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, `"${var.prefix}: ${research.source.result}"`, decoded.Outputs()["summary"].Expression)
+	assert.Equal(t, "market", decoded.Context()["var"].GetAttr("prefix").AsString())
+	snapshot := decoded.Context()
+	snapshot["var"] = cty.EmptyObjectVal
+	assert.Equal(t, "market", decoded.Context()["var"].GetAttr("prefix").AsString())
+}
+
+func TestPlanLocalEvaluationRecipesRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals(
+		"D:/research",
+		nil,
+		map[string]plan.OutputSpec{
+			"summary": {Value: cty.UnknownVal(cty.String), Expression: "local.summary"},
+		},
+		map[string]cty.Value{
+			"local": cty.ObjectVal(map[string]cty.Value{"summary": cty.UnknownVal(cty.String)}),
+		},
+		map[string]string{"summary": "upper(research.source.result)"},
+	)
+	require.NoError(t, err)
+
+	encoded, err := plan.Marshal(planned)
+	require.NoError(t, err)
+	decoded, err := plan.Unmarshal(encoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, map[string]string{"summary": "upper(research.source.result)"}, decoded.LocalExpressions())
+}
+
 func TestPlanSaveKeepsSecretsUnencryptedButRedactsDisplay(t *testing.T) {
 	t.Parallel()
 

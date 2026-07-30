@@ -1,15 +1,20 @@
 package spec_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Azure/golden"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
+	"github.com/lonegunmanb/r42/internal/provider"
+	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
+	toolspec "github.com/lonegunmanb/r42/internal/tool/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
@@ -351,13 +356,6 @@ func TestPlanDirectoryRejectsInvalidModuleBoundaries(t *testing.T) {
 			expectedError: "fixture plan failed",
 		},
 		{
-			name: "output must be known",
-			child: `planning_fixture "unknown" { value = "unknown" }
-output "result" { value = planning_fixture.unknown }`,
-			root:          `module "child" { source = "./child" }`,
-			expectedError: "value must be wholly known during plan",
-		},
-		{
 			name:          "output value is required",
 			child:         `output "result" {}`,
 			root:          `module "child" { source = "./child" }`,
@@ -380,6 +378,229 @@ output "result" { value = planning_fixture.unknown }`,
 			assert.ErrorContains(t, err, tt.expectedError)
 		})
 	}
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestPlanDirectoryAllowsKnownAfterApplyOutput(t *testing.T) {
+	registerSchemas()
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42", `
+planning_fixture "unknown" { value = "unknown" }
+output "result" { value = planning_fixture.unknown }
+`)
+
+	planned, err := modulespec.PlanDirectory(directory, nil)
+
+	require.NoError(t, err)
+	output := planned.Outputs["result"]
+	assert.True(t, output.Type.Equals(cty.String))
+	assert.False(t, output.Value.IsKnown())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestPlanDirectoryBuildsSavedResearchDAG(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(provider.ModelProviderBlock))
+	golden.RegisterBlock(new(toolspec.GoToolBlock))
+	golden.RegisterBlock(new(toolspec.ExternalToolBlock))
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42", `
+research "source" {
+  model         = "test-model"
+  system_prompt = "Collect evidence."
+
+  artifact "report" {
+    type = "file"
+    path = "report.md"
+  }
+}
+
+research "summary" {
+  model         = "test-model"
+  system_prompt = "Summarize evidence."
+  depends_on    = [research.source]
+}
+
+output "report_path" {
+  value = research.source.artifacts.report.path
+}
+`)
+
+	planned, err := modulespec.PlanDirectoryWithOptions(directory, modulespec.PlanOptions{
+		Context: context.Background(),
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, planned.Saved)
+	nodes := planned.Saved.Nodes()
+	require.Len(t, nodes, 2)
+	assert.Equal(t, "research.source", nodes[0].Address)
+	assert.Equal(t, "research", nodes[0].Kind)
+	assert.Empty(t, nodes[0].Dependencies)
+	assert.Equal(t, "test-model", nodes[0].Config.GetAttr("model").AsString())
+	assert.Equal(t, "research.summary", nodes[1].Address)
+	assert.Equal(t, []string{"research.source"}, nodes[1].Dependencies)
+	assert.Equal(t,
+		"research.source.artifacts.report.path",
+		planned.Saved.Outputs()["report_path"].Expression,
+	)
+	assert.Contains(t, planned.Saved.Context(), "research")
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestPlanDirectoryEmbedsSavedChildPlan(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	root := t.TempDir()
+	child := filepath.Join(root, "child")
+	require.NoError(t, os.Mkdir(child, 0o755))
+	writeR42(t, child, "main.r42", `
+research "inside" {
+  model         = "test-model"
+  system_prompt = "Work inside the module."
+}
+`)
+	writeR42(t, root, "main.r42", `
+module "child" {
+  source      = "./child"
+  parallelism = 2
+}
+`)
+
+	planned, err := modulespec.PlanDirectoryWithOptions(root, modulespec.PlanOptions{})
+
+	require.NoError(t, err)
+	require.NotNil(t, planned.Saved)
+	nodes := planned.Saved.Nodes()
+	require.Len(t, nodes, 1)
+	assert.Equal(t, "module.child", nodes[0].Address)
+	require.NotNil(t, nodes[0].Module)
+	assert.Equal(t, 2, nodes[0].Module.Parallelism)
+	assert.Equal(t, "research.inside", nodes[0].Module.Plan.Nodes()[0].Address)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestSavedResearchConfigCanBeReconstructed(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(provider.ModelProviderBlock))
+	golden.RegisterBlock(new(toolspec.GoToolBlock))
+	golden.RegisterBlock(new(toolspec.ExternalToolBlock))
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42", `
+model_provider "primary" {
+  type        = "openai"
+  endpoint    = "https://example.test"
+  api_key     = "secret"
+  wire_api    = "responses"
+  transport   = "http"
+  headers     = { "x-project" = "r42" }
+}
+
+external_tool "lookup" {
+  description = "Look up evidence"
+  program     = ["lookup", "--json"]
+  working_dir = "data"
+  input_type  = object({ query = string, limit = optional(number, 5) })
+  output_type = object({ answer = string })
+}
+
+go_tool "finish" {
+  description = "Finish research"
+  source = <<-GO
+    import "context"
+    type Input struct { Summary string `+"`json:\"summary\"`"+` }
+    type Output string
+    func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+      return ToolResponse[Output]{Accepted: true}, nil
+    }
+  GO
+}
+
+research "market" {
+  model_provider       = model_provider.primary
+  model                = "test-model"
+  reasoning_effort     = "high"
+  system_prompt        = "Research carefully."
+  prompt               = "Start now."
+  tools                = [external_tool.lookup]
+  terminate_tool       = go_tool.finish
+  allowed_tools        = [tool_name(external_tool.lookup)]
+  disallowed_tools     = ["ask_user"]
+  skill_directories    = ["."]
+  skills               = ["evidence"]
+  disabled_skills      = ["unsafe"]
+  max_protocol_attempts = 7
+  timeout              = "1m"
+
+  artifact "report" {
+    type      = "file"
+    path      = "report.md"
+    required  = true
+    non_empty = true
+  }
+
+  qc {
+    criteria     = { accuracy = "Must be accurate" }
+    model        = "qc-model"
+    max_qc_rounds = 3
+  }
+}
+`)
+
+	planned, err := modulespec.PlanDirectoryWithOptions(directory, modulespec.PlanOptions{})
+	require.NoError(t, err)
+	node := planned.Saved.Nodes()[0]
+	assert.True(t, corespec.IsSensitive(node.Config))
+
+	reconstructed, err := modulespec.DecodeResearchPlan(node.Config)
+	require.NoError(t, err)
+	assert.Equal(t, "test-model", reconstructed.Config.Model)
+	assert.Equal(t, "high", *reconstructed.Config.ReasoningEffort)
+	assert.Equal(t, "Start now.", *reconstructed.Config.Prompt)
+	assert.Equal(t, 7, reconstructed.Config.MaxProtocolAttempts)
+	assert.Equal(t, time.Minute, *reconstructed.Config.Timeout)
+	require.NotNil(t, reconstructed.Provider)
+	assert.Equal(t, "https://example.test", reconstructed.Provider.Endpoint)
+	assert.Equal(t, "secret", *reconstructed.Provider.APIKey)
+	require.Len(t, reconstructed.Tools, 1)
+	assert.Equal(t, "external_tool.lookup", reconstructed.Tools[0].Address)
+	assert.Contains(t, reconstructed.Tools[0].InputTypeExpression, "optional(number, 5)")
+	require.NotNil(t, reconstructed.TerminateTool)
+	assert.Equal(t, "go_tool.finish", reconstructed.TerminateTool.Address)
+	require.NotNil(t, reconstructed.Config.QC)
+	assert.Equal(t, "qc-model", *reconstructed.Config.QC.Model)
+	assert.Equal(t, 3, reconstructed.Config.QC.MaxRounds)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestSavedResearchConfigRestoresExplicitEmptyHeaders(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(provider.ModelProviderBlock))
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42", `
+model_provider "primary" {
+  type     = "openai"
+  endpoint = "https://example.test"
+  headers  = {}
+}
+
+research "market" {
+  model_provider = model_provider.primary
+  model          = "test-model"
+  system_prompt  = "Research carefully."
+}
+`)
+
+	planned, err := modulespec.PlanDirectoryWithOptions(directory, modulespec.PlanOptions{})
+	require.NoError(t, err)
+	reconstructed, err := modulespec.DecodeResearchPlan(planned.Saved.Nodes()[0].Config)
+
+	require.NoError(t, err)
+	require.NotNil(t, reconstructed.Provider)
+	assert.True(t, reconstructed.Provider.Headers.RawEquals(cty.MapValEmpty(cty.String)))
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

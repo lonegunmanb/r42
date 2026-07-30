@@ -29,6 +29,25 @@ func Display(planned *Plan) (string, error) {
 	return buffer.String(), nil
 }
 
+func DisplayValues(values map[string]cty.Value) (string, error) {
+	view := make(map[string]any, len(values))
+	for name, value := range values {
+		displayed, err := displayValue(value)
+		if err != nil {
+			return "", fmt.Errorf("display value %q: %w", name, err)
+		}
+		view[name] = displayed
+	}
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(view); err != nil {
+		// note: untested because displayValue returns only JSON-compatible values.
+		return "", fmt.Errorf("encode values display: %w", err)
+	}
+	return buffer.String(), nil
+}
+
 func displayPlan(planned *Plan) (map[string]any, error) {
 	nodes := make([]any, len(planned.nodes))
 	for index, node := range planned.nodes {

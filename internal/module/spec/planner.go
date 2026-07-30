@@ -1,18 +1,25 @@
 package spec
 
 import (
+	"context"
 	"fmt"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/lonegunmanb/r42/internal/config"
+	internalplan "github.com/lonegunmanb/r42/internal/plan"
+	"github.com/lonegunmanb/r42/internal/provider"
+	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
+	toolspec "github.com/lonegunmanb/r42/internal/tool/spec"
 	"github.com/zclconf/go-cty/cty"
 )
 
@@ -21,12 +28,19 @@ type Output struct {
 	Type        cty.Type
 	Description string
 	Sensitive   bool
+	Expression  string
 }
 
 type Plan struct {
 	Directory string
 	Outputs   map[string]Output
 	Modules   map[string]ModulePlan
+	Saved     *internalplan.Plan
+}
+
+type PlanOptions struct {
+	Context   context.Context
+	Variables []golden.CliFlagAssignedVariables
 }
 
 type ModulePlan struct {
@@ -60,6 +74,15 @@ func (a assignedValues) Variables(*golden.BaseConfig) (map[string]golden.Variabl
 }
 
 func PlanDirectory(directory string, inputs map[string]cty.Value) (Plan, error) {
+	return planDirectoryEntry(directory, inputs, PlanOptions{})
+}
+
+func PlanDirectoryWithOptions(directory string, options PlanOptions) (Plan, error) {
+	return planDirectoryEntry(directory, nil, options)
+}
+
+func planDirectoryEntry(directory string, inputs map[string]cty.Value, options PlanOptions) (Plan, error) {
+	registerPlanBlocks()
 	absolute, err := normalizeDirectory(directory)
 	if err != nil {
 		return Plan{}, fmt.Errorf("reading module directory: %w", err)
@@ -69,7 +92,7 @@ func PlanDirectory(directory string, inputs map[string]cty.Value) (Plan, error) 
 		return Plan{}, fmt.Errorf("creating isolated child variable directory: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(childVariableDirectory) }()
-	return planDirectory(absolute, inputs, nil, true, childVariableDirectory)
+	return planDirectory(absolute, inputs, nil, true, childVariableDirectory, options)
 }
 
 func planDirectory(
@@ -78,6 +101,7 @@ func planDirectory(
 	stack []string,
 	root bool,
 	childVariableDirectory string,
+	options PlanOptions,
 ) (Plan, error) {
 	if slices.Contains(stack, directory) {
 		return Plan{}, fmt.Errorf("module directory cycle: %v -> %s", stack, directory)
@@ -108,9 +132,13 @@ func planDirectory(
 	sensitiveVariables := sensitiveVariableNames(variables, inheritedSensitive)
 
 	assigned := []golden.CliFlagAssignedVariables{assignedValues(assignedInputs)}
+	if root {
+		assigned = append(assigned, options.Variables...)
+	}
 	baseArguments := golden.NewBaseConfigArgs{
 		Basedir:                  directory,
 		CliFlagAssignedVariables: assigned,
+		Ctx:                      options.Context,
 	}
 	if !root {
 		baseArguments.VarConfigDir = &childVariableDirectory
@@ -140,6 +168,10 @@ func planDirectory(
 	}
 	for _, module := range golden.Blocks[*ModuleBlock](planning) {
 		plan.Modules[module.Name()] = module.PlannedModule()
+	}
+	plan.Saved, err = savedPlan(planning, plan)
+	if err != nil {
+		return Plan{}, err
 	}
 	return plan, nil
 }
@@ -178,7 +210,14 @@ func (c *planningConfig) planChild(
 	if err != nil {
 		return ModulePlan{}, err
 	}
-	plan, err := planDirectory(directory, inputs, c.stack, false, c.childVariableDirectory)
+	plan, err := planDirectory(
+		directory,
+		inputs,
+		c.stack,
+		false,
+		c.childVariableDirectory,
+		PlanOptions{Context: c.Context()},
+	)
 	if err != nil {
 		return ModulePlan{}, err
 	}
@@ -316,10 +355,100 @@ func clonePlan(source Plan) Plan {
 		Directory: source.Directory,
 		Outputs:   make(map[string]Output, len(source.Outputs)),
 		Modules:   make(map[string]ModulePlan, len(source.Modules)),
+		Saved:     source.Saved,
 	}
 	maps.Copy(result.Outputs, source.Outputs)
 	for name, module := range source.Modules {
 		result.Modules[name] = cloneModulePlan(module)
 	}
 	return result
+}
+
+var registerPlanningBlocks sync.Once
+
+func registerPlanBlocks() {
+	registerPlanningBlocks.Do(func() {
+		golden.RegisterBlock(new(provider.ModelProviderBlock))
+		golden.RegisterBlock(new(toolspec.GoToolBlock))
+		golden.RegisterBlock(new(toolspec.ExternalToolBlock))
+		golden.RegisterBlock(new(researchspec.ResearchBlock))
+		golden.RegisterBlock(new(ModuleBlock))
+		golden.RegisterBlock(new(OutputBlock))
+	})
+}
+
+func savedPlan(config *planningConfig, planned Plan) (*internalplan.Plan, error) {
+	executable := make(map[string]struct{})
+	for _, block := range golden.Blocks[*researchspec.ResearchBlock](config) {
+		executable[block.Address()] = struct{}{}
+	}
+	for _, block := range golden.Blocks[*ModuleBlock](config) {
+		executable[block.Address()] = struct{}{}
+	}
+	dependencies := make(map[string][]string, len(executable))
+	for address := range executable {
+		children, err := config.GetChildren(address)
+		if err != nil {
+			return nil, fmt.Errorf("read dependencies for %s: %w", address, err)
+		}
+		for child := range children {
+			if _, ok := executable[child]; ok {
+				dependencies[child] = append(dependencies[child], address)
+			}
+		}
+	}
+
+	nodes := make([]internalplan.NodeSpec, 0, len(executable))
+	for _, block := range golden.Blocks[*researchspec.ResearchBlock](config) {
+		snapshot, err := encodeResearchPlan(block.ResearchConfig(), config)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot %s: %w", block.Address(), err)
+		}
+		nodes = append(nodes, internalplan.NodeSpec{
+			Address:      block.Address(),
+			Kind:         "research",
+			Dependencies: dependencies[block.Address()],
+			Config:       snapshot,
+		})
+	}
+	for _, block := range golden.Blocks[*ModuleBlock](config) {
+		module := planned.Modules[block.Name()]
+		nodes = append(nodes, internalplan.NodeSpec{
+			Address:      block.Address(),
+			Kind:         "module",
+			Dependencies: dependencies[block.Address()],
+			Config:       cty.EmptyObjectVal,
+			Module: &internalplan.ModuleSpec{
+				Plan:        module.Saved,
+				Parallelism: module.Parallelism,
+				Timeout:     module.Timeout,
+			},
+		})
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Address < nodes[j].Address })
+	for index := range nodes {
+		sort.Strings(nodes[index].Dependencies)
+	}
+	outputs := make(map[string]internalplan.OutputSpec, len(planned.Outputs))
+	for name, output := range planned.Outputs {
+		outputs[name] = internalplan.OutputSpec{
+			Value: output.Value, Description: output.Description, Expression: output.Expression,
+		}
+	}
+	contextValues := make(map[string]cty.Value)
+	maps.Copy(contextValues, config.EvalContext().Variables)
+	localExpressions := make(map[string]string)
+	for _, block := range golden.Blocks[*golden.LocalBlock](config) {
+		attribute, ok := block.HclBlock().Attributes()["value"]
+		if ok {
+			localExpressions[block.Name()] = attribute.ExprString()
+		}
+	}
+	result, err := internalplan.NewWithContextAndLocals(
+		planned.Directory, nodes, outputs, contextValues, localExpressions,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build saved plan: %w", err)
+	}
+	return result, nil
 }

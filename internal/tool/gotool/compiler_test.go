@@ -44,11 +44,15 @@ func TestCompilerBuildsCachesInvokesAndCleansProgram(t *testing.T) {
 	_, err = program.Invoke(t.Context(), json.RawMessage(`{"action":"error"}`))
 	require.Error(t, err)
 	require.ErrorContains(t, err, "tool returned an error")
+	var invocationErr *InvocationError
+	require.ErrorAs(t, err, &invocationErr)
+	assert.Contains(t, invocationErr.Stderr(), "tool returned an error")
 
 	_, err = program.Invoke(t.Context(), json.RawMessage(`{"action":"invalid_response"}`))
 	require.Error(t, err)
 	require.ErrorContains(t, err, "running inline Go tool")
 	require.ErrorContains(t, err, "issue 0 code is required")
+	require.ErrorAs(t, err, &invocationErr)
 
 	path := program.Path()
 	require.NoError(t, compiler.Close())

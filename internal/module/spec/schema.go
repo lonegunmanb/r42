@@ -127,9 +127,6 @@ func (b *OutputBlock) ExecuteDuringPlan() error {
 		return err
 	}
 	unmarked, _ := b.Expression.UnmarkDeep()
-	if !unmarked.IsWhollyKnown() {
-		return fmt.Errorf("output %q value must be wholly known during plan", b.Name())
-	}
 	if err := corespec.ValidateType(unmarked.Type()); err != nil {
 		return fmt.Errorf("output %q type: %w", b.Name(), err)
 	}
@@ -152,11 +149,16 @@ func (b *OutputBlock) Snapshot() Output {
 	if b.Description != nil {
 		description = *b.Description
 	}
+	expression := ""
+	if attribute, ok := b.HclBlock().Attributes()["value"]; ok {
+		expression = attribute.ExprString()
+	}
 	return Output{
 		Value:       b.planned,
 		Type:        b.planned.Type(),
 		Description: description,
 		Sensitive:   corespec.IsSensitive(b.planned),
+		Expression:  expression,
 	}
 }
 

@@ -45,6 +45,49 @@ func TestExecutorAppliesGoldenBlocksInDependencyOrder(t *testing.T) {
 	assert.Empty(t, runner.Warnings())
 }
 
+func TestExecutorResolvesOutputsAfterSuccessfulApply(t *testing.T) {
+	t.Parallel()
+
+	factory := &resolvingFactory{
+		fakeFactory: fakeFactory{build: func(_ context.Context, node plan.NodeSpec, _ *r42concurrency.Scope) (golden.ApplyBlock, error) {
+			return newFakeBlock(node.Address, func() error { return nil }, nil), nil
+		}},
+		outputs: map[string]cty.Value{"result": cty.StringVal("applied")},
+	}
+	planned := savedPlan(t, []plan.NodeSpec{{
+		Address: "research.source", Kind: "research", Config: cty.EmptyObjectVal,
+	}}, map[string]plan.OutputSpec{"result": {Value: cty.UnknownVal(cty.String)}})
+
+	outputs, err := executor.New(factory, nil).Apply(t.Context(), planned, 1)
+
+	require.NoError(t, err)
+	assert.Equal(t, cty.StringVal("applied"), outputs["result"])
+	assert.True(t, factory.resolved)
+}
+
+func TestExecutorApplyInScopeUsesCallerScopeWithoutClosingDebug(t *testing.T) {
+	t.Parallel()
+
+	scope, err := r42concurrency.NewScope(4)
+	require.NoError(t, err)
+	var received *r42concurrency.Scope
+	factory := &fakeFactory{build: func(_ context.Context, node plan.NodeSpec, actual *r42concurrency.Scope) (golden.ApplyBlock, error) {
+		received = actual
+		return newFakeBlock(node.Address, func() error { return nil }, nil), nil
+	}}
+	debug := &fakeCloser{}
+	planned := savedPlan(t, []plan.NodeSpec{{
+		Address: "research.source", Kind: "research", Config: cty.EmptyObjectVal,
+	}}, nil)
+	runner := executor.New(factory, debug)
+
+	_, err = runner.ApplyInScope(t.Context(), planned, scope)
+
+	require.NoError(t, err)
+	assert.Same(t, scope, received)
+	assert.Zero(t, debug.calls.Load())
+}
+
 func TestExecutorCancelsRootAndCleansUpAfterActiveApplyStops(t *testing.T) {
 	t.Parallel()
 
@@ -344,6 +387,17 @@ type fakeFactory struct {
 	err   error
 }
 
+type resolvingFactory struct {
+	fakeFactory
+	outputs  map[string]cty.Value
+	resolved bool
+}
+
+func (f *resolvingFactory) ResolveOutputs(*plan.Plan) (map[string]cty.Value, error) {
+	f.resolved = true
+	return f.outputs, nil
+}
+
 func (f *fakeFactory) New(ctx context.Context, node plan.NodeSpec, scope *r42concurrency.Scope) (golden.ApplyBlock, error) {
 	if f.err != nil {
 		return nil, f.err
@@ -380,9 +434,18 @@ func (b *fakeBlock) Cleanup(ctx context.Context) error {
 	return b.cleanup(ctx)
 }
 
-type fakeCloser struct{ close func() error }
+type fakeCloser struct {
+	close func() error
+	calls atomic.Int32
+}
 
-func (c *fakeCloser) Close() error { return c.close() }
+func (c *fakeCloser) Close() error {
+	c.calls.Add(1)
+	if c.close == nil {
+		return nil
+	}
+	return c.close()
+}
 
 var _ io.Closer = (*fakeCloser)(nil)
 

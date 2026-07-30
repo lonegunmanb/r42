@@ -26,23 +26,55 @@ type ModuleSpec struct {
 type OutputSpec struct {
 	Value       cty.Value
 	Description string
+	Expression  string
 }
 
 type Plan struct {
-	directory string
-	nodes     []NodeSpec
-	outputs   map[string]OutputSpec
+	directory        string
+	nodes            []NodeSpec
+	outputs          map[string]OutputSpec
+	context          map[string]cty.Value
+	localExpressions map[string]string
 }
 
 func New(directory string, nodes []NodeSpec, outputs map[string]OutputSpec) (*Plan, error) {
+	return NewWithContext(directory, nodes, outputs, nil)
+}
+
+func NewWithContext(
+	directory string,
+	nodes []NodeSpec,
+	outputs map[string]OutputSpec,
+	contextValues map[string]cty.Value,
+) (*Plan, error) {
+	return NewWithContextAndLocals(directory, nodes, outputs, contextValues, nil)
+}
+
+func NewWithContextAndLocals(
+	directory string,
+	nodes []NodeSpec,
+	outputs map[string]OutputSpec,
+	contextValues map[string]cty.Value,
+	localExpressions map[string]string,
+) (*Plan, error) {
 	if err := validateNodes(nodes); err != nil {
 		return nil, err
 	}
 	return &Plan{
-		directory: directory,
-		nodes:     cloneNodes(nodes),
-		outputs:   cloneOutputs(outputs),
+		directory:        directory,
+		nodes:            cloneNodes(nodes),
+		outputs:          cloneOutputs(outputs),
+		context:          cloneContext(contextValues),
+		localExpressions: maps.Clone(localExpressions),
 	}, nil
+}
+
+func (p *Plan) Context() map[string]cty.Value {
+	return cloneContext(p.context)
+}
+
+func (p *Plan) LocalExpressions() map[string]string {
+	return maps.Clone(p.localExpressions)
 }
 
 func (p *Plan) Directory() string {
@@ -117,10 +149,18 @@ func clonePlan(source *Plan) *Plan {
 		return nil
 	}
 	return &Plan{
-		directory: source.directory,
-		nodes:     cloneNodes(source.nodes),
-		outputs:   cloneOutputs(source.outputs),
+		directory:        source.directory,
+		nodes:            cloneNodes(source.nodes),
+		outputs:          cloneOutputs(source.outputs),
+		context:          cloneContext(source.context),
+		localExpressions: maps.Clone(source.localExpressions),
 	}
+}
+
+func cloneContext(source map[string]cty.Value) map[string]cty.Value {
+	result := make(map[string]cty.Value, len(source))
+	maps.Copy(result, source)
+	return result
 }
 
 func cloneNodes(source []NodeSpec) []NodeSpec {

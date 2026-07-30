@@ -45,6 +45,7 @@ type Runner struct {
 
 type ExecutionError struct {
 	cause  error
+	stdout string
 	stderr string
 }
 
@@ -69,6 +70,10 @@ func (e *ExecutionError) Unwrap() error {
 
 func (e *ExecutionError) Stderr() string {
 	return e.stderr
+}
+
+func (e *ExecutionError) Stdout() string {
+	return e.stdout
 }
 
 func (r *Runner) Run(ctx context.Context, config Config, input cty.Value) (Result, error) {
@@ -104,24 +109,24 @@ func (r *Runner) Run(ctx context.Context, config Config, input cty.Value) (Resul
 	runErr := command.Run()
 
 	if stdout.exceeded {
-		return Result{}, executionError("external tool stdout exceeded 100 MiB limit", stderr.String())
+		return Result{}, executionError("external tool stdout exceeded 100 MiB limit", stdout.String(), stderr.String())
 	}
 	if stderr.exceeded {
-		return Result{}, executionError("external tool stderr exceeded 100 MiB limit", stderr.String())
+		return Result{}, executionError("external tool stderr exceeded 100 MiB limit", stdout.String(), stderr.String())
 	}
 	if err = ctx.Err(); err != nil {
-		return Result{}, &ExecutionError{cause: err, stderr: stderr.String()}
+		return Result{}, &ExecutionError{cause: err, stdout: stdout.String(), stderr: stderr.String()}
 	}
 	if runErr != nil {
 		return Result{}, &ExecutionError{
 			cause:  fmt.Errorf("running external tool: %w", runErr),
-			stderr: stderr.String(),
+			stdout: stdout.String(), stderr: stderr.String(),
 		}
 	}
 
 	result, err := decodeResponse(stdout.Bytes(), config.Output)
 	if err != nil {
-		return Result{}, &ExecutionError{cause: err, stderr: stderr.String()}
+		return Result{}, &ExecutionError{cause: err, stdout: stdout.String(), stderr: stderr.String()}
 	}
 	result.Stderr = stderr.String()
 	return result, nil
@@ -266,8 +271,8 @@ func validateJSONObject(value any, elementType, objectType cty.Type, path string
 	return nil
 }
 
-func executionError(message, stderr string) error {
-	return &ExecutionError{cause: errors.New(message), stderr: stderr}
+func executionError(message, stdout, stderr string) error {
+	return &ExecutionError{cause: errors.New(message), stdout: stdout, stderr: stderr}
 }
 
 type limitedBuffer struct {

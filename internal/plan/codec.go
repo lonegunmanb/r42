@@ -12,9 +12,11 @@ import (
 )
 
 type wirePlan struct {
-	Directory string                `json:"directory"`
-	Nodes     []wireNode            `json:"nodes"`
-	Outputs   map[string]wireOutput `json:"outputs"`
+	Directory        string                `json:"directory"`
+	Nodes            []wireNode            `json:"nodes"`
+	Outputs          map[string]wireOutput `json:"outputs"`
+	Context          map[string]wireValue  `json:"context,omitempty"`
+	LocalExpressions map[string]string     `json:"local_expressions,omitempty"`
 }
 
 type wireNode struct {
@@ -34,6 +36,7 @@ type wireModule struct {
 type wireOutput struct {
 	Value       wireValue `json:"value"`
 	Description string    `json:"description"`
+	Expression  string    `json:"expression,omitempty"`
 }
 
 type wireValue struct {
@@ -84,9 +87,11 @@ func Unmarshal(encoded []byte) (*Plan, error) {
 
 func encodePlan(planned *Plan) (wirePlan, error) {
 	result := wirePlan{
-		Directory: planned.directory,
-		Nodes:     make([]wireNode, len(planned.nodes)),
-		Outputs:   make(map[string]wireOutput, len(planned.outputs)),
+		Directory:        planned.directory,
+		Nodes:            make([]wireNode, len(planned.nodes)),
+		Outputs:          make(map[string]wireOutput, len(planned.outputs)),
+		Context:          make(map[string]wireValue, len(planned.context)),
+		LocalExpressions: planned.LocalExpressions(),
 	}
 	for index, node := range planned.nodes {
 		config, err := encodeValue(node.Config)
@@ -116,7 +121,16 @@ func encodePlan(planned *Plan) (wirePlan, error) {
 		if err != nil {
 			return wirePlan{}, fmt.Errorf("output %q: %w", name, err)
 		}
-		result.Outputs[name] = wireOutput{Value: value, Description: output.Description}
+		result.Outputs[name] = wireOutput{
+			Value: value, Description: output.Description, Expression: output.Expression,
+		}
+	}
+	for name, value := range planned.context {
+		encoded, err := encodeValue(value)
+		if err != nil {
+			return wirePlan{}, fmt.Errorf("context %q: %w", name, err)
+		}
+		result.Context[name] = encoded
 	}
 	return result, nil
 }
@@ -152,9 +166,19 @@ func decodePlan(wire wirePlan) (*Plan, error) {
 		if err != nil {
 			return nil, fmt.Errorf("output %q: %w", name, err)
 		}
-		outputs[name] = OutputSpec{Value: value, Description: output.Description}
+		outputs[name] = OutputSpec{
+			Value: value, Description: output.Description, Expression: output.Expression,
+		}
 	}
-	return New(wire.Directory, nodes, outputs)
+	contextValues := make(map[string]cty.Value, len(wire.Context))
+	for name, encoded := range wire.Context {
+		value, err := decodeValue(encoded)
+		if err != nil {
+			return nil, fmt.Errorf("context %q: %w", name, err)
+		}
+		contextValues[name] = value
+	}
+	return NewWithContextAndLocals(wire.Directory, nodes, outputs, contextValues, wire.LocalExpressions)
 }
 
 func encodeValue(value cty.Value) (wireValue, error) {
