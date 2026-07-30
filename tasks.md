@@ -108,7 +108,7 @@ edit those files.
 | P2-T01 | DONE | Codex | Inline Go AST/type validator, wrapper generator, compiler cache, temp cleanup | P1-T04 | `internal/tool/gotool/**` |
 | P2-T02 | DONE | Codex | External tool JSON protocol, limits, stderr policy, process-tree cancellation | P1-T04 | `internal/tool/external/**` |
 | P2-T03 | DONE | Codex | Run/workspace manager, artifact paths and recursive validation | P1-T05 | `internal/run/**`, `internal/artifact/**` |
-| P2-T04 | READY | - | Provider runtime and official Copilot SDK session factory with lifecycle retries | P0-T04, P1-T03, P1-T05 | `internal/copilot/**` |
+| P2-T04 | DONE | Codex | Provider runtime and official Copilot SDK session factory with lifecycle retries | P0-T04, P1-T03, P1-T05 | `internal/copilot/**` |
 | P2-T05 | READY | - | Immutable plan model, nested-plan persistence, sensitive redaction/permissions | P1-T02, P1-T03, P1-T04, P1-T05, P1-T06 | `internal/plan/**` |
 | P3-T01 | BLOCKED | - | Research completion state machine and terminal-tool protocol | P2-T01, P2-T02, P2-T03, P2-T04, P2-T05 | `internal/research/runtime/**` |
 | P3-T02 | BLOCKED | - | Persistent QC state machine, verdict tool, criteria, revision loop | P3-T01 | `internal/qc/**` |
