@@ -132,7 +132,10 @@ r42 deliberately does not compensate for the following general Golden issues:
   [Azure/golden#87](https://github.com/Azure/golden/issues/87));
 - `SingleValues` overwrites repeated names and cannot represent keyed or empty
   `for_each` namespaces
-  ([Azure/golden#86](https://github.com/Azure/golden/issues/86)).
+  ([Azure/golden#86](https://github.com/Azure/golden/issues/86));
+- decoding a plan-time unknown cty value into a native Go primitive field fails
+  with `value must be known`; this prevents an apply-time value such as an
+  artifact path from being interpolated directly into a native `string` field.
 
 These behaviors belong in Golden because they affect every DSL built on its
 block wrapping, expansion, and value aggregation. P1-T06 therefore contains no
