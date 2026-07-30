@@ -296,6 +296,17 @@ The SDK name is the HCL address with `.` replaced by `_`. r42 deliberately adds
 no other label restriction and performs no post-conversion collision check.
 Provider rejection and collisions are accepted first-version risks.
 
+### Working directory
+
+`cwd()` returns the r42 process working directory at expression evaluation
+time, equivalent to `os.Getwd()`. It does not return the directory containing a
+`.r42` file. The result always uses `/` path separators, including on Windows,
+so it can be interpolated into paths consistently:
+
+```hcl
+path = "${cwd()}/research-output/report.md"
+```
+
 ### Skills
 
 r42 uses Copilot's native skill mechanism: normalized absolute roots go into

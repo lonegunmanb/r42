@@ -2,6 +2,9 @@ package config
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/zclconf/go-cty/cty"
@@ -57,8 +60,24 @@ func AddressFromValue(value cty.Value) (Address, bool) {
 
 func Functions() map[string]function.Function {
 	return map[string]function.Function{
+		"cwd":       cwdFunction(),
 		"tool_name": toolNameFunction(),
 	}
+}
+
+func cwdFunction() function.Function {
+	return function.New(&function.Spec{
+		Params: []function.Parameter{},
+		Type:   function.StaticReturnType(cty.String),
+		Impl: func([]cty.Value, cty.Type) (cty.Value, error) {
+			workingDirectory, err := os.Getwd()
+			if err != nil {
+				// note: untested because os.Getwd failure requires invalidating process-wide filesystem state.
+				return cty.NilVal, fmt.Errorf("get current working directory: %w", err)
+			}
+			return cty.StringVal(filepath.ToSlash(workingDirectory)), nil
+		},
+	})
 }
 
 func toolNameFunction() function.Function {

@@ -25,8 +25,10 @@ value. The session completes when the model finishes its response.
 The `multi-step` example fans out into three independent research directions,
 then runs a synthesis session after all three subreports exist. Its explicit
 `depends_on` list forms the fan-in edge, while the blocks exchange reports
-through a shared directory inside the retained run. All four sessions use one
-OpenAI `model_provider`; set `OPENAI_API_KEY` before Apply.
+through `research-output` under the directory where the r42 CLI was started.
+The `cwd()` function returns that directory with `/` separators on every
+operating system. All four sessions use one OpenAI `model_provider`; set
+`OPENAI_API_KEY` before Apply.
 
 ```powershell
 go run ./cmd/r42 plan ./docs/examples/multi-step --out ./multi-step.r42plan

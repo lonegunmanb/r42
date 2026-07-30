@@ -18,12 +18,12 @@ research "architecture" {
   model            = "gpt-5.6-sol"
   reasoning_effort = "medium"
   system_prompt    = "You are a software architecture researcher. Use primary sources, separate evidence from inference, and write concise Markdown."
-  prompt           = "Research the architecture and integration tradeoffs of adopting AI coding agents in a software engineering organization. Create ../../shared if needed and write your findings to ../../shared/architecture.md."
+  prompt           = "Research the architecture and integration tradeoffs of adopting AI coding agents in a software engineering organization. Create ${cwd()}/research-output if needed and write your findings to ${cwd()}/research-output/architecture.md."
   permission       = "approve_all"
 
   artifact "report" {
     type      = "file"
-    path      = "../../shared/architecture.md"
+    path      = "${cwd()}/research-output/architecture.md"
     required  = true
     non_empty = true
   }
@@ -34,12 +34,12 @@ research "security" {
   model            = "gpt-5.6-sol"
   reasoning_effort = "medium"
   system_prompt    = "You are an application security researcher. Use primary sources, separate evidence from inference, and write concise Markdown."
-  prompt           = "Research the security, privacy, and governance risks of adopting AI coding agents in a software engineering organization. Create ../../shared if needed and write your findings to ../../shared/security.md."
+  prompt           = "Research the security, privacy, and governance risks of adopting AI coding agents in a software engineering organization. Create ${cwd()}/research-output if needed and write your findings to ${cwd()}/research-output/security.md."
   permission       = "approve_all"
 
   artifact "report" {
     type      = "file"
-    path      = "../../shared/security.md"
+    path      = "${cwd()}/research-output/security.md"
     required  = true
     non_empty = true
   }
@@ -50,12 +50,12 @@ research "delivery" {
   model            = "gpt-5.6-sol"
   reasoning_effort = "medium"
   system_prompt    = "You are an engineering effectiveness researcher. Use primary sources, separate evidence from inference, and write concise Markdown."
-  prompt           = "Research the delivery, quality, and organizational effects of adopting AI coding agents in a software engineering organization. Create ../../shared if needed and write your findings to ../../shared/delivery.md."
+  prompt           = "Research the delivery, quality, and organizational effects of adopting AI coding agents in a software engineering organization. Create ${cwd()}/research-output if needed and write your findings to ${cwd()}/research-output/delivery.md."
   permission       = "approve_all"
 
   artifact "report" {
     type      = "file"
-    path      = "../../shared/delivery.md"
+    path      = "${cwd()}/research-output/delivery.md"
     required  = true
     non_empty = true
   }
@@ -67,13 +67,13 @@ research "synthesis" {
   reasoning_effort = "high"
   system_prompt    = "You are the lead researcher. Reconcile disagreements, preserve source attribution, and produce a decision-oriented final report."
   prompt           = <<-PROMPT
-    Read these three subreports from the shared run directory:
+    Read these three subreports from the shared output directory:
 
-    - ../../shared/architecture.md
-    - ../../shared/security.md
-    - ../../shared/delivery.md
+    - ${cwd()}/research-output/architecture.md
+    - ${cwd()}/research-output/security.md
+    - ${cwd()}/research-output/delivery.md
 
-    Synthesize them into ../../shared/final_report.md. Include an executive
+    Synthesize them into ${cwd()}/research-output/final_report.md. Include an executive
     summary, cross-cutting tradeoffs, unresolved uncertainties, and
     recommendations.
   PROMPT
@@ -86,7 +86,7 @@ research "synthesis" {
 
   artifact "final_report" {
     type      = "file"
-    path      = "../../shared/final_report.md"
+    path      = "${cwd()}/research-output/final_report.md"
     required  = true
     non_empty = true
   }

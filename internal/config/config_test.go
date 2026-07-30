@@ -177,6 +177,32 @@ func TestToolNameReportsTheInvalidArgumentRange(t *testing.T) {
 	assert.Equal(t, 17, diagnostics[0].Subject.End.Column)
 }
 
+func TestCWDReturnsSlashNormalizedWorkingDirectory(t *testing.T) {
+	t.Parallel()
+
+	workingDirectory, err := os.Getwd()
+	require.NoError(t, err)
+	cwdFunction, exists := config.Functions()["cwd"]
+	require.True(t, exists)
+
+	actual, err := cwdFunction.Call(nil)
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.ToSlash(workingDirectory), actual.AsString())
+	assert.NotContains(t, actual.AsString(), `\`)
+}
+
+func TestCWDRejectsArguments(t *testing.T) {
+	t.Parallel()
+
+	cwdFunction, exists := config.Functions()["cwd"]
+	require.True(t, exists)
+
+	_, err := cwdFunction.Call([]cty.Value{cty.StringVal("unexpected")})
+
+	require.Error(t, err)
+}
+
 func TestAddressFromValueRejectsNonAddresses(t *testing.T) {
 	t.Parallel()
 
@@ -330,7 +356,7 @@ func TestAddressCtyValueIsAnObject(t *testing.T) {
 	assert.Equal(t, "go", value.GetAttr("kind").AsString())
 }
 
-func TestNewBaseConfigIncludesGoldenEnvAndToolName(t *testing.T) {
+func TestNewBaseConfigIncludesGoldenEnvAndR42Functions(t *testing.T) {
 	t.Setenv("R42_CONFIG_ENV", "from-environment")
 
 	base := config.NewBaseConfig(golden.NewBaseConfigArgs{
@@ -350,6 +376,13 @@ func TestNewBaseConfigIncludesGoldenEnvAndToolName(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "builtin_web", name.AsString())
+
+	cwdFunction, exists := evaluation.Functions["cwd"]
+	require.True(t, exists)
+	workingDirectory, err := cwdFunction.Call(nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, workingDirectory.AsString())
+	assert.NotContains(t, workingDirectory.AsString(), `\`)
 	assert.Equal(t, "r42", base.DslFullName())
 	assert.Equal(t, "r42", base.DslAbbreviation())
 }
