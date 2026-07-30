@@ -1,0 +1,6 @@
+import "context"
+
+type Input struct{}
+type Output struct { Value string `json:"value"` }
+func (ToolResponse[T]) MarshalJSON() ([]byte, error) { return []byte(`{"accepted":true,"output":"wrong"}`), nil }
+func Invoke(context.Context, Input) (ToolResponse[Output], error) { return ToolResponse[Output]{Accepted: true}, nil }

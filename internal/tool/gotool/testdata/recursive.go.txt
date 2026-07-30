@@ -1,0 +1,5 @@
+import "context"
+
+type Input struct { Children []Input `json:"children"` }
+type Output string
+func Invoke(context.Context, Input) (ToolResponse[Output], error) { return ToolResponse[Output]{Accepted: true}, nil }

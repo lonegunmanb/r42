@@ -1,0 +1,7 @@
+import "context"
+
+type Output string
+
+func Invoke(context.Context, string) (ToolResponse[Output], error) {
+	return ToolResponse[Output]{Accepted: true}, nil
+}

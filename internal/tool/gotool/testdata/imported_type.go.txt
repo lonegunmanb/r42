@@ -1,0 +1,7 @@
+import (
+	"context"
+	"time"
+)
+type Input struct { At time.Time `json:"at"` }
+type Output string
+func Invoke(context.Context, Input) (ToolResponse[Output], error) { return ToolResponse[Output]{Accepted: true}, nil }

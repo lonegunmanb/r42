@@ -1,0 +1,7 @@
+import "context"
+
+type Payload struct { Value string `json:"value"` }
+func (Payload) MarshalText() ([]byte, error) { return []byte("changed"), nil }
+type Input struct { Payload Payload `json:"payload"` }
+type Output string
+func Invoke(context.Context, Input) (ToolResponse[Output], error) { return ToolResponse[Output]{Accepted: true}, nil }

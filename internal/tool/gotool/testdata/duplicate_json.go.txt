@@ -1,0 +1,8 @@
+import "context"
+
+type Input struct {
+	First string `json:"value"`
+	Second string `json:"value"`
+}
+type Output string
+func Invoke(context.Context, Input) (ToolResponse[Output], error) { return ToolResponse[Output]{Accepted: true}, nil }

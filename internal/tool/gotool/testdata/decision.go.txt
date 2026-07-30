@@ -1,0 +1,32 @@
+import (
+	"context"
+	"errors"
+)
+
+type Input struct {
+	Action string `json:"action"`
+}
+
+type Output struct {
+	Message string `json:"message"`
+}
+
+func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
+	switch input.Action {
+	case "accept":
+		output := Output{Message: "done"}
+		return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+	case "reject":
+		return ToolResponse[Output]{Issues: []Issue{{
+			Code:    "invalid_action",
+			Message: "action must be accept",
+		}}}, nil
+	case "invalid_response":
+		return ToolResponse[Output]{Issues: []Issue{{
+			Code:    " ",
+			Message: "invalid",
+		}}}, nil
+	default:
+		return ToolResponse[Output]{}, errors.New("tool returned an error")
+	}
+}

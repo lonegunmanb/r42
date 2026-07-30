@@ -1,0 +1,11 @@
+import "context"
+
+type Input struct {
+	Jobs chan string `json:"jobs"`
+}
+
+type Output string
+
+func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+	return ToolResponse[Output]{}, nil
+}

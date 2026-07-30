@@ -1,0 +1,14 @@
+import (
+	"context"
+	_ "embed"
+)
+
+//go:embed file-that-does-not-exist.txt
+var missing string
+
+type Input struct{}
+type Output string
+
+func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+	return ToolResponse[Output]{Accepted: true}, nil
+}

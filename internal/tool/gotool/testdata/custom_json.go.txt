@@ -1,0 +1,6 @@
+import "context"
+
+type Input struct{}
+func (*Input) UnmarshalJSON([]byte) error { return nil }
+type Output string
+func Invoke(context.Context, Input) (ToolResponse[Output], error) { return ToolResponse[Output]{Accepted: true}, nil }

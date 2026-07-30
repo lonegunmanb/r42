@@ -105,7 +105,7 @@ edit those files.
 | P1-T04 | DONE | Codex | `go_tool` and `external_tool` schemas plus cty/JSON schema derivation | P1-T01 | `internal/tool/spec/**` |
 | P1-T05 | DONE | Codex | `research`, nested `qc`, artifact, and session-policy schemas | P1-T01 | `internal/research/spec/**` |
 | P1-T06 | DONE | Codex | Terraform-like variable/module/output schemas, source resolution, cycle detection | P0-T03, P1-T01 | `internal/module/spec/**` |
-| P2-T01 | READY | - | Inline Go AST/type validator, wrapper generator, compiler cache, temp cleanup | P1-T04 | `internal/tool/gotool/**` |
+| P2-T01 | DONE | Codex | Inline Go AST/type validator, wrapper generator, compiler cache, temp cleanup | P1-T04 | `internal/tool/gotool/**` |
 | P2-T02 | READY | - | External tool JSON protocol, limits, stderr policy, process-tree cancellation | P1-T04 | `internal/tool/external/**` |
 | P2-T03 | READY | - | Run/workspace manager, artifact paths and recursive validation | P1-T05 | `internal/run/**`, `internal/artifact/**` |
 | P2-T04 | READY | - | Provider runtime and official Copilot SDK session factory with lifecycle retries | P0-T04, P1-T03, P1-T05 | `internal/copilot/**` |

@@ -1,0 +1,8 @@
+import "context"
+
+type Input struct{}
+type Output struct{}
+
+func Invoke(context.Context, Input) (ToolResponse[string], error) {
+	return ToolResponse[string]{}, nil
+}

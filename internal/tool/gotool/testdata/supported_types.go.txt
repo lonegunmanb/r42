@@ -1,0 +1,12 @@
+import "context"
+
+type Input struct {
+	Enabled bool              `json:"enabled"`
+	Count   int64             `json:"count"`
+	Ratio   float64           `json:"ratio"`
+	Pair    [2]string         `json:"pair"`
+	Labels  map[string]uint32 `json:"labels"`
+	Ignored string            `json:"-"`
+}
+type Output []map[string]float32
+func Invoke(context.Context, Input) (ToolResponse[Output], error) { return ToolResponse[Output]{Accepted: true}, nil }

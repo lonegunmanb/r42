@@ -1,0 +1,6 @@
+import "context"
+
+type Payload struct { Value string `json:"value"` }
+type Input struct { Payload }
+type Output string
+func Invoke(context.Context, Input) (ToolResponse[Output], error) { return ToolResponse[Output]{Accepted: true}, nil }

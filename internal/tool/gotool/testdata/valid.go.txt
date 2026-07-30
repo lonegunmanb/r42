@@ -1,0 +1,14 @@
+import "context"
+
+type Input struct {
+	Query string `json:"query"`
+	Limit *int   `json:"limit,omitempty"`
+}
+
+type Output struct {
+	Summary string `json:"summary"`
+}
+
+func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+	return ToolResponse[Output]{Accepted: true}, nil
+}

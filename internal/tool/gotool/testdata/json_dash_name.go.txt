@@ -1,0 +1,13 @@
+import "context"
+
+type Input struct {
+	Value string `json:"-,omitempty"`
+}
+
+type Output struct {
+	Value string `json:"value"`
+}
+
+func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+	return ToolResponse[Output]{Accepted: true}, nil
+}
