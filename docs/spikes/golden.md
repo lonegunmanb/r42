@@ -117,3 +117,23 @@ Golden then decodes the traversal directly into a consumer's `cty.Value` field
 and records the implicit dependency. A small object containing the block address,
 kind, and public block attributes preserves typed reference semantics. Returning
 an address string instead would erase the referenced block's object shape.
+
+## Golden Gaps Reserved For An Upstream Or Fork Fix
+
+r42 deliberately does not compensate for the following general Golden issues:
+
+- block wrapping assumes a second label exists, so a malformed named block can
+  panic instead of returning a diagnostic;
+- `for_each` expansion runs before `PrePlan`, may iterate unknown or null values,
+  and accepts any iterable even though its error describes only sets and maps;
+- `SingleValues` overwrites repeated names and cannot represent keyed or empty
+  `for_each` namespaces;
+- `for_each` expressions that use dynamic namespace indexing, such as
+  `local[var.selected]`, cannot be repaired reliably by a consumer-side
+  dependency pre-evaluation pass.
+
+These behaviors belong in Golden because they affect every DSL built on its
+block wrapping, expansion, and value aggregation. P1-T06 therefore contains no
+r42-specific pre-expansion validator, dependency-closure evaluator, or keyed
+`SingleValues` replacement. A future Golden fork can fix them at their owning
+abstraction before r42 enables module `for_each` as a supported contract.
