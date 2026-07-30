@@ -87,3 +87,5 @@ require (
 	golang.org/x/tools v0.44.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/Azure/golden => github.com/lonegunmanb/golden v0.0.0-20260730080256-a8035a319213
