@@ -111,7 +111,7 @@ edit those files.
 | P2-T04 | DONE | Codex | Provider runtime and official Copilot SDK session factory with lifecycle retries | P0-T04, P1-T03, P1-T05 | `internal/copilot/**` |
 | P2-T05 | DONE | Codex | Immutable plan model, nested-plan persistence, sensitive redaction/permissions | P1-T02, P1-T03, P1-T04, P1-T05, P1-T06 | `internal/plan/**` |
 | P3-T01 | DONE | Codex | Research completion state machine and terminal-tool protocol | P2-T01, P2-T02, P2-T03, P2-T04, P2-T05 | `internal/research/runtime/**` |
-| P3-T02 | READY | - | Persistent QC state machine, verdict tool, criteria, revision loop | P3-T01 | `internal/qc/**` |
+| P3-T02 | DONE | Codex | Persistent QC state machine, verdict tool, criteria, revision loop | P3-T01 | `internal/qc/**` |
 | P3-T03 | READY | - | Module nested executor, atomic outputs, timeout propagation | P2-T05, P3-T01 | `internal/module/runtime/**` |
 | P3-T04 | READY | - | Hierarchical global/module research semaphore and permit lifecycle | P3-T01, P1-T06 | `internal/concurrency/**` |
 | P3-T05 | READY | - | Debug event files, prompt/transcript capture, normal-mode redaction | P2-T03, P2-T04, P3-T01 | `internal/debuglog/**` |

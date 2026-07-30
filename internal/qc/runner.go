@@ -1,0 +1,303 @@
+package qc
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+
+	sdk "github.com/github/copilot-sdk/go"
+	researchruntime "github.com/lonegunmanb/r42/internal/research/runtime"
+	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
+	corespec "github.com/lonegunmanb/r42/internal/spec"
+	"github.com/zclconf/go-cty/cty"
+)
+
+type Research interface {
+	Run(context.Context, researchruntime.Config) (researchruntime.Result, error)
+}
+
+type Session interface {
+	SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error)
+}
+
+type Task struct {
+	SystemPrompt string  `json:"system_prompt"`
+	Prompt       *string `json:"prompt,omitempty"`
+}
+
+type Config struct {
+	Task                Task
+	Criteria            cty.Value
+	Artifacts           []researchspec.Artifact
+	Research            researchruntime.Config
+	MaxRounds           int
+	MaxProtocolAttempts int
+	VerdictToolName     string
+}
+
+type Result struct {
+	Candidate researchruntime.Result
+	Rounds    int
+}
+
+type Verdict struct {
+	Pass   bool             `json:"pass"`
+	Issues []corespec.Issue `json:"issues,omitempty"`
+}
+
+func (v Verdict) Validate() error {
+	if v.Pass && len(v.Issues) != 0 {
+		return fmt.Errorf("passing verdict must not contain issues")
+	}
+	if !v.Pass && len(v.Issues) == 0 {
+		return fmt.Errorf("failing verdict must contain at least one issue")
+	}
+	for index, issue := range v.Issues {
+		if err := issue.Validate(); err != nil {
+			return fmt.Errorf("issue %d: %w", index, err)
+		}
+	}
+	return nil
+}
+
+type Runner struct {
+	research Research
+	session  Session
+	verdicts *VerdictRecorder
+}
+
+func NewRunner(research Research, session Session, verdicts *VerdictRecorder) *Runner {
+	return &Runner{research: research, session: session, verdicts: verdicts}
+}
+
+func (r *Runner) Run(ctx context.Context, config Config) (Result, error) {
+	if err := r.validate(config); err != nil {
+		return Result{}, err
+	}
+	candidate, err := r.research.Run(ctx, config.Research)
+	if err != nil {
+		return Result{}, fmt.Errorf("run research candidate: %w", err)
+	}
+	for round := 1; ; round++ {
+		verdict, err := r.review(ctx, config, candidate)
+		if err != nil {
+			return Result{}, err
+		}
+		if verdict.Pass {
+			return Result{Candidate: candidate, Rounds: round}, nil
+		}
+		if round == config.MaxRounds {
+			return Result{}, fmt.Errorf("qc rounds exhausted after %d rounds", round)
+		}
+		revision := config.Research
+		revision.InitialPrompt = revisionPrompt(verdict.Issues)
+		candidate, err = r.research.Run(ctx, revision)
+		if err != nil {
+			return Result{}, fmt.Errorf("run research revision: %w", err)
+		}
+	}
+}
+
+func (r *Runner) validate(config Config) error {
+	if r.research == nil {
+		return fmt.Errorf("research runner is required")
+	}
+	if r.session == nil {
+		return fmt.Errorf("qc session is required")
+	}
+	if r.verdicts == nil {
+		return fmt.Errorf("qc verdict recorder is required")
+	}
+	if config.MaxRounds <= 0 {
+		return fmt.Errorf("qc rounds exhausted before review")
+	}
+	if config.MaxProtocolAttempts < 0 {
+		return fmt.Errorf("qc maximum protocol attempts must not be negative")
+	}
+	if strings.TrimSpace(config.VerdictToolName) == "" {
+		return fmt.Errorf("qc verdict tool name is required")
+	}
+	_, err := criteriaMap(config.Criteria)
+	return err
+}
+
+func (r *Runner) review(
+	ctx context.Context,
+	config Config,
+	candidate researchruntime.Result,
+) (Verdict, error) {
+	prompt, err := contextPrompt(config, candidate)
+	if err != nil {
+		// note: untested because validate has already accepted the same immutable criteria value.
+		return Verdict{}, err
+	}
+	attempts := 0
+	for {
+		if _, err = r.session.SendAndWait(ctx, sdk.MessageOptions{Prompt: prompt}); err != nil {
+			return Verdict{}, fmt.Errorf("send qc prompt: %w", err)
+		}
+		verdicts, failure := r.verdicts.drain()
+		if failure != nil {
+			return Verdict{}, fmt.Errorf("qc verdict tool failed: %w", failure)
+		}
+		if len(verdicts) > 0 {
+			return verdicts[0], nil
+		}
+		attempts++
+		if attempts >= config.MaxProtocolAttempts {
+			return Verdict{}, fmt.Errorf(
+				"qc verdict protocol attempts exhausted after %d attempts (maximum %d)",
+				attempts,
+				config.MaxProtocolAttempts,
+			)
+		}
+		prompt = fmt.Sprintf("You must call the %q tool before QC can finish.", config.VerdictToolName)
+	}
+}
+
+type VerdictRecorder struct {
+	mu       sync.Mutex
+	verdicts []Verdict
+	failure  error
+}
+
+func NewVerdictRecorder() *VerdictRecorder {
+	return &VerdictRecorder{}
+}
+
+func (r *VerdictRecorder) Record(verdict Verdict) error {
+	if err := verdict.Validate(); err != nil {
+		failure := fmt.Errorf("record qc verdict: %w", err)
+		r.RecordError(failure)
+		return failure
+	}
+	verdict.Issues = cloneIssues(verdict.Issues)
+	r.mu.Lock()
+	r.verdicts = append(r.verdicts, verdict)
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *VerdictRecorder) RecordError(err error) {
+	if err == nil {
+		return
+	}
+	r.mu.Lock()
+	if r.failure == nil {
+		r.failure = err
+	}
+	r.mu.Unlock()
+}
+
+func (r *VerdictRecorder) drain() ([]Verdict, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	verdicts := r.verdicts
+	failure := r.failure
+	r.verdicts = nil
+	r.failure = nil
+	return verdicts, failure
+}
+
+type contextDocument struct {
+	Task      Task               `json:"task"`
+	Criteria  map[string]string  `json:"criteria"`
+	Candidate candidateDocument  `json:"candidate"`
+	Artifacts []artifactDocument `json:"artifacts"`
+}
+
+type candidateDocument struct {
+	Result *string `json:"result,omitempty"`
+}
+
+type artifactDocument struct {
+	Name     string                    `json:"name"`
+	Type     researchspec.ArtifactType `json:"type"`
+	Path     string                    `json:"path"`
+	Required bool                      `json:"required"`
+	NonEmpty bool                      `json:"non_empty"`
+}
+
+func contextPrompt(config Config, candidate researchruntime.Result) (string, error) {
+	criteria, err := criteriaMap(config.Criteria)
+	if err != nil {
+		return "", err
+	}
+	document := contextDocument{
+		Task:      config.Task,
+		Criteria:  criteria,
+		Candidate: candidateDocument{Result: cloneString(candidate.Value)},
+		Artifacts: make([]artifactDocument, len(config.Artifacts)),
+	}
+	for index, declared := range config.Artifacts {
+		document.Artifacts[index] = artifactDocument{
+			Name:     declared.Name,
+			Type:     declared.Type,
+			Path:     candidate.Artifacts[declared.Name],
+			Required: declared.Required,
+			NonEmpty: declared.NonEmpty,
+		}
+	}
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		// note: untested because contextDocument contains only JSON-compatible fields.
+		return "", fmt.Errorf("encode qc context: %w", err)
+	}
+	return string(encoded), nil
+}
+
+func criteriaMap(value cty.Value) (map[string]string, error) {
+	if value.Type().Equals(cty.NilType) {
+		return nil, fmt.Errorf("qc criteria must be a non-empty map of string")
+	}
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.IsWhollyKnown() || unmarked.IsNull() || !unmarked.Type().Equals(cty.Map(cty.String)) || unmarked.LengthInt() == 0 {
+		return nil, fmt.Errorf("qc criteria must be a non-empty map of string")
+	}
+	result := make(map[string]string, unmarked.LengthInt())
+	for name, criterion := range unmarked.AsValueMap() {
+		if criterion.IsNull() {
+			return nil, fmt.Errorf("qc criteria values must not be null")
+		}
+		result[name] = criterion.AsString()
+	}
+	return result, nil
+}
+
+func revisionPrompt(issues []corespec.Issue) string {
+	var result strings.Builder
+	result.WriteString("QC rejected the candidate. Revise the research to fix these issues:\n")
+	for index, issue := range issues {
+		if index > 0 {
+			result.WriteByte('\n')
+		}
+		fmt.Fprintf(&result, "- [%s] %s", issue.Code, issue.Message)
+		if issue.Path != nil {
+			fmt.Fprintf(&result, " (path: %s)", *issue.Path)
+		}
+		if issue.RepairHint != nil {
+			fmt.Fprintf(&result, " Repair: %s", *issue.RepairHint)
+		}
+	}
+	return result.String()
+}
+
+func cloneIssues(source []corespec.Issue) []corespec.Issue {
+	result := make([]corespec.Issue, len(source))
+	for index, issue := range source {
+		result[index] = issue
+		result[index].Path = cloneString(issue.Path)
+		result[index].RepairHint = cloneString(issue.RepairHint)
+	}
+	return result
+}
+
+func cloneString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	result := *value
+	return &result
+}
