@@ -102,7 +102,7 @@ edit those files.
 | P1-T01 | DONE | Codex | Core domain types, Issue/ToolResponse invariants, cty type utilities | P0-T02 | `internal/spec/**` |
 | P1-T02 | DONE | Codex | Source loader, HCL functions (`env`, `tool_name`), diagnostics, address model | P0-T02, P0-T03, P1-T01 | `internal/config/**` |
 | P1-T03 | DONE | Codex | `model_provider` schema, auth one-of, retry merge and classifier | P1-T01 | `internal/provider/**` |
-| P1-T04 | READY | - | `go_tool` and `external_tool` schemas plus cty/JSON schema derivation | P1-T01 | `internal/tool/spec/**` |
+| P1-T04 | DONE | Codex | `go_tool` and `external_tool` schemas plus cty/JSON schema derivation | P1-T01 | `internal/tool/spec/**` |
 | P1-T05 | READY | - | `research`, nested `qc`, artifact, and session-policy schemas | P1-T01 | `internal/research/spec/**` |
 | P1-T06 | READY | - | Terraform-like variable/module/output schemas, source resolution, cycle detection | P0-T03, P1-T01 | `internal/module/spec/**` |
 | P2-T01 | BLOCKED | - | Inline Go AST/type validator, wrapper generator, compiler cache, temp cleanup | P1-T04 | `internal/tool/gotool/**` |

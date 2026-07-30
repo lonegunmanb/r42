@@ -140,7 +140,10 @@ func TestToolNameRejectsUntypedAddresses(t *testing.T) {
 		input cty.Value
 	}{
 		{name: "plain string", input: cty.StringVal("go_tool.finish")},
-		{name: "unknown string", input: cty.UnknownVal(cty.String)},
+		{name: "unknown object", input: cty.UnknownVal(cty.Object(map[string]cty.Type{
+			"address": cty.String,
+			"kind":    cty.String,
+		}))},
 		{name: "dynamic value", input: cty.DynamicVal},
 		{
 			name:  "unknown address kind",
@@ -177,19 +180,116 @@ func TestToolNameReportsTheInvalidArgumentRange(t *testing.T) {
 func TestAddressFromValueRejectsNonAddresses(t *testing.T) {
 	t.Parallel()
 
-	_, addressMarks := config.Address{Kind: config.AddressKindGo, Value: "go_tool.finish"}.CtyValue().Unmark()
 	tests := []struct {
 		name  string
 		input cty.Value
 	}{
+		{name: "nil value", input: cty.NilVal},
 		{name: "number", input: cty.NumberIntVal(1)},
-		{name: "unknown string", input: cty.UnknownVal(cty.String)},
-		{name: "null string", input: cty.NullVal(cty.String)},
+		{name: "unknown object", input: cty.UnknownVal(cty.Object(map[string]cty.Type{
+			"address": cty.String,
+			"kind":    cty.String,
+		}))},
+		{name: "null object", input: cty.NullVal(cty.Object(map[string]cty.Type{
+			"address": cty.String,
+			"kind":    cty.String,
+		}))},
 		{name: "unmarked string", input: cty.StringVal("go_tool.finish")},
-		{name: "mark value mismatch", input: cty.StringVal("go_tool.other").WithMarks(addressMarks)},
 		{
 			name:  "unknown address kind",
 			input: config.Address{Kind: config.AddressKindUnknown, Value: "go_tool.finish"}.CtyValue(),
+		},
+		{
+			name: "kind and address disagree",
+			input: cty.ObjectVal(map[string]cty.Value{
+				"address": cty.StringVal("external_tool.finish"),
+				"kind":    cty.StringVal("go"),
+			}),
+		},
+		{
+			name: "missing address attribute",
+			input: cty.ObjectVal(map[string]cty.Value{
+				"kind": cty.StringVal("go"),
+			}),
+		},
+		{
+			name: "missing kind attribute",
+			input: cty.ObjectVal(map[string]cty.Value{
+				"address": cty.StringVal("go_tool.finish"),
+			}),
+		},
+		{
+			name: "address attribute has wrong type",
+			input: cty.ObjectVal(map[string]cty.Value{
+				"address": cty.NumberIntVal(1),
+				"kind":    cty.StringVal("go"),
+			}),
+		},
+		{
+			name: "kind attribute has wrong type",
+			input: cty.ObjectVal(map[string]cty.Value{
+				"address": cty.StringVal("go_tool.finish"),
+				"kind":    cty.NumberIntVal(1),
+			}),
+		},
+		{
+			name: "unknown address attribute",
+			input: cty.ObjectVal(map[string]cty.Value{
+				"address": cty.UnknownVal(cty.String),
+				"kind":    cty.StringVal("go"),
+			}),
+		},
+		{
+			name: "unknown block attribute",
+			input: cty.ObjectVal(map[string]cty.Value{
+				"address":     cty.StringVal("go_tool.finish"),
+				"kind":        cty.StringVal("go"),
+				"description": cty.UnknownVal(cty.String),
+			}),
+		},
+		{
+			name: "null kind attribute",
+			input: cty.ObjectVal(map[string]cty.Value{
+				"address": cty.StringVal("go_tool.finish"),
+				"kind":    cty.NullVal(cty.String),
+			}),
+		},
+		{
+			name: "null address attribute",
+			input: cty.ObjectVal(map[string]cty.Value{
+				"address": cty.NullVal(cty.String),
+				"kind":    cty.StringVal("go"),
+			}),
+		},
+		{
+			name: "marked address attribute",
+			input: cty.ObjectVal(map[string]cty.Value{
+				"address": cty.StringVal("go_tool.finish").Mark("sensitive"),
+				"kind":    cty.StringVal("go"),
+			}),
+		},
+		{
+			name: "marked kind attribute",
+			input: cty.ObjectVal(map[string]cty.Value{
+				"address": cty.StringVal("go_tool.finish"),
+				"kind":    cty.StringVal("go").Mark("sensitive"),
+			}),
+		},
+		{
+			name: "marked block attribute",
+			input: cty.ObjectVal(map[string]cty.Value{
+				"address":     cty.StringVal("go_tool.finish"),
+				"kind":        cty.StringVal("go"),
+				"description": cty.StringVal("Finish").Mark("sensitive"),
+			}),
+		},
+		{
+			name:  "go tool missing name",
+			input: config.Address{Kind: config.AddressKindGo, Value: "go_tool."}.CtyValue(),
+		},
+		{
+			name:  "empty built in address",
+			input: config.Address{Kind: config.AddressKindBuiltin}.CtyValue(),
 		},
 	}
 
@@ -203,17 +303,31 @@ func TestAddressFromValueRejectsNonAddresses(t *testing.T) {
 	}
 }
 
-func TestAddressFromValueRejectsMultipleAddressMarks(t *testing.T) {
+func TestAddressFromValueAllowsBlockAttributes(t *testing.T) {
 	t.Parallel()
 
-	value := config.Address{Kind: config.AddressKindGo, Value: "shared.tool"}.CtyValue()
-	_, secondMarks := config.Address{Kind: config.AddressKindExternal, Value: "shared.tool"}.CtyValue().Unmark()
-	for mark := range secondMarks {
-		value = value.Mark(mark)
-	}
+	value := cty.ObjectVal(map[string]cty.Value{
+		"address":     cty.StringVal("go_tool.finish"),
+		"kind":        cty.StringVal("go"),
+		"description": cty.StringVal("Finish research"),
+		"source":      cty.StringVal("package main"),
+	})
 
-	_, ok := config.AddressFromValue(value)
-	assert.False(t, ok)
+	address, ok := config.AddressFromValue(value)
+	require.True(t, ok)
+	assert.Equal(t, config.Address{Kind: config.AddressKindGo, Value: "go_tool.finish"}, address)
+}
+
+func TestAddressCtyValueIsAnObject(t *testing.T) {
+	t.Parallel()
+
+	value := config.Address{Kind: config.AddressKindGo, Value: "go_tool.finish"}.CtyValue()
+	require.True(t, value.Type().Equals(cty.Object(map[string]cty.Type{
+		"address": cty.String,
+		"kind":    cty.String,
+	})))
+	assert.Equal(t, "go_tool.finish", value.GetAttr("address").AsString())
+	assert.Equal(t, "go", value.GetAttr("kind").AsString())
 }
 
 func TestNewBaseConfigIncludesGoldenEnvAndToolName(t *testing.T) {

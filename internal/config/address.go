@@ -22,36 +22,37 @@ type Address struct {
 	Value string
 }
 
-type addressMark struct {
-	Address Address
-}
-
 func (a Address) CtyValue() cty.Value {
-	return cty.StringVal(a.Value).Mark(addressMark{Address: a})
+	return cty.ObjectVal(map[string]cty.Value{
+		"address": cty.StringVal(a.Value),
+		"kind":    cty.StringVal(string(a.Kind)),
+	})
 }
 
 func AddressFromValue(value cty.Value) (Address, bool) {
-	if !value.Type().Equals(cty.String) || !value.IsKnown() || value.IsNull() {
+	unmarked, _ := value.Unmark()
+	valueType := unmarked.Type()
+	if !valueType.IsObjectType() || !unmarked.IsWhollyKnown() || unmarked.IsNull() || unmarked.ContainsMarked() {
+		return Address{}, false
+	}
+	if !valueType.HasAttribute("address") || !valueType.HasAttribute("kind") {
+		return Address{}, false
+	}
+	if !valueType.AttributeType("address").Equals(cty.String) || !valueType.AttributeType("kind").Equals(cty.String) {
 		return Address{}, false
 	}
 
-	unmarked, marks := value.Unmark()
-	var result Address
-	found := false
-	for mark := range marks {
-		addressValue, ok := mark.(addressMark)
-		if !ok {
-			continue
-		}
-		address := addressValue.Address
-		if found || !validAddressKind(address.Kind) || unmarked.AsString() != address.Value {
-			return Address{}, false
-		}
-		result = address
-		found = true
+	addressValue := unmarked.GetAttr("address")
+	kindValue := unmarked.GetAttr("kind")
+	if addressValue.IsNull() || kindValue.IsNull() {
+		return Address{}, false
+	}
+	result := Address{
+		Kind:  AddressKind(kindValue.AsString()),
+		Value: addressValue.AsString(),
 	}
 
-	return result, found
+	return result, validAddress(result)
 }
 
 func Functions() map[string]function.Function {
@@ -66,7 +67,7 @@ func toolNameFunction() function.Function {
 			{
 				Name:             "address",
 				Description:      "A typed tool address.",
-				Type:             cty.String,
+				Type:             cty.DynamicPseudoType,
 				AllowMarked:      true,
 				AllowUnknown:     true,
 				AllowDynamicType: true,
@@ -80,21 +81,24 @@ func toolNameFunction() function.Function {
 			}
 
 			_, marks := arguments[0].Unmark()
-			for mark := range marks {
-				if _, ok := mark.(addressMark); ok {
-					delete(marks, mark)
-				}
-			}
 			return cty.StringVal(strings.ReplaceAll(address.Value, ".", "_")).WithMarks(marks), nil
 		},
 	})
 }
 
-func validAddressKind(kind AddressKind) bool {
-	switch kind {
-	case AddressKindGo, AddressKindExternal, AddressKindBuiltin:
-		return true
+func validAddress(address Address) bool {
+	switch address.Kind {
+	case AddressKindGo:
+		return hasNamedPrefix(address.Value, "go_tool.")
+	case AddressKindExternal:
+		return hasNamedPrefix(address.Value, "external_tool.")
+	case AddressKindBuiltin:
+		return address.Value != ""
 	default:
 		return false
 	}
+}
+
+func hasNamedPrefix(value, prefix string) bool {
+	return strings.HasPrefix(value, prefix) && len(value) > len(prefix)
 }
