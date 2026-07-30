@@ -1,4 +1,20 @@
+model_provider "primary" {
+  type        = "openai"
+  endpoint    = "https://api.openai.com/v1"
+  wire_api    = "responses"
+  transport   = "http"
+  api_key_ref = "OPENAI_API_KEY"
+
+  retry {
+    lifecycle_retries    = 10
+    model_call_retries   = 5
+    interval_seconds     = 10
+    max_interval_seconds = 180
+  }
+}
+
 research "architecture" {
+  model_provider   = model_provider.primary
   model            = "gpt-5.6-sol"
   reasoning_effort = "medium"
   system_prompt    = "You are a software architecture researcher. Use primary sources, separate evidence from inference, and write concise Markdown."
@@ -14,6 +30,7 @@ research "architecture" {
 }
 
 research "security" {
+  model_provider   = model_provider.primary
   model            = "gpt-5.6-sol"
   reasoning_effort = "medium"
   system_prompt    = "You are an application security researcher. Use primary sources, separate evidence from inference, and write concise Markdown."
@@ -29,6 +46,7 @@ research "security" {
 }
 
 research "delivery" {
+  model_provider   = model_provider.primary
   model            = "gpt-5.6-sol"
   reasoning_effort = "medium"
   system_prompt    = "You are an engineering effectiveness researcher. Use primary sources, separate evidence from inference, and write concise Markdown."
@@ -44,6 +62,7 @@ research "delivery" {
 }
 
 research "synthesis" {
+  model_provider   = model_provider.primary
   model            = "gpt-5.6-sol"
   reasoning_effort = "high"
   system_prompt    = "You are the lead researcher. Reconcile disagreements, preserve source attribution, and produce a decision-oriented final report."
