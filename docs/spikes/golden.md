@@ -123,17 +123,19 @@ an address string instead would erase the referenced block's object shape.
 r42 deliberately does not compensate for the following general Golden issues:
 
 - block wrapping assumes a second label exists, so a malformed named block can
-  panic instead of returning a diagnostic;
+  panic instead of returning a diagnostic
+  ([Azure/golden#83](https://github.com/Azure/golden/issues/83));
 - `for_each` expansion runs before `PrePlan`, may iterate unknown or null values,
-  and accepts any iterable even though its error describes only sets and maps;
+  and accepts any iterable even though its error describes only sets and maps
+  ([Azure/golden#84](https://github.com/Azure/golden/issues/84),
+  [Azure/golden#85](https://github.com/Azure/golden/issues/85),
+  [Azure/golden#87](https://github.com/Azure/golden/issues/87));
 - `SingleValues` overwrites repeated names and cannot represent keyed or empty
-  `for_each` namespaces;
-- `for_each` expressions that use dynamic namespace indexing, such as
-  `local[var.selected]`, cannot be repaired reliably by a consumer-side
-  dependency pre-evaluation pass.
+  `for_each` namespaces
+  ([Azure/golden#86](https://github.com/Azure/golden/issues/86)).
 
 These behaviors belong in Golden because they affect every DSL built on its
 block wrapping, expansion, and value aggregation. P1-T06 therefore contains no
-r42-specific pre-expansion validator, dependency-closure evaluator, or keyed
-`SingleValues` replacement. A future Golden fork can fix them at their owning
-abstraction before r42 enables module `for_each` as a supported contract.
+r42-specific pre-expansion validator or keyed `SingleValues` replacement. A
+future Golden fork can fix them at their owning abstraction before r42 enables
+module `for_each` as a supported contract.
