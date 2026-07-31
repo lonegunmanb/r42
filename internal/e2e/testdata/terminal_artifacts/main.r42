@@ -41,9 +41,9 @@ output "summary" {
 }
 
 output "report_path" {
-  value = research.source.artifacts.report.path
+  value = one([for item in research.source.artifact : item if item.name == "report"]).path
 }
 
 output "evidence_path" {
-  value = research.source.artifacts.evidence.path
+  value = one([for item in research.source.artifact : item if item.name == "evidence"]).path
 }

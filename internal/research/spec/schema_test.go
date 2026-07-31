@@ -43,6 +43,13 @@ func referenceValue(address, kind string) cty.Value {
 	})
 }
 
+func assertReference(t *testing.T, value cty.Value, address, kind string) {
+	t.Helper()
+	require.True(t, value.Type().IsObjectType())
+	assert.Equal(t, address, value.GetAttr("address").AsString())
+	assert.Equal(t, kind, value.GetAttr("kind").AsString())
+}
+
 func registerResearchSchemaBlocks() {
 	registerResearchBlock.Do(func() {
 		golden.RegisterBlock(new(researchspec.ResearchBlock))
@@ -69,7 +76,7 @@ research "with_provider" {
 
 	require.NoError(t, config.RunPlan())
 	planned := golden.Blocks[*researchspec.ResearchBlock](config)[0].ResearchConfig()
-	assert.True(t, referenceValue("model_provider.primary", "provider").RawEquals(planned.ModelProvider))
+	assertReference(t, planned.ModelProvider, "model_provider.primary", "provider")
 	ancestors, err := config.GetAncestors("research.with_provider")
 	require.NoError(t, err)
 	assert.Contains(t, ancestors, "model_provider.primary")
@@ -152,7 +159,7 @@ research "market" {
 	assert.False(t, block.CanExecutePrePlan())
 
 	planned := block.ResearchConfig()
-	assert.True(t, referenceValue("model_provider.primary", "provider").RawEquals(planned.ModelProvider))
+	assertReference(t, planned.ModelProvider, "model_provider.primary", "provider")
 	assert.Equal(t, "gpt-5.6-sol", planned.Model)
 	require.NotNil(t, planned.ReasoningEffort)
 	assert.Equal(t, "max", *planned.ReasoningEffort)
@@ -175,7 +182,7 @@ research "market" {
 		Name: "report", Type: researchspec.ArtifactTypeFile, Path: "report.md", Required: true, NonEmpty: true,
 	}, planned.Artifacts[0])
 	require.NotNil(t, planned.QC)
-	assert.True(t, referenceValue("model_provider.quality", "provider").RawEquals(planned.QC.ModelProvider))
+	assertReference(t, planned.QC.ModelProvider, "model_provider.quality", "provider")
 	assert.True(t, cty.TupleVal([]cty.Value{referenceValue("fixture_tool.read_only", "builtin")}).RawEquals(planned.QC.Tools))
 	assert.Equal(t, 3, planned.QC.MaxRounds)
 	assert.Equal(t, []string{"./qc-skills"}, planned.QC.SkillDirectories)
@@ -187,7 +194,7 @@ research "market" {
 	assert.Equal(t, "qc-model", effective.Model)
 	assert.Equal(t, 4, effective.Retry.LifecycleRetries)
 	assert.Equal(t, 2, effective.Retry.ModelCallRetries)
-	assert.True(t, referenceValue("model_provider.quality", "provider").RawEquals(effective.ModelProvider))
+	assertReference(t, effective.ModelProvider, "model_provider.quality", "provider")
 	assert.True(t, cty.TupleVal([]cty.Value{referenceValue("fixture_tool.read_only", "builtin")}).RawEquals(effective.Tools))
 
 	ancestors, err := config.GetAncestors("research.market")
@@ -204,9 +211,65 @@ research "market" {
 
 	value := block.Value()
 	assert.True(t, value.Type().HasAttribute("result"))
-	artifacts := value.GetAttr("artifacts")
-	assert.True(t, artifacts.Type().HasAttribute("report"))
-	assert.False(t, artifacts.GetAttr("report").GetAttr("path").IsKnown())
+	artifacts := value.GetAttr("artifact")
+	assert.True(t, artifacts.Type().IsListType())
+	require.Equal(t, 1, artifacts.LengthInt())
+	assert.False(t, artifacts.Index(cty.NumberIntVal(0)).GetAttr("path").IsKnown())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockExposesEveryNestedBlockAsListOfObjects(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+research "market" {
+  model         = "gpt-5.6-sol"
+  system_prompt = "Research carefully."
+
+  retry {
+    lifecycle_retries = 4
+  }
+
+  artifact "report" {
+    type = "file"
+    path = "report.md"
+  }
+
+  artifact "evidence" {
+    type = "directory"
+    path = "evidence"
+  }
+
+  qc {
+    criteria = { accuracy = "Cite every claim." }
+
+    retry {
+      model_call_retries = 2
+    }
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	value := golden.Blocks[*researchspec.ResearchBlock](config)[0].Value()
+	assert.False(t, value.Type().HasAttribute("artifacts"))
+
+	for _, name := range []string{"retry", "artifact", "qc"} {
+		require.True(t, value.Type().HasAttribute(name), name)
+		assert.True(t, value.GetAttr(name).Type().IsListType(), name)
+	}
+
+	artifacts := value.GetAttr("artifact")
+	require.Equal(t, 2, artifacts.LengthInt())
+	assert.Equal(t, "report", artifacts.Index(cty.NumberIntVal(0)).GetAttr("name").AsString())
+	assert.Equal(t, "evidence", artifacts.Index(cty.NumberIntVal(1)).GetAttr("name").AsString())
+
+	qc := value.GetAttr("qc").Index(cty.NumberIntVal(0))
+	assert.True(t, qc.Type().IsObjectType())
+	require.True(t, qc.Type().HasAttribute("retry"))
+	qcRetries := qc.GetAttr("retry")
+	assert.True(t, qcRetries.Type().IsListType())
+	require.Equal(t, 1, qcRetries.LengthInt())
+	assert.True(t, qcRetries.Index(cty.NumberIntVal(0)).Type().IsObjectType())
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

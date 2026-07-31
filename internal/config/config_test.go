@@ -203,6 +203,43 @@ func TestCWDRejectsArguments(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestOneSelectsOnlyCollectionElement(t *testing.T) {
+	t.Parallel()
+
+	oneFunction, exists := config.Functions()["one"]
+	require.True(t, exists)
+	tests := []struct {
+		name      string
+		input     cty.Value
+		expected  cty.Value
+		errorText string
+	}{
+		{name: "list", input: cty.ListVal([]cty.Value{cty.StringVal("only")}), expected: cty.StringVal("only")},
+		{name: "set", input: cty.SetVal([]cty.Value{cty.StringVal("only")}), expected: cty.StringVal("only")},
+		{name: "tuple", input: cty.TupleVal([]cty.Value{cty.StringVal("only")}), expected: cty.StringVal("only")},
+		{name: "empty", input: cty.ListValEmpty(cty.String), expected: cty.NullVal(cty.String)},
+		{name: "empty tuple", input: cty.EmptyTupleVal, expected: cty.NullVal(cty.DynamicPseudoType)},
+		{name: "dynamic unknown", input: cty.DynamicVal, expected: cty.DynamicVal},
+		{name: "multiple", input: cty.ListVal([]cty.Value{cty.StringVal("one"), cty.StringVal("two")}), errorText: "zero or one"},
+		{name: "null", input: cty.NullVal(cty.List(cty.String)), errorText: "must not be null"},
+		{name: "not collection", input: cty.StringVal("only"), errorText: "list, set, or tuple"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			actual, err := oneFunction.Call([]cty.Value{test.input})
+			if test.errorText != "" {
+				require.Error(t, err)
+				require.ErrorContains(t, err, test.errorText)
+				return
+			}
+			require.NoError(t, err)
+			assert.True(t, test.expected.RawEquals(actual))
+		})
+	}
+}
+
 func TestAddressFromValueRejectsNonAddresses(t *testing.T) {
 	t.Parallel()
 

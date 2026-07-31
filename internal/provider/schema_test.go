@@ -72,6 +72,33 @@ model_provider "primary" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
+func TestModelProviderBlockExposesRetryAsNestedBlockList(t *testing.T) {
+	registerProviderBlock.Do(func() { golden.RegisterBlock(new(provider.ModelProviderBlock)) })
+	config := parseProviderConfig(t, `
+model_provider "primary" {
+  type     = "openai"
+  endpoint = "https://models.example.test"
+
+  retry {
+    lifecycle_retries = 7
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	block := golden.Blocks[*provider.ModelProviderBlock](config)[0]
+	value := block.Value()
+	require.True(t, value.Type().HasAttribute("retry"))
+	retries := value.GetAttr("retry")
+	assert.True(t, retries.Type().IsListType())
+	require.Equal(t, 1, retries.LengthInt())
+	retry := retries.Index(cty.NumberIntVal(0))
+	assert.True(t, retry.Type().IsObjectType())
+	assert.Equal(t, "7", retry.GetAttr("lifecycle_retries").AsBigFloat().Text('f', 0))
+	assert.True(t, retry.GetAttr("model_call_retries").IsNull())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
 func TestModelProviderBlockDefaultsAndMarksLiteralCredential(t *testing.T) {
 	registerProviderBlock.Do(func() { golden.RegisterBlock(new(provider.ModelProviderBlock)) })
 	config := parseProviderConfig(t, `

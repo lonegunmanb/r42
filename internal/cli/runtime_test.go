@@ -70,12 +70,18 @@ func TestProductionRuntimeRunsOneResearchSessionAndPublishesArtifacts(t *testing
 research "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
+	retry {
+	  lifecycle_retries = 3
+	}
 	artifact "report" {
 	  type = "file"
 	  path = "report.md"
 	}
 }
-output "report_path" { value = research.source.artifacts.report.path }
+locals {
+  report_with_retries = "${one(research.source.artifact).path}|${one(research.source.retry).lifecycle_retries}"
+}
+output "report_path" { value = local.report_with_retries }
 `), 0o600))
 	opener := &fakeSessionOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
@@ -95,9 +101,11 @@ output "report_path" { value = research.source.artifacts.report.path }
 	assert.True(t, strings.HasPrefix(opener.configs[0].SystemPrompt, "You are executing"))
 	assert.Equal(t, 1, opener.session.sendCalls)
 	assert.Equal(t, 1, opener.session.closeCalls)
-	path := result.Outputs["report_path"].AsString()
+	path, retries, ok := strings.Cut(result.Outputs["report_path"].AsString(), "|")
+	require.True(t, ok)
 	assert.True(t, filepath.IsAbs(path))
 	assert.Equal(t, "report.md", filepath.Base(path))
+	assert.Equal(t, "3", retries)
 }
 
 func TestProductionRuntimeExecutesTerminalGoTool(t *testing.T) {

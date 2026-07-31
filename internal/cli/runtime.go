@@ -822,6 +822,11 @@ func setBlockResult(contextValues map[string]cty.Value, address string, value ct
 		return
 	}
 	values := namespace.AsValueMap()
+	if existing, ok := values[name]; ok && existing.Type().IsObjectType() && value.Type().IsObjectType() {
+		merged := existing.AsValueMap()
+		maps.Copy(merged, value.AsValueMap())
+		value = cty.ObjectVal(merged)
+	}
 	values[name] = value
 	contextValues[kind] = cty.ObjectVal(values)
 }
@@ -909,11 +914,7 @@ func (b *researchApplyBlock) Apply() error {
 	if err != nil {
 		return err
 	}
-	artifacts := make(map[string]cty.Value, len(result.Artifacts))
-	for name, path := range result.Artifacts {
-		artifacts[name] = cty.ObjectVal(map[string]cty.Value{"path": cty.StringVal(path)})
-	}
-	value := map[string]cty.Value{"artifacts": objectValue(artifacts)}
+	value := map[string]cty.Value{"artifact": researchspec.ArtifactsValue(b.config.Artifacts, result.Artifacts)}
 	if b.config.TerminateToolName != "" {
 		value["result"] = cty.NullVal(cty.String)
 		if result.Value != nil {

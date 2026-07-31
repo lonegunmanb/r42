@@ -61,6 +61,7 @@ func AddressFromValue(value cty.Value) (Address, bool) {
 func Functions() map[string]function.Function {
 	return map[string]function.Function{
 		"cwd":       cwdFunction(),
+		"one":       oneFunction(),
 		"tool_name": toolNameFunction(),
 	}
 }
@@ -76,6 +77,48 @@ func cwdFunction() function.Function {
 				return cty.NilVal, fmt.Errorf("get current working directory: %w", err)
 			}
 			return cty.StringVal(filepath.ToSlash(workingDirectory)), nil
+		},
+	})
+}
+
+func oneFunction() function.Function {
+	return function.New(&function.Spec{
+		Params: []function.Parameter{{
+			Name:             "collection",
+			Type:             cty.DynamicPseudoType,
+			AllowDynamicType: true,
+		}},
+		Type: func(arguments []cty.Value) (cty.Type, error) {
+			collectionType := arguments[0].Type()
+			switch {
+			case collectionType.Equals(cty.DynamicPseudoType):
+				return cty.DynamicPseudoType, nil
+			case collectionType.IsListType(), collectionType.IsSetType():
+				return collectionType.ElementType(), nil
+			case collectionType.IsTupleType():
+				elementTypes := collectionType.TupleElementTypes()
+				if len(elementTypes) == 1 {
+					return elementTypes[0], nil
+				}
+				return cty.DynamicPseudoType, nil
+			default:
+				return cty.NilType, function.NewArgError(0, errors.New("one requires a list, set, or tuple"))
+			}
+		},
+		Impl: func(arguments []cty.Value, returnType cty.Type) (cty.Value, error) {
+			collection := arguments[0]
+			if collection.IsNull() {
+				return cty.NilVal, function.NewArgError(0, errors.New("one collection must not be null"))
+			}
+			if collection.LengthInt() > 1 {
+				return cty.NilVal, function.NewArgError(0, errors.New("one collection must contain zero or one elements"))
+			}
+			iterator := collection.ElementIterator()
+			if !iterator.Next() {
+				return cty.NullVal(returnType), nil
+			}
+			_, value := iterator.Element()
+			return value, nil
 		},
 	})
 }

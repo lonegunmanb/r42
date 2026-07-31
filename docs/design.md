@@ -188,12 +188,18 @@ output "summary" {
 }
 
 output "report_path" {
-  value = research.market.artifacts.report.path
+  value = one([for item in research.market.artifact : item if item.name == "report"]).path
 }
 ```
 
 The example fixes the public shape of the DSL. Adapter-specific provider
 combinations may be narrowed by Plan validation as the adapter evolves.
+
+Every nested block keeps its singular HCL block name and is exposed as
+`list(object)`, following Terraform and Golden conventions. This applies to
+`model_provider.retry`, `research.retry`, `research.artifact`, `research.qc`,
+and `research.qc[*].retry`; r42 does not remap labeled nested blocks into
+name-keyed objects.
 
 ## 5. Model Providers
 
@@ -291,6 +297,10 @@ SDK filter fields use the built-in function:
 tool_name(go_tool.finish)              # "go_tool_finish"
 tool_name(external_tool.search_catalog) # "external_tool_search_catalog"
 ```
+
+`one(collection)` follows Terraform's zero-or-one convention: an empty list,
+set, or tuple returns null, one element returns that element, and more than one
+element is an error.
 
 The SDK name is the HCL address with `.` replaced by `_`. r42 deliberately adds
 no other label restriction and performs no post-conversion collision check.
@@ -477,9 +487,10 @@ An artifact has a name, `type` (`file` or `directory`), `path`, `required`, and
 - For `required = false`, `.path` still returns the expected absolute path when
   the artifact does not exist.
 
-`research.name.artifacts.artifact_name.path` creates a Golden implicit dependency
-when referenced. A plain string containing the same filesystem path creates no
-dependency; use `depends_on` when needed.
+`research.name.artifact` is a `list(object)`, matching Golden's nested-block
+representation. Referencing it creates a Golden implicit dependency. A plain
+string containing the same filesystem path creates no dependency; use
+`depends_on` when needed.
 
 ## 11. Modules
 

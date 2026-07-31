@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -217,7 +218,9 @@ func (b *ResearchBlock) ResearchConfig() Config {
 
 func (b *ResearchBlock) Value() cty.Value {
 	values := map[string]cty.Value{
-		"artifacts": artifactValues(b.planned.Artifacts),
+		"retry":    retryBlockValues(b.RetryBlocks),
+		"artifact": ArtifactsValue(b.planned.Artifacts, nil),
+		"qc":       qcBlockValues(b.QCBlocks),
 	}
 	if hasValue(b.planned.TerminateTool) {
 		values["result"] = cty.UnknownVal(cty.String)
@@ -231,6 +234,126 @@ type RetryBlock struct {
 	IntervalSeconds    *int     `hcl:"interval_seconds,optional"`
 	MaxIntervalSeconds *int     `hcl:"max_interval_seconds,optional"`
 	ErrorMessageRegex  []string `hcl:"error_message_regex,optional"`
+}
+
+var retryBlockType = cty.Object(map[string]cty.Type{
+	"lifecycle_retries":    cty.Number,
+	"model_call_retries":   cty.Number,
+	"interval_seconds":     cty.Number,
+	"max_interval_seconds": cty.Number,
+	"error_message_regex":  cty.List(cty.String),
+})
+
+func retryBlockValues(blocks []RetryBlock) cty.Value {
+	if len(blocks) == 0 {
+		return cty.ListValEmpty(retryBlockType)
+	}
+	values := make([]cty.Value, len(blocks))
+	for index, block := range blocks {
+		values[index] = cty.ObjectVal(map[string]cty.Value{
+			"lifecycle_retries":    optionalIntValue(block.LifecycleRetries),
+			"model_call_retries":   optionalIntValue(block.ModelCallRetries),
+			"interval_seconds":     optionalIntValue(block.IntervalSeconds),
+			"max_interval_seconds": optionalIntValue(block.MaxIntervalSeconds),
+			"error_message_regex":  stringListValue(block.ErrorMessageRegex),
+		})
+	}
+	return cty.ListVal(values)
+}
+
+func qcBlockValues(blocks []QCBlock) cty.Value {
+	if len(blocks) != 1 {
+		return cty.ListValEmpty(qcBlockType())
+	}
+	block := blocks[0]
+	value := cty.ObjectVal(map[string]cty.Value{
+		"criteria":          qcCriteriaValue(block.Criteria),
+		"model_provider":    optionalObjectValue(block.ModelProvider),
+		"model":             optionalStringValue(block.Model),
+		"reasoning_effort":  optionalStringValue(block.ReasoningEffort),
+		"tools":             optionalToolsValue(block.Tools),
+		"allowed_tools":     stringListValue(block.AllowedTools),
+		"disallowed_tools":  stringListValue(block.DisallowedTools),
+		"skill_directories": stringListValue(block.SkillDirectories),
+		"skills":            stringListValue(block.Skills),
+		"disabled_skills":   stringListValue(block.DisabledSkills),
+		"permission":        optionalPermissionValue(block.Permission),
+		"max_qc_rounds":     optionalIntValue(block.MaxQCRounds),
+		"retry":             retryBlockValues(block.RetryBlocks),
+	})
+	return cty.ListVal([]cty.Value{value})
+}
+
+func qcCriteriaValue(value cty.Value) cty.Value {
+	criteria, err := normalizeCriteria(value)
+	if err != nil {
+		return cty.UnknownVal(cty.Map(cty.String))
+	}
+	return criteria
+}
+
+func qcBlockType() cty.Type {
+	return cty.Object(map[string]cty.Type{
+		"criteria":          cty.Map(cty.String),
+		"model_provider":    cty.EmptyObject,
+		"model":             cty.String,
+		"reasoning_effort":  cty.String,
+		"tools":             cty.EmptyTuple,
+		"allowed_tools":     cty.List(cty.String),
+		"disallowed_tools":  cty.List(cty.String),
+		"skill_directories": cty.List(cty.String),
+		"skills":            cty.List(cty.String),
+		"disabled_skills":   cty.List(cty.String),
+		"permission":        cty.String,
+		"max_qc_rounds":     cty.Number,
+		"retry":             cty.List(retryBlockType),
+	})
+}
+
+func optionalObjectValue(value cty.Value) cty.Value {
+	if value == cty.NilVal || value.Type().Equals(cty.NilType) {
+		return cty.NullVal(cty.EmptyObject)
+	}
+	return value
+}
+
+func optionalToolsValue(value cty.Value) cty.Value {
+	if value == cty.NilVal || value.Type().Equals(cty.NilType) {
+		return cty.EmptyTupleVal
+	}
+	return value
+}
+
+func optionalStringValue(value *string) cty.Value {
+	if value == nil {
+		return cty.NullVal(cty.String)
+	}
+	return cty.StringVal(*value)
+}
+
+func optionalPermissionValue(value *Permission) cty.Value {
+	if value == nil {
+		return cty.NullVal(cty.String)
+	}
+	return cty.StringVal(string(*value))
+}
+
+func optionalIntValue(value *int) cty.Value {
+	if value == nil {
+		return cty.NullVal(cty.Number)
+	}
+	return cty.NumberIntVal(int64(*value))
+}
+
+func stringListValue(values []string) cty.Value {
+	if len(values) == 0 {
+		return cty.ListValEmpty(cty.String)
+	}
+	result := make([]cty.Value, len(values))
+	for index, value := range values {
+		result[index] = cty.StringVal(value)
+	}
+	return cty.ListVal(result)
 }
 
 type ArtifactBlock struct {
@@ -452,17 +575,31 @@ func defaultTools(value cty.Value) cty.Value {
 	return value
 }
 
-func artifactValues(artifacts []Artifact) cty.Value {
+func ArtifactsValue(artifacts []Artifact, resolvedPaths map[string]string) cty.Value {
 	if len(artifacts) == 0 {
-		return cty.EmptyObjectVal
+		return cty.ListValEmpty(cty.Object(map[string]cty.Type{
+			"name": cty.String, "type": cty.String, "path": cty.String,
+			"required": cty.Bool, "non_empty": cty.Bool,
+		}))
 	}
-	values := make(map[string]cty.Value, len(artifacts))
-	for _, artifact := range artifacts {
-		values[artifact.Name] = cty.ObjectVal(map[string]cty.Value{
-			"path": cty.UnknownVal(cty.String),
+	values := make([]cty.Value, len(artifacts))
+	for index, artifact := range artifacts {
+		path := cty.UnknownVal(cty.String)
+		if filepath.IsAbs(artifact.Path) {
+			path = cty.StringVal(artifact.Path)
+		}
+		if resolved, ok := resolvedPaths[artifact.Name]; ok {
+			path = cty.StringVal(resolved)
+		}
+		values[index] = cty.ObjectVal(map[string]cty.Value{
+			"name":      cty.StringVal(artifact.Name),
+			"type":      cty.StringVal(string(artifact.Type)),
+			"path":      path,
+			"required":  cty.BoolVal(artifact.Required),
+			"non_empty": cty.BoolVal(artifact.NonEmpty),
 		})
 	}
-	return cty.ObjectVal(values)
+	return cty.ListVal(values)
 }
 
 func cloneConfig(config Config) Config {

@@ -412,18 +412,18 @@ research "source" {
 
   artifact "report" {
     type = "file"
-    path = "report.md"
+    path = "${cwd()}/report.md"
   }
 }
 
 research "summary" {
   model         = "test-model"
   system_prompt = "Summarize evidence."
-  depends_on    = [research.source]
+  prompt        = one(research.source.artifact).path
 }
 
 output "report_path" {
-  value = research.source.artifacts.report.path
+  value = one(research.source.artifact).path
 }
 `)
 
@@ -442,7 +442,7 @@ output "report_path" {
 	assert.Equal(t, "research.summary", nodes[1].Address)
 	assert.Equal(t, []string{"research.source"}, nodes[1].Dependencies)
 	assert.Equal(t,
-		"research.source.artifacts.report.path",
+		"one(research.source.artifact).path",
 		planned.Saved.Outputs()["report_path"].Expression,
 	)
 	assert.Contains(t, planned.Saved.Context(), "research")

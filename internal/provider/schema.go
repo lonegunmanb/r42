@@ -44,6 +44,7 @@ func (b *ModelProviderBlock) Value() cty.Value {
 	return cty.ObjectVal(map[string]cty.Value{
 		"address": cty.StringVal(b.Address()),
 		"kind":    cty.StringVal("provider"),
+		"retry":   retryBlockValues(b.RetryBlocks),
 	})
 }
 
@@ -116,6 +117,49 @@ type RetryBlock struct {
 	IntervalSeconds    *int     `hcl:"interval_seconds,optional"`
 	MaxIntervalSeconds *int     `hcl:"max_interval_seconds,optional"`
 	ErrorMessageRegex  []string `hcl:"error_message_regex,optional"`
+}
+
+var retryBlockType = cty.Object(map[string]cty.Type{
+	"lifecycle_retries":    cty.Number,
+	"model_call_retries":   cty.Number,
+	"interval_seconds":     cty.Number,
+	"max_interval_seconds": cty.Number,
+	"error_message_regex":  cty.List(cty.String),
+})
+
+func retryBlockValues(blocks []RetryBlock) cty.Value {
+	if len(blocks) == 0 {
+		return cty.ListValEmpty(retryBlockType)
+	}
+	values := make([]cty.Value, len(blocks))
+	for index, block := range blocks {
+		values[index] = cty.ObjectVal(map[string]cty.Value{
+			"lifecycle_retries":    optionalIntValue(block.LifecycleRetries),
+			"model_call_retries":   optionalIntValue(block.ModelCallRetries),
+			"interval_seconds":     optionalIntValue(block.IntervalSeconds),
+			"max_interval_seconds": optionalIntValue(block.MaxIntervalSeconds),
+			"error_message_regex":  stringListValue(block.ErrorMessageRegex),
+		})
+	}
+	return cty.ListVal(values)
+}
+
+func optionalIntValue(value *int) cty.Value {
+	if value == nil {
+		return cty.NullVal(cty.Number)
+	}
+	return cty.NumberIntVal(int64(*value))
+}
+
+func stringListValue(values []string) cty.Value {
+	if len(values) == 0 {
+		return cty.ListValEmpty(cty.String)
+	}
+	result := make([]cty.Value, len(values))
+	for index, value := range values {
+		result[index] = cty.StringVal(value)
+	}
+	return cty.ListVal(result)
 }
 
 func (b *ModelProviderBlock) toConfig() (Config, error) {
