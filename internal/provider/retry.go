@@ -165,64 +165,6 @@ func Delay(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-type HTTPError struct {
-	StatusCode int
-	Err        error
-}
-
-func (e HTTPError) Error() string {
-	if e.Err == nil {
-		return fmt.Sprintf("http status %d", e.StatusCode)
-	}
-	return fmt.Sprintf("http status %d: %v", e.StatusCode, e.Err)
-}
-
-func (e HTTPError) Unwrap() error {
-	return e.Err
-}
-
-func (e HTTPError) HTTPStatusCode() int {
-	return e.StatusCode
-}
-
-type TransientError struct {
-	Err error
-}
-
-func (e TransientError) Error() string {
-	if e.Err == nil {
-		return "transient error"
-	}
-	return e.Err.Error()
-}
-
-func (e TransientError) Unwrap() error {
-	return e.Err
-}
-
-func (e TransientError) IsTransient() bool {
-	return true
-}
-
-type PermanentError struct {
-	Err error
-}
-
-func (e PermanentError) Error() string {
-	if e.Err == nil {
-		return "permanent error"
-	}
-	return e.Err.Error()
-}
-
-func (e PermanentError) Unwrap() error {
-	return e.Err
-}
-
-func (e PermanentError) IsPermanent() bool {
-	return true
-}
-
 func (p RetryPolicy) IsTransient(err error) bool {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false

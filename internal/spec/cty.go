@@ -2,7 +2,6 @@ package spec
 
 import (
 	"fmt"
-	"slices"
 	"sort"
 
 	"github.com/zclconf/go-cty/cty"
@@ -67,12 +66,4 @@ func MarkSensitive(value cty.Value) cty.Value {
 
 func IsSensitive(value cty.Value) bool {
 	return value.HasMarkDeep(sensitive)
-}
-
-func PropagateSensitive(result cty.Value, sources ...cty.Value) cty.Value {
-	if slices.ContainsFunc(sources, IsSensitive) {
-		return MarkSensitive(result)
-	}
-
-	return result
 }

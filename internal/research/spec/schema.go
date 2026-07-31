@@ -16,6 +16,11 @@ import (
 	"github.com/zclconf/go-cty/cty/convert"
 )
 
+var (
+	_ golden.PlanBlock  = (*ResearchBlock)(nil)
+	_ golden.ApplyBlock = (*ResearchBlock)(nil)
+)
+
 type ResearchBlock struct {
 	*golden.BaseBlock
 	ModelProvider       cty.Value       `hcl:"model_provider,optional"`
@@ -38,6 +43,10 @@ type ResearchBlock struct {
 	QCBlocks            []QCBlock       `hcl:"qc,block"`
 
 	planned Config
+}
+
+type blockApplier interface {
+	ApplyBlock(string) error
 }
 
 func (*ResearchBlock) Type() string { return "" }
@@ -63,6 +72,14 @@ func (b *ResearchBlock) ExecuteDuringPlan() error {
 		b.planned = config
 		return nil
 	})
+}
+
+func (b *ResearchBlock) Apply() error {
+	applier, ok := b.Config().(blockApplier)
+	if !ok {
+		return fmt.Errorf("research %q requires an r42 apply config", b.Name())
+	}
+	return applier.ApplyBlock(b.Address())
 }
 
 func (b *ResearchBlock) validateNativeStringFields() error {

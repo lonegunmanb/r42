@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Azure/golden"
+	"github.com/lonegunmanb/r42/internal/executor"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/provider"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
@@ -54,7 +55,7 @@ func registerSchemas() {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestPlanDirectoryPlansModuleInputsAndOutputs(t *testing.T) {
+func TestResearchConfigPlansModuleInputsAndOutputs(t *testing.T) {
 	registerSchemas()
 	root := t.TempDir()
 	child := filepath.Join(root, "modules", "sector")
@@ -78,7 +79,7 @@ output "report" {
 module "sector" {
   source      = "./modules/sector"
   parallelism = 4
-  timeout     = "1h"
+  timeout     = " 1h "
   topic       = "energy"
 }
 
@@ -87,7 +88,7 @@ output "sector_report" {
 }
 `)
 
-	plan, err := modulespec.PlanDirectory(root, nil)
+	plan, err := planSource(root, executor.ResearchConfigOptions{})
 	require.NoError(t, err)
 
 	modulePlan, ok := plan.Modules["sector"]
@@ -110,7 +111,7 @@ output "sector_report" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestPlanDirectoryUsesVariableDefault(t *testing.T) {
+func TestResearchConfigUsesVariableDefault(t *testing.T) {
 	registerSchemas()
 	root := t.TempDir()
 	child := filepath.Join(root, "child")
@@ -127,12 +128,12 @@ module "child" { source = "./child" }
 output "topic" { value = module.child.topic }
 `)
 
-	plan, err := modulespec.PlanDirectory(root, nil)
+	plan, err := planSource(root, executor.ResearchConfigOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, "energy", plan.Outputs["topic"].Value.AsString())
 }
 
-func TestPlanDirectoryDelegatesRootVariablesToGolden(t *testing.T) {
+func TestResearchConfigDelegatesRootVariablesToGolden(t *testing.T) {
 	registerSchemas()
 	t.Setenv("R42_VAR_TOPIC", "from-env")
 	root := t.TempDir()
@@ -143,7 +144,7 @@ variable "topic" {
 output "topic" { value = var.topic }
 `)
 
-	plan, err := modulespec.PlanDirectory(root, nil)
+	plan, err := planSource(root, executor.ResearchConfigOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, "from-env", plan.Outputs["topic"].Value.AsString())
 }
@@ -166,7 +167,7 @@ module "child" { source = "./child" }
 output "topic" { value = module.child.topic }
 `)
 
-	plan, err := modulespec.PlanDirectory(root, nil)
+	plan, err := planSource(root, executor.ResearchConfigOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, "child-default", plan.Outputs["topic"].Value.AsString())
 }
@@ -192,7 +193,7 @@ variable "topic" { type = string }
 output "topic" { value = var.topic }
 `)
 
-	plan, err := modulespec.PlanDirectory(root, nil)
+	plan, err := planSource(root, executor.ResearchConfigOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, "from-root-var-file", plan.Outputs["topic"].Value.AsString())
 }
@@ -241,7 +242,7 @@ output "secret" { value = var.secret }
 output "secret" { value = module.child.secret }
 `)
 
-			plan, err := modulespec.PlanDirectory(root, nil)
+			plan, err := planSource(root, executor.ResearchConfigOptions{})
 			require.NoError(t, err)
 			assert.True(t, corespec.IsSensitive(plan.Outputs["secret"].Value))
 			assert.True(t, plan.Outputs["secret"].Sensitive)
@@ -278,7 +279,7 @@ module "child" {
 output "secret" { value = module.child.secret }
 `)
 
-	plan, err := modulespec.PlanDirectory(root, nil)
+	plan, err := planSource(root, executor.ResearchConfigOptions{})
 	require.NoError(t, err)
 	output := plan.Outputs["secret"]
 	assert.True(t, corespec.IsSensitive(output.Value))
@@ -287,7 +288,7 @@ output "secret" { value = module.child.secret }
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestPlanDirectoryAcceptsAbsoluteModuleSource(t *testing.T) {
+func TestResearchConfigAcceptsAbsoluteModuleSource(t *testing.T) {
 	registerSchemas()
 	root := t.TempDir()
 	child := t.TempDir()
@@ -297,13 +298,13 @@ module "child" { source = %q }
 output "value" { value = module.child.value }
 `, filepath.ToSlash(child)))
 
-	plan, err := modulespec.PlanDirectory(root, nil)
+	plan, err := planSource(root, executor.ResearchConfigOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, "absolute", plan.Outputs["value"].Value.AsString())
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestPlanDirectoryRejectsInvalidModuleBoundaries(t *testing.T) {
+func TestResearchConfigRejectsInvalidModuleBoundaries(t *testing.T) {
 	registerSchemas()
 	tests := []struct {
 		name          string
@@ -373,7 +374,7 @@ func TestPlanDirectoryRejectsInvalidModuleBoundaries(t *testing.T) {
 			}
 			writeR42(t, root, "main.r42", tt.root)
 
-			_, err := modulespec.PlanDirectory(root, nil)
+			_, err := planSource(root, executor.ResearchConfigOptions{})
 			require.Error(t, err)
 			assert.ErrorContains(t, err, tt.expectedError)
 		})
@@ -381,7 +382,7 @@ func TestPlanDirectoryRejectsInvalidModuleBoundaries(t *testing.T) {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestPlanDirectoryAllowsKnownAfterApplyOutput(t *testing.T) {
+func TestResearchConfigAllowsKnownAfterApplyOutput(t *testing.T) {
 	registerSchemas()
 	directory := t.TempDir()
 	writeR42(t, directory, "main.r42", `
@@ -389,7 +390,7 @@ planning_fixture "unknown" { value = "unknown" }
 output "result" { value = planning_fixture.unknown }
 `)
 
-	planned, err := modulespec.PlanDirectory(directory, nil)
+	planned, err := planSource(directory, executor.ResearchConfigOptions{})
 
 	require.NoError(t, err)
 	output := planned.Outputs["result"]
@@ -398,7 +399,7 @@ output "result" { value = planning_fixture.unknown }
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestPlanDirectoryBuildsSavedResearchDAG(t *testing.T) {
+func TestResearchConfigBuildsSavedResearchDAG(t *testing.T) {
 	registerSchemas()
 	golden.RegisterBlock(new(provider.ModelProviderBlock))
 	golden.RegisterBlock(new(toolspec.GoToolBlock))
@@ -427,7 +428,7 @@ output "report_path" {
 }
 `)
 
-	planned, err := modulespec.PlanDirectoryWithOptions(directory, modulespec.PlanOptions{
+	planned, err := planSource(directory, executor.ResearchConfigOptions{
 		Context: context.Background(),
 	})
 
@@ -449,7 +450,7 @@ output "report_path" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestPlanDirectoryEmbedsSavedChildPlan(t *testing.T) {
+func TestResearchConfigEmbedsSavedChildPlan(t *testing.T) {
 	registerSchemas()
 	golden.RegisterBlock(new(researchspec.ResearchBlock))
 	root := t.TempDir()
@@ -468,7 +469,7 @@ module "child" {
 }
 `)
 
-	planned, err := modulespec.PlanDirectoryWithOptions(root, modulespec.PlanOptions{})
+	planned, err := planSource(root, executor.ResearchConfigOptions{})
 
 	require.NoError(t, err)
 	require.NotNil(t, planned.Saved)
@@ -549,7 +550,7 @@ research "market" {
 }
 `)
 
-	planned, err := modulespec.PlanDirectoryWithOptions(directory, modulespec.PlanOptions{})
+	planned, err := planSource(directory, executor.ResearchConfigOptions{})
 	require.NoError(t, err)
 	node := planned.Saved.Nodes()[0]
 	assert.True(t, corespec.IsSensitive(node.Config))
@@ -594,7 +595,7 @@ research "market" {
 }
 `)
 
-	planned, err := modulespec.PlanDirectoryWithOptions(directory, modulespec.PlanOptions{})
+	planned, err := planSource(directory, executor.ResearchConfigOptions{})
 	require.NoError(t, err)
 	reconstructed, err := modulespec.DecodeResearchPlan(planned.Saved.Nodes()[0].Config)
 
@@ -604,7 +605,7 @@ research "market" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestPlanDirectoryRejectsInvalidModuleSchema(t *testing.T) {
+func TestResearchConfigRejectsInvalidModuleSchema(t *testing.T) {
 	registerSchemas()
 	tests := []struct {
 		name          string
@@ -651,7 +652,7 @@ func TestPlanDirectoryRejectsInvalidModuleSchema(t *testing.T) {
 			writeR42(t, child, "main.r42", `output "value" { value = "ok" }`)
 			writeR42(t, root, "main.r42", "module \"child\" {\n"+tt.moduleBody+"\n}")
 
-			_, err := modulespec.PlanDirectory(root, nil)
+			_, err := planSource(root, executor.ResearchConfigOptions{})
 			require.Error(t, err)
 			assert.ErrorContains(t, err, tt.expectedError)
 		})
@@ -659,7 +660,7 @@ func TestPlanDirectoryRejectsInvalidModuleSchema(t *testing.T) {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestPlanDirectoryRejectsInvalidOutputPrimitiveTypes(t *testing.T) {
+func TestResearchConfigRejectsInvalidOutputPrimitiveTypes(t *testing.T) {
 	registerSchemas()
 	tests := []struct {
 		name          string
@@ -675,7 +676,7 @@ func TestPlanDirectoryRejectsInvalidOutputPrimitiveTypes(t *testing.T) {
 			root := t.TempDir()
 			writeR42(t, root, "main.r42", "output \"value\" {\nvalue = \"ok\"\n"+tt.attribute+"\n}")
 
-			_, err := modulespec.PlanDirectory(root, nil)
+			_, err := planSource(root, executor.ResearchConfigOptions{})
 			require.Error(t, err)
 			assert.ErrorContains(t, err, tt.expectedError)
 		})
@@ -683,7 +684,7 @@ func TestPlanDirectoryRejectsInvalidOutputPrimitiveTypes(t *testing.T) {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestPlanDirectoryDetectsOnlyActiveDirectoryCycles(t *testing.T) {
+func TestResearchConfigDetectsOnlyActiveDirectoryCycles(t *testing.T) {
 	registerSchemas()
 	root := t.TempDir()
 	shared := filepath.Join(root, "shared")
@@ -696,7 +697,7 @@ output "first" { value = module.first.value }
 output "second" { value = module.second.value }
 `)
 
-	plan, err := modulespec.PlanDirectory(root, nil)
+	plan, err := planSource(root, executor.ResearchConfigOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, "shared", plan.Outputs["first"].Value.AsString())
 	assert.Equal(t, "shared", plan.Outputs["second"].Value.AsString())
@@ -707,7 +708,7 @@ output "second" { value = module.second.value }
 	writeR42(t, cycleRoot, "main.r42", `module "child" { source = "./child" }`)
 	writeR42(t, child, "main.r42", `module "root" { source = ".." }`)
 
-	_, err = modulespec.PlanDirectory(cycleRoot, nil)
+	_, err = planSource(cycleRoot, executor.ResearchConfigOptions{})
 	require.Error(t, err)
 	require.ErrorContains(t, err, "module directory cycle")
 	assert.ErrorContains(t, err, filepath.Clean(cycleRoot))
@@ -728,7 +729,7 @@ module "child" { source = "./child" }
 output "leak" { value = module.child.planning_fixture.internal.value }
 `)
 
-	_, err := modulespec.PlanDirectory(root, nil)
+	_, err := planSource(root, executor.ResearchConfigOptions{})
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "Unsupported attribute")
 }
@@ -736,4 +737,16 @@ output "leak" { value = module.child.planning_fixture.internal.value }
 func writeR42(t *testing.T, directory, name, source string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, name), []byte(source+"\n"), 0o600))
+}
+
+func planSource(directory string, options executor.ResearchConfigOptions) (modulespec.Plan, error) {
+	config, err := executor.NewResearchConfig(directory, options)
+	if err != nil {
+		return modulespec.Plan{}, err
+	}
+	planned, err := executor.RunResearchPlan(config)
+	if err != nil {
+		return modulespec.Plan{}, err
+	}
+	return planned.Plan, nil
 }

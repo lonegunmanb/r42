@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -221,26 +220,4 @@ func (r *Recorder) Warning() string {
 		return ""
 	}
 	return debugWarning
-}
-
-func RedactKnownSecrets(content string, secrets []string) string {
-	ordered := make([]string, 0, len(secrets))
-	seen := make(map[string]struct{}, len(secrets))
-	for _, secret := range secrets {
-		if secret == "" {
-			continue
-		}
-		if _, exists := seen[secret]; exists {
-			continue
-		}
-		seen[secret] = struct{}{}
-		ordered = append(ordered, secret)
-	}
-	slices.SortFunc(ordered, func(left, right string) int {
-		return len(right) - len(left)
-	})
-	for _, secret := range ordered {
-		content = strings.ReplaceAll(content, secret, "<sensitive>")
-	}
-	return content
 }

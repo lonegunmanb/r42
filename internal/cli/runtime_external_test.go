@@ -12,6 +12,7 @@ import (
 	sdk "github.com/github/copilot-sdk/go"
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/copilot"
+	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -37,10 +38,10 @@ research "source" {
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(source), 0o600))
 	opener := &externalCallingOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 
-	_, err = runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
 	assert.Contains(t, opener.result, `"accepted":true`)
@@ -68,10 +69,10 @@ research "source" {
 `, program)
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(source), 0o600))
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: &externalCallingOpener{}})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 
-	_, err = runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1, Debug: true})
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1, Debug: true})
 
 	require.Error(t, err)
 	runs, readErr := os.ReadDir(filepath.Join(directory, ".r42", "runs"))

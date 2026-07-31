@@ -7,11 +7,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Azure/golden"
 	"github.com/lonegunmanb/r42/internal/cli"
+	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/lonegunmanb/r42/internal/plan"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/stretchr/testify/assert"
@@ -20,39 +22,59 @@ import (
 )
 
 type fakeRuntime struct {
-	planned       *plan.Plan
-	planDirectory string
-	variables     []golden.CliFlagAssignedVariables
-	applyOptions  cli.ApplyOptions
-	applyDeadline bool
-	applyResult   cli.ApplyResult
-	planErr       error
-	applyErr      error
+	planned          *plan.Plan
+	plannedDirectory string
+	variables        []golden.CliFlagAssignedVariables
+	configOptions    executor.ResearchConfigOptions
+	applyDeadline    bool
+	outputs          map[string]cty.Value
+	warnings         []error
+	planErr          error
+	applyErr         error
+	applyHook        func()
 }
 
-func (f *fakeRuntime) Plan(
-	_ context.Context,
+func (f *fakeRuntime) Config(
 	directory string,
-	variables []golden.CliFlagAssignedVariables,
-) (*plan.Plan, error) {
-	f.planDirectory = directory
-	f.variables = variables
-	return f.planned, f.planErr
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	f.plannedDirectory = directory
+	f.variables = options.Variables
+	if f.planErr != nil {
+		return nil, f.planErr
+	}
+	return f.config(f.planned, options)
 }
 
-func (f *fakeRuntime) Apply(ctx context.Context, _ *plan.Plan, options cli.ApplyOptions) (cli.ApplyResult, error) {
-	f.applyOptions = options
-	_, f.applyDeadline = ctx.Deadline()
-	return f.applyResult, f.applyErr
+func (f *fakeRuntime) ConfigFromPlan(
+	planned *plan.Plan,
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	return f.config(planned, options)
+}
+
+func (f *fakeRuntime) config(
+	planned *plan.Plan,
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	f.configOptions = options
+	options.Apply = func(*plan.Plan) (map[string]cty.Value, []error, error) {
+		if f.applyHook != nil {
+			f.applyHook()
+		}
+		_, f.applyDeadline = options.Context.Deadline()
+		return f.outputs, f.warnings, f.applyErr
+	}
+	return executor.NewResearchConfigFromPlan(planned, options)
 }
 
 func TestCommandPlanSavesOptionalOutputAndSeparatesPermissionWarning(t *testing.T) {
 	t.Parallel()
 
 	directory := t.TempDir()
-	planned, err := plan.New(directory, nil, map[string]plan.OutputSpec{
+	planned, err := plan.NewWithContextAndLocals(directory, nil, map[string]plan.OutputSpec{
 		"answer": {Value: cty.StringVal("42")},
-	})
+	}, nil, nil)
 	require.NoError(t, err)
 	runtime := &fakeRuntime{planned: planned}
 	outPath := filepath.Join(t.TempDir(), "research.r42plan")
@@ -65,7 +87,7 @@ func TestCommandPlanSavesOptionalOutputAndSeparatesPermissionWarning(t *testing.
 	)
 
 	require.NoError(t, executeErr)
-	assert.Equal(t, directory, runtime.planDirectory)
+	assert.Equal(t, directory, runtime.plannedDirectory)
 	assert.Len(t, runtime.variables, 2)
 	assert.Contains(t, stdout, `"answer"`)
 	assert.NotContains(t, stdout, "unencrypted")
@@ -75,7 +97,7 @@ func TestCommandPlanSavesOptionalOutputAndSeparatesPermissionWarning(t *testing.
 	assert.Equal(t, planned.Outputs(), loaded.Outputs())
 }
 
-func TestCommandPlanDirectoryFlagsAndDefaultPrintWithoutSaving(t *testing.T) {
+func TestCommandPlanFlagsAndDefaultPrintWithoutSaving(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -98,7 +120,7 @@ func TestCommandPlanDirectoryFlagsAndDefaultPrintWithoutSaving(t *testing.T) {
 			stdout, stderr, err := execute(t, runtime, test.arguments...)
 
 			require.NoError(t, err)
-			assert.Equal(t, test.wantDirectory, runtime.planDirectory)
+			assert.Equal(t, test.wantDirectory, runtime.plannedDirectory)
 			assert.Contains(t, stdout, `"nodes"`)
 			assert.Empty(t, stderr)
 		})
@@ -140,10 +162,11 @@ func TestCommandPlanHelpDescribesOptionalDirectoryAndOutput(t *testing.T) {
 	assert.NotContains(t, stdout, "plan DIRECTORY")
 }
 
+//nolint:paralleltest // t.Chdir verifies the CLI process working-directory contract.
 func TestCommandPlanDebugRecordsDetailedGoldenPlanningLifecycle(t *testing.T) {
-	t.Parallel()
-
+	workingDirectory := t.TempDir()
 	directory := t.TempDir()
+	t.Chdir(workingDirectory)
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
 output "answer" { value = "42" }
 `), 0o600))
@@ -153,7 +176,7 @@ output "answer" { value = "42" }
 
 	require.NoError(t, err)
 	assert.Contains(t, stderr, "sensitive")
-	events := readDebugEvents(t, directory)
+	events := readDebugEvents(t, workingDirectory)
 	for _, action := range []string{
 		"plan",
 		"config.directory.scan",
@@ -174,11 +197,28 @@ output "answer" { value = "42" }
 	encodedPath, err := json.Marshal(filepath.Join(directory, "main.r42"))
 	require.NoError(t, err)
 	assert.Contains(t, events, string(encodedPath))
+	assert.NoDirExists(t, filepath.Join(directory, ".r42"))
 }
 
-func TestCommandPlanDebugDoesNotCreateMissingDirectory(t *testing.T) {
-	t.Parallel()
+//nolint:paralleltest // t.Chdir verifies the CLI process working-directory contract.
+func TestCommandPlanStoresDebugRunInWorkingDirectory(t *testing.T) {
+	workingDirectory := t.TempDir()
+	configurationDirectory := t.TempDir()
+	t.Chdir(workingDirectory)
+	require.NoError(t, os.WriteFile(filepath.Join(configurationDirectory, "main.r42"), []byte(`
+output "answer" { value = "42" }
+`), 0o600))
 
+	_, _, err := execute(t, cli.NewRuntime(), "plan", "--directory", configurationDirectory, "--debug")
+
+	require.NoError(t, err)
+	assert.Contains(t, readDebugEvents(t, workingDirectory), `"action":"plan"`)
+	assert.NoDirExists(t, filepath.Join(configurationDirectory, ".r42"))
+}
+
+//nolint:paralleltest // t.Chdir isolates debug output from the repository.
+func TestCommandPlanDebugDoesNotCreateMissingDirectory(t *testing.T) {
+	t.Chdir(t.TempDir())
 	directory := filepath.Join(t.TempDir(), "missing")
 
 	_, _, err := execute(t, cli.NewRuntime(), "plan", "--directory", directory, "--debug")
@@ -188,25 +228,27 @@ func TestCommandPlanDebugDoesNotCreateMissingDirectory(t *testing.T) {
 	require.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
+//nolint:paralleltest // t.Chdir isolates debug output from the repository.
 func TestCommandPlanDebugRecordsParseFailure(t *testing.T) {
-	t.Parallel()
-
+	workingDirectory := t.TempDir()
 	directory := t.TempDir()
+	t.Chdir(workingDirectory)
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "broken.r42"), []byte(`research "broken" {`), 0o600))
 
 	_, _, err := execute(t, cli.NewRuntime(), "plan", "--directory", directory, "--debug")
 
 	require.Error(t, err)
-	events := readDebugEvents(t, directory)
+	events := readDebugEvents(t, workingDirectory)
 	assert.Contains(t, events, `"action":"hcl.syntax.parse","status":"failed"`)
 	assert.Contains(t, events, `"action":"plan","status":"failed"`)
 	assert.Contains(t, events, `"error":`)
 }
 
+//nolint:paralleltest // t.Chdir verifies the CLI process working-directory contract.
 func TestCommandApplyDebugRecordsDetailedPlanAndApplyLifecycle(t *testing.T) {
-	t.Parallel()
-
+	workingDirectory := t.TempDir()
 	directory := t.TempDir()
+	t.Chdir(workingDirectory)
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
 research "source" {
   model         = "test-model"
@@ -219,7 +261,7 @@ output "answer" { value = "42" }
 	_, _, err := execute(t, runtime, "apply", directory, "--debug", "--parallelism", "1")
 
 	require.NoError(t, err)
-	events := readDebugEvents(t, directory)
+	events := readDebugEvents(t, workingDirectory)
 	for _, action := range []string{
 		"plan",
 		"config.file.collect",
@@ -227,10 +269,11 @@ output "answer" { value = "42" }
 		"golden.config.init",
 		"golden.run_plan",
 		"plan.snapshot",
+		"plan.display",
 		"apply",
-		"apply.saved_hcl.build",
 		"apply.golden.config.init",
-		"apply.golden.run_plan",
+		"apply.golden.plan",
+		"apply.golden.apply",
 		"block.decode",
 		"block.plan",
 		"block.factory",
@@ -244,6 +287,42 @@ output "answer" { value = "42" }
 		assert.Contains(t, events, `"action":"`+action+`"`)
 	}
 	assert.Contains(t, events, `"block_address":"research.source"`)
+	assert.NoDirExists(t, filepath.Join(directory, ".r42"))
+}
+
+//nolint:paralleltest // t.Chdir verifies the CLI process working-directory contract.
+func TestCommandApplyStoresRunInWorkingDirectory(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments []string
+		debug     bool
+	}{
+		{name: "default", arguments: nil},
+		{name: "debug", arguments: []string{"--debug"}, debug: true},
+	}
+	//nolint:paralleltest // Each subtest changes the process working directory.
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workingDirectory := t.TempDir()
+			configurationDirectory := t.TempDir()
+			t.Chdir(workingDirectory)
+			require.NoError(t, os.WriteFile(filepath.Join(configurationDirectory, "main.r42"), []byte(`
+output "answer" { value = "42" }
+`), 0o600))
+
+			arguments := append([]string{"apply", configurationDirectory}, test.arguments...)
+			_, _, err := execute(t, cli.NewRuntime(), arguments...)
+
+			require.NoError(t, err)
+			runs, err := os.ReadDir(filepath.Join(workingDirectory, ".r42", "runs"))
+			require.NoError(t, err)
+			require.Len(t, runs, 1)
+			if test.debug {
+				assert.Contains(t, readDebugEvents(t, workingDirectory), `"action":"apply"`)
+			}
+			assert.NoDirExists(t, filepath.Join(configurationDirectory, ".r42"))
+		})
+	}
 }
 
 func readDebugEvents(t *testing.T, directory string) string {
@@ -256,11 +335,12 @@ func readDebugEvents(t *testing.T, directory string) string {
 	return string(content)
 }
 
+//nolint:paralleltest // t.Chdir isolates CLI run artifacts from the source tree.
 func TestCommandApplySupportsSavedPlanAndDirectory(t *testing.T) {
-	t.Parallel()
+	t.Chdir(t.TempDir())
 
 	directory := t.TempDir()
-	planned, err := plan.New(directory, nil, nil)
+	planned, err := plan.NewWithContextAndLocals(directory, nil, nil, nil, nil)
 	require.NoError(t, err)
 	planPath := filepath.Join(t.TempDir(), "saved.r42plan")
 	_, err = plan.Save(planPath, planned)
@@ -276,13 +356,10 @@ func TestCommandApplySupportsSavedPlanAndDirectory(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
 			runtime := &fakeRuntime{
-				planned: planned,
-				applyResult: cli.ApplyResult{
-					Outputs:  map[string]cty.Value{"answer": cty.StringVal("42")},
-					Warnings: []error{errors.New("close session failed")},
-				},
+				planned:  planned,
+				outputs:  map[string]cty.Value{"answer": cty.StringVal("42")},
+				warnings: []error{errors.New("close session failed")},
 			}
 
 			stdout, stderr, executeErr := execute(t, runtime,
@@ -293,16 +370,77 @@ func TestCommandApplySupportsSavedPlanAndDirectory(t *testing.T) {
 			)
 
 			require.NoError(t, executeErr)
-			assert.Equal(t, test.wantPlanCalls, runtime.planDirectory != "")
-			assert.Equal(t, 3, runtime.applyOptions.Parallelism)
-			assert.True(t, runtime.applyOptions.Debug)
+			assert.Equal(t, test.wantPlanCalls, runtime.plannedDirectory != "")
+			assert.Equal(t, 3, runtime.configOptions.Parallelism)
+			assert.True(t, runtime.configOptions.Debug)
 			assert.True(t, runtime.applyDeadline)
+			assert.Contains(t, stdout, `"nodes"`)
 			assert.Contains(t, stdout, `"answer":"42"`)
+			assert.Less(t, strings.Index(stdout, `"nodes"`), strings.Index(stdout, `"answer":"42"`))
 			assert.NotContains(t, stdout, "close session failed")
 			assert.Contains(t, stderr, "close session failed")
 			assert.Contains(t, stderr, "sensitive")
 		})
 	}
+}
+
+func TestCommandApplyPrintsPlanBeforeExecution(t *testing.T) {
+	t.Parallel()
+	planned := mustPlan(t)
+	wantPlan, err := plan.Display(planned)
+	require.NoError(t, err)
+	wantOutputs, err := plan.DisplayValues(map[string]cty.Value{"answer": cty.StringVal("42")})
+	require.NoError(t, err)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	runtime := &fakeRuntime{planned: planned, outputs: map[string]cty.Value{"answer": cty.StringVal("42")}}
+	runtime.applyHook = func() {
+		assert.Equal(t, wantPlan, stdout.String())
+	}
+	command := cli.NewCommand(runtime)
+	command.SetOut(&stdout)
+	command.SetErr(&stderr)
+	command.SetArgs([]string{"apply", t.TempDir()})
+
+	err = command.ExecuteContext(t.Context())
+
+	require.NoError(t, err)
+	assert.Equal(t, wantPlan+wantOutputs, stdout.String())
+	assert.Empty(t, stderr.String())
+}
+
+func TestCommandApplyPrintsPlanWhenExecutionFails(t *testing.T) {
+	t.Parallel()
+	planned := mustPlan(t)
+	wantPlan, err := plan.Display(planned)
+	require.NoError(t, err)
+	runtime := &fakeRuntime{planned: planned, applyErr: assert.AnError}
+
+	stdout, _, err := execute(t, runtime, "apply", t.TempDir())
+
+	require.ErrorIs(t, err, assert.AnError)
+	assert.Equal(t, wantPlan, stdout)
+}
+
+func TestCommandApplyFailsFastWhenPlanCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	applyCalled := false
+	runtime := &fakeRuntime{planned: mustPlan(t), applyHook: func() { applyCalled = true }}
+	command := cli.NewCommand(runtime)
+	command.SetOut(failingWriter{})
+	command.SetErr(new(bytes.Buffer))
+	command.SetArgs([]string{"apply", t.TempDir()})
+
+	err := command.ExecuteContext(t.Context())
+
+	require.ErrorContains(t, err, "write plan")
+	assert.False(t, applyCalled)
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, assert.AnError
 }
 
 func TestCommandDiagnosticsAndExitCodes(t *testing.T) {
@@ -356,6 +494,17 @@ func TestCommandDiagnosticsAndExitCodes(t *testing.T) {
 	}
 }
 
+func TestCommandApplyFailsFastWhenTargetCannotBeInspected(t *testing.T) {
+	t.Parallel()
+	target := filepath.Join(t.TempDir(), "missing.r42plan")
+
+	_, _, err := execute(t, &fakeRuntime{}, "apply", target)
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "inspect apply target")
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func execute(t *testing.T, runtime cli.Runtime, args ...string) (string, string, error) {
 	t.Helper()
 	var stdout bytes.Buffer
@@ -370,7 +519,7 @@ func execute(t *testing.T, runtime cli.Runtime, args ...string) (string, string,
 
 func mustPlan(t *testing.T) *plan.Plan {
 	t.Helper()
-	planned, err := plan.New(t.TempDir(), nil, nil)
+	planned, err := plan.NewWithContextAndLocals(t.TempDir(), nil, nil, nil, nil)
 	require.NoError(t, err)
 	return planned
 }
@@ -390,7 +539,7 @@ func TestApplyDefaultParallelism(t *testing.T) {
 	runtime := &fakeRuntime{planned: mustPlan(t)}
 	_, _, err := execute(t, runtime, "apply", t.TempDir())
 	require.NoError(t, err)
-	assert.Equal(t, 10, runtime.applyOptions.Parallelism)
+	assert.Equal(t, 10, runtime.configOptions.Parallelism)
 }
 
 func TestApplyRedactsSensitiveOutputFromStdout(t *testing.T) {
@@ -398,9 +547,9 @@ func TestApplyRedactsSensitiveOutputFromStdout(t *testing.T) {
 
 	runtime := &fakeRuntime{
 		planned: mustPlan(t),
-		applyResult: cli.ApplyResult{Outputs: map[string]cty.Value{
+		outputs: map[string]cty.Value{
 			"secret": corespec.MarkSensitive(cty.StringVal("do-not-print")),
-		}},
+		},
 	}
 	stdout, _, err := execute(t, runtime, "apply", t.TempDir())
 	require.NoError(t, err)
@@ -450,7 +599,11 @@ func TestApplyTimeoutIncludesDirectDirectoryPlanning(t *testing.T) {
 
 type blockingPlanRuntime struct{ applyCalled bool }
 
-func (*blockingPlanRuntime) Plan(ctx context.Context, _ string, _ []golden.CliFlagAssignedVariables) (*plan.Plan, error) {
+func (*blockingPlanRuntime) Config(
+	_ string,
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	ctx := options.Context
 	if _, ok := ctx.Deadline(); !ok {
 		return nil, errors.New("plan context has no deadline")
 	}
@@ -458,9 +611,15 @@ func (*blockingPlanRuntime) Plan(ctx context.Context, _ string, _ []golden.CliFl
 	return nil, ctx.Err()
 }
 
-func (r *blockingPlanRuntime) Apply(context.Context, *plan.Plan, cli.ApplyOptions) (cli.ApplyResult, error) {
-	r.applyCalled = true
-	return cli.ApplyResult{}, nil
+func (r *blockingPlanRuntime) ConfigFromPlan(
+	planned *plan.Plan,
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	options.Apply = func(*plan.Plan) (map[string]cty.Value, []error, error) {
+		r.applyCalled = true
+		return nil, nil, nil
+	}
+	return executor.NewResearchConfigFromPlan(planned, options)
 }
 
 type runtimeFunc struct {
@@ -468,10 +627,26 @@ type runtimeFunc struct {
 	apply func(context.Context) error
 }
 
-func (r runtimeFunc) Plan(context.Context, string, []golden.CliFlagAssignedVariables) (*plan.Plan, error) {
-	return r.plan, nil
+func (r runtimeFunc) Config(
+	_ string,
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	return r.config(r.plan, options)
 }
 
-func (r runtimeFunc) Apply(ctx context.Context, _ *plan.Plan, _ cli.ApplyOptions) (cli.ApplyResult, error) {
-	return cli.ApplyResult{}, r.apply(ctx)
+func (r runtimeFunc) ConfigFromPlan(
+	planned *plan.Plan,
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	return r.config(planned, options)
+}
+
+func (r runtimeFunc) config(
+	planned *plan.Plan,
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	options.Apply = func(*plan.Plan) (map[string]cty.Value, []error, error) {
+		return nil, nil, r.apply(options.Context)
+	}
+	return executor.NewResearchConfigFromPlan(planned, options)
 }

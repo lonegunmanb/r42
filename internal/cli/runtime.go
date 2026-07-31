@@ -66,39 +66,50 @@ func NewRuntimeWithOptions(options RuntimeOptions) *Engine {
 	return &Engine{options: options}
 }
 
-func (*Engine) Plan(
-	ctx context.Context,
+func (e *Engine) Config(
 	directory string,
-	variables []golden.CliFlagAssignedVariables,
-) (*plan.Plan, error) {
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	ctx := options.Context
 	if state := debugRunFromContext(ctx); state != nil {
 		var err error
-		ctx, _, _, err = state.ensure(ctx, directory)
+		ctx, _, _, err = state.ensure(ctx, runDirectory(directory, options.RunDirectory))
 		if err != nil {
 			return nil, err
 		}
 	}
-	started := time.Now()
-	if err := debuglog.Lifecycle(ctx, "plan", debuglog.StatusStarted, debuglog.Event{Path: directory}); err != nil {
-		return nil, err
+	apply := func(saved *plan.Plan) (map[string]cty.Value, []error, error) {
+		return e.apply(ctx, saved, options)
 	}
-	planned, err := modulespec.PlanDirectoryWithOptions(directory, modulespec.PlanOptions{
-		Context: ctx, Variables: variables,
-	})
-	logErr := recordLifecycleCompletion(ctx, "plan", started, err, debuglog.Event{Path: directory})
+	started := time.Now()
+	options.Context = ctx
+	options.Apply = apply
+	researchConfig, err := executor.NewResearchConfig(directory, options)
 	if err != nil {
+		logErr := recordLifecycleCompletion(ctx, "plan", started, err, debuglog.Event{Path: directory})
 		return nil, errors.Join(err, logErr)
 	}
-	return planned.Saved, logErr
+	return researchConfig, nil
 }
 
-func (e *Engine) Apply(
+func (e *Engine) ConfigFromPlan(
+	planned *plan.Plan,
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	ctx := options.Context
+	options.Apply = func(saved *plan.Plan) (map[string]cty.Value, []error, error) {
+		return e.apply(ctx, saved, options)
+	}
+	return executor.NewResearchConfigFromPlan(planned, options)
+}
+
+func (e *Engine) apply(
 	ctx context.Context,
 	planned *plan.Plan,
-	options ApplyOptions,
-) (ApplyResult, error) {
+	options executor.ResearchConfigOptions,
+) (map[string]cty.Value, []error, error) {
 	if planned == nil {
-		return ApplyResult{}, fmt.Errorf("saved plan is required")
+		return nil, nil, fmt.Errorf("saved plan is required")
 	}
 	state := debugRunFromContext(ctx)
 	ownedDebugState := false
@@ -110,15 +121,21 @@ func (e *Engine) Apply(
 			state = &debugRun{enabled: true}
 			ownedDebugState = true
 		}
-		ctx, activeRun, recorder, err = state.ensure(ctx, planned.Directory())
-	} else {
-		activeRun, err = run.NewManager(planned.Directory()).Create()
-		if err == nil {
-			recorder, err = debuglog.NewRecorder(activeRun.Directory(), false)
+		ctx, activeRun, recorder, err = state.ensure(
+			ctx, runDirectory(planned.Directory(), options.RunDirectory),
+		)
+		if err != nil {
+			return nil, nil, err
 		}
-	}
-	if err != nil {
-		return ApplyResult{}, err
+	} else {
+		activeRun, err = run.NewManager(runDirectory(planned.Directory(), options.RunDirectory)).Create()
+		if err != nil {
+			return nil, nil, err
+		}
+		recorder, err = debuglog.NewRecorder(activeRun.Directory(), false)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	started := time.Now()
 	if err = debuglog.Lifecycle(ctx, "apply", debuglog.StatusStarted, debuglog.Event{
@@ -127,7 +144,7 @@ func (e *Engine) Apply(
 		if ownedDebugState {
 			_ = state.close()
 		}
-		return ApplyResult{}, err
+		return nil, nil, err
 	}
 	sessions := e.options.Sessions
 	if sessions == nil {
@@ -163,7 +180,14 @@ func (e *Engine) Apply(
 			warnings = append(warnings, fmt.Errorf("close debug log: %w", closeErr))
 		}
 	}
-	return ApplyResult{Outputs: outputs, Warnings: warnings}, applyErr
+	return outputs, warnings, applyErr
+}
+
+func runDirectory(configurationDirectory, requested string) string {
+	if strings.TrimSpace(requested) == "" {
+		return configurationDirectory
+	}
+	return requested
 }
 
 func recordLifecycleCompletion(
@@ -1130,7 +1154,7 @@ func (o *officialSessionOpener) Open(ctx context.Context, config copilot.Session
 	if err != nil {
 		return nil, err
 	}
-	return officialSession{session}, nil
+	return session, nil
 }
 
 func (o *officialSessionOpener) Close() error {
@@ -1143,12 +1167,4 @@ func (o *officialSessionOpener) Close() error {
 	o.client = nil
 	o.factory = nil
 	return err
-}
-
-type officialSession struct {
-	*copilot.Session
-}
-
-func (s officialSession) Close(ctx context.Context) error {
-	return s.Session.Close(ctx)
 }

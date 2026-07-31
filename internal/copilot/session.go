@@ -160,7 +160,7 @@ func (s *Session) SendAndWait(ctx context.Context, options sdk.MessageOptions) (
 	}
 }
 
-func (s *Session) Close(ctx context.Context) *CleanupWarning {
+func (s *Session) Close(ctx context.Context) error {
 	for attempt := 0; ; attempt++ {
 		err := s.sdk.Disconnect()
 		if err == nil {

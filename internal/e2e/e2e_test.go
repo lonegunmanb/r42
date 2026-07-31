@@ -11,9 +11,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Azure/golden"
 	sdk "github.com/github/copilot-sdk/go"
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/copilot"
+	"github.com/lonegunmanb/r42/internal/executor"
+	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
@@ -22,15 +25,55 @@ import (
 
 func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
 
+type runtimeResult struct {
+	Outputs  map[string]cty.Value
+	Warnings []error
+}
+
+func planRuntime(
+	runtime *cli.Engine,
+	ctx context.Context,
+	directory string,
+	variables []golden.CliFlagAssignedVariables,
+) (*plan.Plan, error) {
+	config, err := runtime.Config(directory, executor.ResearchConfigOptions{
+		Context:   ctx,
+		Variables: variables,
+	})
+	if err != nil {
+		return nil, err
+	}
+	planned, err := executor.RunResearchPlan(config)
+	if err != nil {
+		return nil, err
+	}
+	return planned.SavedPlan(), nil
+}
+
+func applyRuntime(
+	runtime *cli.Engine,
+	ctx context.Context,
+	planned *plan.Plan,
+	options executor.ResearchConfigOptions,
+) (runtimeResult, error) {
+	options.Context = ctx
+	config, err := runtime.ConfigFromPlan(planned, options)
+	if err != nil {
+		return runtimeResult{}, err
+	}
+	err = config.Plan().Apply()
+	return runtimeResult{Outputs: config.Outputs(), Warnings: config.Warnings()}, err
+}
+
 func TestResearchWithoutTerminalCompletesHermetically(t *testing.T) {
 	t.Parallel()
 
 	opener := &scenarioOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), fixtureDirectory(t, "no_terminal"), nil)
+	planned, err := planRuntime(runtime, t.Context(), fixtureDirectory(t, "no_terminal"), nil)
 	require.NoError(t, err)
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
 	assert.Empty(t, result.Outputs)
@@ -43,7 +86,7 @@ func TestDocumentedBasicExamplePlans(t *testing.T) {
 	t.Parallel()
 
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: &scenarioOpener{}})
-	planned, err := runtime.Plan(t.Context(), filepath.Join("..", "..", "docs", "examples", "basic"), nil)
+	planned, err := planRuntime(runtime, t.Context(), filepath.Join("..", "..", "docs", "examples", "basic"), nil)
 
 	require.NoError(t, err)
 	require.Len(t, planned.Nodes(), 1)
@@ -55,10 +98,10 @@ func TestTerminalResultAndArtifactsCrossRuntimeBoundaries(t *testing.T) {
 
 	opener := &terminalArtifactOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), fixtureDirectory(t, "terminal_artifacts"), nil)
+	planned, err := planRuntime(runtime, t.Context(), fixtureDirectory(t, "terminal_artifacts"), nil)
 	require.NoError(t, err)
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
 	assert.Equal(t, cty.StringVal("research complete"), result.Outputs["summary"])
@@ -76,10 +119,10 @@ func TestRejectedTerminalArgumentsAreRepairedInSameSession(t *testing.T) {
 
 	opener := &repairOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), fixtureDirectory(t, "repair_terminal"), nil)
+	planned, err := planRuntime(runtime, t.Context(), fixtureDirectory(t, "repair_terminal"), nil)
 	require.NoError(t, err)
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
 	assert.Equal(t, cty.StringVal("repaired"), result.Outputs["summary"])
@@ -93,10 +136,10 @@ func TestQCIssuesTriggerRevisionAndPassInPersistentSessions(t *testing.T) {
 
 	opener := &qcScenarioOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), fixtureDirectory(t, "qc_revision"), nil)
+	planned, err := planRuntime(runtime, t.Context(), fixtureDirectory(t, "qc_revision"), nil)
 	require.NoError(t, err)
 
-	_, err = runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
 	assert.Equal(t, 2, opener.opens)
@@ -112,10 +155,10 @@ func TestNestedModulesPublishOutputsWithGoldenTraversal(t *testing.T) {
 	tracker := &parallelTracker{}
 	opener := &parallelOpener{tracker: tracker}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), fixtureDirectory(t, "parallel_modules"), nil)
+	planned, err := planRuntime(runtime, t.Context(), fixtureDirectory(t, "parallel_modules"), nil)
 	require.NoError(t, err)
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 2})
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 2})
 
 	require.NoError(t, err)
 	assert.Equal(t, cty.StringVal("child-done"), result.Outputs["first"])
@@ -154,6 +197,7 @@ func runE2ECLIProcess(t *testing.T, arguments ...string) string {
 	t.Helper()
 	commandArguments := append([]string{"-test.run=^TestE2ECLIProcess$", "--"}, arguments...)
 	command := exec.CommandContext(t.Context(), os.Args[0], commandArguments...)
+	command.Dir = t.TempDir()
 	command.Env = append(os.Environ(), "R42_E2E_CLI=1")
 	output, err := command.CombinedOutput()
 	require.NoError(t, err, string(output))
@@ -189,16 +233,16 @@ func TestCancellationStopsSessionAndExternalChildProcess(t *testing.T) {
 	state := &failFastState{startedFile: startedFile, slowStopped: make(chan struct{})}
 	opener := &failFastOpener{state: state}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
 	type outcome struct {
-		result cli.ApplyResult
+		result runtimeResult
 		err    error
 	}
 	finished := make(chan outcome, 1)
 	go func() {
-		result, applyErr := runtime.Apply(ctx, planned, cli.ApplyOptions{Parallelism: 2})
+		result, applyErr := applyRuntime(runtime, ctx, planned, executor.ResearchConfigOptions{Parallelism: 2})
 		finished <- outcome{result: result, err: applyErr}
 	}()
 	require.Eventually(t, func() bool {

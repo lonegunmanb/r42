@@ -84,7 +84,7 @@ func (e *Executor) apply(
 	if contextErr := ctx.Err(); contextErr != nil {
 		execution.fail(contextErr)
 	}
-	runErr := runSavedPlan(planned.Directory(), execution)
+	runErr := runSavedPlan(planned.Directory(), execution, scope.Limit())
 	failure := execution.failureError()
 	if failure == nil && runErr != nil {
 		failure = runErr

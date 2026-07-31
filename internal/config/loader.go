@@ -27,10 +27,6 @@ type Loaded struct {
 	Blocks []*golden.HclBlock
 }
 
-func LoadDirectory(directory string) (Loaded, hcl.Diagnostics, error) {
-	return LoadDirectoryContext(context.Background(), directory)
-}
-
 func LoadDirectoryContext(ctx context.Context, directory string) (Loaded, hcl.Diagnostics, error) {
 	absoluteDirectory, err := filepath.Abs(directory)
 	if err != nil {

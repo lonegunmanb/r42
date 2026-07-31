@@ -202,14 +202,3 @@ func schemaForObject(typeValue cty.Type) map[string]any {
 
 	return schema
 }
-
-func ValidateTerminateOutput(typeValue cty.Type) error {
-	if err := corespec.ValidateType(typeValue); err != nil {
-		return err
-	}
-	if !typeValue.Equals(cty.String) {
-		return fmt.Errorf("terminate tool output must be string")
-	}
-
-	return nil
-}

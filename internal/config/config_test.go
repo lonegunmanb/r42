@@ -56,7 +56,7 @@ func TestLoadDirectoryLoadsR42FilesInStableOrder(t *testing.T) {
 	writeFile(t, directory, "ignored.txt", "not hcl")
 	require.NoError(t, os.Mkdir(filepath.Join(directory, "nested.r42"), 0o755))
 
-	loaded, diagnostics, err := config.LoadDirectory(directory)
+	loaded, diagnostics, err := config.LoadDirectoryContext(t.Context(), directory)
 	require.NoError(t, err)
 	require.False(t, diagnostics.HasErrors(), diagnostics.Error())
 	require.Len(t, loaded.Files, 2)
@@ -78,7 +78,7 @@ func TestLoadDirectoryReturnsParserDiagnosticsWithSources(t *testing.T) {
 	writeFile(t, directory, "broken.r42", "loader_fixture \"broken\" { value = }\n")
 	writeFile(t, directory, "valid.r42", "loader_fixture \"valid\" {}\n")
 
-	loaded, diagnostics, err := config.LoadDirectory(directory)
+	loaded, diagnostics, err := config.LoadDirectoryContext(t.Context(), directory)
 	require.NoError(t, err)
 	require.True(t, diagnostics.HasErrors())
 	assert.GreaterOrEqual(t, len(diagnostics), 2)
@@ -101,7 +101,7 @@ func TestLoadDirectoryRejectsNonDirectory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.r42")
 	require.NoError(t, os.WriteFile(path, []byte("loader_fixture \"only\" {}\n"), 0o600))
 
-	loaded, diagnostics, err := config.LoadDirectory(path)
+	loaded, diagnostics, err := config.LoadDirectoryContext(t.Context(), path)
 	require.Error(t, err)
 	assert.Empty(t, loaded.Files)
 	assert.Empty(t, loaded.Blocks)
@@ -476,7 +476,7 @@ fixture_consumer "target" {
   depends_on  = [fixture_tool.explicit]
 }
 `)
-	loaded, diagnostics, err := config.LoadDirectory(directory)
+	loaded, diagnostics, err := config.LoadDirectoryContext(t.Context(), directory)
 	require.NoError(t, err)
 	require.False(t, diagnostics.HasErrors(), diagnostics.Error())
 

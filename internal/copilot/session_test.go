@@ -3,6 +3,7 @@ package copilot
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -149,8 +150,8 @@ func TestFactoryOpenRetriesTransientLifecycleFailure(t *testing.T) {
 	created := &fakeSession{}
 	client := &fakeClient{
 		createErrors: []error{
-			provider.TransientError{Err: errors.New("runtime unavailable")},
-			provider.TransientError{Err: errors.New("runtime still unavailable")},
+			transientError{Err: errors.New("runtime unavailable")},
+			transientError{Err: errors.New("runtime still unavailable")},
 		},
 		session: created,
 	}
@@ -176,7 +177,7 @@ func TestFactoryOpenFailsPermanentLifecycleErrorImmediately(t *testing.T) {
 	t.Parallel()
 
 	client := &fakeClient{createErrors: []error{
-		provider.HTTPError{StatusCode: 400, Err: errors.New("invalid model")},
+		httpError{StatusCode: 400, Err: errors.New("invalid model")},
 	}}
 	factory := newFactory(client, nil, noDelay, fixedRandom)
 
@@ -192,8 +193,8 @@ func TestSessionSendAndWaitRetriesSameSession(t *testing.T) {
 	want := &sdk.SessionEvent{ID: "completed"}
 	underlying := &fakeSession{
 		sendErrors: []error{
-			provider.TransientError{Err: errors.New("model overloaded")},
-			provider.TransientError{Err: errors.New("model overloaded again")},
+			transientError{Err: errors.New("model overloaded")},
+			transientError{Err: errors.New("model overloaded again")},
 		},
 		event: want,
 	}
@@ -291,8 +292,8 @@ func TestOfficialSessionPassesThroughNonModelResults(t *testing.T) {
 		},
 		{
 			name:      "transport error",
-			err:       provider.TransientError{Err: errors.New("connection reset")},
-			wantError: provider.TransientError{Err: errors.New("connection reset")},
+			err:       transientError{Err: errors.New("connection reset")},
+			wantError: transientError{Err: errors.New("connection reset")},
 		},
 	}
 
@@ -333,7 +334,7 @@ func TestRetryDelayFailureStopsCurrentOperation(t *testing.T) {
 				t.Helper()
 
 				factory.client = &fakeClient{createErrors: []error{
-					provider.TransientError{Err: errors.New("runtime unavailable")},
+					transientError{Err: errors.New("runtime unavailable")},
 				}}
 				_, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 1, 0)})
 				return err
@@ -346,7 +347,7 @@ func TestRetryDelayFailureStopsCurrentOperation(t *testing.T) {
 				t.Helper()
 
 				underlying := &fakeSession{sendErrors: []error{
-					provider.TransientError{Err: errors.New("model unavailable")},
+					transientError{Err: errors.New("model unavailable")},
 				}}
 				factory.client = &fakeClient{session: underlying}
 				session, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 0, 1)})
@@ -362,7 +363,7 @@ func TestRetryDelayFailureStopsCurrentOperation(t *testing.T) {
 				t.Helper()
 
 				underlying := &fakeSession{disconnectErrors: []error{
-					provider.TransientError{Err: errors.New("runtime unavailable")},
+					transientError{Err: errors.New("runtime unavailable")},
 				}}
 				factory.client = &fakeClient{session: underlying}
 				session, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 1, 0)})
@@ -399,15 +400,15 @@ func TestSessionCloseRetriesAndReturnsOnlyExhaustedCleanupWarning(t *testing.T) 
 	}{
 		{
 			name:            "transient close recovers",
-			disconnectError: []error{provider.TransientError{Err: errors.New("busy")}},
+			disconnectError: []error{transientError{Err: errors.New("busy")}},
 			lifecycleRetry:  1,
 			wantCalls:       2,
 		},
 		{
 			name: "exhausted transient close becomes warning",
 			disconnectError: []error{
-				provider.TransientError{Err: errors.New("busy")},
-				provider.TransientError{Err: errors.New("still busy")},
+				transientError{Err: errors.New("busy")},
+				transientError{Err: errors.New("still busy")},
 			},
 			lifecycleRetry: 1,
 			wantCalls:      2,
@@ -415,7 +416,7 @@ func TestSessionCloseRetriesAndReturnsOnlyExhaustedCleanupWarning(t *testing.T) 
 		},
 		{
 			name:            "permanent close immediately becomes warning",
-			disconnectError: []error{provider.PermanentError{Err: errors.New("destroy rejected")}},
+			disconnectError: []error{permanentError{Err: errors.New("destroy rejected")}},
 			lifecycleRetry:  5,
 			wantCalls:       1,
 			wantWarning:     "close copilot session after 1 attempt: destroy rejected",
@@ -437,13 +438,26 @@ func TestSessionCloseRetriesAndReturnsOnlyExhaustedCleanupWarning(t *testing.T) 
 
 			assert.Equal(t, tt.wantCalls, underlying.disconnectCalls)
 			if tt.wantWarning == "" {
-				assert.Nil(t, warning)
+				assert.NoError(t, warning)
 				return
 			}
-			require.NotNil(t, warning)
+			require.Error(t, warning)
 			assert.Equal(t, tt.wantWarning, warning.Error())
 		})
 	}
+}
+
+func TestSessionCloseSuccessReturnsNilError(t *testing.T) {
+	t.Parallel()
+	underlying := &fakeSession{}
+	factory := newFactory(&fakeClient{session: underlying}, nil, noDelay, fixedRandom)
+	session, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 0, 0)})
+	require.NoError(t, err)
+
+	closeErr := session.Close(t.Context())
+
+	require.NoError(t, closeErr)
+	assert.Equal(t, 1, underlying.disconnectCalls)
 }
 
 type fakeClient struct {
@@ -542,6 +556,27 @@ func providerHeaders(headers map[string]string) cty.Value {
 	}
 	return cty.MapVal(values)
 }
+
+type httpError struct {
+	StatusCode int
+	Err        error
+}
+
+func (e httpError) Error() string       { return fmt.Sprintf("http status %d: %v", e.StatusCode, e.Err) }
+func (e httpError) Unwrap() error       { return e.Err }
+func (e httpError) HTTPStatusCode() int { return e.StatusCode }
+
+type transientError struct{ Err error }
+
+func (e transientError) Error() string   { return e.Err.Error() }
+func (e transientError) Unwrap() error   { return e.Err }
+func (transientError) IsTransient() bool { return true }
+
+type permanentError struct{ Err error }
+
+func (e permanentError) Error() string   { return e.Err.Error() }
+func (e permanentError) Unwrap() error   { return e.Err }
+func (permanentError) IsPermanent() bool { return true }
 
 func noDelay(context.Context, time.Duration) error { return nil }
 

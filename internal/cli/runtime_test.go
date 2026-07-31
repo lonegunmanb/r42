@@ -12,11 +12,52 @@ import (
 	sdk "github.com/github/copilot-sdk/go"
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/copilot"
+	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
 )
+
+type runtimeResult struct {
+	Outputs  map[string]cty.Value
+	Warnings []error
+}
+
+func planRuntime(
+	runtime *cli.Engine,
+	ctx context.Context,
+	directory string,
+	variables []golden.CliFlagAssignedVariables,
+) (*plan.Plan, error) {
+	config, err := runtime.Config(directory, executor.ResearchConfigOptions{
+		Context:   ctx,
+		Variables: variables,
+	})
+	if err != nil {
+		return nil, err
+	}
+	planned, err := executor.RunResearchPlan(config)
+	if err != nil {
+		return nil, err
+	}
+	return planned.SavedPlan(), nil
+}
+
+func applyRuntime(
+	runtime *cli.Engine,
+	ctx context.Context,
+	planned *plan.Plan,
+	options executor.ResearchConfigOptions,
+) (runtimeResult, error) {
+	options.Context = ctx
+	config, err := runtime.ConfigFromPlan(planned, options)
+	if err != nil {
+		return runtimeResult{}, err
+	}
+	err = config.Plan().Apply()
+	return runtimeResult{Outputs: config.Outputs(), Warnings: config.Warnings()}, err
+}
 
 func TestProductionRuntimePlansAndAppliesGoldenVariablesWithoutStartingCopilot(t *testing.T) {
 	t.Parallel()
@@ -26,9 +67,10 @@ variable "topic" { type = string }
 output "summary" { value = "topic=${var.topic}" }
 `), 0o600))
 	runtime := cli.NewRuntime()
-	planned, err := runtime.Plan(t.Context(), directory, []golden.CliFlagAssignedVariables{
+	planned, err := planRuntime(runtime, t.Context(), directory, []golden.CliFlagAssignedVariables{
 		golden.NewCliFlagAssignedVariable("topic", `"markets"`),
 	})
+
 	require.NoError(t, err)
 	path := filepath.Join(t.TempDir(), "saved.r42plan")
 	_, err = plan.Save(path, planned)
@@ -36,11 +78,27 @@ output "summary" { value = "topic=${var.topic}" }
 	planned, err = plan.Load(path)
 	require.NoError(t, err)
 
-	result, err := runtime.Apply(context.Background(), planned, cli.ApplyOptions{Parallelism: 2})
+	result, err := applyRuntime(runtime, context.Background(), planned, executor.ResearchConfigOptions{Parallelism: 2})
 
 	require.NoError(t, err)
 	assert.Equal(t, cty.StringVal("topic=markets"), result.Outputs["summary"])
 	assert.Empty(t, result.Warnings)
+}
+
+func TestProductionRuntimeAppliesPlanFromSourceConfig(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+output "summary" { value = "planned-and-applied" }
+`), 0o600))
+	runtime := cli.NewRuntime()
+	config, err := runtime.Config(directory, executor.ResearchConfigOptions{Context: t.Context()})
+	require.NoError(t, err)
+	planned, err := executor.RunResearchPlan(config)
+	require.NoError(t, err)
+
+	require.NoError(t, planned.Apply())
+	assert.Equal(t, cty.StringVal("planned-and-applied"), config.Outputs()["summary"])
 }
 
 func TestProductionRuntimeUsesPlanKnownFunctionOutputWithoutReevaluation(t *testing.T) {
@@ -50,14 +108,14 @@ func TestProductionRuntimeUsesPlanKnownFunctionOutputWithoutReevaluation(t *test
 output "summary" { value = env("R42_TEST_PLAN_OUTPUT") }
 `), 0o600))
 	runtime := cli.NewRuntime()
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 	encoded, err := plan.Marshal(planned)
 	require.NoError(t, err)
 	planned, err = plan.Unmarshal(encoded)
 	require.NoError(t, err)
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
 	assert.Equal(t, cty.StringVal("planned-value"), result.Outputs["summary"])
@@ -85,14 +143,14 @@ output "report_path" { value = local.report_with_retries }
 `), 0o600))
 	opener := &fakeSessionOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 	encoded, err := plan.Marshal(planned)
 	require.NoError(t, err)
 	planned, err = plan.Unmarshal(encoded)
 	require.NoError(t, err)
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
 	require.Len(t, opener.configs, 1)
@@ -134,14 +192,14 @@ output "summary" { value = research.source.result }
 `), 0o600))
 	opener := &toolCallingOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 	encoded, err := plan.Marshal(planned)
 	require.NoError(t, err)
 	planned, err = plan.Unmarshal(encoded)
 	require.NoError(t, err)
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
 	assert.Equal(t, cty.StringVal("done"), result.Outputs["summary"])
@@ -153,10 +211,10 @@ func TestProductionRuntimeReturnsNullForOmittedTerminalOutput(t *testing.T) {
 	directory := writeTerminalToolFixture(t)
 	opener := &repairingToolOpener{omitOutput: true}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
 	assert.True(t, result.Outputs["summary"].RawEquals(cty.NullVal(cty.String)))
@@ -167,10 +225,10 @@ func TestProductionRuntimeReturnsRepairableToolArgumentIssuesToSameSession(t *te
 	directory := writeTerminalToolFixture(t)
 	opener := &repairingToolOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
 	assert.Equal(t, cty.StringVal("fixed"), result.Outputs["summary"])
@@ -205,14 +263,14 @@ locals { summary = upper(research.source.result) }
 output "summary" { value = local.summary }
 `), 0o600))
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: &toolCallingOpener{}})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 	encoded, err := plan.Marshal(planned)
 	require.NoError(t, err)
 	planned, err = plan.Unmarshal(encoded)
 	require.NoError(t, err)
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
 	assert.Equal(t, cty.StringVal("DONE"), result.Outputs["summary"])
@@ -243,10 +301,10 @@ research "source" {
 }
 `), 0o600))
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: &failingGoToolOpener{}})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 
-	_, err = runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1, Debug: true})
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1, Debug: true})
 
 	require.Error(t, err)
 	events := readOnlyRunEvents(t, directory)
@@ -255,7 +313,7 @@ research "source" {
 	assert.Contains(t, events, "lookup failed completely")
 	assert.Contains(t, events, `"action":"session.send","status":"failed"`)
 	assert.Contains(t, events, `"action":"block.apply","status":"failed"`)
-	assert.Contains(t, events, `"action":"apply.golden.run_plan","status":"failed"`)
+	assert.Contains(t, events, `"action":"apply.golden.apply","status":"failed"`)
 	assert.Contains(t, events, `"action":"apply","status":"failed"`)
 }
 

@@ -44,7 +44,9 @@ third-party fork or adapter.
 The lifecycle is:
 
 ```text
-parse/evaluate -> Plan complete -> immutable planned DAG -> Apply -> new run
+runtime.Config -> ResearchConfig -> RunResearchPlan -> ResearchPlan
+runtime.ConfigFromPlan -> ResearchConfig -> ResearchPlan
+ResearchPlan.Apply -> ResearchConfig.Outputs / Warnings
 ```
 
 Plan recursively parses every referenced module directory. Apply consumes the
@@ -57,10 +59,15 @@ expressed through values, matching Terraform's model.
 
 The pinned Golden version mutates its live block graph during Plan and exposes
 no Plan serialization or nested executor API. r42 owns the immutable
-serializable Plan and persists nested Plans. Apply reconstructs an in-memory
-Golden config whose internal `PlanBlock` values wrap the saved nodes, then calls
-Golden `RunPlan`. Each wrapper creates and applies the corresponding r42
-`ApplyBlock`; Apply never reparses module source.
+serializable Plan and persists nested Plans. Apply reconstructs the saved nodes
+as native `research` and `module` blocks in an r42 `ResearchConfig`; Golden
+builds their dependency graph. `RunResearchPlan` delegates traversal directly to
+`ResearchConfig.RunPlan()` and freezes the source result as a serializable r42
+plan. The CLI retains that Config; `loadOrPlan` returns either the source Config
+or a Config restored from a saved plan. `ResearchPlan.Apply` therefore reads its
+apply behavior from the owning Config instead of accepting another runtime
+options object. Internally, saved nodes are reconstructed as native blocks and
+applied by the same Golden traversal. Apply never reparses module source.
 
 Any block failure or timeout triggers fail-fast cancellation of the entire DAG.
 An interrupted Apply cannot resume; another Apply creates a new run and starts
@@ -546,11 +553,11 @@ permit plus every explicit ancestor-module permit in root-to-leaf order. Its
 effective concurrency is therefore bounded by the global setting and every
 enclosing module.
 
-The pinned Golden `RunPlan` traversal currently executes ready vertices
-serially, so this version observes at most one active research block. r42 keeps
-the global and module permit scopes in the Apply wrappers but does not maintain
-a second DAG scheduler. When Golden's traversal executes independent ready
-vertices concurrently, those existing scopes enforce the configured limits.
+Golden `RunPlan` traverses independent ready vertices concurrently. The root or
+effective module scope supplies its traversal limit, while the research Apply
+wrapper acquires the global and ancestor-module permits. Module orchestration
+callbacks therefore do not consume research permits, and r42 does not maintain
+a second DAG scheduler.
 
 Research blocks and modules may set `timeout` using Go duration strings such as
 `30m` and `2h`. CLI may set an overall timeout. None has a default. The effective
@@ -579,7 +586,9 @@ session creation, messages, model calls, tools, or QC.
 
 ## 14. Runs, Plans, Debugging, and Sensitive Data
 
-Every Apply creates a unique run. Block workspaces and artifacts persist under:
+Every Apply creates a unique run. Block workspaces and artifacts persist under
+the r42 CLI process working directory, independently of the directory containing
+the applied `.r42` files:
 
 ```text
 .r42/runs/<run-id>/...
@@ -618,9 +627,8 @@ Lifecycle actions cover the complete CLI execution path:
   and Plan, and immutable plan snapshot construction. Decode failures are
   recorded by the failed Golden initialization event until Golden exposes a
   per-block decode lifecycle hook;
-- plan display/save, saved-plan synthetic HCL construction, Apply-time Golden
-  initialization and traversal, block factory/Apply/cleanup, and output
-  resolution;
+- plan display/save, Apply-time r42 Config construction, Golden initialization
+  and traversal, block factory/Apply/cleanup, and output resolution;
 - nested module planning and Apply through the same actions; and
 - Copilot session open/send/close with block address, session role, model,
   workspace, and typed-tool names.
@@ -656,6 +664,9 @@ r42 apply <directory>
 
 `plan` defaults `--directory` to `.`. It always prints the Plan to stdout and
 only writes a saved Plan file when `--out` is present.
+
+`apply` prints the immutable Plan JSON to stdout before execution starts. After
+a successful Apply, it prints the output values as a second JSON document.
 
 The CLI also exposes:
 

@@ -37,19 +37,6 @@ type Plan struct {
 	localExpressions map[string]string
 }
 
-func New(directory string, nodes []NodeSpec, outputs map[string]OutputSpec) (*Plan, error) {
-	return NewWithContext(directory, nodes, outputs, nil)
-}
-
-func NewWithContext(
-	directory string,
-	nodes []NodeSpec,
-	outputs map[string]OutputSpec,
-	contextValues map[string]cty.Value,
-) (*Plan, error) {
-	return NewWithContextAndLocals(directory, nodes, outputs, contextValues, nil)
-}
-
 func NewWithContextAndLocals(
 	directory string,
 	nodes []NodeSpec,

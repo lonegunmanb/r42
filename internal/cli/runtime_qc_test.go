@@ -12,6 +12,7 @@ import (
 	sdk "github.com/github/copilot-sdk/go"
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/copilot"
+	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,10 +29,10 @@ research "source" {
 `), 0o600))
 	opener := &qcOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 
-	_, err = runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
 	require.Len(t, opener.configs, 2)
@@ -57,10 +58,10 @@ research "source" {
 `), 0o600))
 	opener := &blockingQCOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 
-	_, err = runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Equal(t, 1, opener.research.closeCalls)
@@ -80,10 +81,10 @@ research "source" {
 `), 0o600))
 	opener := &blockingQCOpenOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 
-	_, err = runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Equal(t, 1, opener.research.closeCalls)
@@ -103,10 +104,10 @@ research "source" {
 	closeErr := errors.New("close research failed")
 	opener := &failingQCOpener{openErr: openErr, research: countingSession{closeErr: closeErr}}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.ErrorIs(t, err, openErr)
 	require.Len(t, result.Warnings, 1)
@@ -125,10 +126,10 @@ research "source" {
 `), 0o600))
 	opener := &revisionQCOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), directory, nil)
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 
-	_, err = runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 1})
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
 	assert.Equal(t, 2, opener.research.sendCalls)

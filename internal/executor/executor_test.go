@@ -50,7 +50,7 @@ func TestExecutorAppliesGoldenBlocksInDependencyOrder(t *testing.T) {
 	assert.Empty(t, runner.Warnings())
 }
 
-func TestExecutorUsesCurrentGoldenRunPlanTraversal(t *testing.T) {
+func TestExecutorRunsIndependentBlocksInParallelThroughGoldenRunPlan(t *testing.T) {
 	t.Parallel()
 
 	var active atomic.Int64
@@ -81,7 +81,20 @@ func TestExecutorUsesCurrentGoldenRunPlanTraversal(t *testing.T) {
 	_, err := executor.New(factory, nil).Apply(t.Context(), planned, 2)
 
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), maximum.Load())
+	assert.Equal(t, int64(2), maximum.Load())
+}
+
+func TestResearchPlanImplementsGoldenPlan(t *testing.T) {
+	t.Parallel()
+
+	assert.Implements(t, (*golden.Plan)(nil), new(executor.ResearchPlan))
+}
+
+func TestResearchConfigImplementsGoldenConfigAndParallelism(t *testing.T) {
+	t.Parallel()
+
+	assert.Implements(t, (*golden.Config)(nil), new(executor.ResearchConfig))
+	assert.Implements(t, (*golden.Parallelism)(nil), new(executor.ResearchConfig))
 }
 
 func TestExecutorResolvesOutputsAfterSuccessfulApply(t *testing.T) {
@@ -490,7 +503,7 @@ func TestApplyErrorExposesDefensiveCleanupWarnings(t *testing.T) {
 
 func savedPlan(t *testing.T, nodes []plan.NodeSpec, outputs map[string]plan.OutputSpec) *plan.Plan {
 	t.Helper()
-	planned, err := plan.New(t.TempDir(), nodes, outputs)
+	planned, err := plan.NewWithContextAndLocals(t.TempDir(), nodes, outputs, nil, nil)
 	require.NoError(t, err)
 	return planned
 }

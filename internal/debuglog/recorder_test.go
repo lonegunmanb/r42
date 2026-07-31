@@ -243,49 +243,6 @@ func TestRecorderSerializesConcurrentEvents(t *testing.T) {
 	assert.Len(t, splitLines(string(content)), count)
 }
 
-func TestRedactKnownSecretsForNormalOutput(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		content string
-		secrets []string
-		want    string
-	}{
-		{
-			name:    "all occurrences",
-			content: "token=secret-value repeated=secret-value",
-			secrets: []string{"secret-value"},
-			want:    "token=<sensitive> repeated=<sensitive>",
-		},
-		{
-			name:    "overlapping secrets use longest match",
-			content: "authorization=Bearer abc123",
-			secrets: []string{"abc123", "Bearer abc123"},
-			want:    "authorization=<sensitive>",
-		},
-		{
-			name:    "empty secrets are ignored",
-			content: "unchanged",
-			secrets: []string{"", ""},
-			want:    "unchanged",
-		},
-		{
-			name:    "duplicate secrets",
-			content: "secret",
-			secrets: []string{"secret", "secret"},
-			want:    "<sensitive>",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tt.want, debuglog.RedactKnownSecrets(tt.content, tt.secrets))
-		})
-	}
-}
-
 func splitLines(content string) []string {
 	if content == "" {
 		return nil

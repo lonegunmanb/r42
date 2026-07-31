@@ -276,34 +276,3 @@ func TestConstraintJSONSchema(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]any{"type": "string"}, actual)
 }
-
-func TestValidateTerminateOutput(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		typeValue     cty.Type
-		expectedError string
-	}{
-		{name: "string", typeValue: cty.String},
-		{name: "number", typeValue: cty.Number, expectedError: "terminate tool output must be string"},
-		{name: "object", typeValue: cty.EmptyObject, expectedError: "terminate tool output must be string"},
-		{
-			name: "dynamic", typeValue: cty.DynamicPseudoType,
-			expectedError: "type must not contain dynamic values at value",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := toolspec.ValidateTerminateOutput(tt.typeValue)
-			if tt.expectedError == "" {
-				assert.NoError(t, err)
-				return
-			}
-			assert.EqualError(t, err, tt.expectedError)
-		})
-	}
-}

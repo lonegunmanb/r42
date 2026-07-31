@@ -3,8 +3,6 @@ package spec
 import (
 	"fmt"
 	"math/big"
-	"strings"
-	"time"
 
 	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
@@ -16,6 +14,7 @@ import (
 var (
 	_ golden.CustomDecode     = (*ModuleBlock)(nil)
 	_ golden.PlanBlock        = (*ModuleBlock)(nil)
+	_ golden.ApplyBlock       = (*ModuleBlock)(nil)
 	_ golden.SingleValueBlock = (*ModuleBlock)(nil)
 	_ golden.PlanBlock        = (*OutputBlock)(nil)
 	_ golden.SingleValueBlock = (*OutputBlock)(nil)
@@ -29,6 +28,10 @@ type ModuleBlock struct {
 	Inputs      map[string]cty.Value
 
 	planned ModulePlan
+}
+
+type blockApplier interface {
+	ApplyBlock(string) error
 }
 
 func (*ModuleBlock) Type() string { return "" }
@@ -78,19 +81,29 @@ func (b *ModuleBlock) Decode(block *golden.HclBlock, context *hcl.EvalContext) e
 
 func (b *ModuleBlock) ExecuteDuringPlan() error {
 	return debuglog.PlanBlock(b.Context(), b.Address(), b.BlockType(), func() error {
-		planner, ok := b.Config().(interface {
-			planChild(string, map[string]cty.Value, *int, *string) (ModulePlan, error)
-		})
+		planner, ok := b.Config().(ModulePlanner)
 		if !ok {
 			return fmt.Errorf("module %q requires an r42 module planning config", b.Name())
 		}
-		planned, err := planner.planChild(b.Source, b.Inputs, b.Parallelism, b.Timeout)
+		planned, err := planner.PlanChildModule(b.Source, b.Inputs, b.Parallelism, b.Timeout)
 		if err != nil {
 			return fmt.Errorf("planning module %q: %w", b.Name(), err)
 		}
 		b.planned = planned
 		return nil
 	})
+}
+
+func (b *ModuleBlock) Apply() error {
+	applier, ok := b.Config().(blockApplier)
+	if !ok {
+		return fmt.Errorf("module %q requires an r42 apply config", b.Name())
+	}
+	return applier.ApplyBlock(b.Address())
+}
+
+type ModulePlanner interface {
+	PlanChildModule(string, map[string]cty.Value, *int, *string) (ModulePlan, error)
 }
 
 func (b *ModuleBlock) Value() cty.Value {
@@ -254,15 +267,4 @@ func decodeOptionalPositiveInt(block *golden.HclBlock, context *hcl.EvalContext,
 
 func isModuleFixedAttribute(name string) bool {
 	return name == "source" || name == "parallelism" || name == "timeout"
-}
-
-func parseModuleTimeout(raw *string) (time.Duration, error) {
-	if raw == nil {
-		return 0, nil
-	}
-	value, err := time.ParseDuration(strings.TrimSpace(*raw))
-	if err != nil || value <= 0 {
-		return 0, fmt.Errorf("module timeout must be a positive duration")
-	}
-	return value, nil
 }

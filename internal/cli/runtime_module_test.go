@@ -11,6 +11,7 @@ import (
 	sdk "github.com/github/copilot-sdk/go"
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/copilot"
+	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
@@ -38,11 +39,11 @@ output "status" { value = module.child.status }
 `), 0o600))
 	opener := &fakeSessionOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), root, nil)
+	planned, err := planRuntime(runtime, t.Context(), root, nil)
 	require.NoError(t, err)
 	require.NoError(t, os.Remove(childPath))
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 4})
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 4})
 
 	require.NoError(t, err)
 	assert.Equal(t, cty.StringVal("child-done"), result.Outputs["status"])
@@ -67,10 +68,10 @@ func TestProductionRuntimePropagatesModuleTimeoutToChildSession(t *testing.T) {
 	root := writeModuleFixture(t, `timeout = "50ms"`)
 	opener := &moduleBlockingOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), root, nil)
+	planned, err := planRuntime(runtime, t.Context(), root, nil)
 	require.NoError(t, err)
 
-	_, err = runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 2})
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 2})
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Equal(t, 1, opener.session.closeCalls)
@@ -82,10 +83,10 @@ func TestProductionRuntimePropagatesChildSessionCloseWarning(t *testing.T) {
 	closeErr := errors.New("close child session failed")
 	opener := &fakeSessionOpener{session: fakeSession{closeErr: closeErr}}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
-	planned, err := runtime.Plan(t.Context(), root, nil)
+	planned, err := planRuntime(runtime, t.Context(), root, nil)
 	require.NoError(t, err)
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 2})
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 2})
 
 	require.NoError(t, err)
 	require.Len(t, result.Warnings, 1)

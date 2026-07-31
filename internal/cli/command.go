@@ -11,6 +11,7 @@ import (
 
 	"github.com/Azure/golden"
 	"github.com/lonegunmanb/r42/internal/debuglog"
+	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/spf13/cobra"
 	"github.com/zclconf/go-cty/cty"
@@ -22,19 +23,9 @@ const (
 	ExitUsage   = 2
 )
 
-type ApplyOptions struct {
-	Parallelism int
-	Debug       bool
-}
-
-type ApplyResult struct {
-	Outputs  map[string]cty.Value
-	Warnings []error
-}
-
 type Runtime interface {
-	Plan(context.Context, string, []golden.CliFlagAssignedVariables) (*plan.Plan, error)
-	Apply(context.Context, *plan.Plan, ApplyOptions) (ApplyResult, error)
+	Config(string, executor.ResearchConfigOptions) (*executor.ResearchConfig, error)
+	ConfigFromPlan(*plan.Plan, executor.ResearchConfigOptions) (*executor.ResearchConfig, error)
 }
 
 type usageError struct {
@@ -90,27 +81,23 @@ func newPlanCommand(runtime Runtime) *cobra.Command {
 				writeWarning(command.ErrOrStderr(), "debug output contains sensitive configuration, prompts, transcripts, and tool data")
 				ctx = withDebugRun(ctx, debugState)
 			}
-			planned, err := runtime.Plan(ctx, directory, goldenVariables(variables, variableFiles))
+			options := executor.ResearchConfigOptions{
+				Context: ctx, Variables: goldenVariables(variables, variableFiles), RunDirectory: ".",
+			}
+			config, err := planConfig(
+				runtime,
+				directory,
+				options,
+			)
 			if err != nil {
 				return errors.Join(fmt.Errorf("plan directory %q: %w", directory, err), closeCommandDebug(command, debugState))
 			}
-			ctx, _, _, err = debugState.ensure(ctx, directory)
+			planned := config.Plan().SavedPlan()
+			ctx, _, _, err = debugState.ensure(ctx, options.RunDirectory)
 			if err != nil {
 				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
-			displayStarted := time.Now()
-			if err = debuglog.Lifecycle(ctx, "plan.display", debuglog.StatusStarted, debuglog.Event{Path: directory}); err != nil {
-				return errors.Join(err, closeCommandDebug(command, debugState))
-			}
-			display, err := plan.Display(planned)
-			displayLogErr := debuglog.CompleteLifecycle(ctx, "plan.display", displayStarted, err, debuglog.Event{Path: directory, Bytes: len(display)})
-			if err != nil {
-				return errors.Join(fmt.Errorf("display plan: %w", err), displayLogErr, closeCommandDebug(command, debugState))
-			}
-			if displayLogErr != nil {
-				return errors.Join(displayLogErr, closeCommandDebug(command, debugState))
-			}
-			if _, err = io.WriteString(command.OutOrStdout(), display); err != nil {
+			if err = writePlan(ctx, command.OutOrStdout(), planned, directory); err != nil {
 				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
 			if strings.TrimSpace(outputPath) != "" {
@@ -175,15 +162,30 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 				ctx = withDebugRun(ctx, debugState)
 				writeWarning(command.ErrOrStderr(), "debug output contains sensitive configuration, prompts, transcripts, and tool data")
 			}
-			planned, err := loadOrPlan(
-				ctx, runtime, args[0], goldenVariables(variables, variableFiles),
+			options := executor.ResearchConfigOptions{
+				Context: ctx, Variables: goldenVariables(variables, variableFiles),
+				RunDirectory: ".", Parallelism: parallelism, Debug: debug,
+			}
+			config, err := loadOrPlan(
+				runtime, args[0], options,
 			)
 			if err != nil {
 				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
-			result, err := runtime.Apply(ctx, planned, ApplyOptions{Parallelism: parallelism, Debug: debug})
+			planned := config.Plan()
+			if planned == nil {
+				return errors.Join(fmt.Errorf("research config has no plan"), closeCommandDebug(command, debugState))
+			}
+			ctx, _, _, err = debugState.ensure(ctx, options.RunDirectory)
+			if err != nil {
+				return errors.Join(err, closeCommandDebug(command, debugState))
+			}
+			if err = writePlan(ctx, command.OutOrStdout(), planned.SavedPlan(), args[0]); err != nil {
+				return errors.Join(err, closeCommandDebug(command, debugState))
+			}
+			err = planned.Apply()
 			closeErr := closeCommandDebug(command, debugState)
-			for _, warning := range result.Warnings {
+			for _, warning := range config.Warnings() {
 				if warning != nil {
 					writeWarning(command.ErrOrStderr(), warning.Error())
 				}
@@ -194,7 +196,7 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 			if closeErr != nil {
 				return closeErr
 			}
-			return writeOutputs(command.OutOrStdout(), result.Outputs)
+			return writeOutputs(command.OutOrStdout(), config.Outputs())
 		},
 	}
 	command.Flags().IntVar(&parallelism, "parallelism", parallelism, "maximum concurrent research blocks")
@@ -242,38 +244,79 @@ func goldenVariables(values, files []string) []golden.CliFlagAssignedVariables {
 }
 
 func loadOrPlan(
-	ctx context.Context,
 	runtime Runtime,
 	target string,
-	variables []golden.CliFlagAssignedVariables,
-) (*plan.Plan, error) {
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
 	info, err := os.Stat(target)
-	if err == nil && info.IsDir() {
-		planned, planErr := runtime.Plan(ctx, target, variables)
-		if planErr != nil {
-			return nil, fmt.Errorf("plan directory %q: %w", target, planErr)
-		}
-		return planned, nil
-	}
-	if err == nil {
-		planned, loadErr := plan.Load(target)
-		if loadErr != nil {
-			return nil, fmt.Errorf("load plan %q: %w", target, loadErr)
-		}
-		return planned, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
+	if err != nil {
 		return nil, fmt.Errorf("inspect apply target %q: %w", target, err)
 	}
-	planned, loadErr := plan.Load(target)
-	if loadErr != nil {
-		return nil, fmt.Errorf("load plan %q: %w", target, loadErr)
+	if info.IsDir() {
+		config, err := planConfig(runtime, target, options)
+		if err != nil {
+			return nil, fmt.Errorf("plan directory %q: %w", target, err)
+		}
+		return config, nil
 	}
-	return planned, nil
+	planned, err := plan.Load(target)
+	if err != nil {
+		return nil, fmt.Errorf("load plan %q: %w", target, err)
+	}
+	config, err := runtime.ConfigFromPlan(planned, options)
+	if err != nil {
+		return nil, fmt.Errorf("configure plan %q: %w", target, err)
+	}
+	return config, nil
+}
+
+func planConfig(
+	runtime Runtime,
+	directory string,
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	config, err := runtime.Config(directory, options)
+	if err != nil {
+		return nil, err
+	}
+	ctx := config.Context()
+	started := time.Now()
+	if err = debuglog.Lifecycle(ctx, "plan", debuglog.StatusStarted, debuglog.Event{Path: directory}); err != nil {
+		return nil, err
+	}
+	if config.Plan() == nil {
+		_, err = executor.RunResearchPlan(config)
+	}
+	logErr := recordLifecycleCompletion(ctx, "plan", started, err, debuglog.Event{Path: directory})
+	if err != nil {
+		return nil, errors.Join(err, logErr)
+	}
+	return config, logErr
 }
 
 func writeWarning(writer io.Writer, message string) {
 	_, _ = fmt.Fprintf(writer, "warning: %s\n", message)
+}
+
+func writePlan(ctx context.Context, writer io.Writer, planned *plan.Plan, path string) error {
+	started := time.Now()
+	if err := debuglog.Lifecycle(ctx, "plan.display", debuglog.StatusStarted, debuglog.Event{Path: path}); err != nil {
+		return err
+	}
+	display, err := plan.Display(planned)
+	logErr := debuglog.CompleteLifecycle(ctx, "plan.display", started, err, debuglog.Event{
+		Path: path, Bytes: len(display),
+	})
+	if err != nil {
+		return errors.Join(fmt.Errorf("display plan: %w", err), logErr)
+	}
+	if logErr != nil {
+		return logErr
+	}
+	if _, err = io.WriteString(writer, display); err != nil {
+		return fmt.Errorf("write plan: %w", err)
+	}
+	return nil
 }
 
 func writeOutputs(writer io.Writer, outputs map[string]cty.Value) error {

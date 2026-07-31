@@ -20,7 +20,7 @@ import (
 func TestPlanNestedRoundTripPreservesDAGValuesAndSensitivity(t *testing.T) {
 	t.Parallel()
 
-	child, err := plan.New("D:/research/child", []plan.NodeSpec{
+	child, err := plan.NewWithContextAndLocals("D:/research/child", []plan.NodeSpec{
 		{
 			Address: "research.detail",
 			Kind:    "research",
@@ -34,7 +34,7 @@ func TestPlanNestedRoundTripPreservesDAGValuesAndSensitivity(t *testing.T) {
 			Value:       cty.StringVal("child result"),
 			Description: "Child summary",
 		},
-	})
+	}, nil, nil)
 	require.NoError(t, err)
 	secretConfig := cty.ObjectVal(map[string]cty.Value{
 		"endpoint": cty.StringVal("https://models.example.test"),
@@ -44,7 +44,7 @@ func TestPlanNestedRoundTripPreservesDAGValuesAndSensitivity(t *testing.T) {
 			corespec.MarkSensitive(cty.StringVal("nested-secret")),
 		}),
 	})
-	original, err := plan.New("D:/research", []plan.NodeSpec{
+	original, err := plan.NewWithContextAndLocals("D:/research", []plan.NodeSpec{
 		{Address: "model_provider.primary", Kind: "model_provider", Config: secretConfig},
 		{
 			Address:      "research.market",
@@ -72,7 +72,7 @@ func TestPlanNestedRoundTripPreservesDAGValuesAndSensitivity(t *testing.T) {
 			Value:       corespec.MarkSensitive(cty.StringVal("output-secret")),
 			Description: "Sensitive token",
 		},
-	})
+	}, nil, nil)
 	require.NoError(t, err)
 
 	encoded, err := plan.Marshal(original)
@@ -106,11 +106,11 @@ func TestPlanSnapshotsAreImmutable(t *testing.T) {
 	t.Parallel()
 
 	dependencies := []string{"go_tool.finish"}
-	child, err := plan.New("child", []plan.NodeSpec{{
+	child, err := plan.NewWithContextAndLocals("child", []plan.NodeSpec{{
 		Address: "research.child",
 		Kind:    "research",
 		Config:  cty.EmptyObjectVal,
-	}}, nil)
+	}}, nil, nil, nil)
 	require.NoError(t, err)
 	nodes := []plan.NodeSpec{
 		{Address: "go_tool.finish", Kind: "go_tool", Config: cty.EmptyObjectVal},
@@ -123,7 +123,7 @@ func TestPlanSnapshotsAreImmutable(t *testing.T) {
 		},
 	}
 	outputs := map[string]plan.OutputSpec{"value": {Value: cty.StringVal("original")}}
-	planned, err := plan.New("root", nodes, outputs)
+	planned, err := plan.NewWithContextAndLocals("root", nodes, outputs, nil, nil)
 	require.NoError(t, err)
 
 	dependencies[0] = "changed.input"
@@ -191,7 +191,7 @@ func TestPlanRejectsInvalidDAG(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := plan.New("root", tt.nodes, nil)
+			_, err := plan.NewWithContextAndLocals("root", tt.nodes, nil, nil, nil)
 			if tt.expectedError == "plan dependency cycle" {
 				require.ErrorContains(t, err, tt.expectedError)
 				return
@@ -205,7 +205,7 @@ func TestPlanUnknownValuesRoundTripAsKnownAfterApply(t *testing.T) {
 	t.Parallel()
 
 	refinedUnknown := cty.UnknownVal(cty.String).Refine().NotNull().StringPrefix("planned-").NewValue()
-	planned, err := plan.New("root", []plan.NodeSpec{{
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{{
 		Address: "research.market",
 		Kind:    "research",
 		Config: cty.ObjectVal(map[string]cty.Value{
@@ -214,7 +214,7 @@ func TestPlanUnknownValuesRoundTripAsKnownAfterApply(t *testing.T) {
 	}}, map[string]plan.OutputSpec{
 		"summary": {Value: refinedUnknown},
 		"secret":  {Value: corespec.MarkSensitive(cty.UnknownVal(cty.String))},
-	})
+	}, nil, nil)
 	require.NoError(t, err)
 
 	encoded, err := plan.Marshal(planned)
@@ -242,12 +242,12 @@ func TestPlanApplyEvaluationRecipeRoundTrip(t *testing.T) {
 			"source": cty.ObjectVal(map[string]cty.Value{"result": cty.UnknownVal(cty.String)}),
 		}),
 	}
-	planned, err := plan.NewWithContext("D:/research", nil, map[string]plan.OutputSpec{
+	planned, err := plan.NewWithContextAndLocals("D:/research", nil, map[string]plan.OutputSpec{
 		"summary": {
 			Value:      cty.UnknownVal(cty.String),
 			Expression: `"${var.prefix}: ${research.source.result}"`,
 		},
-	}, contextValues)
+	}, contextValues, nil)
 	require.NoError(t, err)
 
 	contextValues["var"] = cty.EmptyObjectVal
@@ -290,7 +290,7 @@ func TestPlanLocalEvaluationRecipesRoundTrip(t *testing.T) {
 func TestPlanSaveKeepsSecretsUnencryptedButRedactsDisplay(t *testing.T) {
 	t.Parallel()
 
-	planned, err := plan.New("root", []plan.NodeSpec{{
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{{
 		Address: "model_provider.primary",
 		Kind:    "model_provider",
 		Config: cty.ObjectVal(map[string]cty.Value{
@@ -299,7 +299,7 @@ func TestPlanSaveKeepsSecretsUnencryptedButRedactsDisplay(t *testing.T) {
 		}),
 	}}, map[string]plan.OutputSpec{
 		"password": {Value: corespec.MarkSensitive(cty.StringVal("output-secret"))},
-	})
+	}, nil, nil)
 	require.NoError(t, err)
 	path := filepath.Join(t.TempDir(), "research.r42plan")
 
@@ -343,13 +343,13 @@ func TestPlanLoadReturnsNormalDecodeErrors(t *testing.T) {
 func TestPlanUnmarshalRejectsSemanticValueAndPathErrors(t *testing.T) {
 	t.Parallel()
 
-	planned, err := plan.New("root", []plan.NodeSpec{{
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{{
 		Address: "research.market",
 		Kind:    "research",
 		Config: cty.ObjectVal(map[string]cty.Value{
 			"secret": corespec.MarkSensitive(cty.StringVal("value")),
 		}),
-	}}, nil)
+	}}, nil, nil, nil)
 	require.NoError(t, err)
 	encoded, err := plan.Marshal(planned)
 	require.NoError(t, err)
@@ -407,7 +407,7 @@ func TestPlanUnmarshalRejectsSemanticValueAndPathErrors(t *testing.T) {
 func TestPlanDisplayRendersSupportedCollectionValues(t *testing.T) {
 	t.Parallel()
 
-	planned, err := plan.New("root", []plan.NodeSpec{{
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{{
 		Address: "research.values",
 		Kind:    "research",
 		Config: cty.ObjectVal(map[string]cty.Value{
@@ -418,7 +418,7 @@ func TestPlanDisplayRendersSupportedCollectionValues(t *testing.T) {
 			"set":    cty.SetVal([]cty.Value{cty.StringVal("z"), cty.StringVal("a")}),
 			"tuple":  cty.TupleVal([]cty.Value{cty.StringVal("x"), cty.NumberIntVal(1)}),
 		}),
-	}}, nil)
+	}}, nil, nil, nil)
 	require.NoError(t, err)
 
 	display, err := plan.Display(planned)
@@ -449,13 +449,13 @@ func TestPlanObservesChangedUnhashedExternalContent(t *testing.T) {
 	directory := t.TempDir()
 	externalPath := filepath.Join(directory, "tool.sh")
 	require.NoError(t, os.WriteFile(externalPath, []byte("first"), 0o600))
-	planned, err := plan.New(directory, []plan.NodeSpec{{
+	planned, err := plan.NewWithContextAndLocals(directory, []plan.NodeSpec{{
 		Address: "external_tool.lookup",
 		Kind:    "external_tool",
 		Config: cty.ObjectVal(map[string]cty.Value{
 			"program_path": cty.StringVal(externalPath),
 		}),
-	}}, nil)
+	}}, nil, nil, nil)
 	require.NoError(t, err)
 	planPath := filepath.Join(directory, "saved.r42plan")
 	_, err = plan.Save(planPath, planned)
@@ -487,7 +487,7 @@ func configDocument(t *testing.T, document map[string]any) map[string]any {
 func validPlan(t *testing.T) *plan.Plan {
 	t.Helper()
 
-	planned, err := plan.New("root", nil, nil)
+	planned, err := plan.NewWithContextAndLocals("root", nil, nil, nil, nil)
 	require.NoError(t, err)
 	return planned
 }

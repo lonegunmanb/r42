@@ -5,11 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
-	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/lonegunmanb/r42/internal/cli"
+	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/stretchr/testify/assert"
 	"github.com/zclconf/go-cty/cty"
@@ -18,15 +19,16 @@ import (
 func TestRunMapsErrorsToProcessExitCodesAndStderr(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		ctx     context.Context
-		args    []string
-		runtime cli.Runtime
-		want    int
+		name     string
+		ctx      context.Context
+		args     []string
+		runtime  cli.Runtime
+		want     int
+		wantPlan bool
 	}{
 		{name: "usage", ctx: t.Context(), args: []string{"apply"}, runtime: stubRuntime{}, want: cli.ExitUsage},
-		{name: "runtime", ctx: t.Context(), args: []string{"apply", t.TempDir()}, runtime: stubRuntime{applyErr: errors.New("failed")}, want: cli.ExitFailure},
-		{name: "signal", ctx: canceledContext(), args: []string{"apply", t.TempDir()}, runtime: stubRuntime{applyErr: context.Canceled}, want: 130},
+		{name: "runtime", ctx: t.Context(), args: []string{"apply", t.TempDir()}, runtime: stubRuntime{applyErr: errors.New("failed")}, want: cli.ExitFailure, wantPlan: true},
+		{name: "signal", ctx: canceledContext(), args: []string{"apply", t.TempDir()}, runtime: stubRuntime{applyErr: context.Canceled}, want: 130, wantPlan: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -35,7 +37,7 @@ func TestRunMapsErrorsToProcessExitCodesAndStderr(t *testing.T) {
 			var stderr bytes.Buffer
 			code := run(test.ctx, test.args, &stdout, &stderr, test.runtime)
 			assert.Equal(t, test.want, code)
-			assert.Empty(t, stdout.String())
+			assert.Equal(t, test.wantPlan, strings.Contains(stdout.String(), `"nodes"`))
 			assert.NotEmpty(t, stderr.String())
 		})
 	}
@@ -67,7 +69,7 @@ func TestRunDisplaysEveryHCLDiagnostic(t *testing.T) {
 	)
 
 	assert.Equal(t, cli.ExitFailure, code)
-	assert.Empty(t, stdout.String())
+	assert.Contains(t, stdout.String(), `"nodes"`)
 	assert.Contains(t, stderr.String(), "first invalid expression")
 	assert.Contains(t, stderr.String(), "second invalid expression")
 	assert.NotContains(t, stderr.String(), "other diagnostic(s)")
@@ -75,12 +77,32 @@ func TestRunDisplaysEveryHCLDiagnostic(t *testing.T) {
 
 type stubRuntime struct{ applyErr error }
 
-func (stubRuntime) Plan(context.Context, string, []golden.CliFlagAssignedVariables) (*plan.Plan, error) {
-	return plan.New("", nil, nil)
+func (r stubRuntime) Config(
+	_ string,
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	planned, err := plan.NewWithContextAndLocals("", nil, nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return r.config(planned, options)
 }
 
-func (r stubRuntime) Apply(context.Context, *plan.Plan, cli.ApplyOptions) (cli.ApplyResult, error) {
-	return cli.ApplyResult{Outputs: map[string]cty.Value{}}, r.applyErr
+func (r stubRuntime) ConfigFromPlan(
+	planned *plan.Plan,
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	return r.config(planned, options)
+}
+
+func (r stubRuntime) config(
+	planned *plan.Plan,
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	options.Apply = func(*plan.Plan) (map[string]cty.Value, []error, error) {
+		return map[string]cty.Value{}, nil, r.applyErr
+	}
+	return executor.NewResearchConfigFromPlan(planned, options)
 }
 
 func canceledContext() context.Context {

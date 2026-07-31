@@ -90,7 +90,7 @@ type providerSnapshot struct {
 	Retry          provider.RetryOverride `json:"retry"`
 }
 
-func encodeResearchPlan(config researchspec.Config, planning *planningConfig) (cty.Value, error) {
+func EncodeResearchPlan(config researchspec.Config, planning golden.Config) (cty.Value, error) {
 	tools, err := resolveTools(config.Policy.Tools, planning)
 	if err != nil {
 		return cty.NilVal, err
@@ -195,7 +195,7 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 	}, nil
 }
 
-func resolveProvider(value cty.Value, planning *planningConfig) (*providerSnapshot, bool, error) {
+func resolveProvider(value cty.Value, planning golden.Config) (*providerSnapshot, bool, error) {
 	address, ok, err := referenceAddress(value)
 	if err != nil || !ok {
 		return nil, false, err
@@ -220,7 +220,7 @@ func resolveProvider(value cty.Value, planning *planningConfig) (*providerSnapsh
 	return nil, false, fmt.Errorf("model provider %q was not planned", address)
 }
 
-func resolveTools(value cty.Value, planning *planningConfig) ([]PlannedTool, error) {
+func resolveTools(value cty.Value, planning golden.Config) ([]PlannedTool, error) {
 	if value.Type().Equals(cty.NilType) || value.IsNull() || value.LengthInt() == 0 {
 		return nil, nil
 	}
@@ -237,7 +237,7 @@ func resolveTools(value cty.Value, planning *planningConfig) ([]PlannedTool, err
 	return result, nil
 }
 
-func resolveOptionalTool(value cty.Value, planning *planningConfig) (*PlannedTool, error) {
+func resolveOptionalTool(value cty.Value, planning golden.Config) (*PlannedTool, error) {
 	address, ok, err := referenceAddress(value)
 	if err != nil || !ok {
 		return nil, err
@@ -246,7 +246,7 @@ func resolveOptionalTool(value cty.Value, planning *planningConfig) (*PlannedToo
 	return &tool, err
 }
 
-func resolveTool(value cty.Value, planning *planningConfig) (PlannedTool, error) {
+func resolveTool(value cty.Value, planning golden.Config) (PlannedTool, error) {
 	address, ok, err := referenceAddress(value)
 	if err != nil {
 		return PlannedTool{}, err
@@ -257,7 +257,7 @@ func resolveTool(value cty.Value, planning *planningConfig) (PlannedTool, error)
 	return resolveToolByAddress(address, planning)
 }
 
-func resolveToolByAddress(address string, planning *planningConfig) (PlannedTool, error) {
+func resolveToolByAddress(address string, planning golden.Config) (PlannedTool, error) {
 	for _, block := range golden.Blocks[*toolspec.GoToolBlock](planning) {
 		if block.Address() == address {
 			return PlannedTool{Address: address, Kind: string(config.AddressKindGo), Description: block.Description, Source: block.Source}, nil
