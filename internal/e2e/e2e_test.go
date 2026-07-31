@@ -3,7 +3,6 @@ package e2e_test
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -107,10 +106,10 @@ func TestQCIssuesTriggerRevisionAndPassInPersistentSessions(t *testing.T) {
 	assert.Contains(t, opener.research.prompts[1], "add a citation")
 }
 
-func TestParallelModulesPublishOutputsAfterChildrenComplete(t *testing.T) {
+func TestNestedModulesPublishOutputsWithGoldenTraversal(t *testing.T) {
 	t.Parallel()
 
-	tracker := &parallelTracker{allStarted: make(chan struct{})}
+	tracker := &parallelTracker{}
 	opener := &parallelOpener{tracker: tracker}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
 	planned, err := runtime.Plan(t.Context(), fixtureDirectory(t, "parallel_modules"), nil)
@@ -121,7 +120,8 @@ func TestParallelModulesPublishOutputsAfterChildrenComplete(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, cty.StringVal("child-done"), result.Outputs["first"])
 	assert.Equal(t, cty.StringVal("child-done"), result.Outputs["second"])
-	assert.Equal(t, 2, tracker.maximum)
+	assert.Equal(t, 1, tracker.maximum)
+	assert.Equal(t, 2, tracker.completed)
 }
 
 func TestPlanAndApplyRunInDifferentProcesses(t *testing.T) {
@@ -181,7 +181,7 @@ func TestE2ECLIProcess(t *testing.T) {
 	require.NoError(t, command.ExecuteContext(t.Context()))
 }
 
-func TestFailFastCancelsSessionAndExternalChildProcess(t *testing.T) {
+func TestCancellationStopsSessionAndExternalChildProcess(t *testing.T) {
 	t.Parallel()
 
 	startedFile := filepath.Join(t.TempDir(), "external-started")
@@ -191,11 +191,26 @@ func TestFailFastCancelsSessionAndExternalChildProcess(t *testing.T) {
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
 	planned, err := runtime.Plan(t.Context(), directory, nil)
 	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	type outcome struct {
+		result cli.ApplyResult
+		err    error
+	}
+	finished := make(chan outcome, 1)
+	go func() {
+		result, applyErr := runtime.Apply(ctx, planned, cli.ApplyOptions{Parallelism: 2})
+		finished <- outcome{result: result, err: applyErr}
+	}()
+	require.Eventually(t, func() bool {
+		_, statErr := os.Stat(startedFile)
+		return statErr == nil
+	}, 2*time.Second, 10*time.Millisecond)
+	cancel()
 
-	result, err := runtime.Apply(t.Context(), planned, cli.ApplyOptions{Parallelism: 2})
+	actual := <-finished
 
-	require.ErrorContains(t, err, "trigger fail-fast")
-	assert.Empty(t, result.Outputs)
+	require.ErrorIs(t, actual.err, context.Canceled)
+	assert.Empty(t, actual.result.Outputs)
 	select {
 	case <-state.slowStopped:
 	case <-time.After(2 * time.Second):
@@ -205,7 +220,7 @@ func TestFailFastCancelsSessionAndExternalChildProcess(t *testing.T) {
 	slowErr := state.slowErr
 	state.mu.Unlock()
 	require.ErrorIs(t, slowErr, context.Canceled)
-	assert.Equal(t, 2, state.closedSessions)
+	assert.Equal(t, 1, state.closedSessions)
 }
 
 func renderFailFastFixture(t *testing.T, startedFile string) string {
@@ -234,32 +249,7 @@ type failFastState struct {
 type failFastOpener struct{ state *failFastState }
 
 func (o *failFastOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
-	if strings.Contains(config.SystemPrompt, "TRIGGER_FAIL_FAST") {
-		return &failSession{state: o.state}, nil
-	}
 	return &slowExternalSession{state: o.state, config: config}, nil
-}
-
-type failSession struct{ state *failFastState }
-
-func (s *failSession) SendAndWait(ctx context.Context, _ sdk.MessageOptions) (*sdk.SessionEvent, error) {
-	for {
-		if _, err := os.Stat(s.state.startedFile); err == nil {
-			return nil, errors.New("trigger fail-fast")
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(10 * time.Millisecond):
-		}
-	}
-}
-
-func (s *failSession) Close(context.Context) error {
-	s.state.mu.Lock()
-	s.state.closedSessions++
-	s.state.mu.Unlock()
-	return nil
 }
 
 type slowExternalSession struct {
@@ -413,11 +403,8 @@ func (s *qcScenarioSession) SendAndWait(context.Context, sdk.MessageOptions) (*s
 func (s *qcScenarioSession) Close(context.Context) error { s.closes++; return nil }
 
 type parallelTracker struct {
-	mu                   sync.Mutex
-	active, maximum      int
-	started              int
-	allStarted           chan struct{}
-	allStartedCloseGuard sync.Once
+	mu                         sync.Mutex
+	active, maximum, completed int
 }
 
 type parallelOpener struct{ tracker *parallelTracker }
@@ -428,26 +415,14 @@ func (o *parallelOpener) Open(context.Context, copilot.SessionConfig) (cli.Sessi
 
 type parallelSession struct{ tracker *parallelTracker }
 
-func (s *parallelSession) SendAndWait(ctx context.Context, _ sdk.MessageOptions) (*sdk.SessionEvent, error) {
+func (s *parallelSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
 	s.tracker.mu.Lock()
 	s.tracker.active++
-	s.tracker.started++
 	if s.tracker.active > s.tracker.maximum {
 		s.tracker.maximum = s.tracker.active
 	}
-	if s.tracker.started == 2 {
-		s.tracker.allStartedCloseGuard.Do(func() { close(s.tracker.allStarted) })
-	}
-	s.tracker.mu.Unlock()
-	select {
-	case <-s.tracker.allStarted:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(time.Second):
-		return nil, assert.AnError
-	}
-	s.tracker.mu.Lock()
 	s.tracker.active--
+	s.tracker.completed++
 	s.tracker.mu.Unlock()
 	return &sdk.SessionEvent{}, nil
 }

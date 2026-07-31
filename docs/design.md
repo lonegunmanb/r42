@@ -57,8 +57,10 @@ expressed through values, matching Terraform's model.
 
 The pinned Golden version mutates its live block graph during Plan and exposes
 no Plan serialization or nested executor API. r42 owns the immutable
-serializable Plan, persists nested Plans, and traverses Golden `ApplyBlock`
-values from that saved representation.
+serializable Plan and persists nested Plans. Apply reconstructs an in-memory
+Golden config whose internal `PlanBlock` values wrap the saved nodes, then calls
+Golden `RunPlan`. Each wrapper creates and applies the corresponding r42
+`ApplyBlock`; Apply never reparses module source.
 
 Any block failure or timeout triggers fail-fast cancellation of the entire DAG.
 An interrupted Apply cannot resume; another Apply creates a new run and starts
@@ -542,8 +544,13 @@ closed or close retries have been exhausted.
 A module may set `parallelism`. A leaf research block must acquire the global
 permit plus every explicit ancestor-module permit in root-to-leaf order. Its
 effective concurrency is therefore bounded by the global setting and every
-enclosing module. This is implemented in r42's research Apply layer, not by
-changing Golden.
+enclosing module.
+
+The pinned Golden `RunPlan` traversal currently executes ready vertices
+serially, so this version observes at most one active research block. r42 keeps
+the global and module permit scopes in the Apply wrappers but does not maintain
+a second DAG scheduler. When Golden's traversal executes independent ready
+vertices concurrently, those existing scopes enforce the configured limits.
 
 Research blocks and modules may set `timeout` using Go duration strings such as
 `30m` and `2h`. CLI may set an overall timeout. None has a default. The effective

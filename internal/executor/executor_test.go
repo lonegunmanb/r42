@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Azure/golden"
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
@@ -43,6 +44,40 @@ func TestExecutorAppliesGoldenBlocksInDependencyOrder(t *testing.T) {
 	assert.Equal(t, []string{"apply research.source", "apply research.report"}, events.values())
 	assert.Equal(t, cty.StringVal("complete"), outputs["status"])
 	assert.Empty(t, runner.Warnings())
+}
+
+func TestExecutorUsesCurrentGoldenRunPlanTraversal(t *testing.T) {
+	t.Parallel()
+
+	var active atomic.Int64
+	var maximum atomic.Int64
+	secondStarted := make(chan struct{})
+	var closeSecond sync.Once
+	factory := &fakeFactory{build: func(_ context.Context, node plan.NodeSpec, _ *r42concurrency.Scope) (golden.ApplyBlock, error) {
+		return newFakeBlock(node.Address, func() error {
+			current := active.Add(1)
+			for observed := maximum.Load(); current > observed && !maximum.CompareAndSwap(observed, current); observed = maximum.Load() {
+			}
+			if current == 2 {
+				closeSecond.Do(func() { close(secondStarted) })
+			}
+			select {
+			case <-secondStarted:
+			case <-time.After(50 * time.Millisecond):
+			}
+			active.Add(-1)
+			return nil
+		}, nil), nil
+	}}
+	planned := savedPlan(t, []plan.NodeSpec{
+		{Address: "research.first", Kind: "research", Config: cty.EmptyObjectVal},
+		{Address: "research.second", Kind: "research", Config: cty.EmptyObjectVal},
+	}, nil)
+
+	_, err := executor.New(factory, nil).Apply(t.Context(), planned, 2)
+
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), maximum.Load())
 }
 
 func TestExecutorResolvesOutputsAfterSuccessfulApply(t *testing.T) {
@@ -88,38 +123,22 @@ func TestExecutorApplyInScopeUsesCallerScopeWithoutClosingDebug(t *testing.T) {
 	assert.Zero(t, debug.calls.Load())
 }
 
-func TestExecutorCancelsRootAndCleansUpAfterActiveApplyStops(t *testing.T) {
+func TestExecutorPreservesPrimaryFailureAndCleanupWarnings(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("primary apply failure")
 	closeErr := errors.New("close session failed")
 	debugErr := errors.New("flush debug failed")
 	events := &eventLog{}
-	bothStarted := make(chan struct{})
-	var starts sync.WaitGroup
-	starts.Add(2)
-	factory := &fakeFactory{build: func(ctx context.Context, node plan.NodeSpec, _ *r42concurrency.Scope) (golden.ApplyBlock, error) {
+	factory := &fakeFactory{build: func(_ context.Context, node plan.NodeSpec, _ *r42concurrency.Scope) (golden.ApplyBlock, error) {
 		switch node.Address {
 		case "research.failure":
 			return newFakeBlock(node.Address, func() error {
-				starts.Done()
-				<-bothStarted
 				events.add("apply failed")
 				return wantErr
 			}, func(context.Context) error {
 				events.add("close failure session")
 				return closeErr
-			}), nil
-		case "research.active":
-			return newFakeBlock(node.Address, func() error {
-				starts.Done()
-				<-bothStarted
-				<-ctx.Done()
-				events.add("active tool stopped")
-				return ctx.Err()
-			}, func(context.Context) error {
-				events.add("close active session")
-				return nil
 			}), nil
 		default:
 			return newFakeBlock(node.Address, func() error {
@@ -134,14 +153,9 @@ func TestExecutorCancelsRootAndCleansUpAfterActiveApplyStops(t *testing.T) {
 	}}
 	planned := savedPlan(t, []plan.NodeSpec{
 		{Address: "research.failure", Kind: "research", Config: cty.EmptyObjectVal},
-		{Address: "research.active", Kind: "research", Config: cty.EmptyObjectVal},
 		{Address: "research.dependent", Kind: "research", Dependencies: []string{"research.failure"}, Config: cty.EmptyObjectVal},
 	}, nil)
 	runner := executor.New(factory, debug)
-	go func() {
-		starts.Wait()
-		close(bothStarted)
-	}()
 
 	_, err := runner.Apply(t.Context(), planned, 2)
 
@@ -154,8 +168,7 @@ func TestExecutorCancelsRootAndCleansUpAfterActiveApplyStops(t *testing.T) {
 	require.ErrorIs(t, warnings[1], debugErr)
 	actual := events.values()
 	assert.NotContains(t, actual, "unexpected dependent apply")
-	assert.Less(t, eventIndex(t, actual, "active tool stopped"), eventIndex(t, actual, "close failure session"))
-	assert.Less(t, eventIndex(t, actual, "active tool stopped"), eventIndex(t, actual, "close active session"))
+	assert.Less(t, eventIndex(t, actual, "apply failed"), eventIndex(t, actual, "close failure session"))
 	assert.Equal(t, len(actual)-1, eventIndex(t, actual, "flush debug"))
 }
 
@@ -186,28 +199,23 @@ func TestExecutorCleanupUsesLiveContextAfterApplyFailure(t *testing.T) {
 	}
 }
 
-func TestExecutorWaitsForNestedApplyShutdownBeforeDebugFlush(t *testing.T) {
+func TestExecutorCleansNestedApplyBeforeDebugFlush(t *testing.T) {
 	t.Parallel()
 
 	events := &eventLog{}
 	nestedStopped := make(chan struct{})
-	bothStarted := make(chan struct{})
-	var starts sync.WaitGroup
-	starts.Add(2)
-	factory := &fakeFactory{build: func(ctx context.Context, node plan.NodeSpec, _ *r42concurrency.Scope) (golden.ApplyBlock, error) {
+	factory := &fakeFactory{build: func(_ context.Context, node plan.NodeSpec, _ *r42concurrency.Scope) (golden.ApplyBlock, error) {
 		if node.Address == "module.child" {
 			return newFakeBlock(node.Address, func() error {
-				starts.Done()
-				<-bothStarted
-				<-ctx.Done()
+				events.add("nested applied")
+				return nil
+			}, func(context.Context) error {
 				events.add("nested stopped")
 				close(nestedStopped)
-				return ctx.Err()
-			}, nil), nil
+				return nil
+			}), nil
 		}
 		return newFakeBlock(node.Address, func() error {
-			starts.Done()
-			<-bothStarted
 			return errors.New("root failed")
 		}, nil), nil
 	}}
@@ -222,18 +230,14 @@ func TestExecutorWaitsForNestedApplyShutdownBeforeDebugFlush(t *testing.T) {
 	}}
 	planned := savedPlan(t, []plan.NodeSpec{
 		{Address: "module.child", Kind: "module", Config: cty.EmptyObjectVal, Module: &plan.ModuleSpec{Plan: savedPlan(t, nil, nil)}},
-		{Address: "research.failure", Kind: "research", Config: cty.EmptyObjectVal},
+		{Address: "research.failure", Kind: "research", Dependencies: []string{"module.child"}, Config: cty.EmptyObjectVal},
 	}, nil)
 	runner := executor.New(factory, debug)
-	go func() {
-		starts.Wait()
-		close(bothStarted)
-	}()
 
 	_, err := runner.Apply(t.Context(), planned, 2)
 
 	require.Error(t, err)
-	assert.Equal(t, []string{"nested stopped", "debug closed"}, events.values())
+	assert.Equal(t, []string{"nested applied", "nested stopped", "debug closed"}, events.values())
 	assert.Empty(t, runner.Warnings())
 }
 
@@ -287,22 +291,42 @@ func TestExecutorResearchPermitIncludesCleanup(t *testing.T) {
 func TestExecutorCancelsResearchWaitingForPermitWithoutCreatingBlock(t *testing.T) {
 	t.Parallel()
 
-	wantErr := errors.New("first research failed")
+	scope, err := r42concurrency.NewScope(1)
+	require.NoError(t, err)
+	holderStarted := make(chan struct{})
+	releaseHolder := make(chan struct{})
+	holderDone := make(chan error, 1)
+	go func() {
+		holderDone <- scope.WithResearch(t.Context(), func(context.Context) error {
+			close(holderStarted)
+			<-releaseHolder
+			return nil
+		})
+	}()
+	<-holderStarted
+
 	var factoryCalls atomic.Int64
 	factory := &fakeFactory{build: func(_ context.Context, node plan.NodeSpec, _ *r42concurrency.Scope) (golden.ApplyBlock, error) {
 		factoryCalls.Add(1)
-		return newFakeBlock(node.Address, func() error { return wantErr }, nil), nil
+		return newFakeBlock(node.Address, func() error { return nil }, nil), nil
 	}}
-	planned := savedPlan(t, []plan.NodeSpec{
-		{Address: "research.one", Kind: "research", Config: cty.EmptyObjectVal},
-		{Address: "research.two", Kind: "research", Config: cty.EmptyObjectVal},
-	}, nil)
+	planned := savedPlan(t, []plan.NodeSpec{{Address: "research.waiting", Kind: "research", Config: cty.EmptyObjectVal}}, nil)
 	runner := executor.New(factory, nil)
+	ctx := newObservedContext()
+	result := make(chan error, 1)
+	go func() {
+		_, applyErr := runner.ApplyInScope(ctx, planned, scope)
+		result <- applyErr
+	}()
+	<-ctx.observed
+	ctx.cancel()
 
-	_, err := runner.Apply(t.Context(), planned, 1)
+	applyErr := <-result
 
-	require.ErrorIs(t, err, wantErr)
-	assert.Equal(t, int64(1), factoryCalls.Load())
+	require.ErrorIs(t, applyErr, context.Canceled)
+	assert.Zero(t, factoryCalls.Load())
+	close(releaseHolder)
+	require.NoError(t, <-holderDone)
 }
 
 func TestExecutorDoesNotStartModulesAfterParentCancellation(t *testing.T) {
@@ -327,6 +351,67 @@ func TestExecutorDoesNotStartModulesAfterParentCancellation(t *testing.T) {
 
 	require.ErrorIs(t, err, context.Canceled)
 	assert.False(t, created)
+}
+
+func TestExecutorReturnsCancellationWhenApplyDoesNotObserveContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	factory := &fakeFactory{build: func(context.Context, plan.NodeSpec, *r42concurrency.Scope) (golden.ApplyBlock, error) {
+		return newFakeBlock("module.child", func() error {
+			close(started)
+			<-release
+			return nil
+		}, nil), nil
+	}}
+	planned := savedPlan(t, []plan.NodeSpec{{
+		Address: "module.child",
+		Kind:    "module",
+		Config:  cty.EmptyObjectVal,
+		Module:  &plan.ModuleSpec{Plan: savedPlan(t, nil, nil)},
+	}}, nil)
+	finished := make(chan error, 1)
+	go func() {
+		_, err := executor.New(factory, nil).Apply(ctx, planned, 1)
+		finished <- err
+	}()
+	<-started
+	cancel()
+	close(release)
+
+	require.ErrorIs(t, <-finished, context.Canceled)
+}
+
+func TestExecutorReturnsCancellationWhenContextIsCanceledDuringCleanup(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cleanupStarted := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	factory := &fakeFactory{build: func(context.Context, plan.NodeSpec, *r42concurrency.Scope) (golden.ApplyBlock, error) {
+		return newFakeBlock("research.subject", func() error { return nil }, func(context.Context) error {
+			close(cleanupStarted)
+			<-releaseCleanup
+			return nil
+		}), nil
+	}}
+	planned := savedPlan(t, []plan.NodeSpec{{
+		Address: "research.subject",
+		Kind:    "research",
+		Config:  cty.EmptyObjectVal,
+	}}, nil)
+	finished := make(chan error, 1)
+	go func() {
+		_, err := executor.New(factory, nil).Apply(ctx, planned, 1)
+		finished <- err
+	}()
+	<-cleanupStarted
+	cancel()
+	close(releaseCleanup)
+
+	require.ErrorIs(t, <-finished, context.Canceled)
 }
 
 func TestExecutorValidatesInputsAndFactoryFailures(t *testing.T) {
@@ -475,4 +560,36 @@ func eventIndex(t *testing.T, events []string, want string) int {
 	}
 	require.Fail(t, fmt.Sprintf("event %q is missing from %v", want, events))
 	return -1
+}
+
+type observedContext struct {
+	done     chan struct{}
+	observed chan struct{}
+	once     sync.Once
+	canceled atomic.Bool
+}
+
+func newObservedContext() *observedContext {
+	return &observedContext{done: make(chan struct{}), observed: make(chan struct{})}
+}
+
+func (*observedContext) Deadline() (time.Time, bool) { return time.Time{}, false }
+
+func (c *observedContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.observed) })
+	return c.done
+}
+
+func (c *observedContext) Err() error {
+	if c.canceled.Load() {
+		return context.Canceled
+	}
+	return nil
+}
+
+func (*observedContext) Value(any) any { return nil }
+
+func (c *observedContext) cancel() {
+	c.canceled.Store(true)
+	close(c.done)
 }

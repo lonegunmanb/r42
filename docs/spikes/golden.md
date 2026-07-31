@@ -47,17 +47,23 @@ model or nested executor API. The audit covered `plan.go`, `base_config.go`,
 This is a source-audit conclusion, not a negative behavior inferred from guessed
 method names.
 
-Golden also has no top-level Apply executor. The executable path is caller-owned:
-traverse the planned DAG with `golden.Traverse[golden.ApplyBlock]` and invoke
-each block's `Apply` method. The probe verifies that `RunPlan` does not apply a
-block and an explicit traversal does.
+Golden also has no top-level Apply executor. `RunPlan` only invokes
+`PlanBlock.ExecuteDuringPlan`; it does not call `ApplyBlock.Apply`. r42 therefore
+reconstructs each saved node as an internal Golden `PlanBlock`. Its
+`ExecuteDuringPlan` creates and invokes the existing r42 `ApplyBlock`, allowing
+Golden `RunPlan` to remain the sole DAG traversal entry point.
 
 Consequently r42 must own:
 
 - immutable Plan data and serialization;
 - reconstruction of the Apply graph from saved Plan data;
-- Apply scheduling, cancellation, and cleanup;
+- the saved-node `PlanBlock` adapter, cancellation, and cleanup;
 - creation of a nested executor over an already saved child Plan.
+
+The pinned `RunPlan` traversal is serial. Parallel execution of independent
+ready vertices belongs upstream in Golden; r42 retains its global and nested
+research permit scopes so those limits apply when the upstream traversal is
+parallelized.
 
 The audited Golden version has no API for constructing a nested executor from a
 child Plan. Module planning and execution can still reuse Golden configurations

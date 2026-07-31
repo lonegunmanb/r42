@@ -10,8 +10,3 @@ research "slow" {
   system_prompt = "RUN_EXTERNAL_CHILD"
   tools         = [external_tool.blocker]
 }
-
-research "failure" {
-  model         = "test-model"
-  system_prompt = "TRIGGER_FAIL_FAST"
-}
