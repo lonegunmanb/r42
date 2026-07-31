@@ -160,6 +160,10 @@ func (s *Session) SendAndWait(ctx context.Context, options sdk.MessageOptions) (
 	}
 }
 
+func (s *Session) On(handler sdk.SessionEventHandler) func() {
+	return s.sdk.On(handler)
+}
+
 func (s *Session) Close(ctx context.Context) error {
 	for attempt := 0; ; attempt++ {
 		err := s.sdk.Disconnect()
@@ -198,6 +202,7 @@ type sdkClient interface {
 
 type sdkSession interface {
 	SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error)
+	On(sdk.SessionEventHandler) func()
 	Disconnect() error
 }
 
@@ -259,6 +264,10 @@ func (s *officialSession) SendAndWait(
 
 func (s *officialSession) Disconnect() error {
 	return s.sdk.Disconnect()
+}
+
+func (s *officialSession) On(handler sdk.SessionEventHandler) func() {
+	return s.sdk.On(handler)
 }
 
 type modelCallError struct {

@@ -1066,6 +1066,10 @@ type recordingSession struct {
 	kind     debuglog.SessionKind
 }
 
+type sessionEventSource interface {
+	On(sdk.SessionEventHandler) func()
+}
+
 func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
 	if err := s.recorder.Record(debuglog.Event{
 		Kind: debuglog.EventMessage, BlockAddress: s.address, Session: s.kind,
@@ -1079,23 +1083,48 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 	if err := debuglog.Lifecycle(ctx, "session.send", debuglog.StatusStarted, lifecycleEvent); err != nil {
 		return nil, err
 	}
+	var eventErr error
+	var eventErrMu sync.Mutex
+	unsubscribe := func() {}
+	if source, ok := s.Session.(sessionEventSource); ok {
+		unsubscribe = source.On(func(event sdk.SessionEvent) {
+			if event.Type() != sdk.SessionEventTypeAssistantReasoning &&
+				event.Type() != sdk.SessionEventTypeAssistantReasoningDelta {
+				return
+			}
+			if err := s.recordAssistantEvent(&event); err != nil {
+				eventErrMu.Lock()
+				if eventErr == nil {
+					eventErr = err
+				}
+				eventErrMu.Unlock()
+			}
+		})
+	}
 	event, operationErr := s.Session.SendAndWait(ctx, options)
+	unsubscribe()
+	eventErrMu.Lock()
+	operationErr = errors.Join(operationErr, eventErr)
+	eventErrMu.Unlock()
 	if operationErr == nil {
-		content, marshalErr := json.Marshal(event)
-		if marshalErr != nil {
-			operationErr = fmt.Errorf("encode assistant event: %w", marshalErr)
-		} else if recordErr := s.recorder.Record(debuglog.Event{
-			Kind: debuglog.EventMessage, BlockAddress: s.address, Session: s.kind,
-			Role: debuglog.RoleAssistant, Content: string(content),
-		}); recordErr != nil {
-			operationErr = recordErr
-		}
+		operationErr = s.recordAssistantEvent(event)
 	}
 	logErr := debuglog.CompleteLifecycle(ctx, "session.send", started, operationErr, lifecycleEvent)
 	if operationErr != nil || logErr != nil {
 		return nil, errors.Join(operationErr, logErr)
 	}
 	return event, nil
+}
+
+func (s *recordingSession) recordAssistantEvent(event *sdk.SessionEvent) error {
+	content, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("encode assistant event: %w", err)
+	}
+	return s.recorder.Record(debuglog.Event{
+		Kind: debuglog.EventMessage, BlockAddress: s.address, Session: s.kind,
+		Role: debuglog.RoleAssistant, Content: string(content),
+	})
 }
 
 func (s *recordingSession) Close(ctx context.Context) error {

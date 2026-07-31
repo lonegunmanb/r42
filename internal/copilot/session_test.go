@@ -211,6 +211,30 @@ func TestSessionSendAndWaitRetriesSameSession(t *testing.T) {
 	assert.Len(t, client.configs, 1, "model retry must not replace the session")
 }
 
+func TestSessionOnForwardsSDKEventsAndUnsubscribe(t *testing.T) {
+	t.Parallel()
+
+	want := sdk.SessionEvent{
+		ID:   "reasoning-event",
+		Data: &sdk.AssistantReasoningData{Content: "inspect sources", ReasoningID: "reasoning-1"},
+	}
+	underlying := &fakeEventSession{event: want, result: &sdk.SessionEvent{ID: "completed"}}
+	factory := newFactory(&fakeClient{session: underlying}, nil, noDelay, fixedRandom)
+	session, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 0, 0)})
+	require.NoError(t, err)
+	var got sdk.SessionEvent
+
+	unsubscribe := session.On(func(event sdk.SessionEvent) {
+		got = event
+	})
+	_, err = session.SendAndWait(t.Context(), sdk.MessageOptions{Prompt: "research"})
+	require.NoError(t, err)
+	unsubscribe()
+
+	assert.Equal(t, want, got)
+	assert.Equal(t, 1, underlying.unsubscribeCalls)
+}
+
 func TestSessionSendAndWaitFailsUnrecoverableSessionLossWithoutReplacement(t *testing.T) {
 	t.Parallel()
 
@@ -487,6 +511,10 @@ type fakeSession struct {
 	event            *sdk.SessionEvent
 	disconnectErrors []error
 	disconnectCalls  int
+}
+
+func (*fakeSession) On(sdk.SessionEventHandler) func() {
+	return func() {}
 }
 
 type fakeEventSession struct {
