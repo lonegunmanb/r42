@@ -602,6 +602,35 @@ Full debug data is written to files only, never streamed to the terminal.
 Transport credentials are not deliberately emitted, but prompt/tool content may
 contain secrets; the whole run directory is sensitive.
 
+When `--debug` is enabled, lifecycle and transcript events are appended to
+`.r42/runs/<run-id>/events.jsonl`. Each JSON object has a monotonic `sequence`,
+UTC `timestamp`, event `kind`, and the fields relevant to that event. Lifecycle
+events include an `action` and one of `started`, `completed`, `failed`, or
+`skipped`; terminal events include `duration_ms`, and failures include `error`.
+Each event is flushed immediately so another process can inspect progress while
+r42 is still running.
+
+Lifecycle actions cover the complete CLI execution path:
+
+- directory scanning, source-file collection, HCL syntax/hclwrite parsing, and
+  extracted block addresses and source ranges;
+- Golden config initialization and `RunPlan`, every successful r42 block decode
+  and Plan, and immutable plan snapshot construction. Decode failures are
+  recorded by the failed Golden initialization event until Golden exposes a
+  per-block decode lifecycle hook;
+- plan display/save, saved-plan synthetic HCL construction, Apply-time Golden
+  initialization and traversal, block factory/Apply/cleanup, and output
+  resolution;
+- nested module planning and Apply through the same actions; and
+- Copilot session open/send/close with block address, session role, model,
+  workspace, and typed-tool names.
+
+Message and tool events contain the complete system, user, and assistant
+payloads plus tool arguments/results/stdout/stderr. The CLI prints the debug log
+path and a sensitive-data warning to stderr, but writes event content only to
+the file. `skipped` means an operation was deliberately not attempted because a
+prerequisite failed; it is distinct from a failure in the operation itself.
+
 Variables and outputs support `sensitive = true`, and sensitivity propagates
 through expressions and module boundaries. Plan display, normal Apply display,
 and normal logs redact known sensitive values.

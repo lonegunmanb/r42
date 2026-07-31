@@ -1,7 +1,9 @@
 package config_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,10 +13,39 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/lonegunmanb/r42/internal/config"
+	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
 )
+
+func TestLoadDirectoryContextRecordsDirectoryScanFailure(t *testing.T) {
+	t.Parallel()
+
+	logDirectory := t.TempDir()
+	recorder, err := debuglog.NewRecorder(logDirectory, true)
+	require.NoError(t, err)
+	ctx := debuglog.WithRecorder(t.Context(), recorder)
+	missing := filepath.Join(t.TempDir(), "missing")
+
+	_, _, err = config.LoadDirectoryContext(ctx, missing)
+	require.Error(t, err)
+	require.NoError(t, recorder.Close())
+
+	content, err := os.ReadFile(filepath.Join(logDirectory, debuglog.EventsFileName))
+	require.NoError(t, err)
+	var events []debuglog.Event
+	for line := range bytes.SplitSeq(bytes.TrimSpace(content), []byte("\n")) {
+		var event debuglog.Event
+		require.NoError(t, json.Unmarshal(line, &event))
+		events = append(events, event)
+	}
+	require.Len(t, events, 2)
+	assert.Equal(t, debuglog.StatusStarted, events[0].Status)
+	assert.Equal(t, debuglog.StatusFailed, events[1].Status)
+	assert.Equal(t, "config.directory.scan", events[1].Action)
+	assert.NotEmpty(t, events[1].Error)
+}
 
 func TestLoadDirectoryLoadsR42FilesInStableOrder(t *testing.T) {
 	t.Parallel()

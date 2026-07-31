@@ -2,13 +2,16 @@ package debuglog
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -19,8 +22,18 @@ const (
 type EventKind string
 
 const (
-	EventMessage EventKind = "message"
-	EventTool    EventKind = "tool"
+	EventMessage   EventKind = "message"
+	EventTool      EventKind = "tool"
+	EventLifecycle EventKind = "lifecycle"
+)
+
+type EventStatus string
+
+const (
+	StatusStarted   EventStatus = "started"
+	StatusCompleted EventStatus = "completed"
+	StatusFailed    EventStatus = "failed"
+	StatusSkipped   EventStatus = "skipped"
 )
 
 type SessionKind string
@@ -39,9 +52,25 @@ const (
 )
 
 type Event struct {
+	Sequence     uint64          `json:"sequence,omitempty"`
+	Timestamp    time.Time       `json:"timestamp,omitzero"`
 	Kind         EventKind       `json:"kind"`
 	BlockAddress string          `json:"block_address,omitempty"`
-	Session      SessionKind     `json:"session"`
+	BlockType    string          `json:"block_type,omitempty"`
+	Action       string          `json:"action,omitempty"`
+	Status       EventStatus     `json:"status,omitempty"`
+	Path         string          `json:"path,omitempty"`
+	Paths        []string        `json:"paths,omitempty"`
+	Dependencies []string        `json:"dependencies,omitempty"`
+	SourceRange  string          `json:"source_range,omitempty"`
+	Count        int             `json:"count,omitempty"`
+	Bytes        int             `json:"bytes,omitempty"`
+	DurationMS   *int64          `json:"duration_ms,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	Session      SessionKind     `json:"session,omitempty"`
+	Model        string          `json:"model,omitempty"`
+	WorkingDir   string          `json:"working_directory,omitempty"`
+	ToolNames    []string        `json:"tool_names,omitempty"`
 	Role         Role            `json:"role,omitempty"`
 	Content      string          `json:"content,omitempty"`
 	ToolName     string          `json:"tool_name,omitempty"`
@@ -52,12 +81,68 @@ type Event struct {
 }
 
 type Recorder struct {
-	mu      sync.Mutex
-	enabled bool
-	file    *os.File
-	buffer  *bufio.Writer
-	encoder *json.Encoder
-	closed  bool
+	mu       sync.Mutex
+	enabled  bool
+	file     *os.File
+	buffer   *bufio.Writer
+	encoder  *json.Encoder
+	closed   bool
+	sequence uint64
+}
+
+type recorderContextKey struct{}
+
+func WithRecorder(ctx context.Context, recorder *Recorder) context.Context {
+	return context.WithValue(ctx, recorderContextKey{}, recorder)
+}
+
+func Record(ctx context.Context, event Event) error {
+	if ctx == nil {
+		return nil
+	}
+	recorder, _ := ctx.Value(recorderContextKey{}).(*Recorder)
+	if recorder == nil {
+		return nil
+	}
+	return recorder.Record(event)
+}
+
+func Lifecycle(ctx context.Context, action string, status EventStatus, event Event) error {
+	event.Kind = EventLifecycle
+	event.Action = action
+	event.Status = status
+	return Record(ctx, event)
+}
+
+func CompleteLifecycle(
+	ctx context.Context,
+	action string,
+	started time.Time,
+	operationErr error,
+	event Event,
+) error {
+	duration := time.Since(started).Milliseconds()
+	event.DurationMS = &duration
+	status := StatusCompleted
+	if operationErr != nil {
+		status = StatusFailed
+		event.Error = operationErr.Error()
+	}
+	return Lifecycle(ctx, action, status, event)
+}
+
+func PlanBlock(ctx context.Context, address, blockType string, plan func() error) error {
+	event := Event{BlockAddress: address, BlockType: blockType}
+	if err := Lifecycle(ctx, "block.decode", StatusCompleted, event); err != nil {
+		return err
+	}
+	started := time.Now()
+	if err := Lifecycle(ctx, "block.plan", StatusStarted, event); err != nil {
+		return err
+	}
+	planErr := plan()
+	logErr := CompleteLifecycle(ctx, "block.plan", started, planErr, event)
+	return errors.Join(planErr, logErr)
 }
 
 func NewRecorder(directory string, enabled bool) (*Recorder, error) {
@@ -94,8 +179,19 @@ func (r *Recorder) Record(event Event) error {
 	if r.closed {
 		return fmt.Errorf("debug recorder is closed")
 	}
+	r.sequence++
+	event.Sequence = r.sequence
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	if event.Kind == EventLifecycle && event.Status != StatusStarted && event.DurationMS == nil {
+		event.DurationMS = new(int64)
+	}
 	if err := r.encoder.Encode(event); err != nil {
 		return fmt.Errorf("writing debug event: %w", err)
+	}
+	if err := r.buffer.Flush(); err != nil {
+		return fmt.Errorf("flushing debug event: %w", err)
 	}
 	return nil
 }

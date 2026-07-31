@@ -71,13 +71,25 @@ func (*Engine) Plan(
 	directory string,
 	variables []golden.CliFlagAssignedVariables,
 ) (*plan.Plan, error) {
+	if state := debugRunFromContext(ctx); state != nil {
+		var err error
+		ctx, _, _, err = state.ensure(ctx, directory)
+		if err != nil {
+			return nil, err
+		}
+	}
+	started := time.Now()
+	if err := debuglog.Lifecycle(ctx, "plan", debuglog.StatusStarted, debuglog.Event{Path: directory}); err != nil {
+		return nil, err
+	}
 	planned, err := modulespec.PlanDirectoryWithOptions(directory, modulespec.PlanOptions{
 		Context: ctx, Variables: variables,
 	})
+	logErr := recordLifecycleCompletion(ctx, "plan", started, err, debuglog.Event{Path: directory})
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, logErr)
 	}
-	return planned.Saved, nil
+	return planned.Saved, logErr
 }
 
 func (e *Engine) Apply(
@@ -88,12 +100,33 @@ func (e *Engine) Apply(
 	if planned == nil {
 		return ApplyResult{}, fmt.Errorf("saved plan is required")
 	}
-	activeRun, err := run.NewManager(planned.Directory()).Create()
+	state := debugRunFromContext(ctx)
+	ownedDebugState := false
+	var activeRun *run.Run
+	var recorder *debuglog.Recorder
+	var err error
+	if options.Debug {
+		if state == nil {
+			state = &debugRun{enabled: true}
+			ownedDebugState = true
+		}
+		ctx, activeRun, recorder, err = state.ensure(ctx, planned.Directory())
+	} else {
+		activeRun, err = run.NewManager(planned.Directory()).Create()
+		if err == nil {
+			recorder, err = debuglog.NewRecorder(activeRun.Directory(), false)
+		}
+	}
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	recorder, err := debuglog.NewRecorder(activeRun.Directory(), options.Debug)
-	if err != nil {
+	started := time.Now()
+	if err = debuglog.Lifecycle(ctx, "apply", debuglog.StatusStarted, debuglog.Event{
+		Path: planned.Directory(), Count: len(planned.Nodes()),
+	}); err != nil {
+		if ownedDebugState {
+			_ = state.close()
+		}
 		return ApplyResult{}, err
 	}
 	sessions := e.options.Sessions
@@ -116,10 +149,41 @@ func (e *Engine) Apply(
 	if closeErr := factory.Close(); closeErr != nil {
 		warnings = append(warnings, closeErr)
 	}
-	if closeErr := recorder.Close(); closeErr != nil {
-		warnings = append(warnings, fmt.Errorf("close debug log: %w", closeErr))
+	if logErr := recordLifecycleCompletion(ctx, "apply", started, applyErr, debuglog.Event{
+		Path: planned.Directory(), Count: len(planned.Nodes()),
+	}); logErr != nil {
+		warnings = append(warnings, logErr)
+	}
+	if ownedDebugState {
+		if closeErr := state.close(); closeErr != nil {
+			warnings = append(warnings, fmt.Errorf("close debug log: %w", closeErr))
+		}
+	} else if !options.Debug {
+		if closeErr := recorder.Close(); closeErr != nil {
+			warnings = append(warnings, fmt.Errorf("close debug log: %w", closeErr))
+		}
 	}
 	return ApplyResult{Outputs: outputs, Warnings: warnings}, applyErr
+}
+
+func recordLifecycleCompletion(
+	ctx context.Context,
+	action string,
+	started time.Time,
+	operationErr error,
+	event debuglog.Event,
+) error {
+	duration := time.Since(started).Milliseconds()
+	event.DurationMS = &duration
+	status := debuglog.StatusCompleted
+	if operationErr != nil {
+		status = debuglog.StatusFailed
+		event.Error = operationErr.Error()
+	}
+	if err := debuglog.Lifecycle(ctx, action, status, event); err != nil {
+		return fmt.Errorf("record %s lifecycle: %w", action, err)
+	}
+	return nil
 }
 
 type runtimeFactory struct {
@@ -221,7 +285,7 @@ func (f *runtimeFactory) New(
 	if err = planned.Config.ValidateResolved(resolved); err != nil {
 		return nil, err
 	}
-	session, err := f.sessions.Open(ctx, copilot.SessionConfig{
+	session, err := f.openSession(ctx, executionAddress, debuglog.SessionResearch, copilot.SessionConfig{
 		Provider: planned.Provider, Retry: retry, Model: planned.Config.Model,
 		ReasoningEffort: reasoning, SystemPrompt: systemPrompt, WorkingDirectory: workspace,
 		AvailableTools:   slices.Clone(planned.Config.Policy.AllowedTools),
@@ -241,9 +305,10 @@ func (f *runtimeFactory) New(
 	if planned.TerminateTool != nil {
 		terminalRecorder = terminal
 	}
-	runner := researchruntime.NewRunner(&recordingSession{
+	recordedSession := &recordingSession{
 		Session: session, recorder: f.recorder, address: executionAddress, kind: debuglog.SessionResearch,
-	}, terminalRecorder)
+	}
+	runner := researchruntime.NewRunner(recordedSession, terminalRecorder)
 	var qcRunner *qc.Runner
 	var qcConfig qc.Config
 	var qcSession Session
@@ -256,13 +321,13 @@ func (f *runtimeFactory) New(
 		if selectedProvider != nil {
 			providerRetry, err = provider.MergeRetry(providerRetry, selectedProvider.Retry)
 			if err != nil {
-				f.closeAfterSetupFailure(ctx, session)
+				f.closeAfterSetupFailure(ctx, recordedSession)
 				return nil, err
 			}
 		}
 		effective, effectiveErr := planned.Config.EffectiveQC(providerRetry)
 		if effectiveErr != nil {
-			f.closeAfterSetupFailure(ctx, session)
+			f.closeAfterSetupFailure(ctx, recordedSession)
 			return nil, effectiveErr
 		}
 		qcToolsPlan := planned
@@ -273,7 +338,7 @@ func (f *runtimeFactory) New(
 			researchruntime.NewTerminalRecorder(),
 		)
 		if toolsErr != nil {
-			f.closeAfterSetupFailure(ctx, session)
+			f.closeAfterSetupFailure(ctx, recordedSession)
 			return nil, toolsErr
 		}
 		verdicts := qc.NewVerdictRecorder()
@@ -287,7 +352,7 @@ func (f *runtimeFactory) New(
 			Kind: debuglog.EventMessage, BlockAddress: executionAddress, Session: debuglog.SessionQC,
 			Role: debuglog.RoleSystem, Content: qcSystemPrompt,
 		})
-		qcSession, err = f.sessions.Open(ctx, copilot.SessionConfig{
+		qcSession, err = f.openSession(ctx, executionAddress, debuglog.SessionQC, copilot.SessionConfig{
 			Provider: selectedProvider, Retry: effective.Retry, Model: effective.Model,
 			ReasoningEffort: qcReasoning, SystemPrompt: qcSystemPrompt, WorkingDirectory: workspace,
 			Tools: qcTools, AvailableTools: slices.Clone(effective.AllowedTools), ExcludedTools: slices.Clone(effective.DisallowedTools),
@@ -295,12 +360,13 @@ func (f *runtimeFactory) New(
 			DisabledSkills: slices.Clone(effective.DisabledSkills),
 		})
 		if err != nil {
-			f.closeAfterSetupFailure(ctx, session)
+			f.closeAfterSetupFailure(ctx, recordedSession)
 			return nil, err
 		}
-		qcRunner = qc.NewRunner(runner, &recordingSession{
+		qcSession = &recordingSession{
 			Session: qcSession, recorder: f.recorder, address: executionAddress, kind: debuglog.SessionQC,
-		}, verdicts)
+		}
+		qcRunner = qc.NewRunner(runner, qcSession, verdicts)
 		qcConfig = qc.Config{
 			Task:     qc.Task{SystemPrompt: planned.Config.SystemPrompt, Prompt: planned.Config.Prompt},
 			Criteria: effective.Criteria, Artifacts: planned.Config.Artifacts,
@@ -314,7 +380,7 @@ func (f *runtimeFactory) New(
 		}
 	}
 	block := &researchApplyBlock{
-		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address, session: session,
+		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address, session: recordedSession,
 		runner: runner, qcRunner: qcRunner, qcConfig: qcConfig, qcSession: qcSession, config: researchruntime.Config{
 			InitialPrompt: initialPrompt, MaxProtocolAttempts: planned.Config.MaxProtocolAttempts,
 			Timeout: planned.Config.Timeout, Workspace: workspace, Artifacts: planned.Config.Artifacts,
@@ -329,6 +395,39 @@ func (f *runtimeFactory) closeAfterSetupFailure(ctx context.Context, session Ses
 	if err := session.Close(context.WithoutCancel(ctx)); err != nil {
 		f.state.addWarning(fmt.Errorf("close research session after setup failure: %w", err))
 	}
+}
+
+func (f *runtimeFactory) openSession(
+	ctx context.Context,
+	address string,
+	kind debuglog.SessionKind,
+	config copilot.SessionConfig,
+) (Session, error) {
+	toolNames := make([]string, len(config.Tools))
+	for index, tool := range config.Tools {
+		toolNames[index] = tool.Name
+	}
+	event := debuglog.Event{
+		BlockAddress: address,
+		Session:      kind,
+		Model:        config.Model,
+		WorkingDir:   config.WorkingDirectory,
+		ToolNames:    toolNames,
+	}
+	started := time.Now()
+	if err := debuglog.Lifecycle(ctx, "session.open", debuglog.StatusStarted, event); err != nil {
+		return nil, err
+	}
+	session, err := f.sessions.Open(ctx, config)
+	logErr := debuglog.CompleteLifecycle(ctx, "session.open", started, err, event)
+	if err == nil && logErr == nil {
+		return session, nil
+	}
+	var closeErr error
+	if session != nil {
+		closeErr = session.Close(ctx)
+	}
+	return nil, errors.Join(err, logErr, closeErr)
 }
 
 func (f *runtimeFactory) newModuleBlock(
@@ -950,21 +1049,41 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 	}); err != nil {
 		return nil, err
 	}
-	event, err := s.Session.SendAndWait(ctx, options)
-	if err != nil {
+	ctx = debuglog.WithRecorder(ctx, s.recorder)
+	lifecycleEvent := debuglog.Event{BlockAddress: s.address, Session: s.kind}
+	started := time.Now()
+	if err := debuglog.Lifecycle(ctx, "session.send", debuglog.StatusStarted, lifecycleEvent); err != nil {
 		return nil, err
 	}
-	content, marshalErr := json.Marshal(event)
-	if marshalErr != nil {
-		return nil, fmt.Errorf("encode assistant event: %w", marshalErr)
+	event, operationErr := s.Session.SendAndWait(ctx, options)
+	if operationErr == nil {
+		content, marshalErr := json.Marshal(event)
+		if marshalErr != nil {
+			operationErr = fmt.Errorf("encode assistant event: %w", marshalErr)
+		} else if recordErr := s.recorder.Record(debuglog.Event{
+			Kind: debuglog.EventMessage, BlockAddress: s.address, Session: s.kind,
+			Role: debuglog.RoleAssistant, Content: string(content),
+		}); recordErr != nil {
+			operationErr = recordErr
+		}
 	}
-	if err = s.recorder.Record(debuglog.Event{
-		Kind: debuglog.EventMessage, BlockAddress: s.address, Session: s.kind,
-		Role: debuglog.RoleAssistant, Content: string(content),
-	}); err != nil {
-		return nil, err
+	logErr := debuglog.CompleteLifecycle(ctx, "session.send", started, operationErr, lifecycleEvent)
+	if operationErr != nil || logErr != nil {
+		return nil, errors.Join(operationErr, logErr)
 	}
 	return event, nil
+}
+
+func (s *recordingSession) Close(ctx context.Context) error {
+	ctx = debuglog.WithRecorder(ctx, s.recorder)
+	event := debuglog.Event{BlockAddress: s.address, Session: s.kind}
+	started := time.Now()
+	startLogErr := debuglog.Lifecycle(ctx, "session.close", debuglog.StatusStarted, event)
+	closeErr := s.Session.Close(ctx)
+	if startLogErr != nil {
+		return errors.Join(closeErr, startLogErr)
+	}
+	return errors.Join(closeErr, debuglog.CompleteLifecycle(ctx, "session.close", started, closeErr, event))
 }
 
 func researchRetry(configValue *provider.Config, override provider.RetryOverride) (provider.RetryPolicy, error) {

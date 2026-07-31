@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/Azure/golden"
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
+	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/stretchr/testify/assert"
@@ -170,6 +174,30 @@ func TestExecutorPreservesPrimaryFailureAndCleanupWarnings(t *testing.T) {
 	assert.NotContains(t, actual, "unexpected dependent apply")
 	assert.Less(t, eventIndex(t, actual, "apply failed"), eventIndex(t, actual, "close failure session"))
 	assert.Equal(t, len(actual)-1, eventIndex(t, actual, "flush debug"))
+}
+
+func TestExecutorRecordsSkippedOutputResolutionAfterBlockFailure(t *testing.T) {
+	t.Parallel()
+
+	logDirectory := t.TempDir()
+	recorder, err := debuglog.NewRecorder(logDirectory, true)
+	require.NoError(t, err)
+	ctx := debuglog.WithRecorder(t.Context(), recorder)
+	factory := &fakeFactory{build: func(_ context.Context, node plan.NodeSpec, _ *r42concurrency.Scope) (golden.ApplyBlock, error) {
+		return newFakeBlock(node.Address, func() error { return assert.AnError }, nil), nil
+	}}
+	planned := savedPlan(t, []plan.NodeSpec{{Address: "research.failure", Kind: "research", Config: cty.EmptyObjectVal}}, nil)
+
+	_, err = executor.New(factory, nil).Apply(ctx, planned, 1)
+	require.Error(t, err)
+	require.NoError(t, recorder.Close())
+
+	content, err := os.ReadFile(filepath.Join(logDirectory, debuglog.EventsFileName))
+	require.NoError(t, err)
+	assert.Contains(t, string(content), `"action":"apply.outputs.resolve","status":"skipped"`)
+	assert.NotContains(t, string(content), `"action":"apply.outputs.resolve","status":"failed"`)
+	assert.NotContains(t, string(content), `"block_address":"research.failure","block_type":"research","action":"block.decode","status":"started"`)
+	assert.Equal(t, 1, strings.Count(string(content), `"block_address":"research.failure","block_type":"research","action":"block.decode","status":"completed"`))
 }
 
 func TestExecutorCleanupUsesLiveContextAfterApplyFailure(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/lonegunmanb/r42/internal/config"
+	"github.com/lonegunmanb/r42/internal/debuglog"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
@@ -45,14 +46,15 @@ func (b *GoToolBlock) Value() cty.Value {
 }
 
 func (b *GoToolBlock) ExecuteDuringPlan() error {
-	if strings.TrimSpace(b.Description) == "" {
-		return fmt.Errorf("go tool description is required")
-	}
-	if strings.TrimSpace(b.Source) == "" {
-		return fmt.Errorf("go tool source is required")
-	}
-
-	return nil
+	return debuglog.PlanBlock(b.Context(), b.Address(), b.BlockType(), func() error {
+		if strings.TrimSpace(b.Description) == "" {
+			return fmt.Errorf("go tool description is required")
+		}
+		if strings.TrimSpace(b.Source) == "" {
+			return fmt.Errorf("go tool source is required")
+		}
+		return nil
+	})
 }
 
 type ExternalToolBlock struct {
@@ -151,14 +153,15 @@ func validateExternalToolSchema(block *golden.HclBlock) error {
 }
 
 func (b *ExternalToolBlock) ExecuteDuringPlan() error {
-	if strings.TrimSpace(b.Description) == "" {
-		return fmt.Errorf("external tool description is required")
-	}
-	if len(b.Program) == 0 || strings.TrimSpace(b.Program[0]) == "" {
-		return fmt.Errorf("external tool program must contain an executable")
-	}
-
-	return nil
+	return debuglog.PlanBlock(b.Context(), b.Address(), b.BlockType(), func() error {
+		if strings.TrimSpace(b.Description) == "" {
+			return fmt.Errorf("external tool description is required")
+		}
+		if len(b.Program) == 0 || strings.TrimSpace(b.Program[0]) == "" {
+			return fmt.Errorf("external tool program must contain an executable")
+		}
+		return nil
+	})
 }
 
 func (b *ExternalToolBlock) InputConstraint() Constraint {

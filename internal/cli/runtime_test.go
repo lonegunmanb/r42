@@ -253,6 +253,10 @@ research "source" {
 	assert.Contains(t, events, `"tool_name":"go_tool_lookup"`)
 	assert.Contains(t, events, `"Query":"facts"`)
 	assert.Contains(t, events, "lookup failed completely")
+	assert.Contains(t, events, `"action":"session.send","status":"failed"`)
+	assert.Contains(t, events, `"action":"block.apply","status":"failed"`)
+	assert.Contains(t, events, `"action":"apply.golden.run_plan","status":"failed"`)
+	assert.Contains(t, events, `"action":"apply","status":"failed"`)
 }
 
 func readOnlyRunEvents(t *testing.T, directory string) string {

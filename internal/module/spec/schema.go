@@ -8,6 +8,7 @@ import (
 
 	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
+	"github.com/lonegunmanb/r42/internal/debuglog"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -76,18 +77,20 @@ func (b *ModuleBlock) Decode(block *golden.HclBlock, context *hcl.EvalContext) e
 }
 
 func (b *ModuleBlock) ExecuteDuringPlan() error {
-	planner, ok := b.Config().(interface {
-		planChild(string, map[string]cty.Value, *int, *string) (ModulePlan, error)
+	return debuglog.PlanBlock(b.Context(), b.Address(), b.BlockType(), func() error {
+		planner, ok := b.Config().(interface {
+			planChild(string, map[string]cty.Value, *int, *string) (ModulePlan, error)
+		})
+		if !ok {
+			return fmt.Errorf("module %q requires an r42 module planning config", b.Name())
+		}
+		planned, err := planner.planChild(b.Source, b.Inputs, b.Parallelism, b.Timeout)
+		if err != nil {
+			return fmt.Errorf("planning module %q: %w", b.Name(), err)
+		}
+		b.planned = planned
+		return nil
 	})
-	if !ok {
-		return fmt.Errorf("module %q requires an r42 module planning config", b.Name())
-	}
-	planned, err := planner.planChild(b.Source, b.Inputs, b.Parallelism, b.Timeout)
-	if err != nil {
-		return fmt.Errorf("planning module %q: %w", b.Name(), err)
-	}
-	b.planned = planned
-	return nil
 }
 
 func (b *ModuleBlock) Value() cty.Value {
@@ -123,18 +126,20 @@ func (*OutputBlock) AddressLength() int { return 2 }
 func (*OutputBlock) CanExecutePrePlan() bool { return false }
 
 func (b *OutputBlock) ExecuteDuringPlan() error {
-	if err := b.validatePrimitiveFields(); err != nil {
-		return err
-	}
-	unmarked, _ := b.Expression.UnmarkDeep()
-	if err := corespec.ValidateType(unmarked.Type()); err != nil {
-		return fmt.Errorf("output %q type: %w", b.Name(), err)
-	}
-	b.planned = b.Expression
-	if b.Sensitive {
-		b.planned = corespec.MarkSensitive(b.planned)
-	}
-	return nil
+	return debuglog.PlanBlock(b.Context(), b.Address(), b.BlockType(), func() error {
+		if err := b.validatePrimitiveFields(); err != nil {
+			return err
+		}
+		unmarked, _ := b.Expression.UnmarkDeep()
+		if err := corespec.ValidateType(unmarked.Type()); err != nil {
+			return fmt.Errorf("output %q type: %w", b.Name(), err)
+		}
+		b.planned = b.Expression
+		if b.Sensitive {
+			b.planned = corespec.MarkSensitive(b.planned)
+		}
+		return nil
+	})
 }
 
 func (b *OutputBlock) Value() cty.Value {

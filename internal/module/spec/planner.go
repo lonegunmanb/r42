@@ -2,6 +2,7 @@ package spec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/lonegunmanb/r42/internal/config"
+	"github.com/lonegunmanb/r42/internal/debuglog"
 	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
@@ -106,7 +108,7 @@ func planDirectory(
 	if slices.Contains(stack, directory) {
 		return Plan{}, fmt.Errorf("module directory cycle: %v -> %s", stack, directory)
 	}
-	loaded, diagnostics, err := config.LoadDirectory(directory)
+	loaded, diagnostics, err := config.LoadDirectoryContext(options.Context, directory)
 	if err != nil {
 		return Plan{}, fmt.Errorf("reading module directory: %w", err)
 	}
@@ -151,11 +153,53 @@ func planDirectory(
 		stack:                  append(slices.Clone(stack), directory),
 		sensitiveVariables:     sensitiveVariables,
 	}
-	if err = golden.InitConfig(planning, loaded.Blocks); err != nil {
+	initStarted := time.Now()
+	if err = debuglog.Lifecycle(options.Context, "golden.config.init", debuglog.StatusStarted, debuglog.Event{
+		Path: directory, Count: len(loaded.Blocks),
+	}); err != nil {
 		return Plan{}, err
 	}
-	if err = planning.RunPlan(); err != nil {
+	initErr := golden.InitConfig(planning, loaded.Blocks)
+	if logErr := debuglog.CompleteLifecycle(options.Context, "golden.config.init", initStarted, initErr, debuglog.Event{
+		Path: directory, Count: len(loaded.Blocks),
+	}); logErr != nil {
+		initErr = errors.Join(initErr, logErr)
+	}
+	if initErr != nil {
+		return Plan{}, initErr
+	}
+	for _, block := range golden.Blocks[golden.Block](planning) {
+		event := debuglog.Event{
+			BlockAddress: block.Address(), BlockType: block.BlockType(), SourceRange: block.HclBlock().Range().String(),
+		}
+		switch block.(type) {
+		case *golden.VariableBlock, *golden.LocalBlock:
+			if err = debuglog.Lifecycle(options.Context, "block.decode", debuglog.StatusCompleted, event); err != nil {
+				return Plan{}, err
+			}
+			if err = debuglog.Lifecycle(options.Context, "block.plan", debuglog.StatusCompleted, event); err != nil {
+				return Plan{}, err
+			}
+		default:
+			if err = debuglog.Lifecycle(options.Context, "block.decode", debuglog.StatusStarted, event); err != nil {
+				return Plan{}, err
+			}
+		}
+	}
+	planStarted := time.Now()
+	if err = debuglog.Lifecycle(options.Context, "golden.run_plan", debuglog.StatusStarted, debuglog.Event{
+		Path: directory, Count: len(loaded.Blocks),
+	}); err != nil {
 		return Plan{}, err
+	}
+	runPlanErr := planning.RunPlan()
+	if logErr := debuglog.CompleteLifecycle(options.Context, "golden.run_plan", planStarted, runPlanErr, debuglog.Event{
+		Path: directory, Count: len(loaded.Blocks),
+	}); logErr != nil {
+		runPlanErr = errors.Join(runPlanErr, logErr)
+	}
+	if runPlanErr != nil {
+		return Plan{}, runPlanErr
 	}
 
 	plan := Plan{
@@ -169,7 +213,20 @@ func planDirectory(
 	for _, module := range golden.Blocks[*ModuleBlock](planning) {
 		plan.Modules[module.Name()] = module.PlannedModule()
 	}
+	snapshotStarted := time.Now()
+	if err = debuglog.Lifecycle(options.Context, "plan.snapshot", debuglog.StatusStarted, debuglog.Event{Path: directory}); err != nil {
+		return Plan{}, err
+	}
 	plan.Saved, err = savedPlan(planning, plan)
+	count := 0
+	if plan.Saved != nil {
+		count = len(plan.Saved.Nodes())
+	}
+	if logErr := debuglog.CompleteLifecycle(options.Context, "plan.snapshot", snapshotStarted, err, debuglog.Event{
+		Path: directory, Count: count,
+	}); logErr != nil {
+		err = errors.Join(err, logErr)
+	}
 	if err != nil {
 		return Plan{}, err
 	}

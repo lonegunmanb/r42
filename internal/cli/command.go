@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Azure/golden"
+	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/spf13/cobra"
 	"github.com/zclconf/go-cty/cty"
@@ -72,6 +73,7 @@ func NewCommand(runtime Runtime) *cobra.Command {
 func newPlanCommand(runtime Runtime) *cobra.Command {
 	directory := "."
 	var outputPath string
+	var debug bool
 	var variables []string
 	var variableFiles []string
 	command := &cobra.Command{
@@ -82,31 +84,58 @@ func newPlanCommand(runtime Runtime) *cobra.Command {
 			if runtime == nil {
 				return fmt.Errorf("runtime is required")
 			}
-			planned, err := runtime.Plan(command.Context(), directory, goldenVariables(variables, variableFiles))
+			ctx := command.Context()
+			debugState := &debugRun{enabled: debug}
+			if debug {
+				writeWarning(command.ErrOrStderr(), "debug output contains sensitive configuration, prompts, transcripts, and tool data")
+				ctx = withDebugRun(ctx, debugState)
+			}
+			planned, err := runtime.Plan(ctx, directory, goldenVariables(variables, variableFiles))
 			if err != nil {
-				return fmt.Errorf("plan directory %q: %w", directory, err)
+				return errors.Join(fmt.Errorf("plan directory %q: %w", directory, err), closeCommandDebug(command, debugState))
+			}
+			ctx, _, _, err = debugState.ensure(ctx, directory)
+			if err != nil {
+				return errors.Join(err, closeCommandDebug(command, debugState))
+			}
+			displayStarted := time.Now()
+			if err = debuglog.Lifecycle(ctx, "plan.display", debuglog.StatusStarted, debuglog.Event{Path: directory}); err != nil {
+				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
 			display, err := plan.Display(planned)
+			displayLogErr := debuglog.CompleteLifecycle(ctx, "plan.display", displayStarted, err, debuglog.Event{Path: directory, Bytes: len(display)})
 			if err != nil {
-				return fmt.Errorf("display plan: %w", err)
+				return errors.Join(fmt.Errorf("display plan: %w", err), displayLogErr, closeCommandDebug(command, debugState))
+			}
+			if displayLogErr != nil {
+				return errors.Join(displayLogErr, closeCommandDebug(command, debugState))
 			}
 			if _, err = io.WriteString(command.OutOrStdout(), display); err != nil {
-				return err
+				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
 			if strings.TrimSpace(outputPath) != "" {
+				saveStarted := time.Now()
+				if err = debuglog.Lifecycle(ctx, "plan.save", debuglog.StatusStarted, debuglog.Event{Path: outputPath}); err != nil {
+					return errors.Join(err, closeCommandDebug(command, debugState))
+				}
 				warning, saveErr := plan.Save(outputPath, planned)
+				saveLogErr := debuglog.CompleteLifecycle(ctx, "plan.save", saveStarted, saveErr, debuglog.Event{Path: outputPath})
 				if saveErr != nil {
-					return fmt.Errorf("save plan %q: %w", outputPath, saveErr)
+					return errors.Join(fmt.Errorf("save plan %q: %w", outputPath, saveErr), saveLogErr, closeCommandDebug(command, debugState))
+				}
+				if saveLogErr != nil {
+					return errors.Join(saveLogErr, closeCommandDebug(command, debugState))
 				}
 				if warning != "" {
 					writeWarning(command.ErrOrStderr(), warning)
 				}
 			}
-			return nil
+			return closeCommandDebug(command, debugState)
 		},
 	}
 	command.Flags().StringVarP(&directory, "directory", "d", directory, "directory containing .r42 files")
 	command.Flags().StringVar(&outputPath, "out", "", "saved plan path")
+	command.Flags().BoolVar(&debug, "debug", false, "persist sensitive planning debug events")
 	command.Flags().StringArrayVar(&variables, "var", nil, "set a Golden input variable (name=value)")
 	command.Flags().StringArrayVar(&variableFiles, "var-file", nil, "load Golden input variables from a file")
 	return command
@@ -141,23 +170,29 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 				ctx, cancel = context.WithTimeout(ctx, timeout)
 				defer cancel()
 			}
+			debugState := &debugRun{enabled: debug}
+			if debug {
+				ctx = withDebugRun(ctx, debugState)
+				writeWarning(command.ErrOrStderr(), "debug output contains sensitive configuration, prompts, transcripts, and tool data")
+			}
 			planned, err := loadOrPlan(
 				ctx, runtime, args[0], goldenVariables(variables, variableFiles),
 			)
 			if err != nil {
-				return err
-			}
-			if debug {
-				writeWarning(command.ErrOrStderr(), "debug output contains sensitive prompts, transcripts, and tool data")
+				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
 			result, err := runtime.Apply(ctx, planned, ApplyOptions{Parallelism: parallelism, Debug: debug})
+			closeErr := closeCommandDebug(command, debugState)
 			for _, warning := range result.Warnings {
 				if warning != nil {
 					writeWarning(command.ErrOrStderr(), warning.Error())
 				}
 			}
 			if err != nil {
-				return err
+				return errors.Join(err, closeErr)
+			}
+			if closeErr != nil {
+				return closeErr
 			}
 			return writeOutputs(command.OutOrStdout(), result.Outputs)
 		},
@@ -168,6 +203,18 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 	command.Flags().StringArrayVar(&variables, "var", nil, "set a Golden input variable for directory apply (name=value)")
 	command.Flags().StringArrayVar(&variableFiles, "var-file", nil, "load Golden input variables for directory apply")
 	return command
+}
+
+func closeCommandDebug(command *cobra.Command, state *debugRun) error {
+	path := state.path()
+	err := state.close()
+	if path != "" {
+		writeWarning(command.ErrOrStderr(), "debug log: "+path)
+	}
+	if err != nil {
+		return fmt.Errorf("close debug log: %w", err)
+	}
+	return nil
 }
 
 func usageArgs(validate cobra.PositionalArgs) cobra.PositionalArgs {

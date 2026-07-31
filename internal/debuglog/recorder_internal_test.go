@@ -17,6 +17,8 @@ func TestCloseReportsFlushFailure(t *testing.T) {
 		Role:    RoleUser,
 		Content: "buffered",
 	}))
+	_, err = recorder.buffer.WriteString("pending")
+	require.NoError(t, err)
 	require.NoError(t, recorder.file.Close())
 
 	require.ErrorContains(t, recorder.Close(), "flushing debug events")

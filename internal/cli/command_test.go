@@ -3,7 +3,9 @@ package cli_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -136,6 +138,122 @@ func TestCommandPlanHelpDescribesOptionalDirectoryAndOutput(t *testing.T) {
 	assert.Contains(t, stdout, "-d, --directory string")
 	assert.Contains(t, stdout, `(default ".")`)
 	assert.NotContains(t, stdout, "plan DIRECTORY")
+}
+
+func TestCommandPlanDebugRecordsDetailedGoldenPlanningLifecycle(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+output "answer" { value = "42" }
+`), 0o600))
+
+	planPath := filepath.Join(t.TempDir(), "saved.r42plan")
+	_, stderr, err := execute(t, cli.NewRuntime(), "plan", "--directory", directory, "--out", planPath, "--debug")
+
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "sensitive")
+	events := readDebugEvents(t, directory)
+	for _, action := range []string{
+		"plan",
+		"config.directory.scan",
+		"config.file.collect",
+		"hcl.syntax.parse",
+		"hcl.write.parse",
+		"hcl.block.extract",
+		"golden.config.init",
+		"golden.run_plan",
+		"block.decode",
+		"block.plan",
+		"plan.snapshot",
+		"plan.display",
+		"plan.save",
+	} {
+		assert.Contains(t, events, `"action":"`+action+`"`)
+	}
+	encodedPath, err := json.Marshal(filepath.Join(directory, "main.r42"))
+	require.NoError(t, err)
+	assert.Contains(t, events, string(encodedPath))
+}
+
+func TestCommandPlanDebugDoesNotCreateMissingDirectory(t *testing.T) {
+	t.Parallel()
+
+	directory := filepath.Join(t.TempDir(), "missing")
+
+	_, _, err := execute(t, cli.NewRuntime(), "plan", "--directory", directory, "--debug")
+
+	require.Error(t, err)
+	_, statErr := os.Stat(directory)
+	require.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestCommandPlanDebugRecordsParseFailure(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "broken.r42"), []byte(`research "broken" {`), 0o600))
+
+	_, _, err := execute(t, cli.NewRuntime(), "plan", "--directory", directory, "--debug")
+
+	require.Error(t, err)
+	events := readDebugEvents(t, directory)
+	assert.Contains(t, events, `"action":"hcl.syntax.parse","status":"failed"`)
+	assert.Contains(t, events, `"action":"plan","status":"failed"`)
+	assert.Contains(t, events, `"error":`)
+}
+
+func TestCommandApplyDebugRecordsDetailedPlanAndApplyLifecycle(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+research "source" {
+  model         = "test-model"
+  system_prompt = "Collect evidence."
+}
+output "answer" { value = "42" }
+`), 0o600))
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: &fakeSessionOpener{}})
+
+	_, _, err := execute(t, runtime, "apply", directory, "--debug", "--parallelism", "1")
+
+	require.NoError(t, err)
+	events := readDebugEvents(t, directory)
+	for _, action := range []string{
+		"plan",
+		"config.file.collect",
+		"hcl.block.extract",
+		"golden.config.init",
+		"golden.run_plan",
+		"plan.snapshot",
+		"apply",
+		"apply.saved_hcl.build",
+		"apply.golden.config.init",
+		"apply.golden.run_plan",
+		"block.decode",
+		"block.plan",
+		"block.factory",
+		"block.apply",
+		"block.cleanup",
+		"apply.outputs.resolve",
+		"session.open",
+		"session.send",
+		"session.close",
+	} {
+		assert.Contains(t, events, `"action":"`+action+`"`)
+	}
+	assert.Contains(t, events, `"block_address":"research.source"`)
+}
+
+func readDebugEvents(t *testing.T, directory string) string {
+	t.Helper()
+	runs, err := os.ReadDir(filepath.Join(directory, ".r42", "runs"))
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	content, err := os.ReadFile(filepath.Join(directory, ".r42", "runs", runs[0].Name(), "events.jsonl"))
+	require.NoError(t, err)
+	return string(content)
 }
 
 func TestCommandApplySupportsSavedPlanAndDirectory(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Azure/golden"
+	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
@@ -49,20 +50,22 @@ func (b *ModelProviderBlock) Value() cty.Value {
 }
 
 func (b *ModelProviderBlock) ExecuteDuringPlan() error {
-	if err := b.validateStringAttributes(); err != nil {
-		return err
-	}
-	config, err := b.toConfig()
-	if err != nil {
-		return err
-	}
-	if err = config.Validate(); err != nil {
-		return err
-	}
-	b.APIKeyAttribute = sensitiveString(b.APIKey)
-	b.BearerTokenAttribute = sensitiveString(b.BearerToken)
-	b.planned = config
-	return nil
+	return debuglog.PlanBlock(b.Context(), b.Address(), b.BlockType(), func() error {
+		if err := b.validateStringAttributes(); err != nil {
+			return err
+		}
+		config, err := b.toConfig()
+		if err != nil {
+			return err
+		}
+		if err = config.Validate(); err != nil {
+			return err
+		}
+		b.APIKeyAttribute = sensitiveString(b.APIKey)
+		b.BearerTokenAttribute = sensitiveString(b.BearerToken)
+		b.planned = config
+		return nil
+	})
 }
 
 func (b *ModelProviderBlock) validateStringAttributes() error {

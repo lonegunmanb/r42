@@ -141,7 +141,12 @@ r42 deliberately does not compensate for the following general Golden issues:
   ([Azure/golden#86](https://github.com/Azure/golden/issues/86));
 - decoding a plan-time unknown cty value into a native Go primitive field fails
   with `value must be known`; this prevents an apply-time value such as an
-  artifact path from being interpolated directly into a native `string` field.
+  artifact path from being interpolated directly into a native `string` field;
+- `InitConfig` and `RunPrePlan` expose only aggregate decode failure, with no
+  per-block decode callback or middleware. r42 can log the failed Golden config
+  initialization and its diagnostic, but cannot emit an accurate terminal
+  lifecycle event for the individual failing block without changing Golden or
+  replaying decode with observable side effects.
 
 These behaviors belong in Golden because they affect every DSL built on its
 block wrapping, expansion, and value aggregation. P1-T06 therefore contains no

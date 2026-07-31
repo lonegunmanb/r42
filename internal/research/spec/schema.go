@@ -10,6 +10,7 @@ import (
 
 	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
+	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/provider"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
@@ -48,18 +49,20 @@ func (*ResearchBlock) AddressLength() int { return 2 }
 func (*ResearchBlock) CanExecutePrePlan() bool { return false }
 
 func (b *ResearchBlock) ExecuteDuringPlan() error {
-	if err := b.validateNativeStringFields(); err != nil {
-		return err
-	}
-	config, err := b.toConfig()
-	if err != nil {
-		return err
-	}
-	if err = config.Validate(); err != nil {
-		return err
-	}
-	b.planned = config
-	return nil
+	return debuglog.PlanBlock(b.Context(), b.Address(), b.BlockType(), func() error {
+		if err := b.validateNativeStringFields(); err != nil {
+			return err
+		}
+		config, err := b.toConfig()
+		if err != nil {
+			return err
+		}
+		if err = config.Validate(); err != nil {
+			return err
+		}
+		b.planned = config
+		return nil
+	})
 }
 
 func (b *ResearchBlock) validateNativeStringFields() error {

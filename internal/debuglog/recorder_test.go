@@ -1,6 +1,7 @@
 package debuglog_test
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,11 +9,56 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestContextRecorderPersistsSequencedLifecycleEvents(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	recorder, err := debuglog.NewRecorder(directory, true)
+	require.NoError(t, err)
+	ctx := debuglog.WithRecorder(t.Context(), recorder)
+
+	require.NoError(t, debuglog.Record(ctx, debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "golden.run_plan", Status: debuglog.StatusStarted,
+	}))
+	require.NoError(t, debuglog.Record(ctx, debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "golden.run_plan", Status: debuglog.StatusCompleted,
+	}))
+	require.NoError(t, recorder.Close())
+
+	content, err := os.ReadFile(filepath.Join(directory, debuglog.EventsFileName))
+	require.NoError(t, err)
+	lines := splitLines(string(content))
+	require.Len(t, lines, 2)
+	var first, second debuglog.Event
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &first))
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &second))
+	var firstFields, secondFields map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &firstFields))
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &secondFields))
+	assert.Equal(t, uint64(1), first.Sequence)
+	assert.Equal(t, uint64(2), second.Sequence)
+	assert.False(t, first.Timestamp.IsZero())
+	assert.False(t, second.Timestamp.Before(first.Timestamp))
+	assert.Equal(t, "golden.run_plan", second.Action)
+	assert.Equal(t, debuglog.StatusCompleted, second.Status)
+	assert.NotContains(t, firstFields, "duration_ms")
+	assert.Contains(t, secondFields, "duration_ms")
+}
+
+func TestContextRecorderWithoutRecorderIsNoop(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, debuglog.Record(context.Background(), debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "operation.plan", Status: debuglog.StatusStarted,
+	}))
+}
 
 func TestDisabledRecorderPersistsNothing(t *testing.T) {
 	t.Parallel()
@@ -92,6 +138,10 @@ func TestDebugRecorderPersistsCompleteTranscriptToFile(t *testing.T) {
 	for index, line := range lines {
 		var actual debuglog.Event
 		require.NoError(t, json.Unmarshal([]byte(line), &actual))
+		assert.Equal(t, uint64(index+1), actual.Sequence)
+		assert.False(t, actual.Timestamp.IsZero())
+		actual.Sequence = 0
+		actual.Timestamp = time.Time{}
 		assert.Equal(t, events[index], actual)
 	}
 	assert.Contains(t, recorder.Warning(), "sensitive")
@@ -100,6 +150,26 @@ func TestDebugRecorderPersistsCompleteTranscriptToFile(t *testing.T) {
 		require.NoError(t, statErr)
 		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 	}
+}
+
+func TestRecorderFlushesEachEventForLiveProgress(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	recorder, err := debuglog.NewRecorder(directory, true)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+
+	require.NoError(t, recorder.Record(debuglog.Event{
+		Kind:    debuglog.EventMessage,
+		Session: debuglog.SessionResearch,
+		Role:    debuglog.RoleUser,
+		Content: "visible while the run is active",
+	}))
+
+	content, err := os.ReadFile(filepath.Join(directory, debuglog.EventsFileName))
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "visible while the run is active")
 }
 
 func TestRecorderRejectsInvalidLifecycleOperations(t *testing.T) {

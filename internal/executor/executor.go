@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/Azure/golden"
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
+	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -90,14 +92,33 @@ func (e *Executor) apply(
 
 	warnings := execution.cleanupWarnings()
 	outputs := plannedOutputs(planned)
-	if failure == nil {
+	resolveEvent := debuglog.Event{Path: planned.Directory(), Count: len(outputs)}
+	resolveStarted := time.Now()
+	resolveLogErr := debuglog.Lifecycle(runCtx, "apply.outputs.resolve", debuglog.StatusStarted, resolveEvent)
+	if resolveLogErr != nil && failure == nil {
+		failure = resolveLogErr
+	}
+	if failure != nil {
+		duration := time.Since(resolveStarted).Milliseconds()
+		resolveEvent.DurationMS = &duration
+		resolveEvent.Error = "not attempted because block application failed: " + failure.Error()
+		if logErr := debuglog.Lifecycle(runCtx, "apply.outputs.resolve", debuglog.StatusSkipped, resolveEvent); logErr != nil {
+			warnings = append(warnings, fmt.Errorf("record skipped output resolution: %w", logErr))
+		}
+	} else {
+		var resolveErr error
 		if resolver, ok := e.factory.(OutputResolver); ok {
-			resolved, resolveErr := resolver.ResolveOutputs(planned)
+			var resolved map[string]cty.Value
+			resolved, resolveErr = resolver.ResolveOutputs(planned)
 			if resolveErr != nil {
 				failure = fmt.Errorf("resolve apply outputs: %w", resolveErr)
 			} else {
 				outputs = resolved
 			}
+		}
+		resolveEvent.Count = len(outputs)
+		if logErr := debuglog.CompleteLifecycle(runCtx, "apply.outputs.resolve", resolveStarted, resolveErr, resolveEvent); logErr != nil && failure == nil {
+			failure = logErr
 		}
 	}
 	if closeDebug && e.debug != nil {
