@@ -7,7 +7,7 @@ GitHub Copilot CLI installation with an authenticated account.
 From the repository root:
 
 ```powershell
-go run ./cmd/r42 plan ./docs/examples/basic --out ./basic.r42plan
+go run ./cmd/r42 plan --directory ./docs/examples/basic --out ./basic.r42plan
 go run ./cmd/r42 apply ./basic.r42plan
 ```
 
@@ -31,7 +31,7 @@ operating system. All four sessions use one OpenAI `model_provider`; set
 `OPENAI_API_KEY` before Apply.
 
 ```powershell
-go run ./cmd/r42 plan ./docs/examples/multi-step --out ./multi-step.r42plan
+go run ./cmd/r42 plan --directory ./docs/examples/multi-step --out ./multi-step.r42plan
 go run ./cmd/r42 apply ./multi-step.r42plan --parallelism 3
 ```
 

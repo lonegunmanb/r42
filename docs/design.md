@@ -602,10 +602,13 @@ and planned configuration values themselves remain immutable.
 Required workflows:
 
 ```text
-r42 plan  <directory> --out <file.r42plan>
+r42 plan [-d|--directory <directory>] [--out <file.r42plan>]
 r42 apply <file.r42plan>
 r42 apply <directory>
 ```
+
+`plan` defaults `--directory` to `.`. It always prints the Plan to stdout and
+only writes a saved Plan file when `--out` is present.
 
 The CLI also exposes:
 

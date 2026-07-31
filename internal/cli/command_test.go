@@ -44,7 +44,7 @@ func (f *fakeRuntime) Apply(ctx context.Context, _ *plan.Plan, options cli.Apply
 	return f.applyResult, f.applyErr
 }
 
-func TestCommandPlanWritesPlanAndSeparatesPermissionWarning(t *testing.T) {
+func TestCommandPlanSavesOptionalOutputAndSeparatesPermissionWarning(t *testing.T) {
 	t.Parallel()
 
 	directory := t.TempDir()
@@ -56,7 +56,7 @@ func TestCommandPlanWritesPlanAndSeparatesPermissionWarning(t *testing.T) {
 	outPath := filepath.Join(t.TempDir(), "research.r42plan")
 
 	stdout, stderr, executeErr := execute(t, runtime,
-		"plan", directory,
+		"plan", "--directory", directory,
 		"--out", outPath,
 		"--var", "topic=markets",
 		"--var-file", "inputs.r42vars",
@@ -71,6 +71,71 @@ func TestCommandPlanWritesPlanAndSeparatesPermissionWarning(t *testing.T) {
 	loaded, err := plan.Load(outPath)
 	require.NoError(t, err)
 	assert.Equal(t, planned.Outputs(), loaded.Outputs())
+}
+
+func TestCommandPlanDirectoryFlagsAndDefaultPrintWithoutSaving(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		arguments     []string
+		wantDirectory string
+	}{
+		{name: "default", arguments: []string{"plan"}, wantDirectory: "."},
+		{name: "long flag", arguments: []string{"plan", "--directory", "research"}, wantDirectory: "research"},
+		{name: "short flag", arguments: []string{"plan", "-d", "research"}, wantDirectory: "research"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			planned := mustPlan(t)
+			runtime := &fakeRuntime{planned: planned}
+
+			stdout, stderr, err := execute(t, runtime, test.arguments...)
+
+			require.NoError(t, err)
+			assert.Equal(t, test.wantDirectory, runtime.planDirectory)
+			assert.Contains(t, stdout, `"nodes"`)
+			assert.Empty(t, stderr)
+		})
+	}
+}
+
+func TestCommandPlanPrintsBeforeReportingSaveFailure(t *testing.T) {
+	t.Parallel()
+
+	runtime := &fakeRuntime{planned: mustPlan(t)}
+	stdout, stderr, err := execute(t, runtime, "plan", "--out", t.TempDir())
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "save plan")
+	assert.Contains(t, stdout, `"nodes"`)
+	assert.Empty(t, stderr)
+}
+
+func TestCommandPlanTreatsWhitespaceOutputAsOmitted(t *testing.T) {
+	t.Parallel()
+
+	runtime := &fakeRuntime{planned: mustPlan(t)}
+	stdout, stderr, err := execute(t, runtime, "plan", "--out", " \t ")
+
+	require.NoError(t, err)
+	assert.Contains(t, stdout, `"nodes"`)
+	assert.Empty(t, stderr)
+}
+
+func TestCommandPlanHelpDescribesOptionalDirectoryAndOutput(t *testing.T) {
+	t.Parallel()
+
+	stdout, _, err := execute(t, nil, "plan", "--help")
+
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "r42 plan [flags]")
+	assert.Contains(t, stdout, "-d, --directory string")
+	assert.Contains(t, stdout, `(default ".")`)
+	assert.NotContains(t, stdout, "plan DIRECTORY")
 }
 
 func TestCommandApplySupportsSavedPlanAndDirectory(t *testing.T) {
@@ -141,10 +206,17 @@ func TestCommandDiagnosticsAndExitCodes(t *testing.T) {
 		},
 		{
 			name:     "plan block diagnostic",
-			args:     []string{"plan", t.TempDir(), "--out", filepath.Join(t.TempDir(), "out.r42plan")},
+			args:     []string{"plan", "--directory", t.TempDir()},
 			runtime:  &fakeRuntime{planErr: errors.New("research.market: model is required")},
 			wantCode: cli.ExitFailure,
 			wantErr:  "research.market",
+		},
+		{
+			name:     "plan positional directory is rejected",
+			args:     []string{"plan", t.TempDir()},
+			runtime:  &fakeRuntime{planned: mustPlan(t)},
+			wantCode: cli.ExitUsage,
+			wantErr:  "unknown command",
 		},
 		{
 			name:     "apply failure",

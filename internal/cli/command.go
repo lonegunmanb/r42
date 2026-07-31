@@ -70,42 +70,42 @@ func NewCommand(runtime Runtime) *cobra.Command {
 }
 
 func newPlanCommand(runtime Runtime) *cobra.Command {
+	directory := "."
 	var outputPath string
 	var variables []string
 	var variableFiles []string
 	command := &cobra.Command{
-		Use:   "plan DIRECTORY",
-		Short: "Create and save an immutable research plan",
-		Args:  usageArgs(cobra.ExactArgs(1)),
-		PreRunE: func(*cobra.Command, []string) error {
-			if strings.TrimSpace(outputPath) == "" {
-				return &usageError{err: fmt.Errorf("--out is required")}
-			}
-			return nil
-		},
-		RunE: func(command *cobra.Command, args []string) error {
+		Use:   "plan",
+		Short: "Create an immutable research plan",
+		Args:  usageArgs(cobra.NoArgs),
+		RunE: func(command *cobra.Command, _ []string) error {
 			if runtime == nil {
 				return fmt.Errorf("runtime is required")
 			}
-			planned, err := runtime.Plan(command.Context(), args[0], goldenVariables(variables, variableFiles))
+			planned, err := runtime.Plan(command.Context(), directory, goldenVariables(variables, variableFiles))
 			if err != nil {
-				return fmt.Errorf("plan directory %q: %w", args[0], err)
-			}
-			warning, err := plan.Save(outputPath, planned)
-			if err != nil {
-				return fmt.Errorf("save plan %q: %w", outputPath, err)
-			}
-			if warning != "" {
-				writeWarning(command.ErrOrStderr(), warning)
+				return fmt.Errorf("plan directory %q: %w", directory, err)
 			}
 			display, err := plan.Display(planned)
 			if err != nil {
 				return fmt.Errorf("display plan: %w", err)
 			}
-			_, err = io.WriteString(command.OutOrStdout(), display)
-			return err
+			if _, err = io.WriteString(command.OutOrStdout(), display); err != nil {
+				return err
+			}
+			if strings.TrimSpace(outputPath) != "" {
+				warning, saveErr := plan.Save(outputPath, planned)
+				if saveErr != nil {
+					return fmt.Errorf("save plan %q: %w", outputPath, saveErr)
+				}
+				if warning != "" {
+					writeWarning(command.ErrOrStderr(), warning)
+				}
+			}
+			return nil
 		},
 	}
+	command.Flags().StringVarP(&directory, "directory", "d", directory, "directory containing .r42 files")
 	command.Flags().StringVar(&outputPath, "out", "", "saved plan path")
 	command.Flags().StringArrayVar(&variables, "var", nil, "set a Golden input variable (name=value)")
 	command.Flags().StringArrayVar(&variableFiles, "var-file", nil, "load Golden input variables from a file")

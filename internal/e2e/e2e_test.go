@@ -131,6 +131,7 @@ func TestPlanAndApplyRunInDifferentProcesses(t *testing.T) {
 	planOutput := runE2ECLIProcess(
 		t,
 		"plan",
+		"--directory",
 		fixtureDirectory(t, "terminal_artifacts"),
 		"--out",
 		planPath,
