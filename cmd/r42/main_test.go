@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/Azure/golden"
+	"github.com/hashicorp/hcl/v2"
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/stretchr/testify/assert"
@@ -37,6 +39,38 @@ func TestRunMapsErrorsToProcessExitCodesAndStderr(t *testing.T) {
 			assert.NotEmpty(t, stderr.String())
 		})
 	}
+}
+
+func TestRunDisplaysEveryHCLDiagnostic(t *testing.T) {
+	t.Parallel()
+	diagnostics := hcl.Diagnostics{
+		&hcl.Diagnostic{
+			Severity: hcl.DiagError,
+			Summary:  "first invalid expression",
+			Detail:   "the first expression is invalid",
+		},
+		&hcl.Diagnostic{
+			Severity: hcl.DiagError,
+			Summary:  "second invalid expression",
+			Detail:   "the second expression is invalid",
+		},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := run(
+		t.Context(),
+		[]string{"apply", t.TempDir()},
+		&stdout,
+		&stderr,
+		stubRuntime{applyErr: fmt.Errorf("validate configuration: %w", diagnostics)},
+	)
+
+	assert.Equal(t, cli.ExitFailure, code)
+	assert.Empty(t, stdout.String())
+	assert.Contains(t, stderr.String(), "first invalid expression")
+	assert.Contains(t, stderr.String(), "second invalid expression")
+	assert.NotContains(t, stderr.String(), "other diagnostic(s)")
 }
 
 type stubRuntime struct{ applyErr error }

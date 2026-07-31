@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 
+	"github.com/hashicorp/hcl/v2"
 	"github.com/lonegunmanb/r42/internal/cli"
 )
 
@@ -30,9 +32,21 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, runtime c
 	if err == nil {
 		return cli.ExitSuccess
 	}
-	_, _ = fmt.Fprintf(stderr, "error: %v\n", err)
+	writeError(stderr, err)
 	if errors.Is(ctx.Err(), context.Canceled) && errors.Is(err, context.Canceled) {
 		return 130
 	}
 	return cli.ExitCode(err)
+}
+
+func writeError(writer io.Writer, err error) {
+	var diagnostics hcl.Diagnostics
+	if !errors.As(err, &diagnostics) {
+		_, _ = fmt.Fprintf(writer, "error: %v\n", err)
+		return
+	}
+	context := strings.TrimSuffix(err.Error(), diagnostics.Error())
+	for _, diagnostic := range diagnostics {
+		_, _ = fmt.Fprintf(writer, "error: %s%s\n", context, diagnostic)
+	}
 }
