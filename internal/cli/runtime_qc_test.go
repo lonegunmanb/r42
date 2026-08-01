@@ -20,7 +20,7 @@ import (
 func TestProductionRuntimeRunsPersistentQCSessionWithVerdictTool(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 research "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
@@ -48,7 +48,7 @@ research "source" {
 func TestProductionRuntimeAppliesResearchTimeoutAcrossQC(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 research "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
@@ -71,7 +71,7 @@ research "source" {
 func TestProductionRuntimeAppliesResearchTimeoutWhileOpeningQCSession(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 research "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
@@ -93,7 +93,7 @@ research "source" {
 func TestProductionRuntimeReportsResearchCloseWarningWhenQCOpenFails(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 research "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
@@ -117,7 +117,7 @@ research "source" {
 func TestProductionRuntimeReusesSessionsForQCIssuesRevisionAndPass(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 research "source" {
   model = "test-model"
   system_prompt = "Collect evidence."

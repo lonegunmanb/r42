@@ -63,7 +63,7 @@ func applyRuntime(
 func TestProductionRuntimePlansAndAppliesGoldenVariablesWithoutStartingCopilot(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 variable "topic" { type = string }
 output "summary" { value = "topic=${var.topic}" }
 `), 0o600))
@@ -89,7 +89,7 @@ output "summary" { value = "topic=${var.topic}" }
 func TestProductionRuntimeAppliesPlanFromSourceConfig(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 output "summary" { value = "planned-and-applied" }
 `), 0o600))
 	runtime := cli.NewRuntime()
@@ -107,7 +107,7 @@ func TestProductionRuntimeAppliesTheBlockWorkingDirectoryReservedByPlan(t *testi
 
 	directory := t.TempDir()
 	runRoot := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 research "source" {
   model         = "test-model"
   system_prompt = block_wd()
@@ -147,7 +147,7 @@ research "source" {
 func TestProductionRuntimeUsesPlanKnownFunctionOutputWithoutReevaluation(t *testing.T) {
 	t.Setenv("R42_TEST_PLAN_OUTPUT", "planned-value")
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 output "summary" { value = env("R42_TEST_PLAN_OUTPUT") }
 `), 0o600))
 	runtime := cli.NewRuntime()
@@ -167,7 +167,7 @@ output "summary" { value = env("R42_TEST_PLAN_OUTPUT") }
 func TestProductionRuntimeRunsOneResearchSessionAndPublishesArtifacts(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 research "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
@@ -212,7 +212,7 @@ output "report_path" { value = local.report_with_retries }
 func TestProductionRuntimeExecutesTerminalGoTool(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 go_tool "finish" {
   description = "Finish research"
   source = <<-GO
@@ -283,7 +283,7 @@ func TestProductionRuntimeReturnsRepairableToolArgumentIssuesToSameSession(t *te
 func TestProductionRuntimeEvaluatesKnownAfterApplyLocalsAndFunctions(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 go_tool "finish" {
   description = "Finish research"
   source = <<-GO
@@ -322,7 +322,7 @@ output "summary" { value = local.summary }
 func TestProductionRuntimeRecordsFailedGoToolInDebugLog(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 go_tool "lookup" {
   description = "Look up evidence"
   source = <<-GO
@@ -393,7 +393,7 @@ func (*failingGoToolSession) Close(context.Context) error { return nil }
 func writeTerminalToolFixture(t *testing.T) string {
 	t.Helper()
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 go_tool "finish" {
   description = "Finish research"
   source = <<-GO

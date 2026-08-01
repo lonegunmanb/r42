@@ -75,6 +75,7 @@ type Event struct {
 	ToolName     string          `json:"tool_name,omitempty"`
 	Arguments    json.RawMessage `json:"arguments,omitempty"`
 	Result       json.RawMessage `json:"result,omitempty"`
+	SDKEvent     json.RawMessage `json:"sdk_event,omitempty"`
 	Stdout       string          `json:"stdout,omitempty"`
 	Stderr       string          `json:"stderr,omitempty"`
 }

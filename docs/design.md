@@ -634,9 +634,12 @@ Lifecycle actions cover the complete CLI execution path:
   workspace, and typed-tool names.
 
 Message and tool events contain the complete system, user, and assistant
-payloads plus tool arguments/results/stdout/stderr. The CLI prints the debug log
-path and a sensitive-data warning to stderr, but writes event content only to
-the file. `skipped` means an operation was deliberately not attempted because a
+payloads plus tool arguments/results/stdout/stderr. Copilot SDK tool-call input
+deltas, tool search/request, execution start/progress/partial-result, and
+execution-complete events are preserved as `sdk_event`, including built-in
+tools and their tool-call/turn correlation IDs. The CLI prints the debug log path
+and a sensitive-data warning to stderr, but writes event content only to the
+file. `skipped` means an operation was deliberately not attempted because a
 prerequisite failed; it is distinct from a failure in the operation itself.
 
 Variables and outputs support `sensitive = true`, and sensitivity propagates

@@ -141,6 +141,95 @@ func TestRecordingSessionRecordsReasoningEventsDuringSend(t *testing.T) {
 	}
 }
 
+func TestRecordingSessionRecordsToolEventsDuringSend(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	recorder, err := debuglog.NewRecorder(directory, true)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = recorder.Close() })
+	toolName := "apply_patch"
+	turnID := "5"
+	toolEvents := []sdk.SessionEvent{
+		{
+			ID: "tool-call-delta",
+			Data: &sdk.AssistantToolCallDeltaData{
+				InputDelta: "*** Begin Patch", ToolCallID: "call-1", ToolName: &toolName,
+			},
+		},
+		{
+			ID: "tool-search",
+			Data: &sdk.ToolSearchActivatedData{
+				Strategy: "search", ToolNames: []string{"apply_patch"},
+			},
+		},
+		{
+			ID: "tool-user-requested",
+			Data: &sdk.ToolUserRequestedData{
+				Arguments: "*** Begin Patch", ToolCallID: "call-1", ToolName: toolName,
+			},
+		},
+		{
+			ID: "tool-start",
+			Data: &sdk.ToolExecutionStartData{
+				Arguments: "", ToolCallID: "call-1", ToolName: toolName, TurnID: &turnID,
+			},
+		},
+		{
+			ID: "tool-progress",
+			Data: &sdk.ToolExecutionProgressData{
+				ProgressMessage: "applying patch", ToolCallID: "call-1",
+			},
+		},
+		{
+			ID: "tool-partial-result",
+			Data: &sdk.ToolExecutionPartialResultData{
+				PartialOutput: "updated report.md", ToolCallID: "call-1",
+			},
+		},
+		{
+			ID: "tool-complete",
+			Data: &sdk.ToolExecutionCompleteData{
+				Error: &sdk.ToolExecutionCompleteError{
+					Message: "apply_patch requires a non-empty string input",
+				},
+				Success: false, ToolCallID: "call-1", TurnID: &turnID,
+			},
+		},
+	}
+	session := &fakeInternalSession{
+		events: append(toolEvents, sdk.SessionEvent{
+			ID:   "message-delta",
+			Data: &sdk.AssistantMessageDeltaData{DeltaContent: "not logged", MessageID: "message-1"},
+		}),
+		result: &sdk.SessionEvent{
+			ID:   "assistant-final",
+			Data: &sdk.AssistantMessageData{Content: "research complete"},
+		},
+	}
+	recorded := &recordingSession{
+		Session: session, recorder: recorder, address: "research.source", kind: debuglog.SessionResearch,
+	}
+
+	_, err = recorded.SendAndWait(t.Context(), sdk.MessageOptions{Prompt: "research"})
+	require.NoError(t, err)
+	require.NoError(t, recorder.Close())
+
+	content, err := os.ReadFile(filepath.Join(directory, debuglog.EventsFileName))
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
+	require.Len(t, lines, len(toolEvents)+4)
+	for index, sdkEvent := range toolEvents {
+		var event debuglog.Event
+		require.NoError(t, json.Unmarshal([]byte(lines[index+2]), &event))
+		assert.Equal(t, debuglog.EventTool, event.Kind)
+		assert.Equal(t, string(sdkEvent.Type()), event.Action)
+		expected, marshalErr := json.Marshal(sdkEvent)
+		require.NoError(t, marshalErr)
+		assert.JSONEq(t, string(expected), string(event.SDKEvent))
+	}
+}
+
 func TestRecordingSessionReturnsReasoningLogFailure(t *testing.T) {
 	t.Parallel()
 
@@ -164,6 +253,33 @@ func TestRecordingSessionReturnsReasoningLogFailure(t *testing.T) {
 	result, err := recorded.SendAndWait(t.Context(), sdk.MessageOptions{Prompt: "research"})
 
 	require.ErrorContains(t, err, "debug recorder is closed")
+	assert.Nil(t, result)
+	assert.Equal(t, 1, session.unsubscribeCalls)
+}
+
+func TestRecordingSessionReturnsToolEventEncodingFailure(t *testing.T) {
+	t.Parallel()
+
+	recorder, err := debuglog.NewRecorder(t.TempDir(), true)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = recorder.Close() })
+	session := &fakeInternalSession{
+		events: []sdk.SessionEvent{{
+			ID: "tool-start",
+			Data: &sdk.ToolExecutionStartData{
+				Arguments: make(chan int), ToolCallID: "call-1", ToolName: "apply_patch",
+			},
+		}},
+		result: &sdk.SessionEvent{ID: "assistant-final"},
+	}
+	recorded := &recordingSession{
+		Session: session, recorder: recorder, address: "research.source", kind: debuglog.SessionResearch,
+	}
+
+	result, err := recorded.SendAndWait(t.Context(), sdk.MessageOptions{Prompt: "research"})
+
+	require.ErrorContains(t, err, "encode tool event")
+	require.ErrorContains(t, err, "unsupported type: chan int")
 	assert.Nil(t, result)
 	assert.Equal(t, 1, session.unsubscribeCalls)
 }

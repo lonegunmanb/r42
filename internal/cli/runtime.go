@@ -1116,11 +1116,23 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 	unsubscribe := func() {}
 	if source, ok := s.Session.(sessionEventSource); ok {
 		unsubscribe = source.On(func(event sdk.SessionEvent) {
-			if event.Type() != sdk.SessionEventTypeAssistantReasoning &&
-				event.Type() != sdk.SessionEventTypeAssistantReasoningDelta {
+			var err error
+			switch event.Type() {
+			case sdk.SessionEventTypeAssistantReasoning,
+				sdk.SessionEventTypeAssistantReasoningDelta:
+				err = s.recordAssistantEvent(&event)
+			case sdk.SessionEventTypeAssistantToolCallDelta,
+				sdk.SessionEventTypeToolSearchActivated,
+				sdk.SessionEventTypeToolUserRequested,
+				sdk.SessionEventTypeToolExecutionStart,
+				sdk.SessionEventTypeToolExecutionProgress,
+				sdk.SessionEventTypeToolExecutionPartialResult,
+				sdk.SessionEventTypeToolExecutionComplete:
+				err = s.recordToolEvent(&event)
+			default:
 				return
 			}
-			if err := s.recordAssistantEvent(&event); err != nil {
+			if err != nil {
 				eventErrMu.Lock()
 				if eventErr == nil {
 					eventErr = err
@@ -1142,6 +1154,17 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 		return nil, errors.Join(operationErr, logErr)
 	}
 	return event, nil
+}
+
+func (s *recordingSession) recordToolEvent(event *sdk.SessionEvent) error {
+	content, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("encode tool event: %w", err)
+	}
+	return s.recorder.Record(debuglog.Event{
+		Timestamp: event.Timestamp, Kind: debuglog.EventTool, Action: string(event.Type()),
+		BlockAddress: s.address, Session: s.kind, SDKEvent: content,
+	})
 }
 
 func (s *recordingSession) recordAssistantEvent(event *sdk.SessionEvent) error {

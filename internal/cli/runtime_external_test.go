@@ -35,7 +35,7 @@ research "source" {
   tools = [external_tool.lookup]
 }
 `, program)
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(source), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(source), 0o600))
 	opener := &externalCallingOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
 	planned, err := planRuntime(runtime, t.Context(), directory, nil)
@@ -67,7 +67,7 @@ research "source" {
   tools = [external_tool.lookup]
 }
 `, program)
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(source), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(source), 0o600))
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: &externalCallingOpener{}})
 	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)

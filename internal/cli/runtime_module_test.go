@@ -22,7 +22,7 @@ func TestProductionRuntimeAppliesSavedNestedModuleWithoutReparse(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "child")
 	require.NoError(t, os.Mkdir(child, 0o700))
-	childPath := filepath.Join(child, "main.r42")
+	childPath := filepath.Join(child, "main.r42.hcl")
 	require.NoError(t, os.WriteFile(childPath, []byte(`
 research "inside" {
   model = "test-model"
@@ -30,7 +30,7 @@ research "inside" {
 }
 output "status" { value = "child-done" }
 `), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(root, "main.r42.hcl"), []byte(`
 module "child" {
   source = "./child"
   parallelism = 2
@@ -98,7 +98,7 @@ func writeModuleFixture(t *testing.T, moduleAttributes string) string {
 	root := t.TempDir()
 	child := filepath.Join(root, "child")
 	require.NoError(t, os.Mkdir(child, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(child, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(child, "main.r42.hcl"), []byte(`
 research "inside" {
   model = "test-model"
   system_prompt = "Work."
@@ -106,7 +106,7 @@ research "inside" {
 output "status" { value = "child-done" }
 `), 0o600))
 	moduleAttributes = strings.TrimSpace(moduleAttributes)
-	require.NoError(t, os.WriteFile(filepath.Join(root, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(root, "main.r42.hcl"), []byte(`
 module "child" {
   source = "./child"
   `+moduleAttributes+`

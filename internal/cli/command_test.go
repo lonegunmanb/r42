@@ -159,6 +159,7 @@ func TestCommandPlanHelpDescribesOptionalDirectoryAndOutput(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, stdout, "r42 plan [flags]")
 	assert.Contains(t, stdout, "-d, --directory string")
+	assert.Contains(t, stdout, "directory containing .r42.hcl files")
 	assert.Contains(t, stdout, `(default ".")`)
 	assert.NotContains(t, stdout, "plan DIRECTORY")
 }
@@ -168,7 +169,7 @@ func TestCommandPlanDebugRecordsDetailedGoldenPlanningLifecycle(t *testing.T) {
 	workingDirectory := t.TempDir()
 	directory := t.TempDir()
 	t.Chdir(workingDirectory)
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 output "answer" { value = "42" }
 `), 0o600))
 
@@ -195,7 +196,7 @@ output "answer" { value = "42" }
 	} {
 		assert.Contains(t, events, `"action":"`+action+`"`)
 	}
-	encodedPath, err := json.Marshal(filepath.Join(directory, "main.r42"))
+	encodedPath, err := json.Marshal(filepath.Join(directory, "main.r42.hcl"))
 	require.NoError(t, err)
 	assert.Contains(t, events, string(encodedPath))
 	assert.NoDirExists(t, filepath.Join(directory, ".r42"))
@@ -206,7 +207,7 @@ func TestCommandPlanStoresDebugRunInWorkingDirectory(t *testing.T) {
 	workingDirectory := t.TempDir()
 	configurationDirectory := t.TempDir()
 	t.Chdir(workingDirectory)
-	require.NoError(t, os.WriteFile(filepath.Join(configurationDirectory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(configurationDirectory, "main.r42.hcl"), []byte(`
 output "answer" { value = "42" }
 `), 0o600))
 
@@ -234,7 +235,7 @@ func TestCommandPlanDebugRecordsParseFailure(t *testing.T) {
 	workingDirectory := t.TempDir()
 	directory := t.TempDir()
 	t.Chdir(workingDirectory)
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "broken.r42"), []byte(`research "broken" {`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "broken.r42.hcl"), []byte(`research "broken" {`), 0o600))
 
 	_, _, err := execute(t, cli.NewRuntime(), "plan", "--directory", directory, "--debug")
 
@@ -250,7 +251,7 @@ func TestCommandApplyDebugRecordsDetailedPlanAndApplyLifecycle(t *testing.T) {
 	workingDirectory := t.TempDir()
 	directory := t.TempDir()
 	t.Chdir(workingDirectory)
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 research "source" {
   model         = "test-model"
   system_prompt = "Collect evidence."
@@ -307,7 +308,7 @@ func TestCommandApplyStoresRunInWorkingDirectory(t *testing.T) {
 			workingDirectory := t.TempDir()
 			configurationDirectory := t.TempDir()
 			t.Chdir(workingDirectory)
-			require.NoError(t, os.WriteFile(filepath.Join(configurationDirectory, "main.r42"), []byte(`
+			require.NoError(t, os.WriteFile(filepath.Join(configurationDirectory, "main.r42.hcl"), []byte(`
 output "answer" { value = "42" }
 `), 0o600))
 

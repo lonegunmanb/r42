@@ -120,7 +120,7 @@ func newPlanCommand(runtime Runtime) *cobra.Command {
 			return closeCommandDebug(command, debugState)
 		},
 	}
-	command.Flags().StringVarP(&directory, "directory", "d", directory, "directory containing .r42 files")
+	command.Flags().StringVarP(&directory, "directory", "d", directory, "directory containing .r42.hcl files")
 	command.Flags().StringVar(&outputPath, "out", "", "saved plan path")
 	command.Flags().BoolVar(&debug, "debug", false, "persist sensitive planning debug events")
 	command.Flags().StringArrayVar(&variables, "var", nil, "set a Golden input variable (name=value)")

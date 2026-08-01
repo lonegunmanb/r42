@@ -61,7 +61,7 @@ func TestResearchConfigPlansModuleInputsAndOutputs(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "modules", "sector")
 	require.NoError(t, os.MkdirAll(child, 0o755))
-	writeR42(t, child, "main.r42", `
+	writeR42(t, child, "main.r42.hcl", `
 variable "topic" {
   type = string
 }
@@ -76,7 +76,7 @@ output "report" {
   sensitive   = true
 }
 `)
-	writeR42(t, root, "main.r42", `
+	writeR42(t, root, "main.r42.hcl", `
 module "sector" {
   source      = "./modules/sector"
   parallelism = 4
@@ -117,14 +117,14 @@ func TestResearchConfigUsesVariableDefault(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "child")
 	require.NoError(t, os.Mkdir(child, 0o755))
-	writeR42(t, child, "main.r42", `
+	writeR42(t, child, "main.r42.hcl", `
 variable "topic" {
   type    = string
   default = "energy"
 }
 output "topic" { value = var.topic }
 `)
-	writeR42(t, root, "main.r42", `
+	writeR42(t, root, "main.r42.hcl", `
 module "child" { source = "./child" }
 output "topic" { value = module.child.topic }
 `)
@@ -138,7 +138,7 @@ func TestResearchConfigDelegatesRootVariablesToGolden(t *testing.T) {
 	registerSchemas()
 	t.Setenv("R42_VAR_TOPIC", "from-env")
 	root := t.TempDir()
-	writeR42(t, root, "main.r42", `
+	writeR42(t, root, "main.r42.hcl", `
 variable "topic" {
   type = string
 }
@@ -156,14 +156,14 @@ func TestChildVariableDefaultIsIsolatedFromGoldenRootSources(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "child")
 	require.NoError(t, os.Mkdir(child, 0o755))
-	writeR42(t, child, "main.r42", `
+	writeR42(t, child, "main.r42.hcl", `
 variable "topic" {
   type    = string
   default = "child-default"
 }
 output "topic" { value = var.topic }
 `)
-	writeR42(t, root, "main.r42", `
+	writeR42(t, root, "main.r42.hcl", `
 module "child" { source = "./child" }
 output "topic" { value = module.child.topic }
 `)
@@ -180,7 +180,7 @@ func TestChildVariablesIgnoreChildVarFilesWhileRootVarFilesRemainActive(t *testi
 	child := filepath.Join(root, "child")
 	require.NoError(t, os.Mkdir(child, 0o755))
 	writeR42(t, root, "r42.r42vars", `topic = "from-root-var-file"`)
-	writeR42(t, root, "main.r42", `
+	writeR42(t, root, "main.r42.hcl", `
 variable "topic" { type = string }
 module "child" {
   source = "./child"
@@ -189,7 +189,7 @@ module "child" {
 output "topic" { value = module.child.topic }
 `)
 	writeR42(t, child, "r42.r42vars", `topic =`)
-	writeR42(t, child, "main.r42", `
+	writeR42(t, child, "main.r42.hcl", `
 variable "topic" { type = string }
 output "topic" { value = var.topic }
 `)
@@ -236,10 +236,10 @@ func TestVariableSensitivePropagatesAcrossModuleBoundary(t *testing.T) {
 			root := t.TempDir()
 			child := filepath.Join(root, "child")
 			require.NoError(t, os.Mkdir(child, 0o755))
-			writeR42(t, child, "main.r42", tt.variable+`
+			writeR42(t, child, "main.r42.hcl", tt.variable+`
 output "secret" { value = var.secret }
 `)
-			writeR42(t, root, "main.r42", tt.moduleBody+`
+			writeR42(t, root, "main.r42.hcl", tt.moduleBody+`
 output "secret" { value = module.child.secret }
 `)
 
@@ -257,7 +257,7 @@ func TestSensitiveCallerIsUnmarkedForChildConversionAndValidation(t *testing.T) 
 	root := t.TempDir()
 	child := filepath.Join(root, "child")
 	require.NoError(t, os.Mkdir(child, 0o755))
-	writeR42(t, child, "main.r42", `
+	writeR42(t, child, "main.r42.hcl", `
 variable "secret" {
   type = string
   validation {
@@ -267,7 +267,7 @@ variable "secret" {
 }
 output "secret" { value = var.secret }
 `)
-	writeR42(t, root, "main.r42", `
+	writeR42(t, root, "main.r42.hcl", `
 variable "secret" {
   type      = number
   default   = 42
@@ -293,8 +293,8 @@ func TestResearchConfigAcceptsAbsoluteModuleSource(t *testing.T) {
 	registerSchemas()
 	root := t.TempDir()
 	child := t.TempDir()
-	writeR42(t, child, "main.r42", `output "value" { value = "absolute" }`)
-	writeR42(t, root, "main.r42", fmt.Sprintf(`
+	writeR42(t, child, "main.r42.hcl", `output "value" { value = "absolute" }`)
+	writeR42(t, root, "main.r42.hcl", fmt.Sprintf(`
 module "child" { source = %q }
 output "value" { value = module.child.value }
 `, filepath.ToSlash(child)))
@@ -371,9 +371,9 @@ func TestResearchConfigRejectsInvalidModuleBoundaries(t *testing.T) {
 			if tt.child != "" {
 				child := filepath.Join(root, "child")
 				require.NoError(t, os.Mkdir(child, 0o755))
-				writeR42(t, child, "main.r42", tt.child)
+				writeR42(t, child, "main.r42.hcl", tt.child)
 			}
-			writeR42(t, root, "main.r42", tt.root)
+			writeR42(t, root, "main.r42.hcl", tt.root)
 
 			_, err := planSource(root, executor.ResearchConfigOptions{})
 			require.Error(t, err)
@@ -386,7 +386,7 @@ func TestResearchConfigRejectsInvalidModuleBoundaries(t *testing.T) {
 func TestResearchConfigAllowsKnownAfterApplyOutput(t *testing.T) {
 	registerSchemas()
 	directory := t.TempDir()
-	writeR42(t, directory, "main.r42", `
+	writeR42(t, directory, "main.r42.hcl", `
 planning_fixture "unknown" { value = "unknown" }
 output "result" { value = planning_fixture.unknown }
 `)
@@ -407,7 +407,7 @@ func TestResearchConfigBuildsSavedResearchDAG(t *testing.T) {
 	golden.RegisterBlock(new(toolspec.ExternalToolBlock))
 	golden.RegisterBlock(new(researchspec.ResearchBlock))
 	directory := t.TempDir()
-	writeR42(t, directory, "main.r42", `
+	writeR42(t, directory, "main.r42.hcl", `
 research "source" {
   model         = "test-model"
   system_prompt = "Collect evidence."
@@ -457,13 +457,13 @@ func TestResearchConfigEmbedsSavedChildPlan(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "child")
 	require.NoError(t, os.Mkdir(child, 0o755))
-	writeR42(t, child, "main.r42", `
+	writeR42(t, child, "main.r42.hcl", `
 research "inside" {
   model         = "test-model"
   system_prompt = "Work inside the module."
 }
 `)
-	writeR42(t, root, "main.r42", `
+	writeR42(t, root, "main.r42.hcl", `
 module "child" {
   source      = "./child"
   parallelism = 2
@@ -490,7 +490,7 @@ func TestSavedResearchConfigCanBeReconstructed(t *testing.T) {
 	golden.RegisterBlock(new(toolspec.ExternalToolBlock))
 	golden.RegisterBlock(new(researchspec.ResearchBlock))
 	directory := t.TempDir()
-	writeR42(t, directory, "main.r42", `
+	writeR42(t, directory, "main.r42.hcl", `
 model_provider "primary" {
   type        = "openai"
   endpoint    = "https://example.test"
@@ -582,7 +582,7 @@ func TestSavedResearchConfigRestoresExplicitEmptyHeaders(t *testing.T) {
 	golden.RegisterBlock(new(provider.ModelProviderBlock))
 	golden.RegisterBlock(new(researchspec.ResearchBlock))
 	directory := t.TempDir()
-	writeR42(t, directory, "main.r42", `
+	writeR42(t, directory, "main.r42.hcl", `
 model_provider "primary" {
   type     = "openai"
   endpoint = "https://example.test"
@@ -650,8 +650,8 @@ func TestResearchConfigRejectsInvalidModuleSchema(t *testing.T) {
 			root := t.TempDir()
 			child := filepath.Join(root, "child")
 			require.NoError(t, os.Mkdir(child, 0o755))
-			writeR42(t, child, "main.r42", `output "value" { value = "ok" }`)
-			writeR42(t, root, "main.r42", "module \"child\" {\n"+tt.moduleBody+"\n}")
+			writeR42(t, child, "main.r42.hcl", `output "value" { value = "ok" }`)
+			writeR42(t, root, "main.r42.hcl", "module \"child\" {\n"+tt.moduleBody+"\n}")
 
 			_, err := planSource(root, executor.ResearchConfigOptions{})
 			require.Error(t, err)
@@ -675,7 +675,7 @@ func TestResearchConfigRejectsInvalidOutputPrimitiveTypes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
-			writeR42(t, root, "main.r42", "output \"value\" {\nvalue = \"ok\"\n"+tt.attribute+"\n}")
+			writeR42(t, root, "main.r42.hcl", "output \"value\" {\nvalue = \"ok\"\n"+tt.attribute+"\n}")
 
 			_, err := planSource(root, executor.ResearchConfigOptions{})
 			require.Error(t, err)
@@ -690,8 +690,8 @@ func TestResearchConfigDetectsOnlyActiveDirectoryCycles(t *testing.T) {
 	root := t.TempDir()
 	shared := filepath.Join(root, "shared")
 	require.NoError(t, os.Mkdir(shared, 0o755))
-	writeR42(t, shared, "main.r42", `output "value" { value = "shared" }`)
-	writeR42(t, root, "main.r42", `
+	writeR42(t, shared, "main.r42.hcl", `output "value" { value = "shared" }`)
+	writeR42(t, root, "main.r42.hcl", `
 module "first" { source = "./shared" }
 module "second" { source = "./shared" }
 output "first" { value = module.first.value }
@@ -706,8 +706,8 @@ output "second" { value = module.second.value }
 	cycleRoot := t.TempDir()
 	child := filepath.Join(cycleRoot, "child")
 	require.NoError(t, os.Mkdir(child, 0o755))
-	writeR42(t, cycleRoot, "main.r42", `module "child" { source = "./child" }`)
-	writeR42(t, child, "main.r42", `module "root" { source = ".." }`)
+	writeR42(t, cycleRoot, "main.r42.hcl", `module "child" { source = "./child" }`)
+	writeR42(t, child, "main.r42.hcl", `module "root" { source = ".." }`)
 
 	_, err = planSource(cycleRoot, executor.ResearchConfigOptions{})
 	require.Error(t, err)
@@ -721,11 +721,11 @@ func TestModuleValueExposesOutputsButNotChildBlocks(t *testing.T) {
 	root := t.TempDir()
 	child := filepath.Join(root, "child")
 	require.NoError(t, os.Mkdir(child, 0o755))
-	writeR42(t, child, "main.r42", `
+	writeR42(t, child, "main.r42.hcl", `
 planning_fixture "internal" { value = "hidden" }
 output "visible" { value = "shown" }
 `)
-	writeR42(t, root, "main.r42", `
+	writeR42(t, root, "main.r42.hcl", `
 module "child" { source = "./child" }
 output "leak" { value = module.child.planning_fixture.internal.value }
 `)
@@ -758,13 +758,13 @@ func TestNestedResearchBlockWorkingDirectoryUsesFullModuleAddress(t *testing.T) 
 	root := t.TempDir()
 	child := filepath.Join(root, "child")
 	require.NoError(t, os.Mkdir(child, 0o700))
-	writeR42(t, child, "main.r42", `
+	writeR42(t, child, "main.r42.hcl", `
 research "detail" {
   model         = "test-model"
   system_prompt = block_wd()
 }
 `)
-	writeR42(t, root, "main.r42", `module "child" { source = "./child" }`)
+	writeR42(t, root, "main.r42.hcl", `module "child" { source = "./child" }`)
 
 	planned, err := planSource(root, executor.ResearchConfigOptions{RunDirectory: runRoot})
 	require.NoError(t, err)

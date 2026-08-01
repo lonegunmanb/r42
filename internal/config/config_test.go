@@ -47,14 +47,15 @@ func TestLoadDirectoryContextRecordsDirectoryScanFailure(t *testing.T) {
 	assert.NotEmpty(t, events[1].Error)
 }
 
-func TestLoadDirectoryLoadsR42FilesInStableOrder(t *testing.T) {
+func TestLoadDirectoryLoadsR42HCLFilesInStableOrder(t *testing.T) {
 	t.Parallel()
 
 	directory := t.TempDir()
-	writeFile(t, directory, "b.r42", "loader_fixture \"second\" {}\n")
-	writeFile(t, directory, "a.r42", "loader_fixture \"first\" {}\n")
+	writeFile(t, directory, "b.r42.hcl", "loader_fixture \"second\" {}\n")
+	writeFile(t, directory, "a.r42.hcl", "loader_fixture \"first\" {}\n")
+	writeFile(t, directory, "legacy.r42", "not hcl")
 	writeFile(t, directory, "ignored.txt", "not hcl")
-	require.NoError(t, os.Mkdir(filepath.Join(directory, "nested.r42"), 0o755))
+	require.NoError(t, os.Mkdir(filepath.Join(directory, "nested.r42.hcl"), 0o755))
 
 	loaded, diagnostics, err := config.LoadDirectoryContext(t.Context(), directory)
 	require.NoError(t, err)
@@ -62,7 +63,7 @@ func TestLoadDirectoryLoadsR42FilesInStableOrder(t *testing.T) {
 	require.Len(t, loaded.Files, 2)
 	require.Len(t, loaded.Blocks, 2)
 
-	assert.Equal(t, []string{"a.r42", "b.r42"}, []string{
+	assert.Equal(t, []string{"a.r42.hcl", "b.r42.hcl"}, []string{
 		filepath.Base(loaded.Files[0].Path),
 		filepath.Base(loaded.Files[1].Path),
 	})
@@ -75,8 +76,8 @@ func TestLoadDirectoryReturnsParserDiagnosticsWithSources(t *testing.T) {
 	t.Parallel()
 
 	directory := t.TempDir()
-	writeFile(t, directory, "broken.r42", "loader_fixture \"broken\" { value = }\n")
-	writeFile(t, directory, "valid.r42", "loader_fixture \"valid\" {}\n")
+	writeFile(t, directory, "broken.r42.hcl", "loader_fixture \"broken\" { value = }\n")
+	writeFile(t, directory, "valid.r42.hcl", "loader_fixture \"valid\" {}\n")
 
 	loaded, diagnostics, err := config.LoadDirectoryContext(t.Context(), directory)
 	require.NoError(t, err)
@@ -88,7 +89,7 @@ func TestLoadDirectoryReturnsParserDiagnosticsWithSources(t *testing.T) {
 
 	for _, diagnostic := range diagnostics {
 		require.NotNil(t, diagnostic.Subject)
-		assert.Equal(t, filepath.Join(directory, "broken.r42"), diagnostic.Subject.Filename)
+		assert.Equal(t, filepath.Join(directory, "broken.r42.hcl"), diagnostic.Subject.Filename)
 		assert.Positive(t, diagnostic.Subject.Start.Line)
 		assert.Positive(t, diagnostic.Subject.Start.Column)
 	}
@@ -466,7 +467,7 @@ func TestGoldenHandoffKeepsImplicitAndExplicitDependencies(t *testing.T) {
 	t.Setenv("R42_FIXTURE_VALUE", "from-environment")
 
 	directory := t.TempDir()
-	writeFile(t, directory, "main.r42", `
+	writeFile(t, directory, "main.r42.hcl", `
 fixture_tool "implicit" {}
 fixture_tool "explicit" {}
 

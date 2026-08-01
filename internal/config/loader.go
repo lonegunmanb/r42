@@ -54,7 +54,7 @@ func LoadDirectoryContext(ctx context.Context, directory string) (Loaded, hcl.Di
 	}
 	var diagnostics hcl.Diagnostics
 	for _, entry := range entries {
-		if !entry.Type().IsRegular() || filepath.Ext(entry.Name()) != ".r42" {
+		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".r42.hcl") {
 			continue
 		}
 

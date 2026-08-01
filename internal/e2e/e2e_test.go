@@ -278,7 +278,7 @@ func renderFailFastFixture(t *testing.T, startedFile string) string {
 	source := strings.ReplaceAll(string(template), "__PROGRAM__", string(program))
 	source = strings.ReplaceAll(source, "__STARTED_FILE__", string(started))
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(source), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(source), 0o600))
 	return directory
 }
 

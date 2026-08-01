@@ -73,7 +73,7 @@ func (*lifecycleFixtureBlock) Apply() error {
 //nolint:paralleltest // Golden's block registry is process-global.
 func TestResearchConfigPlansSourceDirectory(t *testing.T) {
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 research "source" {
   model         = "test-model"
   system_prompt = "Collect evidence."
@@ -106,7 +106,7 @@ output "summary" {
 func TestResearchConfigPlansBlockWorkingDirectoriesWithoutCreatingRun(t *testing.T) {
 	directory := t.TempDir()
 	runRoot := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 research "first" {
   model         = "test-model"
   system_prompt = block_wd()
@@ -149,7 +149,7 @@ research "second" {
 //nolint:paralleltest // Golden's block registry is process-global.
 func TestResearchPlanAppliesThroughSourceConfig(t *testing.T) {
 	directory := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 output "summary" {
   value = "planned"
 }
