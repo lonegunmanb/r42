@@ -1,6 +1,7 @@
 package run
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -27,19 +28,36 @@ func NewManager(projectDirectory string) *Manager {
 }
 
 func (m *Manager) Create() (*Run, error) {
+	reserved, err := m.Reserve()
+	if err != nil {
+		return nil, err
+	}
+	if err = reserved.Ensure(); err != nil {
+		return nil, err
+	}
+	return reserved, nil
+}
+
+func (m *Manager) Reserve() (*Run, error) {
 	projectDirectory, err := filepath.Abs(m.projectDirectory)
 	if err != nil {
 		return nil, fmt.Errorf("resolving project directory: %w", err)
 	}
-	runsDirectory := filepath.Join(projectDirectory, ".r42", "runs")
-	if err = os.MkdirAll(runsDirectory, 0o700); err != nil {
-		return nil, fmt.Errorf("creating runs directory: %w", err)
+	random := make([]byte, 16)
+	if _, err = rand.Read(random); err != nil {
+		// note: untested because crypto/rand.Reader cannot be replaced without global process mutation.
+		return nil, fmt.Errorf("reserve run directory: %w", err)
 	}
-	directory, err := os.MkdirTemp(runsDirectory, "run-")
+	id := "run-" + hex.EncodeToString(random)
+	return &Run{id: id, directory: filepath.Join(projectDirectory, ".r42", "runs", id)}, nil
+}
+
+func Open(directory string) (*Run, error) {
+	absolute, err := filepath.Abs(directory)
 	if err != nil {
-		return nil, fmt.Errorf("creating run directory: %w", err)
+		return nil, fmt.Errorf("resolving run directory: %w", err)
 	}
-	return &Run{id: filepath.Base(directory), directory: directory}, nil
+	return &Run{id: filepath.Base(absolute), directory: absolute}, nil
 }
 
 func (r *Run) ID() string {
@@ -50,15 +68,38 @@ func (r *Run) Directory() string {
 	return r.directory
 }
 
-func (r *Run) Workspace(address string) (string, error) {
+func (r *Run) Ensure() error {
+	if err := os.MkdirAll(filepath.Dir(r.directory), 0o700); err != nil {
+		return fmt.Errorf("creating runs directory: %w", err)
+	}
+	if err := os.MkdirAll(r.directory, 0o700); err != nil {
+		return fmt.Errorf("creating run directory: %w", err)
+	}
+	return nil
+}
+
+func (r *Run) WorkspacePath(address string) (string, error) {
 	if strings.TrimSpace(address) == "" {
 		return "", fmt.Errorf("block address is required")
+	}
+	digest := sha256.Sum256([]byte(address))
+	key := hex.EncodeToString(digest[:])
+	return filepath.ToSlash(filepath.Join(r.directory, "blocks", key)), nil
+}
+
+func (r *Run) Workspace(address string) (string, error) {
+	directory, err := r.WorkspacePath(address)
+	if err != nil {
+		return "", err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	digest := sha256.Sum256([]byte(address))
-	key := hex.EncodeToString(digest[:])
+	if err = r.Ensure(); err != nil {
+		return "", err
+	}
+	directory = filepath.FromSlash(directory)
+	key := filepath.Base(directory)
 	blocksDirectory := filepath.Join(r.directory, "blocks")
 	identitiesDirectory := filepath.Join(r.directory, "block-addresses")
 	if err := os.MkdirAll(blocksDirectory, 0o700); err != nil {
@@ -68,7 +109,6 @@ func (r *Run) Workspace(address string) (string, error) {
 		return "", fmt.Errorf("creating block identities directory: %w", err)
 	}
 
-	directory := filepath.Join(blocksDirectory, key)
 	identityPath := filepath.Join(identitiesDirectory, key)
 	identity, err := os.ReadFile(identityPath)
 	if err == nil {

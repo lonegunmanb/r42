@@ -3,6 +3,7 @@ package spec
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"path/filepath"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/provider"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
+	"github.com/zclconf/go-cty/cty/function"
 )
 
 var (
@@ -49,6 +51,10 @@ type blockApplier interface {
 	ApplyBlock(string) error
 }
 
+type blockWorkingDirectoryProvider interface {
+	BlockWorkingDirectory(string) (string, error)
+}
+
 func (*ResearchBlock) Type() string { return "" }
 
 func (*ResearchBlock) BlockType() string { return "research" }
@@ -56,6 +62,27 @@ func (*ResearchBlock) BlockType() string { return "research" }
 func (*ResearchBlock) AddressLength() int { return 2 }
 
 func (*ResearchBlock) CanExecutePrePlan() bool { return false }
+
+func (b *ResearchBlock) EvalContext() *hcl.EvalContext {
+	context := b.BaseBlock.EvalContext()
+	context.Functions = maps.Clone(context.Functions)
+	context.Functions["block_wd"] = function.New(&function.Spec{
+		Params: []function.Parameter{},
+		Type:   function.StaticReturnType(cty.String),
+		Impl: func([]cty.Value, cty.Type) (cty.Value, error) {
+			provider, ok := b.Config().(blockWorkingDirectoryProvider)
+			if !ok {
+				return cty.NilVal, fmt.Errorf("research %q requires an r42 workspace config", b.Name())
+			}
+			directory, err := provider.BlockWorkingDirectory(b.Address())
+			if err != nil {
+				return cty.NilVal, err
+			}
+			return cty.StringVal(directory), nil
+		},
+	})
+	return context
+}
 
 func (b *ResearchBlock) ExecuteDuringPlan() error {
 	return debuglog.PlanBlock(b.Context(), b.Address(), b.BlockType(), func() error {

@@ -14,6 +14,7 @@ import (
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/provider"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
+	runpkg "github.com/lonegunmanb/r42/internal/run"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	toolspec "github.com/lonegunmanb/r42/internal/tool/spec"
 	"github.com/stretchr/testify/assert"
@@ -749,4 +750,36 @@ func planSource(directory string, options executor.ResearchConfigOptions) (modul
 		return modulespec.Plan{}, err
 	}
 	return planned.Plan, nil
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestNestedResearchBlockWorkingDirectoryUsesFullModuleAddress(t *testing.T) {
+	runRoot := t.TempDir()
+	root := t.TempDir()
+	child := filepath.Join(root, "child")
+	require.NoError(t, os.Mkdir(child, 0o700))
+	writeR42(t, child, "main.r42", `
+research "detail" {
+  model         = "test-model"
+  system_prompt = block_wd()
+}
+`)
+	writeR42(t, root, "main.r42", `module "child" { source = "./child" }`)
+
+	planned, err := planSource(root, executor.ResearchConfigOptions{RunDirectory: runRoot})
+	require.NoError(t, err)
+	rootNodes := planned.Saved.Nodes()
+	require.Len(t, rootNodes, 1)
+	require.NotNil(t, rootNodes[0].Module)
+	childNodes := rootNodes[0].Module.Plan.Nodes()
+	require.Len(t, childNodes, 1)
+	decoded, err := modulespec.DecodeResearchPlan(childNodes[0].Config)
+	require.NoError(t, err)
+	reserved, err := runpkg.Open(planned.Saved.RunDirectory())
+	require.NoError(t, err)
+	want, err := reserved.WorkspacePath("module.child.research.detail")
+	require.NoError(t, err)
+
+	assert.Equal(t, want, decoded.Config.SystemPrompt)
+	assert.NoDirExists(t, filepath.Join(runRoot, ".r42"))
 }

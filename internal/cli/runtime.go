@@ -72,11 +72,13 @@ func (e *Engine) Config(
 ) (*executor.ResearchConfig, error) {
 	ctx := options.Context
 	if state := debugRunFromContext(ctx); state != nil {
+		var activeRun *run.Run
 		var err error
-		ctx, _, _, err = state.ensure(ctx, runDirectory(directory, options.RunDirectory))
+		ctx, activeRun, _, err = state.ensure(ctx, runDirectory(directory, options.RunDirectory))
 		if err != nil {
 			return nil, err
 		}
+		options.ReservedRunDirectory = activeRun.Directory()
 	}
 	apply := func(saved *plan.Plan) (map[string]cty.Value, []error, error) {
 		return e.apply(ctx, saved, options)
@@ -100,7 +102,18 @@ func (e *Engine) ConfigFromPlan(
 	options.Apply = func(saved *plan.Plan) (map[string]cty.Value, []error, error) {
 		return e.apply(ctx, saved, options)
 	}
-	return executor.NewResearchConfigFromPlan(planned, options)
+	config, err := executor.NewResearchConfigFromPlan(planned, options)
+	if err != nil {
+		return nil, err
+	}
+	options.ReservedRunDirectory = config.Run().Directory()
+	if state := debugRunFromContext(ctx); state != nil {
+		ctx, _, _, err = state.ensureRun(ctx, config.Run())
+		if err != nil {
+			return nil, err
+		}
+	}
+	return config, nil
 }
 
 func (e *Engine) apply(
@@ -116,20 +129,25 @@ func (e *Engine) apply(
 	var activeRun *run.Run
 	var recorder *debuglog.Recorder
 	var err error
+	activeRun, err = runForPlan(
+		planned,
+		runDirectory(planned.Directory(), options.RunDirectory),
+		options.ReservedRunDirectory,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
 	if options.Debug {
 		if state == nil {
 			state = &debugRun{enabled: true}
 			ownedDebugState = true
 		}
-		ctx, activeRun, recorder, err = state.ensure(
-			ctx, runDirectory(planned.Directory(), options.RunDirectory),
-		)
+		ctx, activeRun, recorder, err = state.ensureRun(ctx, activeRun)
 		if err != nil {
 			return nil, nil, err
 		}
 	} else {
-		activeRun, err = run.NewManager(runDirectory(planned.Directory(), options.RunDirectory)).Create()
-		if err != nil {
+		if err = activeRun.Ensure(); err != nil {
 			return nil, nil, err
 		}
 		recorder, err = debuglog.NewRecorder(activeRun.Directory(), false)
@@ -181,6 +199,16 @@ func (e *Engine) apply(
 		}
 	}
 	return outputs, warnings, applyErr
+}
+
+func runForPlan(planned *plan.Plan, fallbackRoot, reservedDirectory string) (*run.Run, error) {
+	if planned.RunDirectory() != "" {
+		return run.Open(planned.RunDirectory())
+	}
+	if reservedDirectory != "" {
+		return run.Open(reservedDirectory)
+	}
+	return run.NewManager(fallbackRoot).Reserve()
 }
 
 func runDirectory(configurationDirectory, requested string) string {

@@ -21,17 +21,19 @@ import (
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
+	"github.com/lonegunmanb/r42/internal/run"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"
 )
 
 type ResearchConfigOptions struct {
-	Context      context.Context
-	Variables    []golden.CliFlagAssignedVariables
-	RunDirectory string
-	Parallelism  int
-	Debug        bool
-	Apply        func(*internalplan.Plan) (map[string]cty.Value, []error, error)
+	Context              context.Context
+	Variables            []golden.CliFlagAssignedVariables
+	RunDirectory         string
+	ReservedRunDirectory string
+	Parallelism          int
+	Debug                bool
+	Apply                func(*internalplan.Plan) (map[string]cty.Value, []error, error)
 }
 
 type variableDeclaration struct {
@@ -60,8 +62,22 @@ func NewResearchConfig(directory string, options ResearchConfigOptions) (*Resear
 	if err != nil {
 		return nil, fmt.Errorf("creating isolated child variable directory: %w", err)
 	}
+	runRoot := options.RunDirectory
+	if strings.TrimSpace(runRoot) == "" {
+		runRoot = absolute
+	}
+	var reserved *run.Run
+	if options.ReservedRunDirectory != "" {
+		reserved, err = run.Open(options.ReservedRunDirectory)
+	} else {
+		reserved, err = run.NewManager(runRoot).Reserve()
+	}
+	if err != nil {
+		_ = os.RemoveAll(childVariableDirectory)
+		return nil, err
+	}
 	result, err := newSourceResearchConfig(
-		absolute, nil, nil, true, childVariableDirectory, options,
+		absolute, nil, nil, true, childVariableDirectory, reserved, "", options,
 	)
 	if err != nil {
 		_ = os.RemoveAll(childVariableDirectory)
@@ -78,12 +94,18 @@ func NewResearchConfigFromPlan(saved *internalplan.Plan, options ResearchConfigO
 	if options.Apply == nil {
 		return nil, fmt.Errorf("saved plan apply function is required")
 	}
+	activeRun, err := runFromSavedPlan(saved, options.RunDirectory)
+	if err != nil {
+		return nil, err
+	}
+	baseConfig := config.NewBaseConfig(golden.NewBaseConfigArgs{
+		Basedir: saved.Directory(),
+		Ctx:     options.Context,
+	})
 	result := &ResearchConfig{
-		BaseConfig: config.NewBaseConfig(golden.NewBaseConfigArgs{
-			Basedir: saved.Directory(),
-			Ctx:     options.Context,
-		}),
+		BaseConfig:  baseConfig,
 		directory:   saved.Directory(),
+		run:         activeRun,
 		parallelism: r42concurrency.DefaultGlobalParallelism,
 		applyPlan:   options.Apply,
 	}
@@ -106,6 +128,8 @@ func newSourceResearchConfig(
 	stack []string,
 	root bool,
 	childVariableDirectory string,
+	activeRun *run.Run,
+	addressPrefix string,
 	options ResearchConfigOptions,
 ) (*ResearchConfig, error) {
 	if slices.Contains(stack, directory) {
@@ -144,9 +168,12 @@ func newSourceResearchConfig(
 	if !root {
 		baseArguments.VarConfigDir = &childVariableDirectory
 	}
+	baseConfig := config.NewBaseConfig(baseArguments)
 	researchConfig := &ResearchConfig{
-		BaseConfig:             config.NewBaseConfig(baseArguments),
+		BaseConfig:             baseConfig,
 		directory:              directory,
+		run:                    activeRun,
+		addressPrefix:          addressPrefix,
 		childVariableDirectory: childVariableDirectory,
 		stack:                  append(slices.Clone(stack), directory),
 		sensitiveVariables:     sensitiveVariableNames(variables, inheritedSensitive),
@@ -190,11 +217,16 @@ func (c *ResearchConfig) EvalContext() *hcl.EvalContext {
 }
 
 func (c *ResearchConfig) PlanChildModule(
+	address string,
 	source string,
 	inputs map[string]cty.Value,
 	parallelism *int,
 	timeoutValue *string,
 ) (modulespec.ModulePlan, error) {
+	activeRun, err := c.researchRun()
+	if err != nil {
+		return modulespec.ModulePlan{}, err
+	}
 	sourceDirectory := source
 	if !filepath.IsAbs(sourceDirectory) {
 		sourceDirectory = filepath.Join(c.directory, sourceDirectory)
@@ -209,7 +241,7 @@ func (c *ResearchConfig) PlanChildModule(
 	}
 	child, err := newSourceResearchConfig(
 		directory, inputs, c.stack, false, c.childVariableDirectory,
-		ResearchConfigOptions{Context: c.Context()},
+		activeRun, c.executionAddress(address), ResearchConfigOptions{Context: c.Context()},
 	)
 	if err != nil {
 		return modulespec.ModulePlan{}, err
@@ -223,6 +255,21 @@ func (c *ResearchConfig) PlanChildModule(
 		result.Parallelism = *parallelism
 	}
 	return result, nil
+}
+
+func (c *ResearchConfig) BlockWorkingDirectory(address string) (string, error) {
+	activeRun, err := c.researchRun()
+	if err != nil {
+		return "", err
+	}
+	return activeRun.WorkspacePath(c.executionAddress(address))
+}
+
+func (c *ResearchConfig) executionAddress(address string) string {
+	if c.addressPrefix == "" {
+		return address
+	}
+	return c.addressPrefix + "." + address
 }
 
 func (c *ResearchConfig) snapshotPlan() (modulespec.Plan, error) {
@@ -257,6 +304,10 @@ func (c *ResearchConfig) snapshotPlan() (modulespec.Plan, error) {
 }
 
 func (c *ResearchConfig) savedPlan(planned modulespec.Plan) (*internalplan.Plan, error) {
+	activeRun, err := c.researchRun()
+	if err != nil {
+		return nil, err
+	}
 	executable := make(map[string]struct{})
 	for _, block := range golden.Blocks[*researchspec.ResearchBlock](c) {
 		executable[block.Address()] = struct{}{}
@@ -311,13 +362,38 @@ func (c *ResearchConfig) savedPlan(planned modulespec.Plan) (*internalplan.Plan,
 			localExpressions[block.Name()] = attribute.ExprString()
 		}
 	}
-	result, err := internalplan.NewWithContextAndLocals(
-		planned.Directory, nodes, outputs, contextValues, localExpressions,
+	result, err := internalplan.NewForRun(
+		planned.Directory, activeRun.Directory(), nodes, outputs, contextValues, localExpressions,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("build saved plan: %w", err)
 	}
 	return result, nil
+}
+
+func (c *ResearchConfig) researchRun() (*run.Run, error) {
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	if c.run != nil {
+		return c.run, nil
+	}
+	reserved, err := run.NewManager(c.directory).Reserve()
+	if err != nil {
+		return nil, fmt.Errorf("reserve research run: %w", err)
+	}
+	c.run = reserved
+	return c.run, nil
+}
+
+func runFromSavedPlan(saved *internalplan.Plan, requestedRoot string) (*run.Run, error) {
+	if saved.RunDirectory() != "" {
+		return run.Open(saved.RunDirectory())
+	}
+	root := requestedRoot
+	if strings.TrimSpace(root) == "" {
+		root = saved.Directory()
+	}
+	return run.NewManager(root).Reserve()
 }
 
 func inspectVariables(blocks []*golden.HclBlock) (map[string]variableDeclaration, error) {

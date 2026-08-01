@@ -85,7 +85,7 @@ func (b *ModuleBlock) ExecuteDuringPlan() error {
 		if !ok {
 			return fmt.Errorf("module %q requires an r42 module planning config", b.Name())
 		}
-		planned, err := planner.PlanChildModule(b.Source, b.Inputs, b.Parallelism, b.Timeout)
+		planned, err := planner.PlanChildModule(b.Address(), b.Source, b.Inputs, b.Parallelism, b.Timeout)
 		if err != nil {
 			return fmt.Errorf("planning module %q: %w", b.Name(), err)
 		}
@@ -103,7 +103,7 @@ func (b *ModuleBlock) Apply() error {
 }
 
 type ModulePlanner interface {
-	PlanChildModule(string, map[string]cty.Value, *int, *string) (ModulePlan, error)
+	PlanChildModule(string, string, map[string]cty.Value, *int, *string) (ModulePlan, error)
 }
 
 func (b *ModuleBlock) Value() cty.Value {

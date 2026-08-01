@@ -13,6 +13,7 @@ import (
 
 type wirePlan struct {
 	Directory        string                `json:"directory"`
+	RunDirectory     string                `json:"run_directory,omitempty"`
 	Nodes            []wireNode            `json:"nodes"`
 	Outputs          map[string]wireOutput `json:"outputs"`
 	Context          map[string]wireValue  `json:"context,omitempty"`
@@ -88,6 +89,7 @@ func Unmarshal(encoded []byte) (*Plan, error) {
 func encodePlan(planned *Plan) (wirePlan, error) {
 	result := wirePlan{
 		Directory:        planned.directory,
+		RunDirectory:     planned.runDirectory,
 		Nodes:            make([]wireNode, len(planned.nodes)),
 		Outputs:          make(map[string]wireOutput, len(planned.outputs)),
 		Context:          make(map[string]wireValue, len(planned.context)),
@@ -178,7 +180,9 @@ func decodePlan(wire wirePlan) (*Plan, error) {
 		}
 		contextValues[name] = value
 	}
-	return NewWithContextAndLocals(wire.Directory, nodes, outputs, contextValues, wire.LocalExpressions)
+	return NewForRun(
+		wire.Directory, wire.RunDirectory, nodes, outputs, contextValues, wire.LocalExpressions,
+	)
 }
 
 func encodeValue(value cty.Value) (wireValue, error) {

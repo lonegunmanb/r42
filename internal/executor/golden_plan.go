@@ -21,6 +21,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
+	"github.com/lonegunmanb/r42/internal/run"
 	toolspec "github.com/lonegunmanb/r42/internal/tool/spec"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -33,6 +34,9 @@ var (
 type ResearchConfig struct {
 	*golden.BaseConfig
 	directory              string
+	runMu                  sync.Mutex
+	run                    *run.Run
+	addressPrefix          string
 	childVariableDirectory string
 	stack                  []string
 	sensitiveVariables     map[string]struct{}
@@ -45,6 +49,12 @@ type ResearchConfig struct {
 	outputs                map[string]cty.Value
 	warnings               []error
 	plan                   *ResearchPlan
+}
+
+func (c *ResearchConfig) Run() *run.Run {
+	c.runMu.Lock()
+	defer c.runMu.Unlock()
+	return c.run
 }
 
 func newApplyResearchConfig(

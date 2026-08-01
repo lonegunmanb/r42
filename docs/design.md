@@ -560,9 +560,9 @@ callbacks therefore do not consume research permits, and r42 does not maintain
 a second DAG scheduler.
 
 Research blocks and modules may set `timeout` using Go duration strings such as
-`30m` and `2h`. CLI may set an overall timeout. None has a default. The effective
-deadline is the earliest of the overall deadline, all ancestor module deadlines,
-and the research block deadline.
+`30m` and `2h`. CLI overall `--timeout` defaults to `1h`; research and module
+timeouts have no default. The effective deadline is the earliest of the overall
+deadline, all ancestor module deadlines, and the research block deadline.
 
 ## 13. Cancellation and Session Cleanup
 
@@ -671,7 +671,7 @@ a successful Apply, it prints the output values as a second JSON document.
 The CLI also exposes:
 
 - `--parallelism`, default 10.
-- Overall `--timeout`, unset by default.
+- Overall `--timeout`, default `1h`.
 - `--debug`, disabled by default.
 - Golden's existing root-variable input mechanisms without an r42-specific
   duplicate implementation.

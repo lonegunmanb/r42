@@ -27,6 +27,7 @@ type fakeRuntime struct {
 	variables        []golden.CliFlagAssignedVariables
 	configOptions    executor.ResearchConfigOptions
 	applyDeadline    bool
+	applyDeadlineAt  time.Time
 	outputs          map[string]cty.Value
 	warnings         []error
 	planErr          error
@@ -62,7 +63,7 @@ func (f *fakeRuntime) config(
 		if f.applyHook != nil {
 			f.applyHook()
 		}
-		_, f.applyDeadline = options.Context.Deadline()
+		f.applyDeadlineAt, f.applyDeadline = options.Context.Deadline()
 		return f.outputs, f.warnings, f.applyErr
 	}
 	return executor.NewResearchConfigFromPlan(planned, options)
@@ -540,6 +541,15 @@ func TestApplyDefaultParallelism(t *testing.T) {
 	_, _, err := execute(t, runtime, "apply", t.TempDir())
 	require.NoError(t, err)
 	assert.Equal(t, 10, runtime.configOptions.Parallelism)
+}
+
+func TestApplyDefaultTimeout(t *testing.T) {
+	t.Parallel()
+
+	runtime := &fakeRuntime{planned: mustPlan(t)}
+	_, _, err := execute(t, runtime, "apply", t.TempDir())
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now().Add(time.Hour), runtime.applyDeadlineAt, time.Second)
 }
 
 func TestApplyRedactsSensitiveOutputFromStdout(t *testing.T) {

@@ -102,6 +102,31 @@ func TestPlanNestedRoundTripPreservesDAGValuesAndSensitivity(t *testing.T) {
 	assert.Equal(t, "output-secret", unmarkedOutput.AsString())
 }
 
+func TestPlanRoundTripPreservesReservedRunDirectory(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	runDirectory := filepath.Join(t.TempDir(), ".r42", "runs", "run-reserved")
+	planned, err := plan.NewForRun(directory, runDirectory, nil, nil, nil, nil)
+	require.NoError(t, err)
+
+	encoded, err := plan.Marshal(planned)
+	require.NoError(t, err)
+	decoded, err := plan.Unmarshal(encoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, runDirectory, decoded.RunDirectory())
+	assert.NoDirExists(t, runDirectory)
+	display, err := plan.Display(decoded)
+	require.NoError(t, err)
+	var displayed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(display), &displayed))
+	assert.Equal(t, runDirectory, displayed["run_directory"])
+
+	_, err = plan.NewForRun(directory, "relative/run-reserved", nil, nil, nil, nil)
+	require.EqualError(t, err, "run directory must be absolute")
+}
+
 func TestPlanSnapshotsAreImmutable(t *testing.T) {
 	t.Parallel()
 

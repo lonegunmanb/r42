@@ -46,8 +46,41 @@ func (s *debugRun) ensure(ctx context.Context, directory string) (context.Contex
 		if !info.IsDir() {
 			return ctx, nil, nil, fmt.Errorf("debug project path %q is not a directory", directory)
 		}
-		activeRun, err := run.NewManager(directory).Create()
+		activeRun, err := run.NewManager(directory).Reserve()
 		if err != nil {
+			return ctx, nil, nil, err
+		}
+		return s.ensureRunLocked(ctx, activeRun)
+	}
+	return debuglog.WithRecorder(ctx, s.recorder), s.run, s.recorder, nil
+}
+
+func (s *debugRun) ensureRun(
+	ctx context.Context,
+	activeRun *run.Run,
+) (context.Context, *run.Run, *debuglog.Recorder, error) {
+	if s == nil || !s.enabled {
+		return ctx, activeRun, nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ensureRunLocked(ctx, activeRun)
+}
+
+func (s *debugRun) ensureRunLocked(
+	ctx context.Context,
+	activeRun *run.Run,
+) (context.Context, *run.Run, *debuglog.Recorder, error) {
+	if activeRun == nil {
+		return ctx, nil, nil, fmt.Errorf("debug run is required")
+	}
+	if s.run != nil && filepath.Clean(s.run.Directory()) != filepath.Clean(activeRun.Directory()) {
+		return ctx, nil, nil, fmt.Errorf(
+			"debug run %q does not match planned run %q", s.run.Directory(), activeRun.Directory(),
+		)
+	}
+	if s.recorder == nil {
+		if err := activeRun.Ensure(); err != nil {
 			return ctx, nil, nil, err
 		}
 		recorder, err := debuglog.NewRecorder(activeRun.Directory(), true)

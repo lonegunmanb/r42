@@ -13,6 +13,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/copilot"
 	"github.com/lonegunmanb/r42/internal/executor"
+	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -99,6 +100,48 @@ output "summary" { value = "planned-and-applied" }
 
 	require.NoError(t, planned.Apply())
 	assert.Equal(t, cty.StringVal("planned-and-applied"), config.Outputs()["summary"])
+}
+
+func TestProductionRuntimeAppliesTheBlockWorkingDirectoryReservedByPlan(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	runRoot := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+research "source" {
+  model         = "test-model"
+  system_prompt = block_wd()
+}
+`), 0o600))
+	opener := &fakeSessionOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	config, err := runtime.Config(directory, executor.ResearchConfigOptions{
+		Context: t.Context(), RunDirectory: runRoot,
+	})
+	require.NoError(t, err)
+	planned, err := executor.RunResearchPlan(config)
+	require.NoError(t, err)
+	saved := planned.SavedPlan()
+	require.NotNil(t, saved)
+	assert.NoDirExists(t, filepath.Join(runRoot, ".r42"))
+	nodes := saved.Nodes()
+	require.Len(t, nodes, 1)
+	decoded, err := modulespec.DecodeResearchPlan(nodes[0].Config)
+	require.NoError(t, err)
+	plannedWorkingDirectory := decoded.Config.SystemPrompt
+	encoded, err := plan.Marshal(saved)
+	require.NoError(t, err)
+	saved, err = plan.Unmarshal(encoded)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), saved, executor.ResearchConfigOptions{Parallelism: 1})
+	require.NoError(t, err)
+	require.Len(t, opener.configs, 1)
+	workingDirectory := opener.configs[0].WorkingDirectory
+
+	assert.Equal(t, plannedWorkingDirectory, filepath.ToSlash(workingDirectory))
+	assert.DirExists(t, workingDirectory)
+	assert.True(t, strings.HasSuffix(opener.configs[0].SystemPrompt, plannedWorkingDirectory))
 }
 
 func TestProductionRuntimeUsesPlanKnownFunctionOutputWithoutReevaluation(t *testing.T) {

@@ -83,9 +83,10 @@ func displayPlan(planned *Plan) (map[string]any, error) {
 		outputs[name] = map[string]any{"value": value, "description": output.Description}
 	}
 	return map[string]any{
-		"directory": planned.directory,
-		"nodes":     nodes,
-		"outputs":   outputs,
+		"directory":     planned.directory,
+		"run_directory": planned.runDirectory,
+		"nodes":         nodes,
+		"outputs":       outputs,
 	}, nil
 }
 

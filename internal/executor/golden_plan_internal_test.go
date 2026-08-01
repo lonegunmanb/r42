@@ -17,6 +17,7 @@ import (
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/plan"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
+	runpkg "github.com/lonegunmanb/r42/internal/run"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
@@ -99,6 +100,50 @@ output "summary" {
 	require.Len(t, nodes, 1)
 	assert.Equal(t, "research.source", nodes[0].Address)
 	assert.Contains(t, planned.SavedPlan().Outputs()["summary"].Value.AsString(), "report.md")
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigPlansBlockWorkingDirectoriesWithoutCreatingRun(t *testing.T) {
+	directory := t.TempDir()
+	runRoot := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42"), []byte(`
+research "first" {
+  model         = "test-model"
+  system_prompt = block_wd()
+}
+research "second" {
+  model         = "test-model"
+  system_prompt = "${block_wd()}/notes"
+}
+`), 0o600))
+
+	config, err := NewResearchConfig(directory, ResearchConfigOptions{
+		Context: t.Context(), RunDirectory: runRoot,
+	})
+	require.NoError(t, err)
+	planned, err := RunResearchPlan(config)
+	require.NoError(t, err)
+	saved := planned.SavedPlan()
+	require.NotNil(t, saved)
+	reserved, err := runpkg.Open(saved.RunDirectory())
+	require.NoError(t, err)
+	assert.NoDirExists(t, filepath.Join(runRoot, ".r42"))
+
+	configs := make(map[string]researchspec.Config)
+	for _, node := range saved.Nodes() {
+		decoded, decodeErr := modulespec.DecodeResearchPlan(node.Config)
+		require.NoError(t, decodeErr)
+		configs[node.Address] = decoded.Config
+	}
+	first, err := reserved.WorkspacePath("research.first")
+	require.NoError(t, err)
+	second, err := reserved.WorkspacePath("research.second")
+	require.NoError(t, err)
+	assert.Equal(t, first, configs["research.first"].SystemPrompt)
+	assert.Equal(t, second+"/notes", configs["research.second"].SystemPrompt)
+	assert.NotEqual(t, first, second)
+	assert.True(t, filepath.IsAbs(filepath.FromSlash(first)))
+	assert.NotContains(t, first, `\`)
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

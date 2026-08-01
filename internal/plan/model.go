@@ -3,6 +3,7 @@ package plan
 import (
 	"fmt"
 	"maps"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -31,6 +32,7 @@ type OutputSpec struct {
 
 type Plan struct {
 	directory        string
+	runDirectory     string
 	nodes            []NodeSpec
 	outputs          map[string]OutputSpec
 	context          map[string]cty.Value
@@ -44,11 +46,37 @@ func NewWithContextAndLocals(
 	contextValues map[string]cty.Value,
 	localExpressions map[string]string,
 ) (*Plan, error) {
+	return newPlan(directory, "", nodes, outputs, contextValues, localExpressions)
+}
+
+func NewForRun(
+	directory string,
+	runDirectory string,
+	nodes []NodeSpec,
+	outputs map[string]OutputSpec,
+	contextValues map[string]cty.Value,
+	localExpressions map[string]string,
+) (*Plan, error) {
+	if runDirectory != "" && !filepath.IsAbs(runDirectory) {
+		return nil, fmt.Errorf("run directory must be absolute")
+	}
+	return newPlan(directory, runDirectory, nodes, outputs, contextValues, localExpressions)
+}
+
+func newPlan(
+	directory string,
+	runDirectory string,
+	nodes []NodeSpec,
+	outputs map[string]OutputSpec,
+	contextValues map[string]cty.Value,
+	localExpressions map[string]string,
+) (*Plan, error) {
 	if err := validateNodes(nodes); err != nil {
 		return nil, err
 	}
 	return &Plan{
 		directory:        directory,
+		runDirectory:     runDirectory,
 		nodes:            cloneNodes(nodes),
 		outputs:          cloneOutputs(outputs),
 		context:          cloneContext(contextValues),
@@ -66,6 +94,10 @@ func (p *Plan) LocalExpressions() map[string]string {
 
 func (p *Plan) Directory() string {
 	return p.directory
+}
+
+func (p *Plan) RunDirectory() string {
+	return p.runDirectory
 }
 
 func (p *Plan) Nodes() []NodeSpec {
@@ -137,6 +169,7 @@ func clonePlan(source *Plan) *Plan {
 	}
 	return &Plan{
 		directory:        source.directory,
+		runDirectory:     source.runDirectory,
 		nodes:            cloneNodes(source.nodes),
 		outputs:          cloneOutputs(source.outputs),
 		context:          cloneContext(source.context),

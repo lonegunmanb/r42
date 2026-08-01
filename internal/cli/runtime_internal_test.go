@@ -11,9 +11,37 @@ import (
 	sdk "github.com/github/copilot-sdk/go"
 	"github.com/lonegunmanb/r42/internal/copilot"
 	"github.com/lonegunmanb/r42/internal/debuglog"
+	"github.com/lonegunmanb/r42/internal/executor"
+	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zclconf/go-cty/cty"
 )
+
+func TestRuntimeAppliesLegacyPlanWithReservedDebugRun(t *testing.T) {
+	t.Parallel()
+
+	runRoot := t.TempDir()
+	legacy, err := plan.NewWithContextAndLocals(
+		t.TempDir(), nil,
+		map[string]plan.OutputSpec{"summary": {Value: cty.StringVal("legacy")}},
+		nil, nil,
+	)
+	require.NoError(t, err)
+	state := &debugRun{enabled: true}
+	t.Cleanup(func() { require.NoError(t, state.close()) })
+	ctx := withDebugRun(t.Context(), state)
+	runtime := NewRuntime()
+	config, err := runtime.ConfigFromPlan(legacy, executor.ResearchConfigOptions{
+		Context: ctx, RunDirectory: runRoot, Debug: true,
+	})
+	require.NoError(t, err)
+
+	err = config.Plan().Apply()
+
+	require.NoError(t, err)
+	assert.Equal(t, cty.StringVal("legacy"), config.Outputs()["summary"])
+}
 
 func TestRuntimeFactoryClosesOpenedSessionWhenLifecycleCompletionCannotBeRecorded(t *testing.T) {
 	t.Parallel()

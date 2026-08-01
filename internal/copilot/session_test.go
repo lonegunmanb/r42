@@ -55,6 +55,8 @@ func TestFactoryOpenMaterializesProviderAndAssemblesSession(t *testing.T) {
 	config := client.configs[0]
 	assert.Equal(t, "gpt-5.6-sol", config.Model)
 	assert.Equal(t, "max", config.ReasoningEffort)
+	require.NotNil(t, config.Streaming)
+	assert.True(t, *config.Streaming)
 	assert.Equal(t, "D:/run/research.market", config.WorkingDirectory)
 	require.NotNil(t, config.SystemMessage)
 	assert.Equal(t, "append", config.SystemMessage.Mode)

@@ -88,6 +88,7 @@ func (f *Factory) sessionConfig(config SessionConfig) (*sdk.SessionConfig, error
 		ReasoningEffort:     config.ReasoningEffort,
 		SystemMessage:       &sdk.SystemMessageConfig{Mode: "append", Content: config.SystemPrompt},
 		WorkingDirectory:    config.WorkingDirectory,
+		Streaming:           sdk.Bool(true),
 		Provider:            providerConfig,
 		Tools:               slices.Clone(config.Tools),
 		AvailableTools:      slices.Clone(config.AvailableTools),

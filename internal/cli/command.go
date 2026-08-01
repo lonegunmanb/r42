@@ -200,7 +200,7 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 		},
 	}
 	command.Flags().IntVar(&parallelism, "parallelism", parallelism, "maximum concurrent research blocks")
-	command.Flags().DurationVar(&timeout, "timeout", 0, "overall apply timeout")
+	command.Flags().DurationVar(&timeout, "timeout", time.Hour, "overall apply timeout")
 	command.Flags().BoolVar(&debug, "debug", false, "persist sensitive debug events")
 	command.Flags().StringArrayVar(&variables, "var", nil, "set a Golden input variable for directory apply (name=value)")
 	command.Flags().StringArrayVar(&variableFiles, "var-file", nil, "load Golden input variables for directory apply")

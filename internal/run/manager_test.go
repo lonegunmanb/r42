@@ -35,6 +35,22 @@ func TestManagerCreatesUniqueRetainedRuns(t *testing.T) {
 	}
 }
 
+func TestManagerReservesRunAndBlockWorkspaceWithoutCreatingDirectories(t *testing.T) {
+	t.Parallel()
+
+	project := t.TempDir()
+	reserved, err := runpkg.NewManager(project).Reserve()
+	require.NoError(t, err)
+
+	assert.True(t, filepath.IsAbs(reserved.Directory()))
+	assert.NoDirExists(t, filepath.Join(project, ".r42"))
+	workspace, err := reserved.WorkspacePath("research.market")
+	require.NoError(t, err)
+	assert.True(t, filepath.IsAbs(filepath.FromSlash(workspace)))
+	assert.NotContains(t, workspace, `\`)
+	assert.NoDirExists(t, filepath.Join(project, ".r42"))
+}
+
 func TestRunCreatesCollisionFreeBlockWorkspaces(t *testing.T) {
 	t.Parallel()
 	created, err := runpkg.NewManager(t.TempDir()).Create()
