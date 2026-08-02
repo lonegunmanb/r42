@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	sdk "github.com/github/copilot-sdk/go"
@@ -32,7 +33,7 @@ external_tool "lookup" {
 research "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
-  tools = [external_tool.lookup]
+	tool_ids = [external_tool.lookup.id]
 }
 `, program)
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(source), 0o600))
@@ -64,7 +65,7 @@ external_tool "lookup" {
 research "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
-  tools = [external_tool.lookup]
+	tool_ids = [external_tool.lookup.id]
 }
 `, program)
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(source), 0o600))
@@ -80,7 +81,8 @@ research "source" {
 	require.Len(t, runs, 1)
 	events, readErr := os.ReadFile(filepath.Join(directory, ".r42", "runs", runs[0].Name(), "events.jsonl"))
 	require.NoError(t, readErr)
-	assert.Contains(t, string(events), `"tool_name":"external_tool_lookup"`)
+	assert.Contains(t, string(events), `"tool_name":"tool_external_tool_lookup_`)
+	assert.Contains(t, string(events), `"tool_address":"external_tool.lookup"`)
 	assert.Contains(t, string(events), `"query":"facts"`)
 	assert.Contains(t, string(events), "failed stdout")
 	assert.Contains(t, string(events), "complete failed stderr")
@@ -121,7 +123,7 @@ type externalCallingSession struct {
 
 func (s *externalCallingSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
 	for _, tool := range s.config.Tools {
-		if tool.Name == "external_tool_lookup" {
+		if strings.HasPrefix(tool.Name, "tool_external_tool_lookup_") {
 			result, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"query": "facts"}})
 			s.opener.result = result.TextResultForLLM
 			return &sdk.SessionEvent{}, err

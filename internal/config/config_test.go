@@ -149,6 +149,55 @@ func TestToolNameConvertsTypedAddresses(t *testing.T) {
 	}
 }
 
+func TestToolNameReturnsTypedToolIDWhenPresent(t *testing.T) {
+	t.Parallel()
+
+	input := cty.ObjectVal(map[string]cty.Value{
+		"id":      cty.StringVal("tool_go_tool_finish_12345678-1234-8234-9234-123456789abc"),
+		"address": cty.StringVal("go_tool.finish"),
+		"kind":    cty.StringVal("go"),
+	})
+
+	actual, err := config.Functions()["tool_name"].Call([]cty.Value{input})
+
+	require.NoError(t, err)
+	assert.Equal(t, "tool_go_tool_finish_12345678-1234-8234-9234-123456789abc", actual.AsString())
+}
+
+func TestToolNameFallsBackToAddressWhenOptionalIDIsInvalid(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		id            cty.Value
+		expectedError string
+	}{
+		{name: "null", id: cty.NullVal(cty.String)},
+		{name: "unknown", id: cty.UnknownVal(cty.String), expectedError: "tool_name requires a typed tool address"},
+		{name: "wrong type", id: cty.NumberIntVal(1)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			input := cty.ObjectVal(map[string]cty.Value{
+				"id":      tt.id,
+				"address": cty.StringVal("go_tool.finish"),
+				"kind":    cty.StringVal("go"),
+			})
+
+			actual, err := config.Functions()["tool_name"].Call([]cty.Value{input})
+
+			if tt.expectedError != "" {
+				assert.ErrorContains(t, err, tt.expectedError)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, "go_tool_finish", actual.AsString())
+		})
+	}
+}
+
 func TestToolNamePreservesNonAddressMarks(t *testing.T) {
 	t.Parallel()
 

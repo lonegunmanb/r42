@@ -62,6 +62,26 @@ func TestRuntimeFactoryClosesOpenedSessionWhenLifecycleCompletionCannotBeRecorde
 	assert.Equal(t, 1, session.closeCalls)
 }
 
+func TestRuntimeFactoryResolvesToolDefinitionsByID(t *testing.T) {
+	t.Parallel()
+
+	const toolID = "tool_go_tool_finish_12345678-1234-8234-9234-123456789abc"
+	factory := &runtimeFactory{tools: map[string]plan.ToolSpec{
+		toolID: {ID: toolID, Address: "go_tool.finish", Kind: "go"},
+	}}
+
+	definitions, err := factory.resolveToolDefinitions([]string{toolID}, stringPointer(toolID))
+
+	require.NoError(t, err)
+	require.Len(t, definitions, 1)
+	assert.Equal(t, toolID, definitions[0].ID)
+
+	_, err = factory.resolveToolDefinitions([]string{"missing"}, nil)
+	assert.EqualError(t, err, `typed tool id "missing" was not planned`)
+}
+
+func stringPointer(value string) *string { return &value }
+
 func TestRecordingSessionClosesSDKSessionWhenLifecycleStartCannotBeRecorded(t *testing.T) {
 	t.Parallel()
 

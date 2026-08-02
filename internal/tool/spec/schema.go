@@ -36,8 +36,17 @@ func (*GoToolBlock) AddressLength() int { return 2 }
 
 func (*GoToolBlock) CanExecutePrePlan() bool { return false }
 
+func (b *GoToolBlock) CanonicalAddress() string { return canonicalAddress(b.BaseBlock) }
+
+func (b *GoToolBlock) Id() string { return typedToolID(b.BaseBlock, b.BlockType()) }
+
+func (b *GoToolBlock) BaseValues() map[string]cty.Value {
+	return typedToolBaseValues(b.BaseBlock, b.Id())
+}
+
 func (b *GoToolBlock) Value() cty.Value {
 	return cty.ObjectVal(map[string]cty.Value{
+		"id":          cty.StringVal(b.Id()),
 		"address":     cty.StringVal(b.Address()),
 		"kind":        cty.StringVal(string(config.AddressKindGo)),
 		"description": cty.StringVal(b.Description),
@@ -75,6 +84,14 @@ func (*ExternalToolBlock) AddressLength() int { return 2 }
 
 func (*ExternalToolBlock) CanExecutePrePlan() bool { return false }
 
+func (b *ExternalToolBlock) CanonicalAddress() string { return canonicalAddress(b.BaseBlock) }
+
+func (b *ExternalToolBlock) Id() string { return typedToolID(b.BaseBlock, b.BlockType()) }
+
+func (b *ExternalToolBlock) BaseValues() map[string]cty.Value {
+	return typedToolBaseValues(b.BaseBlock, b.Id())
+}
+
 func (b *ExternalToolBlock) Value() cty.Value {
 	program := cty.ListValEmpty(cty.String)
 	if len(b.Program) > 0 {
@@ -86,6 +103,7 @@ func (b *ExternalToolBlock) Value() cty.Value {
 	}
 
 	return cty.ObjectVal(map[string]cty.Value{
+		"id":          cty.StringVal(b.Id()),
 		"address":     cty.StringVal(b.Address()),
 		"kind":        cty.StringVal(string(config.AddressKindExternal)),
 		"description": cty.StringVal(b.Description),

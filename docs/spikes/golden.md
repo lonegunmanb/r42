@@ -1,7 +1,8 @@
 # Golden Capability Spike
 
-This spike targets Golden
-`v0.0.0-20260603014844-1d1c394b55ea`. Executable evidence lives in
+The module requirement names Azure/golden
+`v0.0.0-20260603014844-1d1c394b55ea`, and `go.mod` replaces it with the r42
+fork at `v0.0.0-20260801112721-60fc2aeee0c3`. Executable evidence lives in
 `internal/goldenprobe` and deliberately remains test-only.
 
 ## Block And Type Registration
@@ -85,8 +86,8 @@ when direct CLI values and `golden.NewCliFlagAssignedVariableFile` are mixed.
 Root CLI plumbing should pass Golden's `CliFlagAssignedVariables` directly.
 
 Golden has no exported production source-directory loader. r42 still needs to
-load and parse all `.r42` files, pair `hclsyntax` and `hclwrite` blocks, and pass
-the result through `golden.AsHclBlocks` and `golden.InitConfig`.
+load and parse all `*.r42.hcl` files, pair `hclsyntax` and `hclwrite` blocks, and
+pass the result through `golden.AsHclBlocks` and `golden.InitConfig`.
 
 ## Dynamic Module Inputs
 

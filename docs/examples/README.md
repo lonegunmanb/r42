@@ -22,17 +22,24 @@ value. The session completes when the model finishes its response.
 
 ## Multi-step research
 
-The `multi-step` example fans out into three independent research directions,
-then runs a synthesis session after all three subreports exist. Its explicit
-`depends_on` list forms the fan-in edge, while the blocks exchange reports
-through `research-output` under the directory where the r42 CLI was started.
-The `cwd()` function returns that directory with `/` separators on every
-operating system. All four sessions use one OpenAI `model_provider`; set
-`OPENAI_API_KEY` before Apply.
+The `multi-step` example demonstrates module-owned external tools. The
+`pplx_tools` child module declares a Python search process and fetch process,
+then exports their generated tool IDs as outputs. The root research block uses
+those IDs to search python.org and save a Markdown snapshot in its block
+workspace.
+
+The example provider reads `DEEPSEEK_KEY`. The Python tools read
+`PPLX_API_KEY` and require Python 3; they otherwise use only the Python standard
+library. Initialize the module before planning:
 
 ```powershell
+go run ./cmd/r42 init ./docs/examples/multi-step
 go run ./cmd/r42 plan --directory ./docs/examples/multi-step --out ./multi-step.r42plan
-go run ./cmd/r42 apply ./multi-step.r42plan --parallelism 3
+go run ./cmd/r42 apply ./multi-step.r42plan
 ```
 
-Apply prints the absolute path of the final report when the DAG completes.
+The initialized module is copied to `.r42/modules/pplx_tools` below the
+directory where the CLI was started. `path.module` lets the module invoke its
+copied Python file. During Apply, `block_wd()` resolves to the research block's
+absolute workspace and the fetch tool writes `snapshot.md` there. Apply prints
+that artifact path when the DAG completes.

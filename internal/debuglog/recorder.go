@@ -73,6 +73,7 @@ type Event struct {
 	Role         Role            `json:"role,omitempty"`
 	Content      string          `json:"content,omitempty"`
 	ToolName     string          `json:"tool_name,omitempty"`
+	ToolAddress  string          `json:"tool_address,omitempty"`
 	Arguments    json.RawMessage `json:"arguments,omitempty"`
 	Result       json.RawMessage `json:"result,omitempty"`
 	SDKEvent     json.RawMessage `json:"sdk_event,omitempty"`

@@ -21,6 +21,10 @@ type researchTestConfig struct {
 	*golden.BaseConfig
 }
 
+func (*researchTestConfig) BlockWorkingDirectory(address string) (string, error) {
+	return "workspace/" + address, nil
+}
+
 var registerResearchBlock sync.Once
 
 type fixtureToolBlock struct {
@@ -33,7 +37,11 @@ func (*fixtureToolBlock) AddressLength() int       { return 2 }
 func (*fixtureToolBlock) CanExecutePrePlan() bool  { return false }
 func (*fixtureToolBlock) ExecuteDuringPlan() error { return nil }
 func (b *fixtureToolBlock) Value() cty.Value {
-	return referenceValue(b.Address(), "builtin")
+	return cty.ObjectVal(map[string]cty.Value{
+		"id":      cty.StringVal("tool_fixture_" + b.Name()),
+		"address": cty.StringVal(b.Address()),
+		"kind":    cty.StringVal("builtin"),
+	})
 }
 
 func referenceValue(address, kind string) cty.Value {
@@ -56,6 +64,36 @@ func registerResearchSchemaBlocks() {
 		golden.RegisterBlock(new(provider.ModelProviderBlock))
 		golden.RegisterBlock(new(fixtureToolBlock))
 	})
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockPlansTypedToolIDsAsStrings(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+fixture_tool "lookup" {}
+fixture_tool "finish" {}
+fixture_tool "read_only" {}
+
+research "market" {
+  model             = "model"
+  system_prompt     = "prompt"
+  tool_ids          = [fixture_tool.lookup.id]
+  terminate_tool_id = fixture_tool.finish.id
+
+  qc {
+    criteria = { accuracy = "Check the report." }
+    tool_ids = [fixture_tool.read_only.id]
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	planned := golden.Blocks[*researchspec.ResearchBlock](config)[0].ResearchConfig()
+	assert.Equal(t, []string{"tool_fixture_lookup"}, planned.Policy.ToolIDs)
+	require.NotNil(t, planned.TerminateToolID)
+	assert.Equal(t, "tool_fixture_finish", *planned.TerminateToolID)
+	require.NotNil(t, planned.QC)
+	assert.Equal(t, []string{"tool_fixture_read_only"}, planned.QC.ToolIDs)
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -83,6 +121,59 @@ research "with_provider" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockPlansForEachInstances(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+research "fact" {
+  for_each     = {
+    arithmetic = "What is 17 plus 25?"
+    geography  = "What is the capital of Japan?"
+    science    = "At what temperature in Celsius does water freeze?"
+  }
+  model         = "model"
+  system_prompt = "${block_wd()}: ${each.value}"
+
+  artifact "answer" {
+    type = "file"
+    path = "${block_wd()}/answer.md"
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	blocks := golden.Blocks[*researchspec.ResearchBlock](config)
+	require.Len(t, blocks, 3)
+
+	type plannedResearch struct {
+		systemPrompt string
+		artifactPath string
+	}
+	planned := make(map[string]plannedResearch, len(blocks))
+	for _, block := range blocks {
+		config := block.ResearchConfig()
+		require.Len(t, config.Artifacts, 1)
+		planned[block.Address()] = plannedResearch{
+			systemPrompt: config.SystemPrompt,
+			artifactPath: config.Artifacts[0].Path,
+		}
+	}
+	assert.Equal(t, map[string]plannedResearch{
+		"research.fact[arithmetic]": {
+			systemPrompt: "workspace/research.fact[arithmetic]: What is 17 plus 25?",
+			artifactPath: "workspace/research.fact[arithmetic]/answer.md",
+		},
+		"research.fact[geography]": {
+			systemPrompt: "workspace/research.fact[geography]: What is the capital of Japan?",
+			artifactPath: "workspace/research.fact[geography]/answer.md",
+		},
+		"research.fact[science]": {
+			systemPrompt: "workspace/research.fact[science]: At what temperature in Celsius does water freeze?",
+			artifactPath: "workspace/research.fact[science]/answer.md",
+		},
+	}, planned)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
 func TestResearchBlockPlansPublicShape(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
@@ -105,9 +196,9 @@ research "market" {
   system_prompt        = "Act as a rigorous researcher."
   prompt               = "Research the market."
   timeout              = "2h"
-	tools                = [fixture_tool.lookup]
-	terminate_tool       = fixture_tool.finish
-  allowed_tools        = ["web_search", "go_tool_finish"]
+	tool_ids             = [fixture_tool.lookup.id]
+	terminate_tool_id    = fixture_tool.finish.id
+  allowed_tools        = ["web_search", fixture_tool.finish.id]
   disallowed_tools     = ["ask_user"]
   skill_directories    = ["./skills"]
   skills               = ["source-evaluation"]
@@ -134,7 +225,7 @@ research "market" {
 	model_provider      = model_provider.quality
     model              = "qc-model"
     reasoning_effort   = "high"
-	tools               = [fixture_tool.read_only]
+	tool_ids            = [fixture_tool.read_only.id]
     allowed_tools      = ["web_search", "r42_qc_verdict"]
     disallowed_tools   = ["bash", "edit", "task", "ask_user"]
     skill_directories  = ["./qc-skills"]
@@ -170,20 +261,21 @@ research "market" {
 	assert.Equal(t, 2*time.Hour, *planned.Timeout)
 	assert.Equal(t, researchspec.PermissionApproveAll, planned.Policy.Permission)
 	assert.Equal(t, 7, planned.MaxProtocolAttempts)
-	assert.Equal(t, []string{"web_search", "go_tool_finish"}, planned.Policy.AllowedTools)
+	assert.Equal(t, []string{"web_search", "tool_fixture_finish"}, planned.Policy.AllowedTools)
 	assert.Equal(t, []string{"ask_user"}, planned.Policy.DisallowedTools)
 	assert.Equal(t, []string{"./skills"}, planned.Policy.SkillDirectories)
 	assert.Equal(t, []string{"source-evaluation"}, planned.Policy.Skills)
 	assert.Equal(t, []string{"unsafe-skill"}, planned.Policy.DisabledSkills)
-	assert.True(t, cty.TupleVal([]cty.Value{referenceValue("fixture_tool.lookup", "builtin")}).RawEquals(planned.Policy.Tools))
-	assert.True(t, referenceValue("fixture_tool.finish", "builtin").RawEquals(planned.TerminateTool))
+	assert.Equal(t, []string{"tool_fixture_lookup"}, planned.Policy.ToolIDs)
+	require.NotNil(t, planned.TerminateToolID)
+	assert.Equal(t, "tool_fixture_finish", *planned.TerminateToolID)
 	require.Len(t, planned.Artifacts, 1)
 	assert.Equal(t, researchspec.Artifact{
 		Name: "report", Type: researchspec.ArtifactTypeFile, Path: "report.md", Required: true, NonEmpty: true,
 	}, planned.Artifacts[0])
 	require.NotNil(t, planned.QC)
 	assertReference(t, planned.QC.ModelProvider, "model_provider.quality", "provider")
-	assert.True(t, cty.TupleVal([]cty.Value{referenceValue("fixture_tool.read_only", "builtin")}).RawEquals(planned.QC.Tools))
+	assert.Equal(t, []string{"tool_fixture_read_only"}, planned.QC.ToolIDs)
 	assert.Equal(t, 3, planned.QC.MaxRounds)
 	assert.Equal(t, []string{"./qc-skills"}, planned.QC.SkillDirectories)
 	assert.Equal(t, []string{"qc-skill"}, planned.QC.Skills)
@@ -195,7 +287,7 @@ research "market" {
 	assert.Equal(t, 4, effective.Retry.LifecycleRetries)
 	assert.Equal(t, 2, effective.Retry.ModelCallRetries)
 	assertReference(t, effective.ModelProvider, "model_provider.quality", "provider")
-	assert.True(t, cty.TupleVal([]cty.Value{referenceValue("fixture_tool.read_only", "builtin")}).RawEquals(effective.Tools))
+	assert.Equal(t, []string{"tool_fixture_read_only"}, effective.ToolIDs)
 
 	ancestors, err := config.GetAncestors("research.market")
 	require.NoError(t, err)
@@ -313,10 +405,10 @@ func TestResearchBlockRejectsStringReferencePlaceholders(t *testing.T) {
 		expectedError string
 	}{
 		{name: "model provider", attribute: `model_provider = "fixture_provider.primary"`, expectedError: "research model_provider must be a provider reference"},
-		{name: "tools", attribute: `tools = ["fixture_tool.lookup"]`, expectedError: "research tools must contain typed tool references"},
-		{name: "terminate tool", attribute: `terminate_tool = "fixture_tool.finish"`, expectedError: "research terminate_tool must be a typed tool reference"},
+		{name: "tool ids", attribute: `tool_ids = [""]`, expectedError: "research tool_ids must not contain empty values"},
+		{name: "terminate tool id", attribute: `terminate_tool_id = ""`, expectedError: "research terminate_tool_id must not be empty"},
 		{name: "qc model provider", attribute: "qc {\ncriteria = { accuracy = \"accurate\" }\nmodel_provider = \"fixture_provider.quality\"\n}", expectedError: "qc model_provider must be a provider reference"},
-		{name: "qc tools", attribute: "qc {\ncriteria = { accuracy = \"accurate\" }\ntools = [\"fixture_tool.read_only\"]\n}", expectedError: "qc tools must contain typed tool references"},
+		{name: "qc tool ids", attribute: "qc {\ncriteria = { accuracy = \"accurate\" }\ntool_ids = [\"\"]\n}", expectedError: "qc tool_ids must not contain empty values"},
 	}
 
 	for _, tt := range tests {
@@ -338,10 +430,10 @@ func TestResearchBlockRejectsCrossCategoryReferences(t *testing.T) {
 		expectedError string
 	}{
 		{name: "research provider is tool", attribute: "model_provider = fixture_tool.lookup", expectedError: "research model_provider must be a provider reference"},
-		{name: "research tools contain provider", attribute: "tools = [model_provider.primary]", expectedError: "research tools must contain typed tool references"},
-		{name: "terminate tool is provider", attribute: "terminate_tool = model_provider.primary", expectedError: "research terminate_tool must be a typed tool reference"},
+		{name: "research tool ids contain provider", attribute: "tool_ids = [model_provider.primary]", expectedError: "string required, but have object"},
+		{name: "terminate tool id is provider", attribute: "terminate_tool_id = model_provider.primary", expectedError: "string required, but have object"},
 		{name: "qc provider is tool", attribute: "qc {\ncriteria = { accuracy = \"accurate\" }\nmodel_provider = fixture_tool.lookup\n}", expectedError: "qc model_provider must be a provider reference"},
-		{name: "qc tools contain provider", attribute: "qc {\ncriteria = { accuracy = \"accurate\" }\ntools = [model_provider.primary]\n}", expectedError: "qc tools must contain typed tool references"},
+		{name: "qc tool ids contain provider", attribute: "qc {\ncriteria = { accuracy = \"accurate\" }\ntool_ids = [model_provider.primary]\n}", expectedError: "string required, but have object"},
 	}
 
 	for _, tt := range tests {
@@ -564,20 +656,20 @@ func TestResearchBlockNormalizesExplicitNullTools(t *testing.T) {
 research "null_tools" {
   model         = "model"
   system_prompt = "prompt"
-  tools         = null
+  tool_ids      = null
 
   qc {
     criteria = { accuracy = "accurate" }
-    tools    = null
+    tool_ids = null
   }
 }
 `)
 
 	require.NoError(t, config.RunPlan())
 	planned := golden.Blocks[*researchspec.ResearchBlock](config)[0].ResearchConfig()
-	assert.True(t, cty.EmptyTupleVal.RawEquals(planned.Policy.Tools))
+	assert.Empty(t, planned.Policy.ToolIDs)
 	require.NotNil(t, planned.QC)
-	assert.True(t, cty.EmptyTupleVal.RawEquals(planned.QC.Tools))
+	assert.Empty(t, planned.QC.ToolIDs)
 }
 
 func TestResearchBlockReturnsIndependentRetryConfig(t *testing.T) {

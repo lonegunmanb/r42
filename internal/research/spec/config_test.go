@@ -39,13 +39,13 @@ func TestConfigValidateRequiredFields(t *testing.T) {
 			expectedError: "research reasoning effort must not be empty",
 		},
 		{
-			name: "tools must be a tuple",
+			name: "tool id must not be empty",
 			config: researchspec.Config{
 				Model:        "gpt-5.6-sol",
 				SystemPrompt: "research carefully",
-				Policy:       researchspec.SessionPolicy{Tools: cty.EmptyObjectVal},
+				Policy:       researchspec.SessionPolicy{ToolIDs: []string{""}},
 			},
-			expectedError: "research tools must be a tuple of typed tool references",
+			expectedError: "research tool_ids must not contain empty values",
 		},
 		{
 			name: "reference must contain kind",
@@ -57,13 +57,13 @@ func TestConfigValidateRequiredFields(t *testing.T) {
 			expectedError: "research model_provider must be a provider reference",
 		},
 		{
-			name: "reference fields must be known strings",
+			name: "terminate tool id must not be empty",
 			config: researchspec.Config{
-				Model:         "gpt-5.6-sol",
-				SystemPrompt:  "research carefully",
-				TerminateTool: cty.ObjectVal(map[string]cty.Value{"address": cty.StringVal("go_tool.finish"), "kind": cty.NullVal(cty.String)}),
+				Model:           "gpt-5.6-sol",
+				SystemPrompt:    "research carefully",
+				TerminateToolID: stringPointer(" "),
 			},
-			expectedError: "research terminate_tool must be a typed tool reference",
+			expectedError: "research terminate_tool_id must not be empty",
 		},
 		{
 			name: "provider reference address must be valid",
@@ -76,18 +76,6 @@ func TestConfigValidateRequiredFields(t *testing.T) {
 				}),
 			},
 			expectedError: "research model_provider must be a provider reference",
-		},
-		{
-			name: "tool reference kind must be valid",
-			config: researchspec.Config{
-				Model:        "gpt-5.6-sol",
-				SystemPrompt: "research carefully",
-				TerminateTool: cty.ObjectVal(map[string]cty.Value{
-					"address": cty.StringVal("go_tool.finish"),
-					"kind":    cty.StringVal("anything"),
-				}),
-			},
-			expectedError: "research terminate_tool must be a typed tool reference",
 		},
 		{
 			name: "protocol attempts must be positive",
@@ -130,7 +118,7 @@ func TestConfigValidateRequiredFields(t *testing.T) {
 	}
 }
 
-func TestConfigRejectsNonCanonicalNullToolCollections(t *testing.T) {
+func TestConfigRejectsEmptyToolIDs(t *testing.T) {
 	t.Parallel()
 
 	research := researchspec.Config{
@@ -138,26 +126,26 @@ func TestConfigRejectsNonCanonicalNullToolCollections(t *testing.T) {
 		SystemPrompt:        "prompt",
 		MaxProtocolAttempts: researchspec.DefaultMaxProtocolAttempts,
 		Policy: researchspec.SessionPolicy{
-			Tools:      cty.NullVal(cty.Tuple([]cty.Type{})),
+			ToolIDs:    []string{""},
 			Permission: researchspec.PermissionApproveAll,
 		},
 	}
-	require.EqualError(t, research.Validate(), "research tools must be a tuple of typed tool references")
+	require.EqualError(t, research.Validate(), "research tool_ids must not contain empty values")
 
 	qc := researchspec.QCConfig{
 		Criteria:  cty.MapVal(map[string]cty.Value{"accuracy": cty.StringVal("accurate")}),
-		Tools:     cty.NullVal(cty.Tuple([]cty.Type{})),
+		ToolIDs:   []string{""},
 		MaxRounds: researchspec.DefaultMaxQCRounds,
 	}
-	require.EqualError(t, qc.Validate(), "qc tools must be a tuple of typed tool references")
+	require.EqualError(t, qc.Validate(), "qc tool_ids must not contain empty values")
 }
 
 func TestConfigEffectiveQCInheritsOnlySessionFields(t *testing.T) {
 	t.Parallel()
 
 	providerRef := referenceValue("model_provider.primary", "provider")
-	researchTools := cty.TupleVal([]cty.Value{referenceValue("go_tool.research", "go")})
-	qcTools := cty.TupleVal([]cty.Value{referenceValue("go_tool.qc", "go")})
+	researchToolIDs := []string{"tool_go_tool_research_12345678-1234-8234-9234-123456789abc"}
+	qcToolIDs := []string{"tool_go_tool_qc_12345678-1234-8234-9234-123456789abc"}
 	researchLifecycleRetries := 4
 	qcModelCallRetries := 2
 	config := researchspec.Config{
@@ -170,7 +158,7 @@ func TestConfigEffectiveQCInheritsOnlySessionFields(t *testing.T) {
 			ErrorMessageRegex: []string{"research transient"},
 		},
 		Policy: researchspec.SessionPolicy{
-			Tools:            researchTools,
+			ToolIDs:          researchToolIDs,
 			AllowedTools:     []string{"research_allowed"},
 			DisallowedTools:  []string{"research_denied"},
 			SkillDirectories: []string{"research-skills"},
@@ -180,7 +168,7 @@ func TestConfigEffectiveQCInheritsOnlySessionFields(t *testing.T) {
 		},
 		QC: &researchspec.QCConfig{
 			Criteria: cty.MapVal(map[string]cty.Value{"accuracy": cty.StringVal("cite every claim")}),
-			Tools:    qcTools,
+			ToolIDs:  qcToolIDs,
 			Retry: provider.RetryOverride{
 				ModelCallRetries:  &qcModelCallRetries,
 				ErrorMessageRegex: []string{"qc transient"},
@@ -198,7 +186,7 @@ func TestConfigEffectiveQCInheritsOnlySessionFields(t *testing.T) {
 	assert.Equal(t, 4, effective.Retry.LifecycleRetries)
 	assert.Equal(t, 2, effective.Retry.ModelCallRetries)
 	assert.Equal(t, []string{"research transient", "qc transient"}, effective.Retry.ErrorMessageRegex)
-	assert.True(t, qcTools.RawEquals(effective.Tools))
+	assert.Equal(t, qcToolIDs, effective.ToolIDs)
 	assert.Nil(t, effective.AllowedTools)
 	assert.Equal(t, researchspec.DefaultQCDisallowedTools(), effective.DisallowedTools)
 	assert.Nil(t, effective.SkillDirectories)

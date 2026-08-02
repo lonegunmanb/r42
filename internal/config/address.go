@@ -143,6 +143,13 @@ func toolNameFunction() function.Function {
 			}
 
 			_, marks := arguments[0].Unmark()
+			unmarked, _ := arguments[0].UnmarkDeep()
+			if unmarked.Type().HasAttribute("id") {
+				id := unmarked.GetAttr("id")
+				if !id.IsNull() && id.Type().Equals(cty.String) {
+					return cty.StringVal(id.AsString()).WithMarks(marks), nil
+				}
+			}
 			return cty.StringVal(strings.ReplaceAll(address.Value, ".", "_")).WithMarks(marks), nil
 		},
 	})

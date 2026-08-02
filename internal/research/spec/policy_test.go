@@ -9,6 +9,8 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
+const finishToolID = "tool_go_tool_finish_12345678-1234-8234-9234-123456789abc"
+
 func TestConfigValidateResolvedTools(t *testing.T) {
 	t.Parallel()
 
@@ -37,56 +39,56 @@ func TestConfigValidateResolvedTools(t *testing.T) {
 			name:   "terminal output converts to string",
 			config: validResolvedConfig(referenceValue("go_tool.finish", "go"), nil),
 			resolved: researchspec.ResolvedTools{
-				Terminate:        &researchspec.ToolPolicyRef{Address: "go_tool.finish", OutputType: cty.String},
-				TerminateSDKName: "go_tool_finish",
+				Terminate:        &researchspec.ToolPolicyRef{ID: finishToolID, Address: "go_tool.finish", OutputType: cty.String},
+				TerminateSDKName: finishToolID,
 			},
 		},
 		{
 			name:   "terminal output is not string compatible",
 			config: validResolvedConfig(referenceValue("go_tool.finish", "go"), nil),
 			resolved: researchspec.ResolvedTools{
-				Terminate:        &researchspec.ToolPolicyRef{Address: "go_tool.finish", OutputType: cty.List(cty.String)},
-				TerminateSDKName: "go_tool_finish",
+				Terminate:        &researchspec.ToolPolicyRef{ID: finishToolID, Address: "go_tool.finish", OutputType: cty.List(cty.String)},
+				TerminateSDKName: finishToolID,
 			},
 			expectedError: "terminate tool go_tool.finish output type must be string-compatible",
 		},
 		{
-			name:   "resolved terminal address must match configuration",
+			name:   "resolved terminal id must match configuration",
 			config: validResolvedConfig(referenceValue("go_tool.finish", "go"), nil),
 			resolved: researchspec.ResolvedTools{
-				Terminate:        &researchspec.ToolPolicyRef{Address: "go_tool.other", OutputType: cty.String},
-				TerminateSDKName: "go_tool_finish",
+				Terminate:        &researchspec.ToolPolicyRef{ID: "different", Address: "go_tool.other", OutputType: cty.String},
+				TerminateSDKName: finishToolID,
 			},
-			expectedError: "resolved terminate tool address go_tool.other does not match configured go_tool.finish",
+			expectedError: "resolved terminate tool id different does not match configured " + finishToolID,
 		},
 		{
 			name:   "resolved terminal sdk name must match address",
 			config: validResolvedConfig(referenceValue("go_tool.finish", "go"), nil),
 			resolved: researchspec.ResolvedTools{
-				Terminate:        &researchspec.ToolPolicyRef{Address: "go_tool.finish", OutputType: cty.String},
+				Terminate:        &researchspec.ToolPolicyRef{ID: finishToolID, Address: "go_tool.finish", OutputType: cty.String},
 				TerminateSDKName: "go_tool_other",
 			},
-			expectedError: "resolved terminate tool sdk name go_tool_other does not match configured go_tool_finish",
+			expectedError: "resolved terminate tool sdk name go_tool_other does not match configured " + finishToolID,
 		},
 		{
 			name:   "terminal output type is invalid",
 			config: validResolvedConfig(referenceValue("go_tool.finish", "go"), nil),
 			resolved: researchspec.ResolvedTools{
-				Terminate:        &researchspec.ToolPolicyRef{Address: "go_tool.finish", OutputType: capsule},
-				TerminateSDKName: "go_tool_finish",
+				Terminate:        &researchspec.ToolPolicyRef{ID: finishToolID, Address: "go_tool.finish", OutputType: capsule},
+				TerminateSDKName: finishToolID,
 			},
 			expectedError: "terminate tool go_tool.finish output type: capsule type is not supported at value",
 		},
 		{
 			name: "terminal tool cannot be denied",
 			config: validResolvedConfig(referenceValue("go_tool.finish", "go"), func(policy *researchspec.SessionPolicy) {
-				policy.DisallowedTools = []string{"go_tool_finish"}
+				policy.DisallowedTools = []string{finishToolID}
 			}),
 			resolved: researchspec.ResolvedTools{
-				Terminate:        &researchspec.ToolPolicyRef{Address: "go_tool.finish", OutputType: cty.String},
-				TerminateSDKName: "go_tool_finish",
+				Terminate:        &researchspec.ToolPolicyRef{ID: finishToolID, Address: "go_tool.finish", OutputType: cty.String},
+				TerminateSDKName: finishToolID,
 			},
-			expectedError: "mandatory tool go_tool_finish must not be disallowed",
+			expectedError: "mandatory tool " + finishToolID + " must not be disallowed",
 		},
 		{
 			name: "terminal tool cannot be denied by custom wildcard",
@@ -94,10 +96,10 @@ func TestConfigValidateResolvedTools(t *testing.T) {
 				policy.DisallowedTools = []string{"custom:*"}
 			}),
 			resolved: researchspec.ResolvedTools{
-				Terminate:        &researchspec.ToolPolicyRef{Address: "go_tool.finish", OutputType: cty.String},
-				TerminateSDKName: "go_tool_finish",
+				Terminate:        &researchspec.ToolPolicyRef{ID: finishToolID, Address: "go_tool.finish", OutputType: cty.String},
+				TerminateSDKName: finishToolID,
 			},
-			expectedError: "mandatory tool go_tool_finish must not be disallowed",
+			expectedError: "mandatory tool " + finishToolID + " must not be disallowed",
 		},
 		{
 			name: "terminal tool must be in explicit allowlist",
@@ -105,19 +107,19 @@ func TestConfigValidateResolvedTools(t *testing.T) {
 				policy.AllowedTools = []string{"web_search"}
 			}),
 			resolved: researchspec.ResolvedTools{
-				Terminate:        &researchspec.ToolPolicyRef{Address: "go_tool.finish", OutputType: cty.String},
-				TerminateSDKName: "go_tool_finish",
+				Terminate:        &researchspec.ToolPolicyRef{ID: finishToolID, Address: "go_tool.finish", OutputType: cty.String},
+				TerminateSDKName: finishToolID,
 			},
-			expectedError: "mandatory tool go_tool_finish must be included in allowed tools",
+			expectedError: "mandatory tool " + finishToolID + " must be included in allowed tools",
 		},
 		{
 			name: "terminal tool may be in explicit allowlist",
 			config: validResolvedConfig(referenceValue("go_tool.finish", "go"), func(policy *researchspec.SessionPolicy) {
-				policy.AllowedTools = []string{"go_tool_finish"}
+				policy.AllowedTools = []string{finishToolID}
 			}),
 			resolved: researchspec.ResolvedTools{
-				Terminate:        &researchspec.ToolPolicyRef{Address: "go_tool.finish", OutputType: cty.String},
-				TerminateSDKName: "go_tool_finish",
+				Terminate:        &researchspec.ToolPolicyRef{ID: finishToolID, Address: "go_tool.finish", OutputType: cty.String},
+				TerminateSDKName: finishToolID,
 			},
 		},
 		{
@@ -126,8 +128,8 @@ func TestConfigValidateResolvedTools(t *testing.T) {
 				policy.AllowedTools = []string{"custom:*"}
 			}),
 			resolved: researchspec.ResolvedTools{
-				Terminate:        &researchspec.ToolPolicyRef{Address: "go_tool.finish", OutputType: cty.String},
-				TerminateSDKName: "go_tool_finish",
+				Terminate:        &researchspec.ToolPolicyRef{ID: finishToolID, Address: "go_tool.finish", OutputType: cty.String},
+				TerminateSDKName: finishToolID,
 			},
 		},
 		{
@@ -143,8 +145,8 @@ func TestConfigValidateResolvedTools(t *testing.T) {
 				Policy:       researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
 			},
 			resolved: researchspec.ResolvedTools{
-				Terminate:        &researchspec.ToolPolicyRef{Address: "go_tool.finish", OutputType: cty.String},
-				TerminateSDKName: "go_tool_finish",
+				Terminate:        &researchspec.ToolPolicyRef{ID: finishToolID, Address: "go_tool.finish", OutputType: cty.String},
+				TerminateSDKName: finishToolID,
 			},
 			expectedError: "resolved terminate tool was not configured",
 		},
@@ -152,7 +154,7 @@ func TestConfigValidateResolvedTools(t *testing.T) {
 			name:   "mandatory terminal sdk name is required",
 			config: validResolvedConfig(referenceValue("go_tool.finish", "go"), nil),
 			resolved: researchspec.ResolvedTools{
-				Terminate: &researchspec.ToolPolicyRef{Address: "go_tool.finish", OutputType: cty.String},
+				Terminate: &researchspec.ToolPolicyRef{ID: finishToolID, Address: "go_tool.finish", OutputType: cty.String},
 			},
 			expectedError: "mandatory tool sdk name is required",
 		},
@@ -272,11 +274,12 @@ func validResolvedConfig(terminate cty.Value, mutate func(*researchspec.SessionP
 	config := researchspec.Config{
 		Model:               "model",
 		SystemPrompt:        "prompt",
-		TerminateTool:       terminate,
+		TerminateToolID:     stringPointer(finishToolID),
 		MaxProtocolAttempts: researchspec.DefaultMaxProtocolAttempts,
 		Policy:              policy,
 	}
 	if terminate.Type().Equals(cty.NilType) {
+		config.TerminateToolID = nil
 		config.QC = &researchspec.QCConfig{
 			Criteria:        cty.MapVal(map[string]cty.Value{"accuracy": cty.StringVal("be accurate")}),
 			MaxRounds:       researchspec.DefaultMaxQCRounds,

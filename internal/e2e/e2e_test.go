@@ -475,7 +475,7 @@ func (*parallelSession) Close(context.Context) error { return nil }
 
 func findTool(tools []sdk.Tool, name string) sdk.Tool {
 	for _, tool := range tools {
-		if tool.Name == name {
+		if tool.Name == name || strings.HasPrefix(tool.Name, "tool_"+name+"_") {
 			return tool
 		}
 	}

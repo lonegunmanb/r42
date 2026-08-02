@@ -18,6 +18,7 @@ import (
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
 	"github.com/lonegunmanb/r42/internal/config"
 	"github.com/lonegunmanb/r42/internal/debuglog"
+	modulecache "github.com/lonegunmanb/r42/internal/module"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
@@ -31,6 +32,7 @@ type ResearchConfigOptions struct {
 	Variables            []golden.CliFlagAssignedVariables
 	RunDirectory         string
 	ReservedRunDirectory string
+	ModuleDirectory      string
 	Parallelism          int
 	Debug                bool
 	Apply                func(*internalplan.Plan) (map[string]cty.Value, []error, error)
@@ -174,6 +176,7 @@ func newSourceResearchConfig(
 		directory:              directory,
 		run:                    activeRun,
 		addressPrefix:          addressPrefix,
+		moduleDirectory:        options.ModuleDirectory,
 		childVariableDirectory: childVariableDirectory,
 		stack:                  append(slices.Clone(stack), directory),
 		sensitiveVariables:     sensitiveVariableNames(variables, inheritedSensitive),
@@ -202,6 +205,12 @@ func newSourceResearchConfig(
 
 func (c *ResearchConfig) EvalContext() *hcl.EvalContext {
 	context := c.BaseConfig.EvalContext()
+	if context.Variables == nil {
+		context.Variables = make(map[string]cty.Value)
+	}
+	context.Variables["path"] = cty.ObjectVal(map[string]cty.Value{
+		"module": cty.StringVal(filepath.ToSlash(c.directory)),
+	})
 	variables, ok := context.Variables["var"]
 	if ok && !variables.IsNull() && variables.Type().IsObjectType() {
 		values := variables.AsValueMap()
@@ -223,12 +232,28 @@ func (c *ResearchConfig) PlanChildModule(
 	parallelism *int,
 	timeoutValue *string,
 ) (modulespec.ModulePlan, error) {
+	if c.execution != nil {
+		return c.savedChildModule(address)
+	}
 	activeRun, err := c.researchRun()
 	if err != nil {
 		return modulespec.ModulePlan{}, err
 	}
 	sourceDirectory := source
-	if !filepath.IsAbs(sourceDirectory) {
+	if c.moduleDirectory != "" {
+		canonicalAddress := c.CanonicalAddress(address)
+		sourceDirectory, err = modulecache.Directory(c.moduleDirectory, canonicalAddress)
+		if err != nil {
+			return modulespec.ModulePlan{}, err
+		}
+		if _, statErr := os.Stat(sourceDirectory); statErr != nil {
+			return modulespec.ModulePlan{}, fmt.Errorf(
+				"module %s is not initialized; run r42 init: %w",
+				canonicalAddress,
+				statErr,
+			)
+		}
+	} else if !filepath.IsAbs(sourceDirectory) {
 		sourceDirectory = filepath.Join(c.directory, sourceDirectory)
 	}
 	directory, err := normalizeDirectory(sourceDirectory)
@@ -241,7 +266,9 @@ func (c *ResearchConfig) PlanChildModule(
 	}
 	child, err := newSourceResearchConfig(
 		directory, inputs, c.stack, false, c.childVariableDirectory,
-		activeRun, c.executionAddress(address), ResearchConfigOptions{Context: c.Context()},
+		activeRun, c.CanonicalAddress(address), ResearchConfigOptions{
+			Context: c.Context(), ModuleDirectory: c.moduleDirectory,
+		},
 	)
 	if err != nil {
 		return modulespec.ModulePlan{}, err
@@ -257,15 +284,42 @@ func (c *ResearchConfig) PlanChildModule(
 	return result, nil
 }
 
+func (c *ResearchConfig) savedChildModule(address string) (modulespec.ModulePlan, error) {
+	for _, node := range c.execution.nodes {
+		if node.Address != address {
+			continue
+		}
+		if node.Module == nil || node.Module.Plan == nil {
+			return modulespec.ModulePlan{}, fmt.Errorf("saved module %s has no child plan", address)
+		}
+		outputs := node.Module.Plan.Outputs()
+		plannedOutputs := make(map[string]modulespec.Output, len(outputs))
+		for name, output := range outputs {
+			plannedOutputs[name] = modulespec.Output{
+				Value: output.Value, Type: output.Value.Type(), Description: output.Description,
+				Sensitive: corespec.IsSensitive(output.Value), Expression: output.Expression,
+			}
+		}
+		return modulespec.ModulePlan{
+			Plan: modulespec.Plan{
+				Directory: node.Module.Plan.Directory(), Outputs: plannedOutputs, Saved: node.Module.Plan,
+			},
+			Parallelism: node.Module.Parallelism,
+			Timeout:     node.Module.Timeout,
+		}, nil
+	}
+	return modulespec.ModulePlan{}, fmt.Errorf("saved module %s was not planned", address)
+}
+
 func (c *ResearchConfig) BlockWorkingDirectory(address string) (string, error) {
 	activeRun, err := c.researchRun()
 	if err != nil {
 		return "", err
 	}
-	return activeRun.WorkspacePath(c.executionAddress(address))
+	return activeRun.WorkspacePath(c.CanonicalAddress(address))
 }
 
-func (c *ResearchConfig) executionAddress(address string) string {
+func (c *ResearchConfig) CanonicalAddress(address string) string {
 	if c.addressPrefix == "" {
 		return address
 	}
@@ -327,9 +381,10 @@ func (c *ResearchConfig) savedPlan(planned modulespec.Plan) (*internalplan.Plan,
 			}
 		}
 	}
+	toolRegistry := modulespec.BuildToolRegistry(c, planned.Modules)
 	nodes := make([]internalplan.NodeSpec, 0, len(executable))
 	for _, block := range golden.Blocks[*researchspec.ResearchBlock](c) {
-		snapshot, err := modulespec.EncodeResearchPlan(block.ResearchConfig(), c)
+		snapshot, err := modulespec.EncodeResearchPlan(block.ResearchConfig(), c, toolRegistry)
 		if err != nil {
 			return nil, fmt.Errorf("snapshot %s: %w", block.Address(), err)
 		}
@@ -362,8 +417,8 @@ func (c *ResearchConfig) savedPlan(planned modulespec.Plan) (*internalplan.Plan,
 			localExpressions[block.Name()] = attribute.ExprString()
 		}
 	}
-	result, err := internalplan.NewForRun(
-		planned.Directory, activeRun.Directory(), nodes, outputs, contextValues, localExpressions,
+	result, err := internalplan.NewForRunWithTools(
+		planned.Directory, activeRun.Directory(), nodes, outputs, contextValues, localExpressions, toolRegistry,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("build saved plan: %w", err)

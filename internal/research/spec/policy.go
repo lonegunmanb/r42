@@ -12,6 +12,7 @@ import (
 )
 
 type ToolPolicyRef struct {
+	ID         string
 	Address    string
 	OutputType cty.Type
 }
@@ -26,7 +27,7 @@ func (c Config) ValidateResolved(tools ResolvedTools) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
-	hasTerminate := hasValue(c.TerminateTool)
+	hasTerminate := c.TerminateToolID != nil
 	if hasTerminate && tools.Terminate == nil {
 		return errors.New("terminate tool reference was not resolved")
 	}
@@ -37,23 +38,19 @@ func (c Config) ValidateResolved(tools ResolvedTools) error {
 		if strings.TrimSpace(tools.TerminateSDKName) == "" {
 			return errors.New("mandatory tool sdk name is required")
 		}
-		configuredAddress, _, ok := referenceIdentity(c.TerminateTool)
-		if !ok {
-			return errors.New("configured terminate tool identity is invalid")
-		}
-		if tools.Terminate.Address != configuredAddress {
+		configuredID := *c.TerminateToolID
+		if tools.Terminate.ID != configuredID {
 			return fmt.Errorf(
-				"resolved terminate tool address %s does not match configured %s",
-				tools.Terminate.Address,
-				configuredAddress,
+				"resolved terminate tool id %s does not match configured %s",
+				tools.Terminate.ID,
+				configuredID,
 			)
 		}
-		expectedSDKName := strings.ReplaceAll(configuredAddress, ".", "_")
-		if tools.TerminateSDKName != expectedSDKName {
+		if tools.TerminateSDKName != configuredID {
 			return fmt.Errorf(
 				"resolved terminate tool sdk name %s does not match configured %s",
 				tools.TerminateSDKName,
-				expectedSDKName,
+				configuredID,
 			)
 		}
 		if err := corespec.ValidateType(tools.Terminate.OutputType); err != nil {

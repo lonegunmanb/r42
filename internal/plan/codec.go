@@ -18,6 +18,7 @@ type wirePlan struct {
 	Outputs          map[string]wireOutput `json:"outputs"`
 	Context          map[string]wireValue  `json:"context,omitempty"`
 	LocalExpressions map[string]string     `json:"local_expressions,omitempty"`
+	Tools            map[string]ToolSpec   `json:"tools,omitempty"`
 }
 
 type wireNode struct {
@@ -94,6 +95,7 @@ func encodePlan(planned *Plan) (wirePlan, error) {
 		Outputs:          make(map[string]wireOutput, len(planned.outputs)),
 		Context:          make(map[string]wireValue, len(planned.context)),
 		LocalExpressions: planned.LocalExpressions(),
+		Tools:            planned.Tools(),
 	}
 	for index, node := range planned.nodes {
 		config, err := encodeValue(node.Config)
@@ -180,8 +182,8 @@ func decodePlan(wire wirePlan) (*Plan, error) {
 		}
 		contextValues[name] = value
 	}
-	return NewForRun(
-		wire.Directory, wire.RunDirectory, nodes, outputs, contextValues, wire.LocalExpressions,
+	return NewForRunWithTools(
+		wire.Directory, wire.RunDirectory, nodes, outputs, contextValues, wire.LocalExpressions, wire.Tools,
 	)
 }
 

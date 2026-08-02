@@ -37,6 +37,7 @@ type ResearchConfig struct {
 	runMu                  sync.Mutex
 	run                    *run.Run
 	addressPrefix          string
+	moduleDirectory        string
 	childVariableDirectory string
 	stack                  []string
 	sensitiveVariables     map[string]struct{}
@@ -69,6 +70,7 @@ func newApplyResearchConfig(
 	}
 	researchConfig := &ResearchConfig{
 		BaseConfig:  config.NewBaseConfig(golden.NewBaseConfigArgs{Basedir: directory, Ctx: execution.ctx}),
+		directory:   directory,
 		execution:   execution,
 		parallelism: parallelism,
 	}

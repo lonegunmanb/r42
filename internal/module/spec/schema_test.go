@@ -12,6 +12,7 @@ import (
 	"github.com/Azure/golden"
 	"github.com/lonegunmanb/r42/internal/executor"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
+	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	runpkg "github.com/lonegunmanb/r42/internal/run"
@@ -109,6 +110,70 @@ output "sector_report" {
 	assert.True(t, rootOutput.Value.IsMarked())
 	rootOutputValue, _ := rootOutput.Value.Unmark()
 	assert.Equal(t, "report for energy", rootOutputValue.AsString())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigPlansModulesFromInitializedCanonicalDirectory(t *testing.T) {
+	registerSchemas()
+	root := t.TempDir()
+	modules := filepath.Join(t.TempDir(), "modules")
+	installed := filepath.Join(modules, "sector")
+	original := filepath.Join(root, "original")
+	require.NoError(t, os.MkdirAll(installed, 0o700))
+	require.NoError(t, os.MkdirAll(original, 0o700))
+	writeR42(t, installed, "main.r42.hcl", `output "origin" { value = "initialized" }`)
+	writeR42(t, original, "main.r42.hcl", `output "origin" { value = "source" }`)
+	writeR42(t, root, "main.r42.hcl", `
+module "sector" { source = "./original" }
+output "origin" { value = module.sector.origin }
+`)
+
+	planned, err := planSource(root, executor.ResearchConfigOptions{ModuleDirectory: modules})
+
+	require.NoError(t, err)
+	assert.Equal(t, installed, planned.Modules["sector"].Directory)
+	assert.Equal(t, "initialized", planned.Outputs["origin"].Value.AsString())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigUsesNestedInitializedDirectoryAsPathModule(t *testing.T) {
+	registerSchemas()
+	root := t.TempDir()
+	modules := filepath.Join(t.TempDir(), "modules")
+	child := filepath.Join(modules, "a")
+	grandchild := filepath.Join(child, "b")
+	require.NoError(t, os.MkdirAll(grandchild, 0o700))
+	writeR42(t, grandchild, "main.r42.hcl", `output "module_path" { value = path.module }`)
+	writeR42(t, child, "main.r42.hcl", `
+module "b" { source = "unused" }
+output "nested_path" { value = module.b.module_path }
+`)
+	writeR42(t, root, "main.r42.hcl", `
+module "a" { source = "unused" }
+output "nested_path" { value = module.a.nested_path }
+`)
+
+	planned, err := planSource(root, executor.ResearchConfigOptions{ModuleDirectory: modules})
+
+	require.NoError(t, err)
+	assert.Equal(t, filepath.ToSlash(grandchild), planned.Outputs["nested_path"].Value.AsString())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigRequiresInitializedModuleWhenModuleDirectoryIsConfigured(t *testing.T) {
+	registerSchemas()
+	root := t.TempDir()
+	original := filepath.Join(root, "original")
+	require.NoError(t, os.Mkdir(original, 0o700))
+	writeR42(t, original, "main.r42.hcl", `output "answer" { value = "42" }`)
+	writeR42(t, root, "main.r42.hcl", `module "child" { source = "./original" }`)
+
+	_, err := planSource(root, executor.ResearchConfigOptions{
+		ModuleDirectory: filepath.Join(t.TempDir(), "modules"),
+	})
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "module module.child is not initialized; run r42 init")
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -458,9 +523,15 @@ func TestResearchConfigEmbedsSavedChildPlan(t *testing.T) {
 	child := filepath.Join(root, "child")
 	require.NoError(t, os.Mkdir(child, 0o755))
 	writeR42(t, child, "main.r42.hcl", `
+go_tool "inside" {
+  description = "Work inside the module"
+  source      = "type Input struct{}"
+}
+
 research "inside" {
   model         = "test-model"
   system_prompt = "Work inside the module."
+  tool_ids      = [go_tool.inside.id]
 }
 `)
 	writeR42(t, root, "main.r42.hcl", `
@@ -480,6 +551,148 @@ module "child" {
 	require.NotNil(t, nodes[0].Module)
 	assert.Equal(t, 2, nodes[0].Module.Parallelism)
 	assert.Equal(t, "research.inside", nodes[0].Module.Plan.Nodes()[0].Address)
+	childRegistry := nodes[0].Module.Plan.Tools()
+	require.Len(t, childRegistry, 1)
+	for _, definition := range childRegistry {
+		assert.Equal(t, "module.child.go_tool.inside", definition.Address)
+	}
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigImportsOnlyChildToolsExportedAsOutputs(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	root := t.TempDir()
+	child := filepath.Join(root, "child")
+	require.NoError(t, os.Mkdir(child, 0o755))
+	writeR42(t, child, "main.r42.hcl", `
+external_tool "exported" {
+  description = "Exported child tool"
+  program     = ["exported-helper"]
+  input_type  = object({ query = string })
+  output_type = string
+}
+
+external_tool "private" {
+  description = "Private child tool"
+  program     = ["private-helper"]
+  input_type  = object({ query = string })
+  output_type = string
+}
+
+research "pending" {
+  model             = "test-model"
+  system_prompt     = "Produce an apply-time result."
+  terminate_tool_id = external_tool.private.id
+}
+
+output "exported_tool_id" {
+  value = external_tool.exported.id
+}
+
+output "plain_string" {
+  value = "not a tool id"
+}
+
+output "metadata" {
+  value = { private_id = external_tool.private.id }
+}
+
+output "nothing" {
+  value = tostring(null)
+}
+
+output "pending_result" {
+  value = research.pending.result
+}
+`)
+	writeR42(t, root, "main.r42.hcl", `
+module "tools" {
+  source = "./child"
+}
+
+research "consumer" {
+  model         = "test-model"
+  system_prompt = "Use the exported tool."
+  tool_ids      = [module.tools.exported_tool_id]
+}
+`)
+
+	planned, err := planSource(root, executor.ResearchConfigOptions{})
+
+	require.NoError(t, err)
+	require.NotNil(t, planned.Saved)
+	nodes := planned.Saved.Nodes()
+	require.Len(t, nodes, 2)
+	var consumer internalplan.NodeSpec
+	for _, node := range nodes {
+		if node.Address == "research.consumer" {
+			consumer = node
+		}
+	}
+	require.Equal(t, "research.consumer", consumer.Address)
+	decoded, err := modulespec.DecodeResearchPlan(consumer.Config)
+	require.NoError(t, err)
+	require.Len(t, decoded.Config.Policy.ToolIDs, 1)
+	exportedID := decoded.Config.Policy.ToolIDs[0]
+	registry := planned.Saved.Tools()
+	require.Len(t, registry, 1)
+	require.Contains(t, registry, exportedID)
+	assert.Equal(t, "module.tools.external_tool.exported", registry[exportedID].Address)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigRejectsUnknownTypedToolIDsDuringPlan(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	const unknownID = "tool_go_tool_missing_12345678-1234-8234-9234-123456789abc"
+	tests := []struct {
+		name     string
+		fragment string
+	}{
+		{name: "tool ids", fragment: `tool_ids = ["` + unknownID + `"]`},
+		{name: "terminate tool id", fragment: `terminate_tool_id = "` + unknownID + `"`},
+		{name: "allowed tools", fragment: `allowed_tools = ["` + unknownID + `"]`},
+		{name: "disallowed tools", fragment: `disallowed_tools = ["` + unknownID + `"]`},
+		{
+			name: "qc tool ids",
+			fragment: `qc {
+    criteria = { accuracy = "Check accuracy." }
+    tool_ids = ["` + unknownID + `"]
+  }`,
+		},
+		{
+			name: "qc allowed tools",
+			fragment: `qc {
+    criteria = { accuracy = "Check accuracy." }
+    allowed_tools = ["` + unknownID + `"]
+  }`,
+		},
+		{
+			name: "qc disallowed tools",
+			fragment: `qc {
+    criteria = { accuracy = "Check accuracy." }
+    disallowed_tools = ["ask_user", "` + unknownID + `"]
+  }`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			directory := t.TempDir()
+			writeR42(t, directory, "main.r42.hcl", `
+research "source" {
+  model         = "test-model"
+  system_prompt = "Collect evidence."
+			  `+tt.fragment+`
+}
+`)
+
+			_, err := planSource(directory, executor.ResearchConfigOptions{})
+
+			assert.ErrorContains(t, err, `references tool id "`+unknownID+`" that was not planned`)
+		})
+	}
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -526,8 +739,8 @@ research "market" {
   reasoning_effort     = "high"
   system_prompt        = "Research carefully."
   prompt               = "Start now."
-  tools                = [external_tool.lookup]
-  terminate_tool       = go_tool.finish
+  tool_ids             = [external_tool.lookup.id]
+  terminate_tool_id    = go_tool.finish.id
   allowed_tools        = [tool_name(external_tool.lookup)]
   disallowed_tools     = ["ask_user"]
   skill_directories    = ["."]
@@ -566,11 +779,14 @@ research "market" {
 	require.NotNil(t, reconstructed.Provider)
 	assert.Equal(t, "https://example.test", reconstructed.Provider.Endpoint)
 	assert.Equal(t, "secret", *reconstructed.Provider.APIKey)
-	require.Len(t, reconstructed.Tools, 1)
-	assert.Equal(t, "external_tool.lookup", reconstructed.Tools[0].Address)
-	assert.Contains(t, reconstructed.Tools[0].InputTypeExpression, "optional(number, 5)")
-	require.NotNil(t, reconstructed.TerminateTool)
-	assert.Equal(t, "go_tool.finish", reconstructed.TerminateTool.Address)
+	registry := planned.Saved.Tools()
+	require.Len(t, registry, 2)
+	require.Contains(t, registry, reconstructed.Config.Policy.ToolIDs[0])
+	assert.Equal(t, "external_tool.lookup", registry[reconstructed.Config.Policy.ToolIDs[0]].Address)
+	assert.Contains(t, registry[reconstructed.Config.Policy.ToolIDs[0]].InputTypeExpression, "optional(number, 5)")
+	require.NotNil(t, reconstructed.Config.TerminateToolID)
+	require.Contains(t, registry, *reconstructed.Config.TerminateToolID)
+	assert.Equal(t, "go_tool.finish", registry[*reconstructed.Config.TerminateToolID].Address)
 	require.NotNil(t, reconstructed.Config.QC)
 	assert.Equal(t, "qc-model", *reconstructed.Config.QC.Model)
 	assert.Equal(t, 3, reconstructed.Config.QC.MaxRounds)

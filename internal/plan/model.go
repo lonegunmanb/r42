@@ -4,11 +4,14 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"time"
 
 	"github.com/zclconf/go-cty/cty"
 )
+
+var toolIDPattern = regexp.MustCompile(`^tool_.+_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type NodeSpec struct {
 	Address      string
@@ -30,6 +33,18 @@ type OutputSpec struct {
 	Expression  string
 }
 
+type ToolSpec struct {
+	ID                   string   `json:"id"`
+	Address              string   `json:"address"`
+	Kind                 string   `json:"kind"`
+	Description          string   `json:"description"`
+	Source               string   `json:"source,omitempty"`
+	Program              []string `json:"program,omitempty"`
+	WorkingDir           string   `json:"working_dir,omitempty"`
+	InputTypeExpression  string   `json:"input_type_expression,omitempty"`
+	OutputTypeExpression string   `json:"output_type_expression,omitempty"`
+}
+
 type Plan struct {
 	directory        string
 	runDirectory     string
@@ -37,6 +52,7 @@ type Plan struct {
 	outputs          map[string]OutputSpec
 	context          map[string]cty.Value
 	localExpressions map[string]string
+	tools            map[string]ToolSpec
 }
 
 func NewWithContextAndLocals(
@@ -46,7 +62,7 @@ func NewWithContextAndLocals(
 	contextValues map[string]cty.Value,
 	localExpressions map[string]string,
 ) (*Plan, error) {
-	return newPlan(directory, "", nodes, outputs, contextValues, localExpressions)
+	return newPlan(directory, "", nodes, outputs, contextValues, localExpressions, nil)
 }
 
 func NewForRun(
@@ -57,10 +73,24 @@ func NewForRun(
 	contextValues map[string]cty.Value,
 	localExpressions map[string]string,
 ) (*Plan, error) {
+	return NewForRunWithTools(
+		directory, runDirectory, nodes, outputs, contextValues, localExpressions, nil,
+	)
+}
+
+func NewForRunWithTools(
+	directory string,
+	runDirectory string,
+	nodes []NodeSpec,
+	outputs map[string]OutputSpec,
+	contextValues map[string]cty.Value,
+	localExpressions map[string]string,
+	tools map[string]ToolSpec,
+) (*Plan, error) {
 	if runDirectory != "" && !filepath.IsAbs(runDirectory) {
 		return nil, fmt.Errorf("run directory must be absolute")
 	}
-	return newPlan(directory, runDirectory, nodes, outputs, contextValues, localExpressions)
+	return newPlan(directory, runDirectory, nodes, outputs, contextValues, localExpressions, tools)
 }
 
 func newPlan(
@@ -70,8 +100,12 @@ func newPlan(
 	outputs map[string]OutputSpec,
 	contextValues map[string]cty.Value,
 	localExpressions map[string]string,
+	tools map[string]ToolSpec,
 ) (*Plan, error) {
 	if err := validateNodes(nodes); err != nil {
+		return nil, err
+	}
+	if err := validateTools(tools); err != nil {
 		return nil, err
 	}
 	return &Plan{
@@ -81,6 +115,7 @@ func newPlan(
 		outputs:          cloneOutputs(outputs),
 		context:          cloneContext(contextValues),
 		localExpressions: maps.Clone(localExpressions),
+		tools:            cloneTools(tools),
 	}, nil
 }
 
@@ -106,6 +141,35 @@ func (p *Plan) Nodes() []NodeSpec {
 
 func (p *Plan) Outputs() map[string]OutputSpec {
 	return cloneOutputs(p.outputs)
+}
+
+func (p *Plan) Tools() map[string]ToolSpec {
+	return cloneTools(p.tools)
+}
+
+func IsToolID(value string) bool {
+	return toolIDPattern.MatchString(value)
+}
+
+func validateTools(tools map[string]ToolSpec) error {
+	for id, tool := range tools {
+		if id == "" || tool.ID == "" {
+			return fmt.Errorf("tool id is required")
+		}
+		if id != tool.ID {
+			return fmt.Errorf("tool registry key must match tool id")
+		}
+		if !IsToolID(id) {
+			return fmt.Errorf("tool id %q is invalid", id)
+		}
+		if tool.Address == "" {
+			return fmt.Errorf("tool %s address is required", id)
+		}
+		if tool.Kind == "" {
+			return fmt.Errorf("tool %s kind is required", id)
+		}
+	}
+	return nil
 }
 
 func validateNodes(nodes []NodeSpec) error {
@@ -174,7 +238,17 @@ func clonePlan(source *Plan) *Plan {
 		outputs:          cloneOutputs(source.outputs),
 		context:          cloneContext(source.context),
 		localExpressions: maps.Clone(source.localExpressions),
+		tools:            cloneTools(source.tools),
 	}
+}
+
+func cloneTools(source map[string]ToolSpec) map[string]ToolSpec {
+	result := make(map[string]ToolSpec, len(source))
+	for id, tool := range source {
+		tool.Program = slices.Clone(tool.Program)
+		result[id] = tool
+	}
+	return result
 }
 
 func cloneContext(source map[string]cty.Value) map[string]cty.Value {

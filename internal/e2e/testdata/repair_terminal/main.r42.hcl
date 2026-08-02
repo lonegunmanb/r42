@@ -19,7 +19,7 @@ go_tool "finish" {
 research "source" {
   model                 = "test-model"
   system_prompt         = "Repair invalid terminal arguments and finish."
-  terminate_tool        = go_tool.finish
+  terminate_tool_id     = go_tool.finish.id
   max_protocol_attempts = 3
 }
 

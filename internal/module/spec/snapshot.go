@@ -8,6 +8,7 @@ import (
 
 	"github.com/Azure/golden"
 	"github.com/lonegunmanb/r42/internal/config"
+	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
@@ -15,24 +16,10 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
-type PlannedTool struct {
-	Address              string   `json:"address"`
-	Kind                 string   `json:"kind"`
-	Description          string   `json:"description"`
-	Source               string   `json:"source,omitempty"`
-	Program              []string `json:"program,omitempty"`
-	WorkingDir           string   `json:"working_dir,omitempty"`
-	InputTypeExpression  string   `json:"input_type_expression,omitempty"`
-	OutputTypeExpression string   `json:"output_type_expression,omitempty"`
-}
-
 type ResearchPlan struct {
-	Config        researchspec.Config
-	Provider      *provider.Config
-	Tools         []PlannedTool
-	TerminateTool *PlannedTool
-	QCProvider    *provider.Config
-	QCTools       []PlannedTool
+	Config     researchspec.Config
+	Provider   *provider.Config
+	QCProvider *provider.Config
 }
 
 type researchSnapshot struct {
@@ -47,13 +34,12 @@ type researchSnapshot struct {
 	Artifacts           []researchspec.Artifact `json:"artifacts"`
 	QC                  *qcSnapshot             `json:"qc,omitempty"`
 	Provider            *providerSnapshot       `json:"provider,omitempty"`
-	Tools               []PlannedTool           `json:"tools,omitempty"`
-	TerminateTool       *PlannedTool            `json:"terminate_tool,omitempty"`
+	TerminateToolID     *string                 `json:"terminate_tool_id,omitempty"`
 	QCProvider          *providerSnapshot       `json:"qc_provider,omitempty"`
-	QCTools             []PlannedTool           `json:"qc_tools,omitempty"`
 }
 
 type policySnapshot struct {
+	ToolIDs          []string                `json:"tool_ids,omitempty"`
 	AllowedTools     []string                `json:"allowed_tools,omitempty"`
 	DisallowedTools  []string                `json:"disallowed_tools,omitempty"`
 	SkillDirectories []string                `json:"skill_directories,omitempty"`
@@ -67,6 +53,7 @@ type qcSnapshot struct {
 	Model            *string                  `json:"model,omitempty"`
 	ReasoningEffort  *string                  `json:"reasoning_effort,omitempty"`
 	Retry            provider.RetryOverride   `json:"retry"`
+	ToolIDs          []string                 `json:"tool_ids,omitempty"`
 	AllowedTools     []string                 `json:"allowed_tools,omitempty"`
 	DisallowedTools  []string                 `json:"disallowed_tools,omitempty"`
 	SkillDirectories []string                 `json:"skill_directories,omitempty"`
@@ -90,13 +77,12 @@ type providerSnapshot struct {
 	Retry          provider.RetryOverride `json:"retry"`
 }
 
-func EncodeResearchPlan(config researchspec.Config, planning golden.Config) (cty.Value, error) {
-	tools, err := resolveTools(config.Policy.Tools, planning)
-	if err != nil {
-		return cty.NilVal, err
-	}
-	terminate, err := resolveOptionalTool(config.TerminateTool, planning)
-	if err != nil {
+func EncodeResearchPlan(
+	config researchspec.Config,
+	planning golden.Config,
+	registry map[string]internalplan.ToolSpec,
+) (cty.Value, error) {
+	if err := validateResearchToolIDs(config, registry); err != nil {
 		return cty.NilVal, err
 	}
 	providerConfig, sensitive, err := resolveProvider(config.ModelProvider, planning)
@@ -114,8 +100,7 @@ func EncodeResearchPlan(config researchspec.Config, planning golden.Config) (cty
 		Policy:              snapshotPolicy(config.Policy),
 		Artifacts:           slices.Clone(config.Artifacts),
 		Provider:            providerConfig,
-		Tools:               tools,
-		TerminateTool:       terminate,
+		TerminateToolID:     clonePointer(config.TerminateToolID),
 	}
 	if config.QC != nil {
 		criteria, criteriaErr := stringMap(config.QC.Criteria)
@@ -125,14 +110,11 @@ func EncodeResearchPlan(config researchspec.Config, planning golden.Config) (cty
 		snapshot.QC = &qcSnapshot{
 			Criteria: criteria, Model: clonePointer(config.QC.Model),
 			ReasoningEffort: clonePointer(config.QC.ReasoningEffort), Retry: config.QC.Retry,
+			ToolIDs:      slices.Clone(config.QC.ToolIDs),
 			AllowedTools: slices.Clone(config.QC.AllowedTools), DisallowedTools: slices.Clone(config.QC.DisallowedTools),
 			SkillDirectories: slices.Clone(config.QC.SkillDirectories), Skills: slices.Clone(config.QC.Skills),
 			DisabledSkills: slices.Clone(config.QC.DisabledSkills), Permission: clonePointer(config.QC.Permission),
 			MaxRounds: config.QC.MaxRounds,
-		}
-		snapshot.QCTools, err = resolveTools(config.QC.Tools, planning)
-		if err != nil {
-			return cty.NilVal, err
 		}
 		var qcSensitive bool
 		snapshot.QCProvider, qcSensitive, err = resolveProvider(config.QC.ModelProvider, planning)
@@ -172,26 +154,23 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 		Model: snapshot.Model, ReasoningEffort: clonePointer(snapshot.ReasoningEffort),
 		SystemPrompt: snapshot.SystemPrompt, Prompt: clonePointer(snapshot.Prompt),
 		MaxProtocolAttempts: snapshot.MaxProtocolAttempts, Timeout: nanosecondsDuration(snapshot.TimeoutNanoseconds),
-		Retry: snapshot.Retry, Policy: restorePolicy(snapshot.Policy, snapshot.Tools),
-		Artifacts: slices.Clone(snapshot.Artifacts),
-	}
-	if snapshot.TerminateTool != nil {
-		configValue.TerminateTool = toolReference(*snapshot.TerminateTool)
+		Retry: snapshot.Retry, Policy: restorePolicy(snapshot.Policy),
+		Artifacts:       slices.Clone(snapshot.Artifacts),
+		TerminateToolID: clonePointer(snapshot.TerminateToolID),
 	}
 	if snapshot.QC != nil {
 		configValue.QC = &researchspec.QCConfig{
 			Criteria: cty.MapVal(stringValues(snapshot.QC.Criteria)), Model: clonePointer(snapshot.QC.Model),
 			ReasoningEffort: clonePointer(snapshot.QC.ReasoningEffort), Retry: snapshot.QC.Retry,
-			Tools: toolReferences(snapshot.QCTools), AllowedTools: slices.Clone(snapshot.QC.AllowedTools),
+			ToolIDs: slices.Clone(snapshot.QC.ToolIDs), AllowedTools: slices.Clone(snapshot.QC.AllowedTools),
 			DisallowedTools: slices.Clone(snapshot.QC.DisallowedTools), SkillDirectories: slices.Clone(snapshot.QC.SkillDirectories),
 			Skills: slices.Clone(snapshot.QC.Skills), DisabledSkills: slices.Clone(snapshot.QC.DisabledSkills),
 			Permission: clonePointer(snapshot.QC.Permission), MaxRounds: snapshot.QC.MaxRounds,
 		}
 	}
 	return ResearchPlan{
-		Config: configValue, Provider: restoreProvider(snapshot.Provider), Tools: slices.Clone(snapshot.Tools),
-		TerminateTool: cloneTool(snapshot.TerminateTool), QCProvider: restoreProvider(snapshot.QCProvider),
-		QCTools: slices.Clone(snapshot.QCTools),
+		Config: configValue, Provider: restoreProvider(snapshot.Provider),
+		QCProvider: restoreProvider(snapshot.QCProvider),
 	}, nil
 }
 
@@ -220,60 +199,97 @@ func resolveProvider(value cty.Value, planning golden.Config) (*providerSnapshot
 	return nil, false, fmt.Errorf("model provider %q was not planned", address)
 }
 
-func resolveTools(value cty.Value, planning golden.Config) ([]PlannedTool, error) {
-	if value.Type().Equals(cty.NilType) || value.IsNull() || value.LengthInt() == 0 {
-		return nil, nil
-	}
-	result := make([]PlannedTool, 0, value.LengthInt())
-	iterator := value.ElementIterator()
-	for iterator.Next() {
-		_, element := iterator.Element()
-		tool, err := resolveTool(element, planning)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, tool)
-	}
-	return result, nil
-}
-
-func resolveOptionalTool(value cty.Value, planning golden.Config) (*PlannedTool, error) {
-	address, ok, err := referenceAddress(value)
-	if err != nil || !ok {
-		return nil, err
-	}
-	tool, err := resolveToolByAddress(address, planning)
-	return &tool, err
-}
-
-func resolveTool(value cty.Value, planning golden.Config) (PlannedTool, error) {
-	address, ok, err := referenceAddress(value)
-	if err != nil {
-		return PlannedTool{}, err
-	}
-	if !ok {
-		return PlannedTool{}, fmt.Errorf("typed tool reference is required")
-	}
-	return resolveToolByAddress(address, planning)
-}
-
-func resolveToolByAddress(address string, planning golden.Config) (PlannedTool, error) {
+func BuildToolRegistry(
+	planning golden.Config,
+	modules map[string]ModulePlan,
+) map[string]internalplan.ToolSpec {
+	registry := make(map[string]internalplan.ToolSpec)
 	for _, block := range golden.Blocks[*toolspec.GoToolBlock](planning) {
-		if block.Address() == address {
-			return PlannedTool{Address: address, Kind: string(config.AddressKindGo), Description: block.Description, Source: block.Source}, nil
+		definition := internalplan.ToolSpec{
+			ID: block.Id(), Address: block.CanonicalAddress(), Kind: string(config.AddressKindGo),
+			Description: block.Description, Source: block.Source,
 		}
+		registry[definition.ID] = definition
 	}
 	for _, block := range golden.Blocks[*toolspec.ExternalToolBlock](planning) {
-		if block.Address() == address {
-			return PlannedTool{
-				Address: address, Kind: string(config.AddressKindExternal), Description: block.Description,
-				Program: slices.Clone(block.Program), WorkingDir: block.WorkingDir,
-				InputTypeExpression:  block.HclBlock().Attributes()["input_type"].ExprString(),
-				OutputTypeExpression: block.HclBlock().Attributes()["output_type"].ExprString(),
-			}, nil
+		definition := internalplan.ToolSpec{
+			ID: block.Id(), Address: block.CanonicalAddress(), Kind: string(config.AddressKindExternal),
+			Description: block.Description, Program: slices.Clone(block.Program), WorkingDir: block.WorkingDir,
+			InputTypeExpression:  block.HclBlock().Attributes()["input_type"].ExprString(),
+			OutputTypeExpression: block.HclBlock().Attributes()["output_type"].ExprString(),
+		}
+		registry[definition.ID] = definition
+	}
+	for _, module := range modules {
+		childRegistry := module.Saved.Tools()
+		for _, output := range module.Outputs {
+			value, _ := output.Value.UnmarkDeep()
+			if !value.IsKnown() || value.IsNull() || !value.Type().Equals(cty.String) {
+				continue
+			}
+			definition, ok := childRegistry[value.AsString()]
+			if ok {
+				registry[definition.ID] = definition
+			}
 		}
 	}
-	return PlannedTool{}, fmt.Errorf("typed tool %q was not planned", address)
+	return registry
+}
+
+func validateResearchToolIDs(config researchspec.Config, registry map[string]internalplan.ToolSpec) error {
+	if err := validateConfiguredToolIDs(config.Policy.ToolIDs, registry, "research tool_ids"); err != nil {
+		return err
+	}
+	if config.TerminateToolID != nil {
+		if err := validateConfiguredToolIDs([]string{*config.TerminateToolID}, registry, "research terminate_tool_id"); err != nil {
+			return err
+		}
+	}
+	if err := validateToolFilters(config.Policy.AllowedTools, registry, "research allowed_tools"); err != nil {
+		return err
+	}
+	if err := validateToolFilters(config.Policy.DisallowedTools, registry, "research disallowed_tools"); err != nil {
+		return err
+	}
+	if config.QC == nil {
+		return nil
+	}
+	if err := validateConfiguredToolIDs(config.QC.ToolIDs, registry, "qc tool_ids"); err != nil {
+		return err
+	}
+	if err := validateToolFilters(config.QC.AllowedTools, registry, "qc allowed_tools"); err != nil {
+		return err
+	}
+	return validateToolFilters(config.QC.DisallowedTools, registry, "qc disallowed_tools")
+}
+
+func validateConfiguredToolIDs(
+	ids []string,
+	registry map[string]internalplan.ToolSpec,
+	attribute string,
+) error {
+	for _, id := range ids {
+		if _, ok := registry[id]; !ok {
+			return fmt.Errorf("%s references tool id %q that was not planned", attribute, id)
+		}
+	}
+	return nil
+}
+
+func validateToolFilters(
+	filters []string,
+	registry map[string]internalplan.ToolSpec,
+	attribute string,
+) error {
+	for _, filter := range filters {
+		if _, ok := registry[filter]; ok {
+			continue
+		}
+		if internalplan.IsToolID(filter) {
+			return fmt.Errorf("%s references tool id %q that was not planned", attribute, filter)
+		}
+	}
+	return nil
 }
 
 func referenceAddress(value cty.Value) (string, bool, error) {
@@ -289,15 +305,16 @@ func referenceAddress(value cty.Value) (string, bool, error) {
 
 func snapshotPolicy(policy researchspec.SessionPolicy) policySnapshot {
 	return policySnapshot{
+		ToolIDs:      slices.Clone(policy.ToolIDs),
 		AllowedTools: slices.Clone(policy.AllowedTools), DisallowedTools: slices.Clone(policy.DisallowedTools),
 		SkillDirectories: slices.Clone(policy.SkillDirectories), Skills: slices.Clone(policy.Skills),
 		DisabledSkills: slices.Clone(policy.DisabledSkills), Permission: policy.Permission,
 	}
 }
 
-func restorePolicy(policy policySnapshot, tools []PlannedTool) researchspec.SessionPolicy {
+func restorePolicy(policy policySnapshot) researchspec.SessionPolicy {
 	return researchspec.SessionPolicy{
-		Tools: toolReferences(tools), AllowedTools: slices.Clone(policy.AllowedTools),
+		ToolIDs: slices.Clone(policy.ToolIDs), AllowedTools: slices.Clone(policy.AllowedTools),
 		DisallowedTools: slices.Clone(policy.DisallowedTools), SkillDirectories: slices.Clone(policy.SkillDirectories),
 		Skills: slices.Clone(policy.Skills), DisabledSkills: slices.Clone(policy.DisabledSkills), Permission: policy.Permission,
 	}
@@ -322,23 +339,6 @@ func restoreProvider(snapshot *providerSnapshot) *provider.Config {
 		APIKeyRef: clonePointer(snapshot.APIKeyRef), BearerToken: clonePointer(snapshot.BearerToken),
 		BearerTokenRef: clonePointer(snapshot.BearerTokenRef), Retry: snapshot.Retry,
 	}
-}
-
-func toolReferences(tools []PlannedTool) cty.Value {
-	if len(tools) == 0 {
-		return cty.EmptyTupleVal
-	}
-	values := make([]cty.Value, len(tools))
-	for index, tool := range tools {
-		values[index] = toolReference(tool)
-	}
-	return cty.TupleVal(values)
-}
-
-func toolReference(tool PlannedTool) cty.Value {
-	return cty.ObjectVal(map[string]cty.Value{
-		"address": cty.StringVal(tool.Address), "kind": cty.StringVal(tool.Kind),
-	})
 }
 
 func stringMap(value cty.Value) (map[string]string, error) {
@@ -382,14 +382,5 @@ func clonePointer[T any](value *T) *T {
 		return nil
 	}
 	result := *value
-	return &result
-}
-
-func cloneTool(tool *PlannedTool) *PlannedTool {
-	if tool == nil {
-		return nil
-	}
-	result := *tool
-	result.Program = slices.Clone(tool.Program)
 	return &result
 }

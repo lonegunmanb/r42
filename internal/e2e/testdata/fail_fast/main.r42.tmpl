@@ -8,5 +8,5 @@ external_tool "blocker" {
 research "slow" {
   model         = "test-model"
   system_prompt = "RUN_EXTERNAL_CHILD"
-  tools         = [external_tool.blocker]
+  tool_ids      = [external_tool.blocker.id]
 }

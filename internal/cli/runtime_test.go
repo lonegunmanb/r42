@@ -229,7 +229,7 @@ go_tool "finish" {
 research "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
-  terminate_tool = go_tool.finish
+  terminate_tool_id = go_tool.finish.id
 }
 output "summary" { value = research.source.result }
 `), 0o600))
@@ -246,7 +246,7 @@ output "summary" { value = research.source.result }
 
 	require.NoError(t, err)
 	assert.Equal(t, cty.StringVal("done"), result.Outputs["summary"])
-	assert.Equal(t, "go_tool_finish", opener.calledTool)
+	assert.True(t, strings.HasPrefix(opener.calledTool, "tool_go_tool_finish_"))
 }
 
 func TestProductionRuntimeReturnsNullForOmittedTerminalOutput(t *testing.T) {
@@ -300,7 +300,7 @@ go_tool "finish" {
 research "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
-  terminate_tool = go_tool.finish
+  terminate_tool_id = go_tool.finish.id
 }
 locals { summary = upper(research.source.result) }
 output "summary" { value = local.summary }
@@ -340,7 +340,7 @@ go_tool "lookup" {
 research "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
-  tools = [go_tool.lookup]
+  tool_ids = [go_tool.lookup.id]
 }
 `), 0o600))
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: &failingGoToolOpener{}})
@@ -351,7 +351,8 @@ research "source" {
 
 	require.Error(t, err)
 	events := readOnlyRunEvents(t, directory)
-	assert.Contains(t, events, `"tool_name":"go_tool_lookup"`)
+	assert.Contains(t, events, `"tool_name":"tool_go_tool_lookup_`)
+	assert.Contains(t, events, `"tool_address":"go_tool.lookup"`)
 	assert.Contains(t, events, `"Query":"facts"`)
 	assert.Contains(t, events, "lookup failed completely")
 	assert.Contains(t, events, `"action":"session.send","status":"failed"`)
@@ -380,7 +381,7 @@ type failingGoToolSession struct{ config copilot.SessionConfig }
 
 func (s *failingGoToolSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
 	for _, tool := range s.config.Tools {
-		if tool.Name == "go_tool_lookup" {
+		if strings.HasPrefix(tool.Name, "tool_go_tool_lookup_") {
 			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Query": "facts"}})
 			return &sdk.SessionEvent{}, err
 		}
@@ -413,7 +414,7 @@ go_tool "finish" {
 research "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
-  terminate_tool = go_tool.finish
+  terminate_tool_id = go_tool.finish.id
 }
 output "summary" { value = research.source.result }
 `), 0o600))
@@ -438,7 +439,7 @@ type repairingToolSession struct {
 func (s *repairingToolSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
 	s.opener.sendCalls++
 	for _, tool := range s.config.Tools {
-		if tool.Name != "go_tool_finish" {
+		if !strings.HasPrefix(tool.Name, "tool_go_tool_finish_") {
 			continue
 		}
 		arguments := map[string]any{"Summary": "fixed"}
@@ -504,7 +505,7 @@ type toolCallingSession struct {
 
 func (s *toolCallingSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
 	for _, tool := range s.config.Tools {
-		if tool.Name == "go_tool_finish" {
+		if strings.HasPrefix(tool.Name, "tool_go_tool_finish_") {
 			s.opener.calledTool = tool.Name
 			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Summary": "done"}})
 			return &sdk.SessionEvent{}, err

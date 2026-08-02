@@ -127,6 +127,127 @@ func TestPlanRoundTripPreservesReservedRunDirectory(t *testing.T) {
 	require.EqualError(t, err, "run directory must be absolute")
 }
 
+func TestPlanRoundTripPreservesImmutableToolRegistry(t *testing.T) {
+	t.Parallel()
+
+	tools := map[string]plan.ToolSpec{
+		"tool_external_tool_lookup_12345678-1234-8234-9234-123456789abc": {
+			ID:          "tool_external_tool_lookup_12345678-1234-8234-9234-123456789abc",
+			Address:     "module.parent.external_tool.lookup",
+			Kind:        "external",
+			Description: "Look up evidence",
+			Program:     []string{"lookup", "--json"},
+		},
+	}
+	planned, err := plan.NewForRunWithTools("D:/research", "", nil, nil, nil, nil, tools)
+	require.NoError(t, err)
+
+	inputDefinition := tools["tool_external_tool_lookup_12345678-1234-8234-9234-123456789abc"]
+	inputDefinition.Program[0] = "changed input"
+	tools["tool_external_tool_lookup_12345678-1234-8234-9234-123456789abc"] = plan.ToolSpec{ID: "changed"}
+	snapshot := planned.Tools()
+	snapshotDefinition := snapshot["tool_external_tool_lookup_12345678-1234-8234-9234-123456789abc"]
+	snapshotDefinition.Program[0] = "changed snapshot"
+	snapshot["tool_external_tool_lookup_12345678-1234-8234-9234-123456789abc"] = plan.ToolSpec{ID: "changed again"}
+
+	encoded, err := plan.Marshal(planned)
+	require.NoError(t, err)
+	decoded, err := plan.Unmarshal(encoded)
+	require.NoError(t, err)
+
+	actual := decoded.Tools()
+	require.Contains(t, actual, "tool_external_tool_lookup_12345678-1234-8234-9234-123456789abc")
+	assert.Equal(t, "module.parent.external_tool.lookup", actual["tool_external_tool_lookup_12345678-1234-8234-9234-123456789abc"].Address)
+	assert.Equal(t, []string{"lookup", "--json"}, actual["tool_external_tool_lookup_12345678-1234-8234-9234-123456789abc"].Program)
+}
+
+func TestPlanRejectsInvalidToolRegistry(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		tools         map[string]plan.ToolSpec
+		expectedError string
+	}{
+		{
+			name:          "id is required",
+			tools:         map[string]plan.ToolSpec{"": {Address: "go_tool.finish", Kind: "go"}},
+			expectedError: "tool id is required",
+		},
+		{
+			name: "map key must match id",
+			tools: map[string]plan.ToolSpec{
+				"tool_go_tool_finish_12345678-1234-8234-9234-123456789abc": {ID: "different"},
+			},
+			expectedError: "tool registry key must match tool id",
+		},
+		{
+			name: "address is required",
+			tools: map[string]plan.ToolSpec{
+				"tool_go_tool_finish_12345678-1234-8234-9234-123456789abc": {
+					ID: "tool_go_tool_finish_12345678-1234-8234-9234-123456789abc",
+				},
+			},
+			expectedError: "tool tool_go_tool_finish_12345678-1234-8234-9234-123456789abc address is required",
+		},
+		{
+			name: "id format is invalid",
+			tools: map[string]plan.ToolSpec{
+				"tool_go_tool_finish": {
+					ID: "tool_go_tool_finish", Address: "go_tool.finish", Kind: "go",
+				},
+			},
+			expectedError: `tool id "tool_go_tool_finish" is invalid`,
+		},
+		{
+			name: "kind is required",
+			tools: map[string]plan.ToolSpec{
+				"tool_go_tool_finish_12345678-1234-8234-9234-123456789abc": {
+					ID:      "tool_go_tool_finish_12345678-1234-8234-9234-123456789abc",
+					Address: "go_tool.finish",
+				},
+			},
+			expectedError: "tool tool_go_tool_finish_12345678-1234-8234-9234-123456789abc kind is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := plan.NewForRunWithTools("D:/research", "", nil, nil, nil, nil, tt.tools)
+			assert.ErrorContains(t, err, tt.expectedError)
+		})
+	}
+}
+
+func TestToolIDRecognizesGeneratedTypedToolIDs(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		value    string
+		expected bool
+	}{
+		{
+			name:     "generated id",
+			value:    "tool_go_tool_finish_12345678-1234-8234-9234-123456789abc",
+			expected: true,
+		},
+		{name: "builtin name", value: "web_search", expected: false},
+		{name: "missing uuid", value: "tool_go_tool_finish", expected: false},
+		{name: "uuid without tool prefix", value: "finish_12345678-1234-8234-9234-123456789abc", expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tt.expected, plan.IsToolID(tt.value))
+		})
+	}
+}
+
 func TestPlanSnapshotsAreImmutable(t *testing.T) {
 	t.Parallel()
 

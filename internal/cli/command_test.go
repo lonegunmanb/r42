@@ -24,6 +24,9 @@ import (
 type fakeRuntime struct {
 	planned          *plan.Plan
 	plannedDirectory string
+	initialized      string
+	modulesDirectory string
+	upgradeModules   bool
 	variables        []golden.CliFlagAssignedVariables
 	configOptions    executor.ResearchConfigOptions
 	applyDeadline    bool
@@ -32,7 +35,20 @@ type fakeRuntime struct {
 	warnings         []error
 	planErr          error
 	applyErr         error
+	initErr          error
 	applyHook        func()
+}
+
+func (f *fakeRuntime) InitModules(
+	_ context.Context,
+	directory string,
+	modulesDirectory string,
+	upgrade bool,
+) error {
+	f.initialized = directory
+	f.modulesDirectory = modulesDirectory
+	f.upgradeModules = upgrade
+	return f.initErr
 }
 
 func (f *fakeRuntime) Config(
@@ -45,6 +61,77 @@ func (f *fakeRuntime) Config(
 		return nil, f.planErr
 	}
 	return f.config(f.planned, options)
+}
+
+//nolint:paralleltest // t.Chdir verifies the CLI process working-directory contract.
+func TestCommandInitUsesWorkingDirectoryModuleCache(t *testing.T) {
+	workingDirectory := t.TempDir()
+	t.Chdir(workingDirectory)
+	target := t.TempDir()
+	runtime := new(fakeRuntime)
+
+	stdout, stderr, err := execute(t, runtime, "init", target, "--upgrade")
+
+	require.NoError(t, err)
+	assert.Empty(t, stdout)
+	assert.Empty(t, stderr)
+	assert.Equal(t, target, runtime.initialized)
+	assert.Equal(t, filepath.Join(workingDirectory, ".r42", "modules"), runtime.modulesDirectory)
+	assert.True(t, runtime.upgradeModules)
+}
+
+//nolint:paralleltest // t.Chdir verifies the CLI process working-directory contract.
+func TestCommandInitDefaultsToCurrentDirectoryWithoutUpgrade(t *testing.T) {
+	workingDirectory := t.TempDir()
+	t.Chdir(workingDirectory)
+	runtime := new(fakeRuntime)
+
+	_, _, err := execute(t, runtime, "init")
+
+	require.NoError(t, err)
+	assert.Equal(t, ".", runtime.initialized)
+	assert.Equal(t, filepath.Join(workingDirectory, ".r42", "modules"), runtime.modulesDirectory)
+	assert.False(t, runtime.upgradeModules)
+}
+
+func TestCommandInitHelpDescribesDirectoryAndUpgrade(t *testing.T) {
+	t.Parallel()
+
+	stdout, _, err := execute(t, nil, "init", "--help")
+
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "r42 init [DIRECTORY]")
+	assert.Contains(t, stdout, "--upgrade")
+}
+
+//nolint:paralleltest // t.Chdir verifies module installation relative to the CLI working directory.
+func TestCommandInitMakesModulesAvailableToDirectoryApply(t *testing.T) {
+	workingDirectory := t.TempDir()
+	t.Chdir(workingDirectory)
+	root := t.TempDir()
+	child := filepath.Join(root, "child")
+	require.NoError(t, os.Mkdir(child, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(child, "main.r42.hcl"), []byte(`
+output "answer" { value = "42" }
+`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "main.r42.hcl"), []byte(`
+module "child" { source = "./child" }
+output "answer" { value = module.child.answer }
+`), 0o600))
+	runtime := cli.NewRuntime()
+
+	_, _, err := execute(t, runtime, "apply", root)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "run r42 init")
+
+	_, _, err = execute(t, runtime, "init", root)
+	require.NoError(t, err)
+	stdout, _, err := execute(t, runtime, "apply", root)
+
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(workingDirectory, ".r42", "modules", "child", "main.r42.hcl"))
+	assert.Contains(t, stdout, `"42"`)
+	assert.NoDirExists(t, filepath.Join(root, ".r42"))
 }
 
 func (f *fakeRuntime) ConfigFromPlan(

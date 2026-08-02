@@ -103,6 +103,36 @@ output "summary" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigExposesSourceDirectoryAsPathModule(t *testing.T) {
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+output "module_path" {
+  value = path.module
+}
+`), 0o600))
+
+	config, err := NewResearchConfig(directory, ResearchConfigOptions{Context: t.Context()})
+	require.NoError(t, err)
+	planned, err := RunResearchPlan(config)
+	require.NoError(t, err)
+
+	assert.Equal(t, filepath.ToSlash(directory), planned.Outputs["module_path"].Value.AsString())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestApplyResearchConfigExposesSavedDirectoryAsPathModule(t *testing.T) {
+	directory := t.TempDir()
+	execution := &planExecution{ctx: t.Context()}
+
+	config, err := newApplyResearchConfig(directory, execution, 1)
+	require.NoError(t, err)
+	pathValue, ok := config.EvalContext().Variables["path"]
+	require.True(t, ok)
+
+	assert.Equal(t, filepath.ToSlash(directory), pathValue.GetAttr("module").AsString())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
 func TestResearchConfigPlansBlockWorkingDirectoriesWithoutCreatingRun(t *testing.T) {
 	directory := t.TempDir()
 	runRoot := t.TempDir()

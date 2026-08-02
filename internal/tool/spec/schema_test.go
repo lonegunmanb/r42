@@ -1,6 +1,7 @@
 package spec_test
 
 import (
+	"strings"
 	"sync"
 	"testing"
 
@@ -18,6 +19,11 @@ import (
 
 type toolTestConfig struct {
 	*golden.BaseConfig
+	canonicalPrefix string
+}
+
+func (c *toolTestConfig) CanonicalAddress(address string) string {
+	return c.canonicalPrefix + "." + address
 }
 
 var registerToolBlocks sync.Once
@@ -400,12 +406,12 @@ external_tool "lookup" {
 	assert.Empty(t, externalValue.GetAttr("working_dir").AsString())
 
 	referenceTests := []struct {
-		name       string
-		expression string
-		expected   string
+		name           string
+		expression     string
+		expectedPrefix string
 	}{
-		{name: "go tool traversal", expression: "tool_name(go_tool.finish)", expected: "go_tool_finish"},
-		{name: "external tool traversal", expression: "tool_name(external_tool.lookup)", expected: "external_tool_lookup"},
+		{name: "go tool traversal", expression: "tool_name(go_tool.finish)", expectedPrefix: "tool_go_tool_finish_"},
+		{name: "external tool traversal", expression: "tool_name(external_tool.lookup)", expectedPrefix: "tool_external_tool_lookup_"},
 	}
 	for _, tt := range referenceTests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -417,9 +423,59 @@ external_tool "lookup" {
 			require.False(t, diagnostics.HasErrors(), diagnostics.Error())
 			actual, diagnostics := expression.Value(evaluationContext)
 			require.False(t, diagnostics.HasErrors(), diagnostics.Error())
-			assert.Equal(t, tt.expected, actual.AsString())
+			assert.True(t, strings.HasPrefix(actual.AsString(), tt.expectedPrefix))
 		})
 	}
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestToolBlocksExposeStableIDsFromCanonicalAddresses(t *testing.T) {
+	const source = `
+go_tool "finish" {
+  description = "Finish research"
+  source = "type Input struct{}"
+}
+
+external_tool "lookup" {
+  description = "Look up data"
+  program = ["lookup"]
+  input_type = object({ query = string })
+  output_type = string
+}
+`
+	first := parseToolConfig(t, source)
+	require.NoError(t, first.RunPlan())
+	second := parseToolConfig(t, source)
+	require.NoError(t, second.RunPlan())
+	sibling := parseToolConfigWithPrefix(t, "module.sibling", source)
+	require.NoError(t, sibling.RunPlan())
+
+	firstGo := golden.Blocks[*toolspec.GoToolBlock](first)[0]
+	secondGo := golden.Blocks[*toolspec.GoToolBlock](second)[0]
+	siblingGo := golden.Blocks[*toolspec.GoToolBlock](sibling)[0]
+	firstExternal := golden.Blocks[*toolspec.ExternalToolBlock](first)[0]
+	secondExternal := golden.Blocks[*toolspec.ExternalToolBlock](second)[0]
+	siblingExternal := golden.Blocks[*toolspec.ExternalToolBlock](sibling)[0]
+
+	assert.Equal(t, "module.parent.go_tool.finish", firstGo.CanonicalAddress())
+	assert.Equal(t, "module.parent.external_tool.lookup", firstExternal.CanonicalAddress())
+	assert.Equal(t, "module.sibling.go_tool.finish", siblingGo.CanonicalAddress())
+	assert.Equal(t, "module.sibling.external_tool.lookup", siblingExternal.CanonicalAddress())
+	assert.Regexp(t, `^tool_go_tool_finish_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, firstGo.Id())
+	assert.Regexp(t, `^tool_external_tool_lookup_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, firstExternal.Id())
+	assert.Equal(t, firstGo.Id(), secondGo.Id())
+	assert.Equal(t, firstExternal.Id(), secondExternal.Id())
+	assert.NotEqual(t, firstGo.Id(), firstExternal.Id())
+	assert.NotEqual(t, firstGo.Id(), siblingGo.Id())
+	assert.NotEqual(t, firstExternal.Id(), siblingExternal.Id())
+	assert.Equal(t, firstGo.Id(), firstGo.BaseValues()["id"].AsString())
+	assert.Equal(t, firstExternal.Id(), firstExternal.BaseValues()["id"].AsString())
+	goValue := first.EvalContext().Variables["go_tool"].GetAttr("finish")
+	externalValue := first.EvalContext().Variables["external_tool"].GetAttr("lookup")
+	require.True(t, goValue.Type().HasAttribute("id"))
+	require.True(t, externalValue.Type().HasAttribute("id"))
+	assert.Equal(t, firstGo.Id(), goValue.GetAttr("id").AsString())
+	assert.Equal(t, firstExternal.Id(), externalValue.GetAttr("id").AsString())
 }
 
 func parseConstraint(t *testing.T, source string) toolspec.Constraint {
@@ -434,6 +490,11 @@ func parseConstraint(t *testing.T, source string) toolspec.Constraint {
 
 func parseToolConfig(t *testing.T, source string) *toolTestConfig {
 	t.Helper()
+	return parseToolConfigWithPrefix(t, "module.parent", source)
+}
+
+func parseToolConfigWithPrefix(t *testing.T, canonicalPrefix, source string) *toolTestConfig {
+	t.Helper()
 
 	registerToolBlocks.Do(func() {
 		golden.RegisterBlock(new(toolspec.GoToolBlock))
@@ -447,7 +508,10 @@ func parseToolConfig(t *testing.T, source string) *toolTestConfig {
 	body, ok := syntaxFile.Body.(*hclsyntax.Body)
 	require.True(t, ok)
 
-	config := &toolTestConfig{BaseConfig: config.NewBaseConfig(golden.NewBaseConfigArgs{})}
+	config := &toolTestConfig{
+		BaseConfig:      config.NewBaseConfig(golden.NewBaseConfigArgs{}),
+		canonicalPrefix: canonicalPrefix,
+	}
 	err := golden.InitConfig(config, golden.AsHclBlocks(body.Blocks, writeFile.Body().Blocks()))
 	require.NoError(t, err)
 	return config

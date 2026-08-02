@@ -23,6 +23,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/copilot"
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/executor"
+	module "github.com/lonegunmanb/r42/internal/module"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"
@@ -64,6 +65,18 @@ func NewRuntime() *Engine {
 
 func NewRuntimeWithOptions(options RuntimeOptions) *Engine {
 	return &Engine{options: options}
+}
+
+func (*Engine) InitModules(
+	ctx context.Context,
+	directory string,
+	modulesDirectory string,
+	upgrade bool,
+) error {
+	return module.Init(ctx, directory, module.InitOptions{
+		ModulesDirectory: modulesDirectory,
+		Upgrade:          upgrade,
+	})
 }
 
 func (e *Engine) Config(
@@ -170,7 +183,7 @@ func (e *Engine) apply(
 	}
 	factory := &runtimeFactory{
 		results: make(map[string]cty.Value), run: activeRun, sessions: sessions, recorder: recorder,
-		state: new(runtimeState),
+		state: new(runtimeState), tools: planned.Tools(),
 	}
 	runner := executor.New(factory, nil)
 	outputs, applyErr := runner.Apply(ctx, planned, options.Parallelism)
@@ -246,6 +259,7 @@ type runtimeFactory struct {
 	recorder *debuglog.Recorder
 	state    *runtimeState
 	prefix   string
+	tools    map[string]plan.ToolSpec
 }
 
 type runtimeState struct {
@@ -295,7 +309,7 @@ func (f *runtimeFactory) New(
 			blockCancel()
 		}
 	}()
-	executionAddress := f.executionAddress(node.Address)
+	executionAddress := f.CanonicalAddress(node.Address)
 	workspace, err := f.run.Workspace(executionAddress)
 	if err != nil {
 		return nil, err
@@ -317,17 +331,19 @@ func (f *runtimeFactory) New(
 	}
 	terminal := researchruntime.NewTerminalRecorder()
 	tools, terminalType, err := f.buildTools(
-		ctx, executionAddress, debuglog.SessionResearch, workspace, planned, terminal,
+		ctx, executionAddress, debuglog.SessionResearch, workspace,
+		planned.Config.Policy.ToolIDs, planned.Config.TerminateToolID, terminal,
 	)
 	if err != nil {
 		return nil, err
 	}
 	resolved := researchspec.ResolvedTools{}
 	terminateName := ""
-	if planned.TerminateTool != nil {
-		terminateName = toolName(planned.TerminateTool.Address)
+	if planned.Config.TerminateToolID != nil {
+		terminateName = *planned.Config.TerminateToolID
+		definition := f.tools[terminateName]
 		resolved.Terminate = &researchspec.ToolPolicyRef{
-			Address: planned.TerminateTool.Address, OutputType: terminalType,
+			ID: definition.ID, Address: definition.Address, OutputType: terminalType,
 		}
 		resolved.TerminateSDKName = terminateName
 	}
@@ -354,7 +370,7 @@ func (f *runtimeFactory) New(
 		initialPrompt = *planned.Config.Prompt
 	}
 	var terminalRecorder *researchruntime.TerminalRecorder
-	if planned.TerminateTool != nil {
+	if planned.Config.TerminateToolID != nil {
 		terminalRecorder = terminal
 	}
 	recordedSession := &recordingSession{
@@ -382,11 +398,8 @@ func (f *runtimeFactory) New(
 			f.closeAfterSetupFailure(ctx, recordedSession)
 			return nil, effectiveErr
 		}
-		qcToolsPlan := planned
-		qcToolsPlan.Tools = planned.QCTools
-		qcToolsPlan.TerminateTool = nil
 		qcTools, _, toolsErr := f.buildTools(
-			ctx, executionAddress, debuglog.SessionQC, workspace, qcToolsPlan,
+			ctx, executionAddress, debuglog.SessionQC, workspace, effective.ToolIDs, nil,
 			researchruntime.NewTerminalRecorder(),
 		)
 		if toolsErr != nil {
@@ -494,10 +507,10 @@ func (f *runtimeFactory) newModuleBlock(
 	if err != nil {
 		return nil, err
 	}
-	executionAddress := f.executionAddress(node.Address)
+	executionAddress := f.CanonicalAddress(node.Address)
 	childFactory := &runtimeFactory{
 		results: make(map[string]cty.Value), run: f.run, sessions: f.sessions,
-		recorder: f.recorder, state: f.state, prefix: executionAddress,
+		recorder: f.recorder, state: f.state, prefix: executionAddress, tools: node.Module.Plan.Tools(),
 	}
 	return &moduleApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address,
@@ -506,7 +519,7 @@ func (f *runtimeFactory) newModuleBlock(
 	}, nil
 }
 
-func (f *runtimeFactory) executionAddress(address string) string {
+func (f *runtimeFactory) CanonicalAddress(address string) string {
 	if f.prefix == "" {
 		return address
 	}
@@ -557,26 +570,25 @@ func (f *runtimeFactory) buildTools(
 	blockAddress string,
 	sessionKind debuglog.SessionKind,
 	workspace string,
-	planned modulespec.ResearchPlan,
+	toolIDs []string,
+	terminateToolID *string,
 	terminal *researchruntime.TerminalRecorder,
 ) ([]sdk.Tool, cty.Type, error) {
-	definitions := slices.Clone(planned.Tools)
-	if planned.TerminateTool != nil && !slices.ContainsFunc(definitions, func(tool modulespec.PlannedTool) bool {
-		return tool.Address == planned.TerminateTool.Address
-	}) {
-		definitions = append(definitions, *planned.TerminateTool)
+	definitions, err := f.resolveToolDefinitions(toolIDs, terminateToolID)
+	if err != nil {
+		return nil, cty.NilType, err
 	}
 	result := make([]sdk.Tool, 0, len(definitions))
 	terminalType := cty.NilType
 	for _, definition := range definitions {
 		if definition.Kind == string(config.AddressKindExternal) {
 			tool, outputType, err := f.buildExternalTool(
-				ctx, blockAddress, sessionKind, workspace, definition, planned, terminal,
+				ctx, blockAddress, sessionKind, workspace, definition, terminateToolID, terminal,
 			)
 			if err != nil {
 				return nil, cty.NilType, err
 			}
-			if planned.TerminateTool != nil && definition.Address == planned.TerminateTool.Address {
+			if terminateToolID != nil && definition.ID == *terminateToolID {
 				terminalType = outputType
 			}
 			result = append(result, tool)
@@ -599,29 +611,32 @@ func (f *runtimeFactory) buildTools(
 		if err != nil {
 			return nil, cty.NilType, fmt.Errorf("schema %s: %w", definition.Address, err)
 		}
-		isTerminal := planned.TerminateTool != nil && definition.Address == planned.TerminateTool.Address
+		isTerminal := terminateToolID != nil && definition.ID == *terminateToolID
 		if isTerminal {
 			terminalType = analysis.OutputType
 		}
 		result = append(result, sdk.Tool{
-			Name: toolName(definition.Address), Description: definition.Description, Parameters: parameters,
+			Name: definition.ID, Description: definition.Description, Parameters: parameters,
 			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
 				arguments, marshalErr := json.Marshal(invocation.Arguments)
 				if marshalErr != nil {
 					return f.rejectedArguments(
-						blockAddress, sessionKind, definition.Address, nil, marshalErr, isTerminal, terminal,
+						blockAddress, sessionKind, definition.ID, definition.Address,
+						nil, marshalErr, isTerminal, terminal,
 					)
 				}
 				value, decodeErr := ctyjson.Unmarshal(arguments, input.Type())
 				if decodeErr != nil {
 					return f.rejectedArguments(
-						blockAddress, sessionKind, definition.Address, arguments, decodeErr, isTerminal, terminal,
+						blockAddress, sessionKind, definition.ID, definition.Address,
+						arguments, decodeErr, isTerminal, terminal,
 					)
 				}
 				value, validateErr := input.Apply(value)
 				if validateErr != nil {
 					return f.rejectedArguments(
-						blockAddress, sessionKind, definition.Address, arguments, validateErr, isTerminal, terminal,
+						blockAddress, sessionKind, definition.ID, definition.Address,
+						arguments, validateErr, isTerminal, terminal,
 					)
 				}
 				arguments, marshalErr = ctyjson.Marshal(value, input.Type())
@@ -638,7 +653,8 @@ func (f *runtimeFactory) buildTools(
 						stderr = invocationErr.Stderr()
 					}
 					if recordErr := f.recordToolFailure(
-						blockAddress, sessionKind, definition.Address, arguments, invokeErr, stdout, stderr,
+						blockAddress, sessionKind, definition.ID, definition.Address,
+						arguments, invokeErr, stdout, stderr,
 					); recordErr != nil {
 						return sdk.ToolResult{}, errors.Join(invokeErr, recordErr)
 					}
@@ -653,7 +669,8 @@ func (f *runtimeFactory) buildTools(
 				}
 				if recordErr := f.recorder.Record(debuglog.Event{
 					Kind: debuglog.EventTool, BlockAddress: blockAddress, Session: sessionKind,
-					ToolName: toolName(definition.Address), Arguments: arguments, Result: encoded, Stderr: response.Stderr,
+					ToolName: definition.ID, ToolAddress: definition.Address,
+					Arguments: arguments, Result: encoded, Stderr: response.Stderr,
 				}); recordErr != nil {
 					return sdk.ToolResult{}, recordErr
 				}
@@ -674,13 +691,32 @@ func (f *runtimeFactory) buildTools(
 	return result, terminalType, nil
 }
 
+func (f *runtimeFactory) resolveToolDefinitions(
+	toolIDs []string,
+	terminateToolID *string,
+) ([]plan.ToolSpec, error) {
+	ids := slices.Clone(toolIDs)
+	if terminateToolID != nil && !slices.Contains(ids, *terminateToolID) {
+		ids = append(ids, *terminateToolID)
+	}
+	definitions := make([]plan.ToolSpec, 0, len(ids))
+	for _, id := range ids {
+		definition, ok := f.tools[id]
+		if !ok {
+			return nil, fmt.Errorf("typed tool id %q was not planned", id)
+		}
+		definitions = append(definitions, definition)
+	}
+	return definitions, nil
+}
+
 func (f *runtimeFactory) buildExternalTool(
 	ctx context.Context,
 	blockAddress string,
 	sessionKind debuglog.SessionKind,
 	workspace string,
-	definition modulespec.PlannedTool,
-	planned modulespec.ResearchPlan,
+	definition plan.ToolSpec,
+	terminateToolID *string,
 	terminal *researchruntime.TerminalRecorder,
 ) (sdk.Tool, cty.Type, error) {
 	input, err := parseConstraint(definition.InputTypeExpression)
@@ -695,27 +731,30 @@ func (f *runtimeFactory) buildExternalTool(
 	if err != nil {
 		return sdk.Tool{}, cty.NilType, err
 	}
-	isTerminal := planned.TerminateTool != nil && definition.Address == planned.TerminateTool.Address
+	isTerminal := terminateToolID != nil && definition.ID == *terminateToolID
 	runner := externaltool.NewRunner()
 	tool := sdk.Tool{
-		Name: toolName(definition.Address), Description: definition.Description, Parameters: parameters,
+		Name: definition.ID, Description: definition.Description, Parameters: parameters,
 		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
 			arguments, marshalErr := json.Marshal(invocation.Arguments)
 			if marshalErr != nil {
 				return f.rejectedArguments(
-					blockAddress, sessionKind, definition.Address, nil, marshalErr, isTerminal, terminal,
+					blockAddress, sessionKind, definition.ID, definition.Address,
+					nil, marshalErr, isTerminal, terminal,
 				)
 			}
 			value, decodeErr := ctyjson.Unmarshal(arguments, input.Type())
 			if decodeErr != nil {
 				return f.rejectedArguments(
-					blockAddress, sessionKind, definition.Address, arguments, decodeErr, isTerminal, terminal,
+					blockAddress, sessionKind, definition.ID, definition.Address,
+					arguments, decodeErr, isTerminal, terminal,
 				)
 			}
 			value, validateErr := input.Apply(value)
 			if validateErr != nil {
 				return f.rejectedArguments(
-					blockAddress, sessionKind, definition.Address, arguments, validateErr, isTerminal, terminal,
+					blockAddress, sessionKind, definition.ID, definition.Address,
+					arguments, validateErr, isTerminal, terminal,
 				)
 			}
 			result, runErr := runner.Run(ctx, externaltool.Config{
@@ -731,7 +770,8 @@ func (f *runtimeFactory) buildExternalTool(
 					stderr = executionErr.Stderr()
 				}
 				if recordErr := f.recordToolFailure(
-					blockAddress, sessionKind, definition.Address, arguments, runErr, stdout, stderr,
+					blockAddress, sessionKind, definition.ID, definition.Address,
+					arguments, runErr, stdout, stderr,
 				); recordErr != nil {
 					return sdk.ToolResult{}, errors.Join(runErr, recordErr)
 				}
@@ -755,7 +795,8 @@ func (f *runtimeFactory) buildExternalTool(
 			}
 			if recordErr := f.recorder.Record(debuglog.Event{
 				Kind: debuglog.EventTool, BlockAddress: blockAddress, Session: sessionKind,
-				ToolName: toolName(definition.Address), Arguments: arguments, Result: encoded, Stderr: result.Stderr,
+				ToolName: definition.ID, ToolAddress: definition.Address,
+				Arguments: arguments, Result: encoded, Stderr: result.Stderr,
 			}); recordErr != nil {
 				return sdk.ToolResult{}, recordErr
 			}
@@ -778,6 +819,7 @@ func (f *runtimeFactory) buildExternalTool(
 func (f *runtimeFactory) recordToolFailure(
 	blockAddress string,
 	sessionKind debuglog.SessionKind,
+	toolID string,
 	toolAddress string,
 	arguments []byte,
 	cause error,
@@ -787,7 +829,7 @@ func (f *runtimeFactory) recordToolFailure(
 	failure, _ := json.Marshal(map[string]string{"error": cause.Error()})
 	return f.recorder.Record(debuglog.Event{
 		Kind: debuglog.EventTool, BlockAddress: blockAddress, Session: sessionKind,
-		ToolName: toolName(toolAddress), Arguments: arguments, Result: failure,
+		ToolName: toolID, ToolAddress: toolAddress, Arguments: arguments, Result: failure,
 		Stdout: stdout, Stderr: stderr,
 	})
 }
@@ -795,6 +837,7 @@ func (f *runtimeFactory) recordToolFailure(
 func (f *runtimeFactory) rejectedArguments(
 	blockAddress string,
 	sessionKind debuglog.SessionKind,
+	toolID string,
 	toolAddress string,
 	arguments []byte,
 	cause error,
@@ -809,7 +852,7 @@ func (f *runtimeFactory) rejectedArguments(
 	}
 	if err = f.recorder.Record(debuglog.Event{
 		Kind: debuglog.EventTool, BlockAddress: blockAddress, Session: sessionKind,
-		ToolName: toolName(toolAddress), Arguments: arguments, Result: encoded,
+		ToolName: toolID, ToolAddress: toolAddress, Arguments: arguments, Result: encoded,
 	}); err != nil {
 		return sdk.ToolResult{}, err
 	}
@@ -880,10 +923,6 @@ func (f *runtimeFactory) Close() error {
 	err := f.state.compiler.Close()
 	f.state.compiler = nil
 	return err
-}
-
-func toolName(address string) string {
-	return strings.ReplaceAll(address, ".", "_")
 }
 
 func (f *runtimeFactory) ResolveOutputs(planned *plan.Plan) (map[string]cty.Value, error) {

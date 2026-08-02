@@ -30,8 +30,8 @@ type ResearchBlock struct {
 	ReasoningEffort     *string         `hcl:"reasoning_effort,optional"`
 	SystemPrompt        string          `hcl:"system_prompt"`
 	Prompt              *string         `hcl:"prompt,optional"`
-	Tools               cty.Value       `hcl:"tools,optional"`
-	TerminateTool       cty.Value       `hcl:"terminate_tool,optional"`
+	ToolIDs             []string        `hcl:"tool_ids,optional"`
+	TerminateToolID     *string         `hcl:"terminate_tool_id,optional"`
 	AllowedTools        []string        `hcl:"allowed_tools,optional"`
 	DisallowedTools     []string        `hcl:"disallowed_tools,optional"`
 	SkillDirectories    []string        `hcl:"skill_directories,optional"`
@@ -66,6 +66,9 @@ func (*ResearchBlock) CanExecutePrePlan() bool { return false }
 func (b *ResearchBlock) EvalContext() *hcl.EvalContext {
 	context := b.BaseBlock.EvalContext()
 	context.Functions = maps.Clone(context.Functions)
+	if context.Functions == nil {
+		context.Functions = make(map[string]function.Function)
+	}
 	context.Functions["block_wd"] = function.New(&function.Spec{
 		Params: []function.Parameter{},
 		Type:   function.StaticReturnType(cty.String),
@@ -118,12 +121,12 @@ func (b *ResearchBlock) validateNativeStringFields() error {
 		return err
 	}
 	if err := validateStringAttributes(root, b.EvalContext(), "research", []string{
-		"model", "reasoning_effort", "system_prompt", "prompt", "permission", "timeout",
+		"model", "reasoning_effort", "system_prompt", "prompt", "terminate_tool_id", "permission", "timeout",
 	}); err != nil {
 		return err
 	}
 	if err := validateStringCollections(root, b.EvalContext(), "research", []string{
-		"allowed_tools", "disallowed_tools", "skill_directories", "skills", "disabled_skills",
+		"tool_ids", "allowed_tools", "disallowed_tools", "skill_directories", "skills", "disabled_skills",
 	}); err != nil {
 		return err
 	}
@@ -160,7 +163,7 @@ func validateQCStringFields(block *golden.HclBlock, context *hcl.EvalContext) er
 		return err
 	}
 	if err := validateStringCollections(block, context, "qc", []string{
-		"allowed_tools", "disallowed_tools", "skill_directories", "skills", "disabled_skills",
+		"tool_ids", "allowed_tools", "disallowed_tools", "skill_directories", "skills", "disabled_skills",
 	}); err != nil {
 		return err
 	}
@@ -269,7 +272,7 @@ func (b *ResearchBlock) Value() cty.Value {
 		"artifact": ArtifactsValue(b.planned.Artifacts, nil),
 		"qc":       qcBlockValues(b.QCBlocks),
 	}
-	if hasValue(b.planned.TerminateTool) {
+	if b.planned.TerminateToolID != nil {
 		values["result"] = cty.UnknownVal(cty.String)
 	}
 	return cty.ObjectVal(values)
@@ -318,7 +321,7 @@ func qcBlockValues(blocks []QCBlock) cty.Value {
 		"model_provider":    optionalObjectValue(block.ModelProvider),
 		"model":             optionalStringValue(block.Model),
 		"reasoning_effort":  optionalStringValue(block.ReasoningEffort),
-		"tools":             optionalToolsValue(block.Tools),
+		"tool_ids":          stringListValue(block.ToolIDs),
 		"allowed_tools":     stringListValue(block.AllowedTools),
 		"disallowed_tools":  stringListValue(block.DisallowedTools),
 		"skill_directories": stringListValue(block.SkillDirectories),
@@ -345,7 +348,7 @@ func qcBlockType() cty.Type {
 		"model_provider":    cty.EmptyObject,
 		"model":             cty.String,
 		"reasoning_effort":  cty.String,
-		"tools":             cty.EmptyTuple,
+		"tool_ids":          cty.List(cty.String),
 		"allowed_tools":     cty.List(cty.String),
 		"disallowed_tools":  cty.List(cty.String),
 		"skill_directories": cty.List(cty.String),
@@ -360,13 +363,6 @@ func qcBlockType() cty.Type {
 func optionalObjectValue(value cty.Value) cty.Value {
 	if value == cty.NilVal || value.Type().Equals(cty.NilType) {
 		return cty.NullVal(cty.EmptyObject)
-	}
-	return value
-}
-
-func optionalToolsValue(value cty.Value) cty.Value {
-	if value == cty.NilVal || value.Type().Equals(cty.NilType) {
-		return cty.EmptyTupleVal
 	}
 	return value
 }
@@ -416,7 +412,7 @@ type QCBlock struct {
 	ModelProvider    cty.Value    `hcl:"model_provider,optional"`
 	Model            *string      `hcl:"model,optional"`
 	ReasoningEffort  *string      `hcl:"reasoning_effort,optional"`
-	Tools            cty.Value    `hcl:"tools,optional"`
+	ToolIDs          []string     `hcl:"tool_ids,optional"`
 	AllowedTools     []string     `hcl:"allowed_tools,optional"`
 	DisallowedTools  []string     `hcl:"disallowed_tools,optional"`
 	SkillDirectories []string     `hcl:"skill_directories,optional"`
@@ -444,11 +440,11 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 		ReasoningEffort:     clonePointer(b.ReasoningEffort),
 		SystemPrompt:        b.SystemPrompt,
 		Prompt:              clonePointer(b.Prompt),
-		TerminateTool:       b.TerminateTool,
+		TerminateToolID:     cloneStringPointer(b.TerminateToolID),
 		MaxProtocolAttempts: DefaultMaxProtocolAttempts,
 		Timeout:             timeout,
 		Policy: SessionPolicy{
-			Tools:            defaultTools(b.Tools),
+			ToolIDs:          slices.Clone(b.ToolIDs),
 			AllowedTools:     slices.Clone(b.AllowedTools),
 			DisallowedTools:  slices.Clone(b.DisallowedTools),
 			SkillDirectories: slices.Clone(b.SkillDirectories),
@@ -526,7 +522,7 @@ func (b QCBlock) toConfig() (*QCConfig, error) {
 		ModelProvider:    b.ModelProvider,
 		Model:            clonePointer(b.Model),
 		ReasoningEffort:  clonePointer(b.ReasoningEffort),
-		Tools:            defaultTools(b.Tools),
+		ToolIDs:          slices.Clone(b.ToolIDs),
 		AllowedTools:     slices.Clone(b.AllowedTools),
 		DisallowedTools:  slices.Clone(b.DisallowedTools),
 		SkillDirectories: slices.Clone(b.SkillDirectories),
@@ -615,13 +611,6 @@ func clonePointer[T any](value *T) *T {
 	return &result
 }
 
-func defaultTools(value cty.Value) cty.Value {
-	if value.Type().Equals(cty.NilType) || value.IsNull() {
-		return cty.EmptyTupleVal
-	}
-	return value
-}
-
 func ArtifactsValue(artifacts []Artifact, resolvedPaths map[string]string) cty.Value {
 	if len(artifacts) == 0 {
 		return cty.ListValEmpty(cty.Object(map[string]cty.Type{
@@ -653,12 +642,14 @@ func cloneConfig(config Config) Config {
 	result := config
 	result.ReasoningEffort = cloneStringPointer(config.ReasoningEffort)
 	result.Prompt = cloneStringPointer(config.Prompt)
+	result.TerminateToolID = cloneStringPointer(config.TerminateToolID)
 	if config.Timeout != nil {
 		timeout := *config.Timeout
 		result.Timeout = &timeout
 	}
 	result.Retry = cloneRetryOverride(config.Retry)
 	result.Policy.AllowedTools = slices.Clone(config.Policy.AllowedTools)
+	result.Policy.ToolIDs = slices.Clone(config.Policy.ToolIDs)
 	result.Policy.DisallowedTools = slices.Clone(config.Policy.DisallowedTools)
 	result.Policy.SkillDirectories = slices.Clone(config.Policy.SkillDirectories)
 	result.Policy.Skills = slices.Clone(config.Policy.Skills)
@@ -673,6 +664,7 @@ func cloneConfig(config Config) Config {
 			qc.Permission = &permission
 		}
 		qc.Retry = cloneRetryOverride(config.QC.Retry)
+		qc.ToolIDs = slices.Clone(config.QC.ToolIDs)
 		qc.AllowedTools = slices.Clone(config.QC.AllowedTools)
 		qc.DisallowedTools = slices.Clone(config.QC.DisallowedTools)
 		qc.SkillDirectories = slices.Clone(config.QC.SkillDirectories)

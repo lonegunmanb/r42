@@ -155,10 +155,10 @@ research "market" {
   prompt          = "Research ${var.topic}."
   timeout         = "2h"
 
-  tools = [
-    external_tool.search_catalog,
+  tool_ids = [
+    external_tool.search_catalog.id,
   ]
-  terminate_tool = go_tool.finish
+  terminate_tool_id = go_tool.finish.id
 
   allowed_tools = [
     "web_search",
@@ -274,8 +274,8 @@ Research session fields include:
 - `reasoning_effort`: an arbitrary non-empty string passed through unchanged.
 - `system_prompt`: required.
 - `prompt`: optional.
-- `tools`: typed tool references.
-- `terminate_tool`: optional typed tool reference.
+- `tool_ids`: typed tool IDs, normally selected through a tool block's read-only `id` attribute.
+- `terminate_tool_id`: optional typed tool ID.
 - `allowed_tools` and `disallowed_tools`: SDK tool-name strings.
 - `skill_directories`, `skills`, and `disabled_skills`.
 - `permission`, defaulting to `approve_all`.
@@ -299,32 +299,50 @@ disabled by default because DAG execution is unattended.
 Terminate and QC verdict tools are protocol tools: r42 always registers them and
 configuration cannot exclude them.
 
-Typed tools are referenced as values in `tools` and `terminate_tool`. String-only
-SDK filter fields use the built-in function:
+Each typed tool receives a deterministic, SDK-safe ID from its canonical block
+address. Research and QC snapshots store only those IDs; the Plan stores the
+complete ID-to-definition registry used during Apply. String-only SDK filter
+fields can use the `id` attribute directly or the compatibility function:
 
 ```hcl
-tool_name(go_tool.finish)              # "go_tool_finish"
-tool_name(external_tool.search_catalog) # "external_tool_search_catalog"
+go_tool.finish.id
+tool_name(go_tool.finish) # same generated tool_go_tool_finish_<uuid> value
 ```
+
+Tools declared in a module remain private unless the module exposes the tool ID
+as a direct string output. A parent can pass that output to `tool_ids`; Plan then
+imports only the corresponding exported definition into the parent registry.
 
 `one(collection)` follows Terraform's zero-or-one convention: an empty list,
 set, or tuple returns null, one element returns that element, and more than one
 element is an error.
 
-The SDK name is the HCL address with `.` replaced by `_`. r42 deliberately adds
-no other label restriction and performs no post-conversion collision check.
-Provider rejection and collisions are accepted first-version risks.
+The generated ID is also the SDK registration name. It has the form
+`tool_<go_tool|external_tool>_<name>_<uuid>`, is at most 64 characters, and is
+derived from the canonical address so module instances cannot collide.
 
 ### Working directory
 
 `cwd()` returns the r42 process working directory at expression evaluation
 time, equivalent to `os.Getwd()`. It does not return the directory containing a
-`.r42` file. The result always uses `/` path separators, including on Windows,
-so it can be interpolated into paths consistently:
+`*.r42.hcl` file. The result always uses `/` path separators, including on
+Windows, so it can be interpolated into paths consistently:
 
 ```hcl
 path = "${cwd()}/research-output/report.md"
 ```
+
+`block_wd()` takes no arguments and returns the absolute workspace assigned to
+the current block. Plan evaluates the same deterministic value without creating
+the directory; Apply creates the workspace before the block runs. Each expanded
+block address receives a different path, and the result uses `/` separators on
+every operating system.
+
+`path.module` is the absolute directory containing the current block's
+initialized `*.r42.hcl` source. It points to the root configuration directory
+for root blocks and the canonical `.r42/modules/...` directory for child-module
+blocks. Use `path.module` for source-owned files and `block_wd()` for files
+created by one task.
 
 ### Skills
 
@@ -427,10 +445,10 @@ the CLI diagnostic and does not persist full stderr. Debug mode persists it.
 
 ## 8. Research Completion Protocol
 
-Without `terminate_tool`, a normal assistant completion ends research and the
+Without `terminate_tool_id`, a normal assistant completion ends research and the
 block exposes no direct `result` value. Artifacts remain available.
 
-With `terminate_tool`, the block completes only after an accepted call. The
+With `terminate_tool_id`, the block completes only after an accepted call. The
 terminal tool's output type must be string-compatible. Its optional output
 becomes the block's optional string `result`; complex results belong in files in
 the block workspace.
@@ -520,14 +538,29 @@ output "sector_report" {
 }
 ```
 
-Plan resolves the source to a normalized absolute directory, parses all `.r42`
-files there, evaluates its variables, and saves the complete nested Plan. A
-missing module directory is a Plan error. Apply creates a new nested r42 executor
-over the saved Plan and does not parse source again.
+`module.source` must be a literal string because it is resolved before Plan.
+`r42 init [DIRECTORY]` recursively discovers module blocks in `*.r42.hcl`
+files. A local source (`./`, `../`, or an absolute filesystem path) is copied;
+other source strings are passed to go-getter v2.2.3. Installed modules live
+under `<cwd>/.r42/modules` according to their canonical module address:
 
-Cycles are detected against the normalized absolute-directory recursion stack;
-`A -> B -> A` fails Plan. Reusing the same module directory from independent
-branches is allowed.
+```text
+module.a                      -> <cwd>/.r42/modules/a
+module.a.module.b.module.c    -> <cwd>/.r42/modules/a/b/c
+```
+
+Existing installations are reused. `r42 init --upgrade [DIRECTORY]` refreshes
+them through a staging directory so a failed copy or download leaves the
+previous installation intact. Source cycles fail Init.
+
+Plan requires every declared module to be initialized and parses only its
+canonical installed directory; it does not read the original source directory.
+Apply creates a new nested r42 executor over the saved Plan and never reparses
+module source.
+
+Every block can read `path.module`. It is an absolute `/`-normalized path to the
+directory containing that block: the root configuration directory for root
+blocks, or the corresponding `.r42/modules/a/b/c` directory for nested blocks.
 
 `variable` uses Terraform's basic semantics: `type` is required, `default` is
 optional, and a variable without a default must be supplied by its caller during
@@ -588,7 +621,7 @@ session creation, messages, model calls, tools, or QC.
 
 Every Apply creates a unique run. Block workspaces and artifacts persist under
 the r42 CLI process working directory, independently of the directory containing
-the applied `.r42` files:
+the applied `*.r42.hcl` files:
 
 ```text
 .r42/runs/<run-id>/...
@@ -660,10 +693,14 @@ and planned configuration values themselves remain immutable.
 Required workflows:
 
 ```text
+r42 init [<directory>] [--upgrade]
 r42 plan [-d|--directory <directory>] [--out <file.r42plan>]
 r42 apply <file.r42plan>
 r42 apply <directory>
 ```
+
+`init` defaults its directory to `.`. It reuses installed modules unless
+`--upgrade` is present.
 
 `plan` defaults `--directory` to `.`. It always prints the Plan to stdout and
 only writes a saved Plan file when `--out` is present.
@@ -690,10 +727,10 @@ Plan validates all information that is structurally available:
 - HCL/cty types and references.
 - Required fields and mutually exclusive authentication fields.
 - Provider/wire/transport combinations.
-- Module existence, variable assignment, output types, and directory cycles.
+- Initialized module existence, variable assignment, and output types.
 - Inline Go syntax, imports, declarations, signature, and cty compatibility.
 - ToolResponse shape and static invariants.
-- Typed-tool references and `tool_name()` argument kind.
+- Typed-tool IDs, registry membership, and `tool_name()` argument kind.
 - Skill directory existence.
 - Duration syntax and non-negative retry/attempt/concurrency values.
 
@@ -701,8 +738,7 @@ Plan deliberately does not validate:
 
 - External program existence or executability.
 - Whether a model supports a reasoning-effort value.
-- Tool labels beyond HCL parsing, generated SDK name collisions, or provider name
-  character restrictions.
+- Provider-specific tool-name restrictions beyond r42's generated 64-character IDs.
 - External content hashes or future file contents.
 
 Apply validates runtime values, child-process protocol, artifacts, SDK behavior,
@@ -712,9 +748,6 @@ never converted into model issues.
 
 ## 17. Accepted Risks and Deferred Work
 
-- An HCL tool label may produce an SDK-incompatible name because only `.` is
-  converted to `_` and no extra validation is performed.
-- Two references may map to the same SDK name; r42 does not detect the collision.
 - Tools inherit all environment variables and can escape their workspaces.
 - Plan and debug files can contain secrets and are not encrypted.
 - Changed external programs, skills, or files can alter Apply behavior after Plan.

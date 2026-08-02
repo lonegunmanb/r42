@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,6 +27,10 @@ const (
 type Runtime interface {
 	Config(string, executor.ResearchConfigOptions) (*executor.ResearchConfig, error)
 	ConfigFromPlan(*plan.Plan, executor.ResearchConfigOptions) (*executor.ResearchConfig, error)
+}
+
+type moduleInitializer interface {
+	InitModules(context.Context, string, string, bool) error
 }
 
 type usageError struct {
@@ -57,8 +62,39 @@ func NewCommand(runtime Runtime) *cobra.Command {
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return &usageError{err: err}
 	})
-	root.AddCommand(newPlanCommand(runtime), newApplyCommand(runtime))
+	root.AddCommand(newInitCommand(runtime), newPlanCommand(runtime), newApplyCommand(runtime))
 	return root
+}
+
+func newInitCommand(runtime Runtime) *cobra.Command {
+	var upgrade bool
+	command := &cobra.Command{
+		Use:   "init [DIRECTORY]",
+		Short: "Install modules required by the configuration",
+		Args:  usageArgs(cobra.MaximumNArgs(1)),
+		RunE: func(command *cobra.Command, args []string) error {
+			initializer, ok := runtime.(moduleInitializer)
+			if !ok {
+				return fmt.Errorf("module initializer is required")
+			}
+			directory := "."
+			if len(args) == 1 {
+				directory = args[0]
+			}
+			workingDirectory, err := os.Getwd()
+			if err != nil {
+				// note: untested because os.Getwd failure requires invalidating process-wide filesystem state.
+				return fmt.Errorf("get current working directory: %w", err)
+			}
+			modulesDirectory := filepath.Join(workingDirectory, ".r42", "modules")
+			if err = initializer.InitModules(command.Context(), directory, modulesDirectory, upgrade); err != nil {
+				return fmt.Errorf("initialize modules: %w", err)
+			}
+			return nil
+		},
+	}
+	command.Flags().BoolVar(&upgrade, "upgrade", false, "refresh installed modules")
+	return command
 }
 
 func newPlanCommand(runtime Runtime) *cobra.Command {
@@ -81,8 +117,13 @@ func newPlanCommand(runtime Runtime) *cobra.Command {
 				writeWarning(command.ErrOrStderr(), "debug output contains sensitive configuration, prompts, transcripts, and tool data")
 				ctx = withDebugRun(ctx, debugState)
 			}
+			modulesDirectory, err := workingModulesDirectory()
+			if err != nil {
+				return err
+			}
 			options := executor.ResearchConfigOptions{
 				Context: ctx, Variables: goldenVariables(variables, variableFiles), RunDirectory: ".",
+				ModuleDirectory: modulesDirectory,
 			}
 			config, err := planConfig(
 				runtime,
@@ -162,9 +203,14 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 				ctx = withDebugRun(ctx, debugState)
 				writeWarning(command.ErrOrStderr(), "debug output contains sensitive configuration, prompts, transcripts, and tool data")
 			}
+			modulesDirectory, err := workingModulesDirectory()
+			if err != nil {
+				return errors.Join(err, closeCommandDebug(command, debugState))
+			}
 			options := executor.ResearchConfigOptions{
 				Context: ctx, Variables: goldenVariables(variables, variableFiles),
-				RunDirectory: ".", Parallelism: parallelism, Debug: debug,
+				RunDirectory: ".", ModuleDirectory: modulesDirectory,
+				Parallelism: parallelism, Debug: debug,
 			}
 			config, err := loadOrPlan(
 				runtime, args[0], options,
@@ -296,6 +342,15 @@ func planConfig(
 
 func writeWarning(writer io.Writer, message string) {
 	_, _ = fmt.Fprintf(writer, "warning: %s\n", message)
+}
+
+func workingModulesDirectory() (string, error) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		// note: untested because os.Getwd failure requires invalidating process-wide filesystem state.
+		return "", fmt.Errorf("get current working directory: %w", err)
+	}
+	return filepath.Join(workingDirectory, ".r42", "modules"), nil
 }
 
 func writePlan(ctx context.Context, writer io.Writer, planned *plan.Plan, path string) error {

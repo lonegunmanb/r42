@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	r42config "github.com/lonegunmanb/r42/internal/config"
 	"github.com/lonegunmanb/r42/internal/provider"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -22,7 +21,7 @@ type Permission string
 const PermissionApproveAll Permission = "approve_all"
 
 type SessionPolicy struct {
-	Tools            cty.Value
+	ToolIDs          []string
 	AllowedTools     []string
 	DisallowedTools  []string
 	SkillDirectories []string
@@ -37,7 +36,7 @@ type Config struct {
 	ReasoningEffort     *string
 	SystemPrompt        string
 	Prompt              *string
-	TerminateTool       cty.Value
+	TerminateToolID     *string
 	MaxProtocolAttempts int
 	Timeout             *time.Duration
 	Retry               provider.RetryOverride
@@ -56,10 +55,10 @@ func (c Config) Validate() error {
 	if err := validateOptionalProviderReference(c.ModelProvider, "research model_provider"); err != nil {
 		return err
 	}
-	if err := validateToolReferences(c.Policy.Tools, "research tools"); err != nil {
+	if err := validateToolIDs(c.Policy.ToolIDs, "research tool_ids"); err != nil {
 		return err
 	}
-	if err := validateOptionalToolReference(c.TerminateTool, "research terminate_tool"); err != nil {
+	if err := validateOptionalToolID(c.TerminateToolID, "research terminate_tool_id"); err != nil {
 		return err
 	}
 	if c.ReasoningEffort != nil && strings.TrimSpace(*c.ReasoningEffort) == "" {
@@ -101,7 +100,7 @@ type QCConfig struct {
 	Model            *string
 	ReasoningEffort  *string
 	Retry            provider.RetryOverride
-	Tools            cty.Value
+	ToolIDs          []string
 	AllowedTools     []string
 	DisallowedTools  []string
 	SkillDirectories []string
@@ -118,7 +117,7 @@ func (c QCConfig) Validate() error {
 	if err := validateOptionalProviderReference(c.ModelProvider, "qc model_provider"); err != nil {
 		return err
 	}
-	if err := validateToolReferences(c.Tools, "qc tools"); err != nil {
+	if err := validateToolIDs(c.ToolIDs, "qc tool_ids"); err != nil {
 		return err
 	}
 	if c.Model != nil && strings.TrimSpace(*c.Model) == "" {
@@ -169,7 +168,7 @@ type EffectiveQC struct {
 	Model            string
 	ReasoningEffort  *string
 	Retry            provider.RetryPolicy
-	Tools            cty.Value
+	ToolIDs          []string
 	AllowedTools     []string
 	DisallowedTools  []string
 	SkillDirectories []string
@@ -216,17 +215,13 @@ func (c Config) EffectiveQC(providerRetry provider.RetryPolicy) (EffectiveQC, er
 	if disallowedTools == nil {
 		disallowedTools = DefaultQCDisallowedTools()
 	}
-	tools := c.QC.Tools
-	if tools.Type().Equals(cty.NilType) {
-		tools = cty.EmptyTupleVal
-	}
 	return EffectiveQC{
 		Criteria:         c.QC.Criteria,
 		ModelProvider:    modelProvider,
 		Model:            model,
 		ReasoningEffort:  reasoningEffort,
 		Retry:            qcRetry,
-		Tools:            tools,
+		ToolIDs:          slices.Clone(c.QC.ToolIDs),
 		AllowedTools:     slices.Clone(c.QC.AllowedTools),
 		DisallowedTools:  disallowedTools,
 		SkillDirectories: slices.Clone(c.QC.SkillDirectories),
@@ -270,43 +265,23 @@ func validateOptionalProviderReference(value cty.Value, name string) error {
 	return nil
 }
 
-func validateOptionalToolReference(value cty.Value, name string) error {
-	if !hasValue(value) {
+func validateOptionalToolID(value *string, name string) error {
+	if value == nil {
 		return nil
 	}
-	if !isToolReference(value) {
-		return fmt.Errorf("%s must be a typed tool reference", name)
+	if strings.TrimSpace(*value) == "" {
+		return fmt.Errorf("%s must not be empty", name)
 	}
 	return nil
 }
 
-func validateToolReferences(values cty.Value, name string) error {
-	if values.Type().Equals(cty.NilType) {
-		return nil
-	}
-	unmarked, _ := values.UnmarkDeep()
-	if unmarked.IsNull() || !unmarked.IsKnown() || !unmarked.Type().IsTupleType() {
-		return fmt.Errorf("%s must be a tuple of typed tool references", name)
-	}
-	for iterator := unmarked.ElementIterator(); iterator.Next(); {
-		_, value := iterator.Element()
-		if !isToolReference(value) {
-			return fmt.Errorf("%s must contain typed tool references", name)
+func validateToolIDs(values []string, name string) error {
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s must not contain empty values", name)
 		}
 	}
 	return nil
-}
-
-func isToolReference(value cty.Value) bool {
-	address, kind, ok := referenceIdentity(value)
-	if !ok {
-		return false
-	}
-	_, ok = r42config.AddressFromValue(r42config.Address{
-		Kind:  r42config.AddressKind(kind),
-		Value: address,
-	}.CtyValue())
-	return ok
 }
 
 func referenceIdentity(value cty.Value) (string, string, bool) {
