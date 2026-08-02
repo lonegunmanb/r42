@@ -13,6 +13,7 @@ import (
 
 	"github.com/Azure/golden"
 	"github.com/lonegunmanb/r42/internal/cli"
+	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/lonegunmanb/r42/internal/plan"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
@@ -322,7 +323,7 @@ func TestCommandPlanDebugRecordsParseFailure(t *testing.T) {
 	workingDirectory := t.TempDir()
 	directory := t.TempDir()
 	t.Chdir(workingDirectory)
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "broken.r42.hcl"), []byte(`research "broken" {`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "broken.r42.hcl"), []byte(`research "static" "broken" {`), 0o600))
 
 	_, _, err := execute(t, cli.NewRuntime(), "plan", "--directory", directory, "--debug")
 
@@ -339,7 +340,7 @@ func TestCommandApplyDebugRecordsDetailedPlanAndApplyLifecycle(t *testing.T) {
 	directory := t.TempDir()
 	t.Chdir(workingDirectory)
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
-research "source" {
+research "static" "source" {
   model         = "test-model"
   system_prompt = "Collect evidence."
 }
@@ -375,7 +376,7 @@ output "answer" { value = "42" }
 	} {
 		assert.Contains(t, events, `"action":"`+action+`"`)
 	}
-	assert.Contains(t, events, `"block_address":"research.source"`)
+	assert.Contains(t, events, `"block_address":"research.static.source"`)
 	assert.NoDirExists(t, filepath.Join(directory, ".r42"))
 }
 
@@ -495,7 +496,59 @@ func TestCommandApplyPrintsPlanBeforeExecution(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, wantPlan+wantOutputs, stdout.String())
-	assert.Empty(t, stderr.String())
+	assert.Contains(t, stderr.String(), "Research tasks: 0")
+}
+
+func TestCommandApplyREPLShowsDAGAndLiveProgressOnStderr(t *testing.T) {
+	t.Parallel()
+
+	runDirectory := filepath.Join(t.TempDir(), "run-42")
+	planned, err := plan.NewForRun(t.TempDir(), runDirectory, []plan.NodeSpec{
+		{Address: "research.static.collect", Kind: "research"},
+		{
+			Address: "research.static.summary", Kind: "research",
+			Dependencies: []string{"research.static.collect"},
+		},
+	}, nil, nil, nil)
+	require.NoError(t, err)
+	runtime := &fakeRuntime{planned: planned}
+	runtime.applyHook = func() {
+		ctx := runtime.configOptions.Context
+		require.NoError(t, debuglog.Lifecycle(ctx, "block.apply", debuglog.StatusStarted, debuglog.Event{
+			BlockAddress: "research.static.collect", BlockType: "research",
+		}))
+		require.NoError(t, debuglog.Record(ctx, debuglog.Event{
+			Kind: debuglog.EventMessage, Action: "assistant.reasoning_delta",
+			BlockAddress: "research.static.collect", Session: debuglog.SessionResearch,
+			Content: "checking evidence",
+		}))
+		require.NoError(t, debuglog.Lifecycle(ctx, "block.apply", debuglog.StatusCompleted, debuglog.Event{
+			BlockAddress: "research.static.collect", BlockType: "research",
+		}))
+	}
+
+	stdout, stderr, err := execute(t, runtime, "apply", t.TempDir(), "--ui=repl")
+
+	require.NoError(t, err)
+	assert.Contains(t, stdout, `"nodes"`)
+	assert.NotContains(t, stdout, "START research")
+	assert.Contains(t, stderr, "Run: "+runDirectory)
+	assert.Contains(t, stderr, "Research tasks: 2")
+	assert.Contains(t, stderr, "research.static.collect -> research.static.summary")
+	assert.Contains(t, stderr, "START research.static.collect")
+	assert.Contains(t, stderr, "THINKING checking evidence")
+	assert.Contains(t, stderr, "DONE research.static.collect")
+}
+
+func TestCommandApplyHelpDescribesAutomaticUISelection(t *testing.T) {
+	t.Parallel()
+
+	stdout, _, err := execute(t, nil, "apply", "--help")
+
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "--ui string")
+	assert.Contains(t, stdout, "auto, tui, or repl")
+	assert.Contains(t, stdout, `(default "auto")`)
 }
 
 func TestCommandApplyPrintsPlanWhenExecutionFails(t *testing.T) {

@@ -1,9 +1,11 @@
 # Golden Capability Spike
 
-The module requirement names Azure/golden
-`v0.0.0-20260603014844-1d1c394b55ea`, and `go.mod` replaces it with the r42
-fork at `v0.0.0-20260801112721-60fc2aeee0c3`. Executable evidence lives in
-`internal/goldenprobe` and deliberately remains test-only.
+`go.mod` declares Azure/golden
+`v0.0.0-20260603014844-1d1c394b55ea` and replaces it with the cumulative r42
+fork `github.com/lonegunmanb/golden`
+`v0.0.0-20260802095203-0924ab02ace4`. Executable capability evidence lives in
+`internal/goldenprobe`; r42 integration behavior is covered in
+`internal/executor`, `internal/research/spec`, and `internal/module/spec` tests.
 
 ## Block And Type Registration
 
@@ -37,10 +39,11 @@ the expression and registered the referenced block type.
 ## Plan And Apply
 
 `Config.RunPlan` decodes and validates blocks, invokes
-`PlanBlock.ExecuteDuringPlan`, and mutates the live registered block instances.
-The executable probe verifies that Golden's exported `Plan` interface contains
-only `String() string` and `Apply() error` and that `RunPlan` does not call a
-block's `Apply` method.
+`PlanBlock.ExecuteDuringPlan`, and populates the live registered block
+instances. It does not call `ApplyBlock.Apply`. r42 research and module blocks
+use `ExecuteDuringPlan` only to validate and snapshot their planned
+configuration; no Copilot session, typed tool process, artifact mutation, or
+other Apply work starts in this phase.
 
 A separate exported-surface and pinned-source audit found no serializable Plan
 model or nested executor API. The audit covered `plan.go`, `base_config.go`,
@@ -48,23 +51,28 @@ model or nested executor API. The audit covered `plan.go`, `base_config.go`,
 This is a source-audit conclusion, not a negative behavior inferred from guessed
 method names.
 
-Golden also has no top-level Apply executor. `RunPlan` only invokes
-`PlanBlock.ExecuteDuringPlan`; it does not call `ApplyBlock.Apply`. r42 therefore
-reconstructs each saved node as an internal Golden `PlanBlock`. Its
-`ExecuteDuringPlan` creates and invokes the existing r42 `ApplyBlock`, allowing
-Golden `RunPlan` to remain the sole DAG traversal entry point.
+For a source directory, r42 retains the `ResearchConfig` used by `RunPlan` and
+serializes its own immutable Plan snapshot. Applying a saved Plan reconstructs
+its nodes as native r42 `research` and `module` blocks, runs Golden Plan once to
+decode and validate that reconstructed graph, and then calls
+`ResearchPlan.Apply`. Apply collects the reconstructed `ApplyBlock` instances
+from Golden, then r42's saved-plan scheduler invokes each ready block's
+`Apply()` method. The block delegates its canonical address to the r42 execution
+factory, which performs the actual research or nested-module work.
 
 Consequently r42 must own:
 
 - immutable Plan data and serialization;
 - reconstruction of the Apply graph from saved Plan data;
-- the saved-node `PlanBlock` adapter, cancellation, and cleanup;
+- the saved-node factory, cancellation, and cleanup;
 - creation of a nested executor over an already saved child Plan.
 
-The pinned `RunPlan` traversal is serial. Parallel execution of independent
-ready vertices belongs upstream in Golden; r42 retains its global and nested
-research permit scopes so those limits apply when the upstream traversal is
-parallelized.
+The fork's `BaseConfig` accepts a parallelism setting and runs independent ready
+vertices through `runDagOnParallel` during Plan. Its generic
+`Traverse[ApplyBlock]` remains serial. r42 therefore schedules saved-plan Apply
+from its immutable dependency lists, calls each native block's `Apply()` method,
+and uses global plus ancestor-module permit scopes to count only active research
+blocks. Module orchestration nodes do not consume research permits.
 
 The audited Golden version has no API for constructing a nested executor from a
 child Plan. Module planning and execution can still reuse Golden configurations
@@ -84,6 +92,10 @@ The probe verifies every boundary above, including HCL versus JSON default
 files, lexical ordering across HCL and JSON auto files, and declaration ordering
 when direct CLI values and `golden.NewCliFlagAssignedVariableFile` are mixed.
 Root CLI plumbing should pass Golden's `CliFlagAssignedVariables` directly.
+
+The fork also supports Terraform-style `optional(T, default)` modifiers inside
+object type constraints. Type comparison uses cty's semantic equality rather
+than Go `==`, because object types contain maps and are not Go-comparable.
 
 Golden has no exported production source-directory loader. r42 still needs to
 load and parse all `*.r42.hcl` files, pair `hclsyntax` and `hclwrite` blocks, and
@@ -125,32 +137,25 @@ and records the implicit dependency. A small object containing the block address
 kind, and public block attributes preserves typed reference semantics. Returning
 an address string instead would erase the referenced block's object shape.
 
-## Golden Gaps Reserved For An Upstream Or Fork Fix
+## Fork Compatibility Fixes
 
-r42 deliberately does not compensate for the following general Golden issues:
+r42 relies on cumulative fixes in the pinned fork rather than compensating in
+its own DSL layer. In particular, the fork:
 
-- block wrapping assumes a second label exists, so a malformed named block can
-  panic instead of returning a diagnostic
-  ([Azure/golden#83](https://github.com/Azure/golden/issues/83));
-- `for_each` expansion runs before `PrePlan`, may iterate unknown or null values,
-  and accepts any iterable even though its error describes only sets and maps
-  ([Azure/golden#84](https://github.com/Azure/golden/issues/84),
-  [Azure/golden#85](https://github.com/Azure/golden/issues/85),
-  [Azure/golden#87](https://github.com/Azure/golden/issues/87));
-- `SingleValues` overwrites repeated names and cannot represent keyed or empty
-  `for_each` namespaces
-  ([Azure/golden#86](https://github.com/Azure/golden/issues/86));
-- decoding a plan-time unknown cty value into a native Go primitive field fails
-  with `value must be known`; this prevents an apply-time value such as an
-  artifact path from being interpolated directly into a native `string` field;
-- `InitConfig` and `RunPrePlan` expose only aggregate decode failure, with no
-  per-block decode callback or middleware. r42 can log the failed Golden config
-  initialization and its diagnostic, but cannot emit an accurate terminal
-  lifecycle event for the individual failing block without changing Golden or
-  replaying decode with observable side effects.
+- copies the underlying `hclsyntax.Block` while expanding `for_each`, so
+  parallel instances do not mutate one shared nested-block body;
+- compares cty types with semantic equality, avoiding a panic for object-typed
+  variables;
+- populates expanded `SingleValues` only after the replacement vertices are in
+  the DAG, preserving keyed `for_each` namespaces for downstream traversals;
+- accepts the second default argument in `optional(T, default)` object
+  attributes; and
+- traverses independent ready vertices in parallel when Config parallelism is
+  set.
 
-These behaviors belong in Golden because they affect every DSL built on its
-block wrapping, expansion, and value aggregation. P1-T06 therefore contains no
-r42-specific pre-expansion validator or keyed `SingleValues` replacement. A
-future Golden fork can fix them at their owning abstraction before r42 enables
-module `for_each` as a supported contract.
+Two boundaries remain owned by r42. Golden still exposes aggregate
+initialization/decode errors rather than per-block decode middleware, so r42 can
+record the failed config initialization but cannot always identify one block
+lifecycle for malformed HCL. Golden also cannot decode an unknown Plan-time cty
+value into a native Go primitive; r42 keeps apply-time values in cty or saved
+Plan structures until they become known.

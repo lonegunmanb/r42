@@ -16,7 +16,7 @@ go_tool "finish" {
   GO
 }
 
-research "source" {
+research "static" "source" {
   model          = "test-model"
   system_prompt  = "Write the required report and evidence."
   terminate_tool_id = go_tool.finish.id
@@ -37,13 +37,13 @@ research "source" {
 }
 
 output "summary" {
-  value = research.source.result
+  value = research.static.source.result
 }
 
 output "report_path" {
-  value = one([for item in research.source.artifact : item if item.name == "report"]).path
+  value = one([for item in research.static.source.artifact : item if item.name == "report"]).path
 }
 
 output "evidence_path" {
-  value = one([for item in research.source.artifact : item if item.name == "evidence"]).path
+  value = one([for item in research.static.source.artifact : item if item.name == "evidence"]).path
 }

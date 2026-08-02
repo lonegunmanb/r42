@@ -9,7 +9,7 @@ module "pplx_tools" {
   source = "./modules/pplx_tools"
 }
 
-research "external_tool_snapshot" {
+research "static" "external_tool_snapshot" {
   model_provider   = model_provider.primary
   model            = "deepseek-v4-flash"
   reasoning_effort = "low"
@@ -39,5 +39,5 @@ research "external_tool_snapshot" {
 
 output "snapshot_path" {
   description = "Absolute path to the Markdown snapshot written by the external fetch process."
-  value       = one(research.external_tool_snapshot.artifact).path
+  value       = one(research.static.external_tool_snapshot.artifact).path
 }

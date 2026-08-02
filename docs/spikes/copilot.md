@@ -15,6 +15,7 @@ in, or contact an external service.
 | Provider endpoint and protocol | Supported | `ProviderConfig` exposes provider type, wire API, transport, base URL, API key, bearer token, Azure options, and headers. r42 resolves `*_ref` environment names before constructing this value. |
 | Appended system prompt | Supported | `SystemMessageConfig{Mode: "append"}` preserves the SDK foundation and appends r42 plus author instructions. |
 | Typed custom tools | Supported | `DefineTool[T, U]` generates JSON Schema, decodes JSON arguments into `T`, invokes the handler, and serializes non-string `U` as JSON. `Tool.Name` is preserved exactly. |
+| Streaming assistant, reasoning, tool, and usage events | Supported | r42 sets `SessionConfig.Streaming = true`, subscribes to message/reasoning deltas, tool execution lifecycle events, and assistant usage, and preserves the raw SDK payload in debug mode. Reasoning content is available only when the provider emits it. |
 | Exact-name dispatch | Supported | A session registers handlers in a map keyed by `Tool.Name`; incoming calls look up `ToolName` exactly. r42 can therefore use names such as `go_tool_finish`. |
 | Allow and deny filters | Supported | Both lists are forwarded. v1.0.8 sets `toolFilterPrecedence` to `excluded`, so deny wins when both contain a tool. Public field comments that say allow wins are stale. |
 | `approve_all` | Supported | `PermissionHandler.ApproveAll` returns `PermissionDecisionApproveOnce` for every request, which automatically approves each otherwise valid call without persisting a broader permission. |
@@ -40,14 +41,15 @@ effective model and reasoning effort into that custom agent. The probe locks
 this shape.
 
 The SDK accepts raw `Tool.Name` values independently of its optional `ToolSet`
-builder. r42's address-to-name conversion using `_` is therefore compatible.
-Mandatory terminate and QC tools remain an r42 assembly concern: r42 must
-register them and keep them out of the effective deny set.
+builder. r42 therefore registers each typed tool under its deterministic,
+SDK-safe `tool_<kind>_<name>_<uuid>` ID. Mandatory terminate and QC tools remain
+an r42 assembly concern: r42 must register them and keep them out of the
+effective deny set.
 
 ## Unsupported Or r42-Owned Behavior
 
-- There is no SDK retry policy for lifecycle or model calls and no r42 transient
-  error classifier. r42 owns those policies.
+- The SDK exposes no retry policy or transient-error classifier for lifecycle or
+  model calls. r42 owns those policies.
 - There is no terminal-tool, required-tool, protocol-attempt, or block-timeout
   concept in the SDK.
 - There is no session-level selected-skills field; selection uses an activated

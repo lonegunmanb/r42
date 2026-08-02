@@ -74,7 +74,7 @@ func (*lifecycleFixtureBlock) Apply() error {
 func TestResearchConfigPlansSourceDirectory(t *testing.T) {
 	directory := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
-research "source" {
+research "static" "source" {
   model         = "test-model"
   system_prompt = "Collect evidence."
 
@@ -85,7 +85,7 @@ research "source" {
 }
 
 output "summary" {
-  value = one(research.source.artifact).path
+  value = one(research.static.source.artifact).path
 }
 `), 0o600))
 
@@ -98,8 +98,42 @@ output "summary" {
 
 	nodes := planned.SavedPlan().Nodes()
 	require.Len(t, nodes, 1)
-	assert.Equal(t, "research.source", nodes[0].Address)
+	assert.Equal(t, "research.static.source", nodes[0].Address)
 	assert.Contains(t, planned.SavedPlan().Outputs()["summary"].Value.AsString(), "report.md")
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigDelegatesVariableTypeDefaultsToGolden(t *testing.T) {
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+variable "provider" {
+  type = object({
+    type     = optional(string, "openai")
+    endpoint = optional(string, "https://example.test/v1")
+    retry = optional(object({
+      attempts = optional(number, 3)
+    }), {})
+  })
+  default = {}
+}
+
+research "static" "source" {
+  model         = var.provider.type
+  system_prompt = "${var.provider.endpoint}|${var.provider.retry.attempts}"
+}
+`), 0o600))
+
+	config, err := NewResearchConfig(directory, ResearchConfigOptions{Context: t.Context()})
+	require.NoError(t, err)
+	planned, err := RunResearchPlan(config)
+	require.NoError(t, err)
+
+	nodes := planned.SavedPlan().Nodes()
+	require.Len(t, nodes, 1)
+	decoded, err := modulespec.DecodeResearchPlan(nodes[0].Config)
+	require.NoError(t, err)
+	assert.Equal(t, "openai", decoded.Config.Model)
+	assert.Equal(t, "https://example.test/v1|3", decoded.Config.SystemPrompt)
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -137,11 +171,11 @@ func TestResearchConfigPlansBlockWorkingDirectoriesWithoutCreatingRun(t *testing
 	directory := t.TempDir()
 	runRoot := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
-research "first" {
+research "static" "first" {
   model         = "test-model"
   system_prompt = block_wd()
 }
-research "second" {
+research "static" "second" {
   model         = "test-model"
   system_prompt = "${block_wd()}/notes"
 }
@@ -165,12 +199,12 @@ research "second" {
 		require.NoError(t, decodeErr)
 		configs[node.Address] = decoded.Config
 	}
-	first, err := reserved.WorkspacePath("research.first")
+	first, err := reserved.WorkspacePath("research.static.first")
 	require.NoError(t, err)
-	second, err := reserved.WorkspacePath("research.second")
+	second, err := reserved.WorkspacePath("research.static.second")
 	require.NoError(t, err)
-	assert.Equal(t, first, configs["research.first"].SystemPrompt)
-	assert.Equal(t, second+"/notes", configs["research.second"].SystemPrompt)
+	assert.Equal(t, first, configs["research.static.first"].SystemPrompt)
+	assert.Equal(t, second+"/notes", configs["research.static.second"].SystemPrompt)
 	assert.NotEqual(t, first, second)
 	assert.True(t, filepath.IsAbs(filepath.FromSlash(first)))
 	assert.NotContains(t, first, `\`)
@@ -242,10 +276,10 @@ func TestResearchConfigBuildsGoldenGraphFromNativeR42Blocks(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
 	execution := newPlanExecution(ctx, cancel, nil, scope, []plan.NodeSpec{
-		{Address: "research.source", Kind: "research", Config: cty.EmptyObjectVal},
+		{Address: "research.static.source", Kind: "research", Config: cty.EmptyObjectVal},
 		{
 			Address: "module.synthesis", Kind: "module", Config: cty.EmptyObjectVal,
-			Dependencies: []string{"research.source"},
+			Dependencies: []string{"research.static.source"},
 		},
 	})
 
@@ -258,13 +292,64 @@ func TestResearchConfigBuildsGoldenGraphFromNativeR42Blocks(t *testing.T) {
 		byAddress[block.Address()] = block
 	}
 
-	assert.IsType(t, new(researchspec.ResearchBlock), byAddress["research.source"])
+	assert.IsType(t, new(researchspec.ResearchBlock), byAddress["research.static.source"])
 	assert.IsType(t, new(modulespec.ModuleBlock), byAddress["module.synthesis"])
-	assert.Implements(t, (*golden.ApplyBlock)(nil), byAddress["research.source"])
+	assert.Implements(t, (*golden.ApplyBlock)(nil), byAddress["research.static.source"])
 	assert.Implements(t, (*golden.ApplyBlock)(nil), byAddress["module.synthesis"])
 	parents, err := config.GetAncestors("module.synthesis")
 	require.NoError(t, err)
-	assert.Contains(t, parents, "research.source")
+	assert.Contains(t, parents, "research.static.source")
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigRebuildsStaticForEachInstanceDependencies(t *testing.T) {
+	execution := &planExecution{ctx: t.Context(), nodes: []plan.NodeSpec{
+		{
+			Address: "research.static.deep_dive[001]",
+			Kind:    "research",
+			Config:  cty.EmptyObjectVal,
+		},
+		{
+			Address: "research.static.deep_dive[002]",
+			Kind:    "research",
+			Config:  cty.EmptyObjectVal,
+		},
+		{
+			Address: "research.static.deep_dive[003]",
+			Kind:    "research",
+			Config:  cty.EmptyObjectVal,
+		},
+		{
+			Address: "research.static.summary",
+			Kind:    "research",
+			Config:  cty.EmptyObjectVal,
+			Dependencies: []string{
+				"research.static.deep_dive[001]",
+				"research.static.deep_dive[002]",
+				"research.static.deep_dive[003]",
+			},
+		},
+	}}
+
+	config, err := newApplyResearchConfig(".", execution, 2)
+	require.NoError(t, err)
+	require.NoError(t, config.RunPlan())
+	blocks := golden.Blocks[*researchspec.ResearchBlock](config)
+	addresses := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		addresses = append(addresses, block.Address())
+	}
+	assert.ElementsMatch(t, []string{
+		"research.static.deep_dive[001]",
+		"research.static.deep_dive[002]",
+		"research.static.deep_dive[003]",
+		"research.static.summary",
+	}, addresses)
+	parents, err := config.GetAncestors("research.static.summary")
+	require.NoError(t, err)
+	assert.Contains(t, parents, "research.static.deep_dive[001]")
+	assert.Contains(t, parents, "research.static.deep_dive[002]")
+	assert.Contains(t, parents, "research.static.deep_dive[003]")
 }
 
 func TestResearchConfigRunPlanSeparatesGoldenPlanFromApply(t *testing.T) {
@@ -276,7 +361,7 @@ func TestResearchConfigRunPlanSeparatesGoldenPlanFromApply(t *testing.T) {
 	t.Cleanup(cancel)
 	factory := new(countingApplyFactory)
 	execution := newPlanExecution(ctx, cancel, factory, scope, []plan.NodeSpec{{
-		Address: "research.source", Kind: "research", Config: cty.EmptyObjectVal,
+		Address: "research.static.source", Kind: "research", Config: cty.EmptyObjectVal,
 	}})
 	config, err := newApplyResearchConfig(".", execution, 1)
 	require.NoError(t, err)
@@ -333,9 +418,23 @@ func TestNativePlanHCLBlocksRejectInvalidNodes(t *testing.T) {
 		{
 			name: "address kind mismatch",
 			nodes: []plan.NodeSpec{{
-				Address: "research.source", Kind: "module", Config: cty.EmptyObjectVal,
+				Address: "research.static.source", Kind: "module", Config: cty.EmptyObjectVal,
 			}},
-			want: `saved plan node "research.source" does not match kind "module"`,
+			want: `saved plan node "research.static.source" does not match kind "module"`,
+		},
+		{
+			name: "research subtype is missing",
+			nodes: []plan.NodeSpec{{
+				Address: "research.source", Kind: "research", Config: cty.EmptyObjectVal,
+			}},
+			want: `saved plan node "research.source" does not match kind "research"`,
+		},
+		{
+			name: "for each key is empty",
+			nodes: []plan.NodeSpec{{
+				Address: "research.static.source[]", Kind: "research", Config: cty.EmptyObjectVal,
+			}},
+			want: `saved plan node "research.static.source[]" does not match kind "research"`,
 		},
 		{
 			name: "unsupported kind",
@@ -347,10 +446,10 @@ func TestNativePlanHCLBlocksRejectInvalidNodes(t *testing.T) {
 		{
 			name: "malformed dependency",
 			nodes: []plan.NodeSpec{{
-				Address: "research.source", Kind: "research", Config: cty.EmptyObjectVal,
+				Address: "research.static.source", Kind: "research", Config: cty.EmptyObjectVal,
 				Dependencies: []string{"missing"},
 			}},
-			want: "saved plan node research.source depends on unknown node missing",
+			want: "saved plan node research.static.source depends on unknown node missing",
 		},
 	}
 

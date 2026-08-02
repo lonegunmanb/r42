@@ -48,6 +48,28 @@ func TestConfigValidateRequiredFields(t *testing.T) {
 			expectedError: "research tool_ids must not contain empty values",
 		},
 		{
+			name: "typed tool quota must not be negative",
+			config: researchspec.Config{
+				Model:        "gpt-5.6-sol",
+				SystemPrompt: "research carefully",
+				Policy: researchspec.SessionPolicy{
+					TypedToolCallQuota: map[string]int{"tool_example": -1},
+				},
+			},
+			expectedError: "research typed_tool_call_quota for \"tool_example\" must be non-negative",
+		},
+		{
+			name: "typed tool quota must reference a session tool",
+			config: researchspec.Config{
+				Model:        "gpt-5.6-sol",
+				SystemPrompt: "research carefully",
+				Policy: researchspec.SessionPolicy{
+					TypedToolCallQuota: map[string]int{"tool_example": 1},
+				},
+			},
+			expectedError: "research typed_tool_call_quota references tool id \"tool_example\" that is not configured for this session",
+		},
+		{
 			name: "reference must contain kind",
 			config: researchspec.Config{
 				Model:         "gpt-5.6-sol",
@@ -118,6 +140,40 @@ func TestConfigValidateRequiredFields(t *testing.T) {
 	}
 }
 
+func TestQCConfigRejectsNegativeTypedToolCallQuota(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		quota         map[string]int
+		expectedError string
+	}{
+		{
+			name:          "negative",
+			quota:         map[string]int{"tool_example": -1},
+			expectedError: "qc typed_tool_call_quota for \"tool_example\" must be non-negative",
+		},
+		{
+			name:          "outside session",
+			quota:         map[string]int{"tool_example": 1},
+			expectedError: "qc typed_tool_call_quota references tool id \"tool_example\" that is not configured for this session",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			config := researchspec.QCConfig{
+				Criteria:           cty.MapVal(map[string]cty.Value{"accuracy": cty.StringVal("accurate")}),
+				TypedToolCallQuota: tt.quota,
+				MaxRounds:          researchspec.DefaultMaxQCRounds,
+			}
+
+			require.EqualError(t, config.Validate(), tt.expectedError)
+		})
+	}
+}
+
 func TestConfigRejectsEmptyToolIDs(t *testing.T) {
 	t.Parallel()
 
@@ -146,6 +202,7 @@ func TestConfigEffectiveQCInheritsOnlySessionFields(t *testing.T) {
 	providerRef := referenceValue("model_provider.primary", "provider")
 	researchToolIDs := []string{"tool_go_tool_research_12345678-1234-8234-9234-123456789abc"}
 	qcToolIDs := []string{"tool_go_tool_qc_12345678-1234-8234-9234-123456789abc"}
+	qcQuota := map[string]int{qcToolIDs[0]: 2}
 	researchLifecycleRetries := 4
 	qcModelCallRetries := 2
 	config := researchspec.Config{
@@ -167,8 +224,9 @@ func TestConfigEffectiveQCInheritsOnlySessionFields(t *testing.T) {
 			Permission:       researchspec.PermissionApproveAll,
 		},
 		QC: &researchspec.QCConfig{
-			Criteria: cty.MapVal(map[string]cty.Value{"accuracy": cty.StringVal("cite every claim")}),
-			ToolIDs:  qcToolIDs,
+			Criteria:           cty.MapVal(map[string]cty.Value{"accuracy": cty.StringVal("cite every claim")}),
+			ToolIDs:            qcToolIDs,
+			TypedToolCallQuota: qcQuota,
 			Retry: provider.RetryOverride{
 				ModelCallRetries:  &qcModelCallRetries,
 				ErrorMessageRegex: []string{"qc transient"},
@@ -187,6 +245,9 @@ func TestConfigEffectiveQCInheritsOnlySessionFields(t *testing.T) {
 	assert.Equal(t, 2, effective.Retry.ModelCallRetries)
 	assert.Equal(t, []string{"research transient", "qc transient"}, effective.Retry.ErrorMessageRegex)
 	assert.Equal(t, qcToolIDs, effective.ToolIDs)
+	assert.Equal(t, qcQuota, effective.TypedToolCallQuota)
+	effective.TypedToolCallQuota[qcToolIDs[0]] = 9
+	assert.Equal(t, 2, config.QC.TypedToolCallQuota[qcToolIDs[0]])
 	assert.Nil(t, effective.AllowedTools)
 	assert.Equal(t, researchspec.DefaultQCDisallowedTools(), effective.DisallowedTools)
 	assert.Nil(t, effective.SkillDirectories)

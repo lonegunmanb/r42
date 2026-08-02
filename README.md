@@ -1,6 +1,8 @@
 # r42
 
-r42 is an HCL-based planner and execution engine for reproducible AI research
+~~the world, the universe and everything~~
+
+r42 is an HCL-based configuration and execution engine for reproducible AI research
 workflows. A configuration describes a directed acyclic graph (DAG) of research
 sessions, quality-control sessions, typed tools, artifacts, modules, variables,
 and outputs. r42 plans the complete graph before it starts any model session,
@@ -8,11 +10,31 @@ then applies the immutable plan through the official GitHub Copilot SDK.
 
 ## Why r42
 
-Long-running research is easier to inspect and repeat when orchestration is
-separate from model execution. The Plan phase resolves references, expands the
-DAG, validates typed tool schemas, and captures module outputs before paid or
-stateful work begins. Apply then executes only the saved graph, runs independent
-research blocks concurrently, and fails fast when a block cannot complete.
+A serious deep-research run is rarely one prompt followed by one answer. It is
+usually decomposed into many stages that search and reason from different
+perspectives, reconcile conflicting findings, and assemble a knowledge graph
+with a traceable chain from each conclusion back to its evidence and citations.
+
+Many of those stages need their own quality gate. An independent session may
+audit every claim and inference against the captured sources, return specific
+issues to the research session, and repeat that exchange through several rounds
+of revision. The files produced along the way also matter: reports, snapshots,
+datasets, and other artifacts must exist, be non-empty, and satisfy the contract
+expected by downstream stages.
+
+Some handoffs need stronger guarantees than a natural-language response. A
+session can be given typed functions and required to finish a stage by calling
+one of them with a structured completion payload. Schema mismatches, missing
+fields, and invalid enum values are rejected and sent back for repair, just like
+failed research QC. Those functions and research stages must also be reusable
+across different investigations rather than copied into every workflow.
+
+r42 makes this process explicit. Its Plan phase resolves the complete research
+DAG, validates typed tool schemas, and captures module boundaries before paid or
+stateful work begins. Apply executes only that immutable graph, runs independent
+stages concurrently, gives each stage an isolated workspace, and fails fast when
+a block cannot complete. QC loops, typed tools, artifacts, and whole subgraphs
+can be packaged as modules and reused by other research configurations.
 
 This design provides:
 
@@ -22,18 +44,125 @@ This design provides:
 - typed inline Go and external-process tools with stable IDs;
 - Terraform-style modules installed with `r42 init`;
 - isolated per-block workspaces for reports, snapshots, and other artifacts;
+- live TUI or line-oriented progress for the expanded DAG, session activity,
+  tool calls, and token usage;
 - opt-in JSONL debug logs containing prompts, reasoning, messages, and tool events.
 
-## Build
+## Install
 
-r42 requires Go 1.25 or newer and an authenticated GitHub Copilot CLI when the
-default provider is used.
+r42 requires Go 1.25 or newer and the GitHub Copilot CLI executable. r42 uses
+the official GitHub Copilot SDK, which starts Copilot CLI as its local agent
+runtime, so the CLI must be installed even when the model is supplied through a
+bring-your-own-key (BYOK) provider. Follow the
+[official Copilot CLI installation guide](https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli),
+or install it through npm with Node.js 22 or newer:
 
 ```powershell
-git clone https://github.com/lonegunmanb/r42.git
-cd r42
-go build -o r42.exe ./cmd/r42
+npm install -g @github/copilot
 ```
+
+Then install r42:
+
+```powershell
+go install github.com/lonegunmanb/r42/cmd/r42@latest
+```
+
+Authentication depends on the provider configuration:
+
+- When a research block omits `model_provider`, the SDK uses GitHub Copilot's
+  default provider. Copilot CLI must then be authenticated with a GitHub account
+  that has access to GitHub Copilot.
+- When a research block references a BYOK `model_provider`, r42 passes that
+  provider's endpoint and API key to the SDK. Copilot CLI is still the local
+  runtime, but no GitHub account or GitHub Copilot subscription is required for
+  the model call.
+
+## Model providers
+
+A `model_provider "name"` block describes how the Copilot SDK connects to a
+model API. It does not select a model: each research or QC session supplies its
+own `model` and references the provider as `model_provider.<name>`. Omitting the
+reference uses GitHub Copilot's default provider; setting it enables BYOK.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| label `name` | Yes | Local provider name used by references such as `model_provider.openrouter`. |
+| `type` | Yes | Protocol family: `openai`, `azure`, or `anthropic`. Use `openai` for an OpenAI-compatible API. |
+| `endpoint` | Yes | Provider base URL passed to the SDK. Supply the API root, not a request endpoint such as `/responses` or `/chat/completions`. |
+| `wire_api` | No | `completions` or `responses`; defaults to `completions`. Not valid for `anthropic`. |
+| `transport` | No | `http` or `websockets`; defaults to `http`. WebSockets requires `wire_api = "responses"`. Not valid for `anthropic`. |
+| `headers` | No | Additional request headers as `map(string)`. Values must be known during Plan. |
+| `api_key` | No | Literal API key passed through the SDK's `APIKey` field. Prefer `api_key_ref`. |
+| `api_key_ref` | No | Name of an environment variable containing an API key. r42 reads it during Apply. |
+| `bearer_token` | No | Literal token passed through the SDK's `BearerToken` field. Prefer `bearer_token_ref`. |
+| `bearer_token_ref` | No | Name of an environment variable containing a bearer token. r42 reads it during Apply. |
+| `retry` | No | At most one nested retry policy. Omitted fields use r42's provider retry defaults. |
+
+At most one of `api_key`, `api_key_ref`, `bearer_token`, and
+`bearer_token_ref` may be set. Choose the authentication field required by the
+provider instead of manually constructing an `Authorization` header. In
+particular, an OpenAI-compatible API key should normally use `api_key_ref`,
+which maps to the SDK's API-key setting rather than its bearer-token setting.
+
+> [!WARNING]
+> Literal `api_key` and `bearer_token` values are marked sensitive and redacted
+> from displayed plans, but saved `.r42plan` files contain those values
+> unencrypted. Prefer `api_key_ref` or `bearer_token_ref`; these store only the
+> environment variable name in the Plan and resolve the secret during Apply.
+
+### BYOK example
+
+This example uses OpenRouter's OpenAI-compatible API. Set the key in the
+environment that will run `r42 apply`:
+
+```powershell
+$env:OPENROUTER_API_KEY = Read-Host -MaskInput "OpenRouter API key"
+```
+
+Then declare the provider and reference it from the research block:
+
+```hcl
+model_provider "openrouter" {
+  type        = "openai"
+  endpoint    = "https://openrouter.ai/api/v1"
+  wire_api    = "completions"
+  transport   = "http"
+  api_key_ref = "OPENROUTER_API_KEY"
+
+  headers = {
+    "HTTP-Referer"       = "https://github.com/lonegunmanb/r42"
+    "X-OpenRouter-Title" = "r42"
+  }
+
+  retry {
+    lifecycle_retries    = 3
+    model_call_retries   = 3
+    interval_seconds     = 2
+    max_interval_seconds = 30
+  }
+}
+
+research "static" "summary" {
+  model_provider  = model_provider.openrouter
+  model           = "openai/gpt-4o"
+  system_prompt   = "Act as a rigorous research analyst."
+  prompt          = "Summarize the most important design tradeoffs in this repository."
+}
+```
+
+`api_key_ref` is an environment-variable name, not the key itself. Plan can
+therefore validate and save this configuration without reading the credential.
+Apply fails fast if `OPENROUTER_API_KEY` is missing or empty. The OpenRouter
+headers shown above are optional; other OpenAI-compatible providers generally
+need only their base URL, model identifier, and authentication setting. See
+[OpenRouter's OpenAI SDK documentation](https://openrouter.ai/docs/guides/community/openai-sdk)
+for its current endpoint and optional headers.
+
+The nested `retry` block accepts the same five fields documented for research
+retries: `lifecycle_retries`, `model_call_retries`, `interval_seconds`,
+`max_interval_seconds`, and `error_message_regex`. Provider values become the
+base retry policy for every research or QC session that references the provider;
+session-level `retry` blocks can override individual fields.
 
 ## Example
 
@@ -41,7 +170,7 @@ r42 loads every `*.r42.hcl` file in the target directory. The following
 configuration creates one research session:
 
 ```hcl
-research "summary" {
+research "static" "summary" {
   model            = "gpt-5.6-sol"
   reasoning_effort = "medium"
   system_prompt    = "Act as a rigorous research analyst. Distinguish evidence from inference."
@@ -56,17 +185,770 @@ Initialize referenced modules, inspect and save the plan, then apply it:
 r42 init .
 r42 plan --directory . --out research.r42plan
 r42 apply research.r42plan
+
+# Or plan and apply the directory directly
+r42 apply .
 ```
 
 `r42 apply .` is the convenience form that plans the directory, prints the plan
 as JSON, and immediately applies it. The overall Apply timeout defaults to one
 hour and can be changed with `--timeout`.
 
-Modules are installed below `<cwd>/.r42/modules`. Each applied research block
-gets a workspace below `<cwd>/.r42/runs/<run-id>/blocks`; `block_wd()` returns
-that block-specific absolute path, while `path.module` returns the absolute
-directory containing the block's initialized configuration. Both functions use
-`/` path separators on every operating system.
+Apply selects its progress UI with `--ui=auto|tui|repl` (default `auto`). An
+interactive terminal at least 50 columns by 12 rows uses the Bubble Tea TUI;
+redirected output, CI, and unsupported terminals use the line-oriented REPL
+renderer. The TUI header shows the run directory, expanded research-task
+counts, active and failed counts across the complete DAG, and cumulative input
+plus output tokens across research and QC sessions. A module failure therefore
+sets the overall status to `FAILED` even when its child research blocks never
+started.
+
+At 100 columns or wider, the TUI renders DAG, selected-node detail, and event
+timeline panels together. Below 100 columns it renders the focused panel at the
+full terminal width. Every terminal resize immediately recomputes this layout,
+clamps vertical and horizontal scroll positions to the new viewport, and
+requests a complete redraw. If a running TUI is resized below 50 columns or 12
+rows, it shows a size warning until the window is enlarged again.
+
+Navigate with Tab/arrow keys, PgUp/PgDn, Home/End, and horizontal
+Alt+Left/Alt+Right scrolling. Enter folds a module and `f` toggles live timeline
+following. Press `q` twice to cancel a run. The REPL renderer prints the initial
+DAG, research activity, tool transitions, and parent or nested module
+`START`/`DONE`/`FAILED` transitions.
+
+Plan JSON and final outputs remain on stdout. Both progress renderers write to
+stderr, so piping stdout remains machine-safe. Use `--ui=repl` to force stable
+line-oriented progress or `--ui=tui` to require an interactive terminal.
+
+## Variables, locals, and outputs
+
+A `variable` block declares a typed input to the root configuration or a module.
+Its value is read as `var.<name>`. r42 requires `type`; `description`, `default`,
+and `sensitive` are optional, and nested `validation` blocks can reject invalid
+values during Plan. A variable without a default must be supplied by the caller.
+
+`locals` gives names to expressions derived inside the configuration. Local
+values are read as `local.<name>` and are not caller-settable inputs. An `output`
+publishes a value after Apply. Root outputs are printed by the CLI; module
+outputs form the module's public interface and are read by its caller as
+`module.<module_name>.<output_name>`.
+
+```hcl
+variable "topic" {
+  type        = string
+  description = "Subject to investigate."
+
+  validation {
+    condition     = length(trimspace(var.topic)) > 0
+    error_message = "topic must not be empty."
+  }
+}
+
+locals {
+  normalized_topic = trimspace(var.topic)
+}
+
+research "static" "summary" {
+  model         = "gpt-5.6-sol"
+  system_prompt = "Produce a concise, evidence-based summary."
+  prompt        = "Research ${local.normalized_topic} and write ${block_wd()}/summary.md."
+
+  artifact "summary" {
+    type      = "file"
+    path      = "summary.md"
+    required  = true
+    non_empty = true
+  }
+}
+
+output "summary_path" {
+  description = "Validated Markdown summary."
+  value       = one(research.static.summary.artifact).path
+}
+```
+
+A research block exposes `.result` only when it configures
+`terminate_tool_id`; the value is the accepted string-compatible output of that
+typed tool. A normal assistant completion without a terminate tool can publish
+artifacts, as above, but has no `.result` attribute.
+
+Root variables can be assigned on `plan` or on a directory-form `apply`. Both
+Terraform-style single-dash flags and conventional double-dash flags are
+accepted, and each flag can be repeated:
+
+```powershell
+r42 plan -var 'topic="USD/JPY"' -var-file inputs.r42vars --out research.r42plan
+r42 apply -var 'topic="USD/JPY"' .
+
+# These spellings are equivalent
+r42 plan --var 'topic="USD/JPY"' --var-file inputs.r42vars --out research.r42plan
+```
+
+`-var` values are HCL expressions, so collection values retain their types, for
+example `-var 'regions=["us","jp"]'`. A non-JSON variable file uses ordinary
+HCL assignments:
+
+```hcl
+topic   = "USD/JPY"
+regions = ["us", "jp"]
+```
+
+Golden resolves variable sources during Plan and later sources override earlier
+ones: `R42_VAR_<name>` environment variables, `r42.r42vars`, sorted
+`*.auto.r42vars` files, and explicit CLI assignments. Within repeated CLI
+assignments, later values from the same flag kind win. Applying a saved
+`.r42plan` does not re-evaluate variables because their planned values are
+already captured in that file.
+
+## Research blocks
+
+Each `research "static" "name"` block defines one unit of work in the DAG and
+owns one persistent model session for all of that unit's initial and repair
+turns. `static` is the currently supported research subtype and forms part of
+the block's address. Value
+references create implicit dependencies between blocks; `depends_on` adds an
+explicit dependency when no value is exchanged. `for_each` can expand one
+declaration into independently addressed instances such as
+`research.static.name["key"]`.
+
+### Dependencies
+
+Dependencies determine when a block becomes ready during Apply. A block starts
+only after all of its dependencies have completed successfully. Independent
+ready blocks can run concurrently, subject to the configured parallelism.
+
+| Kind | How it is declared | When to use it |
+| --- | --- | --- |
+| Implicit | Reference another block in an HCL expression. | The downstream block consumes an upstream value such as a result, artifact path, module output, provider, or tool ID. |
+| Explicit | Set `depends_on` to a list of block traversals. | The downstream block must wait for an upstream side effect or completion, but does not consume one of its values. |
+
+#### Implicit dependencies
+
+Golden walks HCL expressions during Plan. A traversal such as
+`research.static.collect.artifact` identifies the referenced block and
+automatically adds it as a dependency. In this example,
+`research.static.summarize` cannot start until `research.static.collect`
+succeeds because its prompt consumes the collected artifact
+path:
+
+```hcl
+research "static" "collect" {
+  model         = "gpt-5.6-sol"
+  system_prompt = "Collect primary evidence and preserve its source URLs."
+  prompt        = "Write the evidence to ${block_wd()}/evidence.md."
+
+  artifact "evidence" {
+    type      = "file"
+    path      = "evidence.md"
+    required  = true
+    non_empty = true
+  }
+}
+
+research "static" "summarize" {
+  model         = "gpt-5.6-sol"
+  system_prompt = "Summarize only the supplied evidence."
+  prompt        = "Read ${one(research.static.collect.artifact).path} and summarize it."
+}
+```
+
+The reference serves two purposes: it passes the absolute artifact path into the
+prompt and creates the DAG edge `research.static.collect -> research.static.summarize`.
+The same rule applies to expressions such as `research.static.collect.result`,
+`module.sources.report`, `external_tool.fetch.id`, or
+`model_provider.primary`. Merely writing an address or filesystem path as plain
+text does not create a dependency because it is not an HCL traversal.
+
+#### Explicit dependencies
+
+Use `depends_on` when ordering matters but there is no value to reference. Its
+value is a list of block traversals, not a list of strings:
+
+```hcl
+research "static" "notify" {
+  model         = "gpt-5.6-sol"
+  system_prompt = "Record workflow completion in the external audit system."
+  prompt        = "Record that evidence collection completed successfully."
+
+  depends_on = [research.static.collect]
+}
+```
+
+Here `research.static.notify` waits for `research.static.collect`, but r42 does
+not inject the collect block's result, artifacts, or transcript into the notify
+session. If it needs any of those values, reference them directly and let r42
+infer the dependency instead of adding a redundant `depends_on` entry.
+
+Both forms are validated during Plan. A reference to an unknown block or a cycle
+such as `research.static.a -> research.static.b -> research.static.a` fails
+before any model session starts. If an upstream block fails during Apply, blocks
+that depend on its successful completion are not run.
+
+### Session fields
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `model_provider` | No | References a `model_provider` block containing endpoint, authentication, transport, and retry defaults. When omitted, the Copilot SDK uses its default provider behavior. |
+| `model` | Yes | Model identifier passed to the provider, for example `gpt-5.6-sol`. |
+| `reasoning_effort` | No | Non-empty provider-specific reasoning level. r42 passes it through without restricting the allowed names. |
+| `system_prompt` | Yes | Instructions appended to r42's fixed research protocol system prompt. |
+| `prompt` | No | Initial user task. When omitted, r42 sends a fixed start message. |
+| `tool_ids` | No | IDs of typed `go_tool` or `external_tool` blocks available to this research session. |
+| `typed_tool_call_quota` | No | `map(number)` from configured typed tool IDs to non-negative integer per-session call limits. The terminate tool ID may also be limited. |
+| `terminate_tool_id` | No | Typed tool that must return an accepted response before the stage can finish. Its output must be string-compatible and becomes `research.static.<name>.result`. Without it, a normal assistant completion ends the stage. |
+| `allowed_tools` | No | SDK tool-name allowlist. When present, only listed built-in or typed tools remain available. |
+| `disallowed_tools` | No | SDK tool-name denylist, applied after `allowed_tools` and therefore taking precedence. `ask_user` is denied by default because DAG execution is unattended. |
+| `skill_directories` | No | Directories whose immediate subdirectories contain Copilot skills. r42 forwards the evaluated paths to Copilot; use `path.module` for module-owned skills. |
+| `skills` | No | Skill names eagerly loaded into the session's custom agent. Names come from `SKILL.md` frontmatter or, when omitted there, the skill directory name. |
+| `disabled_skills` | No | Skill names explicitly disabled for this session. |
+| `permission` | No | Tool permission policy. The current supported value and default is `approve_all`, which approves each otherwise valid tool request. |
+| `max_protocol_attempts` | No | Maximum repair budget for rejected terminal calls or completed turns that omit the required terminal call. Defaults to `10`; a new QC revision round resets the budget. |
+| `timeout` | No | Per-block deadline expressed as a Go duration such as `30m` or `2h`. It is bounded by the CLI and ancestor-module deadlines. |
+
+Tool filters use SDK names. A typed tool's read-only `.id` is also its SDK name,
+so the same ID can appear in `tool_ids`, `allowed_tools`, or `disallowed_tools`.
+The mandatory terminal and QC verdict tools cannot be disabled.
+
+### `skill_directories`
+
+A skill is a reusable set of instructions stored in a named directory. Each
+entry in `skill_directories` points to a parent directory, and Copilot discovers
+skills from its immediate subdirectories:
+
+```text
+skills/
+  source-evaluation/
+    SKILL.md
+  citation-checking/
+    SKILL.md
+  experimental-browser/
+    SKILL.md
+```
+
+For example, `skills/source-evaluation/SKILL.md` can contain:
+
+```markdown
+---
+name: source-evaluation
+description: Evaluate the authority, recency, and independence of research sources.
+---
+
+# Source evaluation
+
+For every material claim:
+
+1. Prefer primary sources over summaries.
+2. Record the publication date and publisher.
+3. Separate independent confirmation from repeated reporting of one source.
+4. State any conflict, uncertainty, or missing evidence explicitly.
+```
+
+Use `path.module` to construct a module-owned absolute path. This remains valid
+when the same module is installed below `.r42/modules`:
+
+```hcl
+research "static" "market" {
+  model         = "gpt-5.6-sol"
+  system_prompt = "Research the requested market and cite every material claim."
+  prompt        = "Summarize the current market conditions."
+
+  skill_directories = ["${path.module}/skills"]
+  skills            = ["source-evaluation"]
+  disabled_skills   = ["experimental-browser"]
+
+  qc {
+    criteria = {
+      citations = "Every material claim must be supported by the captured sources."
+    }
+
+    skill_directories = ["${path.module}/skills"]
+    skills            = ["citation-checking"]
+    disabled_skills   = ["experimental-browser"]
+  }
+}
+```
+
+`skill_directories` makes skills discoverable. `skills` selects the named skills
+that r42 eagerly loads into that session's custom agent, while
+`disabled_skills` prevents a discovered skill from being used. Names must match
+the `name` in the skill's YAML frontmatter; when `name` is absent, Copilot uses
+the skill directory name.
+
+Research and QC are independent sessions. QC does not inherit the research
+session's `skill_directories`, `skills`, or `disabled_skills`, so the example
+declares the root again and assigns `citation-checking` explicitly. r42 records
+the evaluated strings in the Plan and passes them to Copilot during Apply; it
+does not copy the skill files into the Plan or validate the directories during
+Plan. The directories and their `SKILL.md` files must therefore still be
+readable when Apply starts.
+
+### `retry`
+
+A research block accepts at most one `retry` block. Its values override the
+referenced model provider's retry policy; omitted fields continue to inherit the
+provider value.
+
+| Field | Purpose |
+| --- | --- |
+| `lifecycle_retries` | Additional attempts for session lifecycle operations. Provider default: `10`; `0` disables retries. |
+| `model_call_retries` | Additional attempts for transient model-call failures. Provider default: `5`; `0` disables retries. |
+| `interval_seconds` | Initial retry delay in seconds. Provider default: `10`. |
+| `max_interval_seconds` | Maximum backoff delay in seconds. Provider default: `180`. |
+| `error_message_regex` | Additional regular expressions that classify matching errors as transient. Built-in transient classifications remain active. |
+
+Authentication errors, invalid schemas, unsupported model parameters, explicit
+cancellation, and deadline expiry are permanent failures and are not retried.
+
+### `artifact "name"`
+
+An artifact declares a file or directory that the session is expected to
+produce. A research block may declare multiple uniquely named artifacts.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| label `name` | Yes | Stable artifact name exposed through `research.static.<name>.artifact`. |
+| `type` | Yes | Either `file` or `directory`. |
+| `path` | Yes | Expected path. Relative paths are based on `block_wd()`; absolute paths and `..` are allowed. |
+| `required` | No | When `true`, the path must exist before QC or block completion. Defaults to `false`. |
+| `non_empty` | No | When `true`, a file must contain bytes or a directory must recursively contain a regular file. Defaults to `false`. |
+
+Missing required artifacts are repairable issues sent back to the same research
+session. Artifact metadata and normalized paths are also provided to QC.
+
+> [!IMPORTANT]
+> An `artifact` block declares a postcondition; it does not instruct the model to
+> create the file or directory. Every required artifact must also be explicitly
+> requested in `system_prompt` or `prompt`, including its path and expected
+> format, or be created by a typed tool that the stage is required to call through
+> `terminate_tool_id`. Otherwise the session may finish without producing it.
+> r42 then reports the artifact problem back to the same session for repair; if
+> the model continues to ignore it, this can look like a loop until
+> `max_protocol_attempts` is exhausted and the block fails.
+
+### `qc`
+
+A research block accepts at most one `qc` block. It creates a second,
+independent, persistent session that reviews the candidate result and artifacts.
+The QC session returns either pass or structured issues; issues are sent to the
+research session for another revision round.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `criteria` | Yes | Non-empty `map(string)`. Each key is a stable criterion ID and each value is the concrete review instruction given to QC. |
+| `model_provider` | No | QC provider override; otherwise inherits the effective research provider. |
+| `model` | No | QC model override; otherwise inherits the research model. |
+| `reasoning_effort` | No | QC reasoning override; otherwise inherits the research value. |
+| `tool_ids` | No | Typed tools available only to QC. Research tools are not inherited. |
+| `typed_tool_call_quota` | No | QC-only `map(number)` non-negative integer call limits. Every key must also appear in this QC block's `tool_ids`. |
+| `allowed_tools` | No | QC SDK tool allowlist. The research allowlist is not inherited. |
+| `disallowed_tools` | No | QC denylist. By default QC disables `bash`, `powershell`, `edit`, `task`, and `ask_user`; the research denylist is not inherited. |
+| `skill_directories` | No | Skill roots available only to QC; research skill roots are not inherited. |
+| `skills` | No | Skills selected only for QC. |
+| `disabled_skills` | No | Skills disabled only for QC. |
+| `permission` | No | QC permission override; otherwise inherits the research permission. |
+| `max_qc_rounds` | No | Maximum number of QC evaluations, including the first evaluation. Defaults to `10`; at most `max_qc_rounds - 1` QC-triggered research revisions can occur. |
+| `retry` | No | One retry block using the same fields as research. It overrides the effective research retry policy field by field. |
+
+Research and QC quotas use independent counters, even when both sessions use the
+same typed tool ID. A call consumes quota only after its arguments pass schema
+validation and the tool returns an accepted response. Execution errors and
+`accepted = false` responses release the reservation. A limit of `0` disables
+calls to that typed tool for the session.
+
+For each QC round, r42 sends one JSON context document to the QC session. It
+contains the original task, the complete `criteria` map, the current candidate
+result, and every declared artifact's normalized path and constraints. It does
+not contain the research transcript. For example, the criteria in the example
+below reach QC in this form:
+
+```json
+{
+  "criteria": {
+    "value": "Read the report and verify that its USD/JPY value matches the cited source.",
+    "date": "Verify that the observation date is identified correctly.",
+    "citations": "Verify that every reported rate is supported by a source URL."
+  }
+}
+```
+
+The map does not create three QC sessions or three independently executed
+checks. One QC session receives the whole map and is instructed to assess every
+entry before calling the mandatory `r42_qc_verdict` typed tool. If all criteria
+pass, it must return `{"pass":true}` with no issues. If any criterion fails, it
+must return `pass = false` and at least one issue:
+
+```json
+{
+  "pass": false,
+  "issues": [
+    {
+      "code": "value",
+      "message": "The report says 151.2, but the cited snapshot says 150.8.",
+      "path": "D:/project/r42/.r42/runs/run-.../blocks/.../report.md",
+      "repair_hint": "Replace the rate with 150.8 and preserve the snapshot URL."
+    }
+  ]
+}
+```
+
+Use short, stable criterion keys such as `value`, `date`, and `citations`, and
+write values as observable pass/fail requirements rather than broad goals. An
+issue should normally reuse the failed criterion key as its `code`, but this is
+currently a convention: r42 requires a non-empty issue `code` and `message` but
+does not enforce that the code appears in `criteria`. `path` and `repair_hint`
+are optional.
+
+#### When QC finds issues
+
+When `r42_qc_verdict` returns `pass = false`, r42 processes the result as
+follows:
+
+1. It validates that the verdict contains at least one issue and that every
+   issue has a non-empty `code` and `message`.
+2. If the current evaluation has not reached `max_qc_rounds`, it formats the
+   issues, including optional paths and repair hints, into a revision prompt and
+   sends that prompt to the original persistent research session.
+3. The research session revises its candidate and artifacts in the same block
+   workspace. Required artifacts are validated again before the revision can
+   return to QC.
+4. The same persistent QC session receives a fresh context document containing
+   the unchanged criteria, the revised candidate, and the current artifact
+   paths, then evaluates the complete criteria map again.
+
+A passing verdict completes the research block and publishes its result for
+downstream blocks. If QC rejects the candidate on the `max_qc_rounds` evaluation,
+r42 does not request another research revision: the block fails with
+`qc rounds exhausted`, and downstream blocks that depend on its successful
+result cannot proceed. The mandatory verdict tool is always registered and
+cannot be filtered out.
+
+The following example asks the research session to write an exchange-rate report
+and gives a separate QC session three explicit checks:
+
+```hcl
+research "static" "exchange_rate" {
+  model = "gpt-5.6-sol"
+  system_prompt = <<-EOT
+    Use current, authoritative sources. Cite the source URL for every reported
+    exchange-rate value and distinguish the observation date from publication
+    dates.
+  EOT
+  prompt = <<-EOT
+    Find the latest USD/JPY exchange rate and write a Markdown report to
+    ${block_wd()}/report.md. Include the observation date, the rate, and source
+    URLs.
+  EOT
+
+  artifact "report" {
+    type      = "file"
+    path      = "report.md"
+    required  = true
+    non_empty = true
+  }
+
+  qc {
+    criteria = {
+      value = "Read ${block_wd()}/report.md and verify that its USD/JPY value matches the cited source."
+      date  = "Verify that the report states when the rate was observed and does not present a publication date as the observation date."
+      citations = "Verify that every reported rate has a source URL and that the source supports the claim."
+    }
+
+    max_qc_rounds = 3
+  }
+}
+```
+
+After the research session finishes, r42 first validates `report.md`, then gives
+the QC session the candidate response and the artifact's normalized path. With
+`max_qc_rounds = 3`, the sequence is bounded as follows:
+
+| QC evaluation | Candidate being checked | Result when QC rejects it |
+| --- | --- | --- |
+| 1 | Initial research result | Issues trigger research revision 1. |
+| 2 | Revision 1 | Issues trigger research revision 2. |
+| 3 | Revision 2 | The block fails; there is no revision 3. |
+
+Thus the setting allows at most three QC evaluations and two QC-triggered
+research revisions. A pass during any evaluation completes the block
+immediately.
+
+## Modules
+
+A module is a reusable directory of `*.r42.hcl` configuration and its supporting
+files. It can package research blocks, QC policies, typed tools, variables,
+outputs, and nested modules behind one declared boundary. Its variables are the
+inputs supplied by the caller; its outputs are the public values that the caller
+can reference. Internal research blocks are still included in the complete Plan
+and executed during Apply, while internal tools remain private unless the module
+explicitly exports their IDs.
+
+```hcl
+module "source_review" {
+  source = "./modules/source_review"
+  topic  = "evidence quality"
+}
+
+output "review" {
+  value = module.source_review.report
+}
+```
+
+Modules keep repeated research stages and tool definitions in one place. A team
+can reuse the same source-gathering, claim-verification, or report-generation
+subgraph in many investigations without copying its prompts, schemas, QC rules,
+and helper programs. The boundary also makes dependencies explicit and limits
+what callers can access to declared outputs.
+
+`r42 init` resolves each module's `source`, copies local modules or downloads
+remote sources through go-getter, and installs them under
+`<cwd>/.r42/modules`. Plan reads those initialized copies, and Apply uses the
+saved Plan rather than reparsing module sources.
+
+## Typed tools
+
+r42 supports two kinds of typed tool: `go_tool` and `external_tool`. Both expose
+a JSON Schema to the model, receive validated structured arguments, and return a
+common `ToolResponse` envelope. A rejected call contains actionable issues and
+is returned to the session for repair; a process, I/O, cancellation, or protocol
+failure fails the block instead of being disguised as a model mistake.
+
+Every typed tool has a deterministic read-only `id` derived from its canonical
+block address. Research and QC blocks select tools through `tool_ids`, and a
+stage can require an accepted call to one tool before completion by setting
+`terminate_tool_id`:
+
+```hcl
+tool_ids = [external_tool.search.id]
+terminate_tool_id = go_tool.submit_report.id
+```
+
+### `go_tool`
+
+A `go_tool` keeps its implementation directly in HCL as an inline Go source
+fragment. It declares `Input`, `Output`, and a typed `Invoke` function. Plan
+parses and type-checks the source, validates its signature and cty compatibility,
+and permits only Go standard-library imports. Apply generates a small executable,
+compiles it once per r42 process, and starts a fresh child process for each tool
+call.
+
+Use a `go_tool` for portable validation and transformation logic that should be
+planned together with the research contract: validating a citation record,
+normalizing a structured result, enforcing allowed enum combinations, or
+accepting the final payload that ends a stage. Its implementation has no
+third-party Go dependencies and needs no separately deployed script.
+
+### `external_tool`
+
+An `external_tool` invokes an existing executable and declares its types with
+HCL `input_type` and `output_type` constraints. For each call, r42 starts the
+configured `program`, writes one JSON argument object to stdin, and expects one
+JSON `ToolResponse` document on stdout. Its working directory defaults to the
+calling block's workspace, so the process can create task-specific artifacts;
+module-owned programs can be located with `path.module`.
+
+The HCL declarations and the program's JSON protocol are one contract:
+
+- `input_type` describes the complete JSON value that the Python program reads
+  from stdin. Every field name, nested object, array, and primitive value must
+  have the declared shape. r42 applies `optional(...)` defaults and validates
+  the value before starting the program.
+- `output_type` describes the JSON value inside the stdout response's `output`
+  field. It does not describe the surrounding `ToolResponse` envelope. For a
+  successful call, the program writes
+  `{"accepted":true,"output":<value matching output_type>}`. For a repairable
+  rejection it writes `{"accepted":false,"issues":[...]}` and omits `output`.
+- stdout must contain exactly one JSON document. Missing fields, additional
+  incompatible fields, wrong primitive types, or a different nested structure
+  violate the contract and fail the tool call.
+
+The equivalent Python runtime types are:
+
+| HCL type | JSON representation | Python value |
+| --- | --- | --- |
+| `object(...)`, `map(...)` | object | `dict` |
+| `list(...)`, `set(...)`, `tuple(...)` | array | `list` |
+| `string` | string | `str` |
+| `number` | number | `int` or `float` |
+| `bool` | `true` or `false` | `bool` |
+
+In the example below, `json.load(sys.stdin)` must therefore produce a Python
+`dict` with `claim`, `sources`, and `minimum_confidence` matching `input_type`.
+The `dict` assigned to `response["output"]` must contain `supported`, `verdict`,
+`confidence`, and `citations` matching `output_type`. The two HCL schemas and
+these two Python data structures must be changed together.
+
+An external tool can be implemented in any language. The only requirement is
+that the program can read and write JSON and constructs values that exactly
+match its declared schemas. r42 uses the same primitive and collection types
+documented in HashiCorp's
+[Terraform type system](https://developer.hashicorp.com/terraform/language/expressions/types),
+including `string`, `number`, `bool`, `list`, `set`, `map`, `tuple`, and nested
+`object` values.
+
+For example, a claim-checking program can accept one claim plus a list of source
+excerpts and return a verdict with typed citations:
+
+```hcl
+external_tool "check_claim" {
+  description = "Check one claim against supplied source excerpts."
+  program     = ["python", "${path.module}/check_claim.py"]
+
+  input_type = object({
+    claim = string
+    sources = list(object({
+      url     = string
+      excerpt = string
+    }))
+    minimum_confidence = optional(number, 0.8)
+  })
+
+  output_type = object({
+    supported  = bool
+    verdict    = string
+    confidence = number
+    citations = list(object({
+      url   = string
+      quote = string
+    }))
+  })
+}
+```
+
+The following `check_claim.py` is a minimal implementation. Its lexical matcher
+is intentionally simple; a production tool can replace `check()` with a model,
+database, or domain-specific verifier without changing the r42 protocol.
+
+```python
+#!/usr/bin/env python3
+
+import json
+import re
+import sys
+from typing import Any
+
+
+def tokens(value: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]+", value.lower()))
+
+
+def reject(code: str, message: str, path: str) -> dict[str, Any]:
+    return {
+        "accepted": False,
+        "issues": [
+            {
+                "code": code,
+                "message": message,
+                "path": path,
+                "repair_hint": "Provide a non-empty claim and at least one source excerpt.",
+            }
+        ],
+    }
+
+
+def check(arguments: dict[str, Any]) -> dict[str, Any]:
+    claim = arguments["claim"].strip()
+    sources = arguments["sources"]
+    minimum = float(arguments.get("minimum_confidence", 0.8))
+    if not claim:
+        return reject("empty_claim", "claim must not be empty", "claim")
+    if not sources:
+        return reject("missing_sources", "at least one source is required", "sources")
+
+    claim_tokens = tokens(claim)
+    if not claim_tokens:
+        return reject("invalid_claim", "claim must contain searchable terms", "claim")
+    ranked = sorted(
+        (
+            (len(claim_tokens & tokens(source["excerpt"])) / len(claim_tokens), source)
+            for source in sources
+        ),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    best_score, best_source = ranked[0]
+    confidence = round(min(0.99, 0.5 + 0.49 * best_score), 2) if best_score else 0.0
+    supported = confidence >= minimum
+    citations = []
+    if best_score:
+        citations.append({"url": best_source["url"], "quote": best_source["excerpt"]})
+
+    return {
+        "accepted": True,
+        "output": {
+            "supported": supported,
+            "verdict": "supported" if supported else "not_supported",
+            "confidence": confidence,
+            "citations": citations,
+        },
+    }
+
+
+def main() -> int:
+    try:
+        arguments = json.load(sys.stdin)
+        response = check(arguments)
+        json.dump(response, sys.stdout, separators=(",", ":"))
+        sys.stdout.write("\n")
+        return 0
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        print(f"invalid tool request: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+For one call, the program receives this JSON on stdin:
+
+```json
+{
+  "claim": "The release added parallel DAG execution.",
+  "sources": [
+    {
+      "url": "https://example.com/release-notes",
+      "excerpt": "The release added parallel DAG execution for independent ready vertices."
+    }
+  ],
+  "minimum_confidence": 0.8
+}
+```
+
+It must write one response matching `ToolResponse[output_type]` to stdout:
+
+```json
+{
+  "accepted": true,
+  "output": {
+    "supported": true,
+    "verdict": "supported",
+    "confidence": 0.99,
+    "citations": [
+      {
+        "url": "https://example.com/release-notes",
+        "quote": "The release added parallel DAG execution for independent ready vertices."
+      }
+    ]
+  }
+}
+```
+
+Use an `external_tool` when the implementation belongs in Python, another
+language, an existing CLI, or a program with dependencies that an inline
+`go_tool` cannot import. Designing the schema and generating the small JSON
+protocol adapter are well-suited to an AI coding agent: provide the desired
+research contract and target language, then let the agent implement the parser,
+response envelope, and tests. r42 still validates the declared types during Plan
+and every actual value during Apply. The executable itself is required only at
+Apply time, keeping runtime dependencies explicit.
+
+## Workspaces
+
+Each applied research block gets a workspace below
+`<cwd>/.r42/runs/<run-id>/blocks`; `block_wd()` returns that block-specific
+absolute path, while `path.module` returns the absolute directory containing the
+block's initialized configuration. Both functions use `/` path separators on
+every operating system.
 
 See [the examples](docs/examples/README.md) for a basic workflow and a module
 that exports typed external tools. The complete language and execution contract
@@ -77,7 +959,9 @@ is documented in [the design specification](docs/design.md).
 Saved plans and `--debug` logs may contain credentials, prompts, transcripts,
 reasoning, and tool data. They are stored unencrypted under the paths selected
 by the user or under `<cwd>/.r42/runs`; do not publish them or commit them to
-source control.
+source control. The live progress UI also displays assistant, reasoning, and
+tool activity supplied by the model SDK, so terminal recordings and shared
+screens should be treated as sensitive.
 
 ## Development
 

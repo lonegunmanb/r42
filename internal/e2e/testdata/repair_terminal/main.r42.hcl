@@ -16,7 +16,7 @@ go_tool "finish" {
   GO
 }
 
-research "source" {
+research "static" "source" {
   model                 = "test-model"
   system_prompt         = "Repair invalid terminal arguments and finish."
   terminate_tool_id     = go_tool.finish.id
@@ -24,5 +24,5 @@ research "source" {
 }
 
 output "summary" {
-  value = research.source.result
+  value = research.static.source.result
 }

@@ -5,7 +5,7 @@ external_tool "blocker" {
   output_type = string
 }
 
-research "slow" {
+research "static" "slow" {
   model         = "test-model"
   system_prompt = "RUN_EXTERNAL_CHILD"
   tool_ids      = [external_tool.blocker.id]

@@ -21,7 +21,7 @@ func TestProductionRuntimeRunsPersistentQCSessionWithVerdictTool(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
-research "source" {
+research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
   qc { criteria = { accuracy = "Must be accurate" } }
@@ -49,7 +49,7 @@ func TestProductionRuntimeAppliesResearchTimeoutAcrossQC(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
-research "source" {
+research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
   timeout = "50ms"
@@ -72,7 +72,7 @@ func TestProductionRuntimeAppliesResearchTimeoutWhileOpeningQCSession(t *testing
 	t.Parallel()
 	directory := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
-research "source" {
+research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
   timeout = "50ms"
@@ -94,7 +94,7 @@ func TestProductionRuntimeReportsResearchCloseWarningWhenQCOpenFails(t *testing.
 	t.Parallel()
 	directory := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
-research "source" {
+research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
   qc { criteria = { accuracy = "Must be accurate" } }
@@ -118,7 +118,7 @@ func TestProductionRuntimeReusesSessionsForQCIssuesRevisionAndPass(t *testing.T)
 	t.Parallel()
 	directory := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
-research "source" {
+research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
   qc { criteria = { accuracy = "Must be accurate" } }

@@ -473,7 +473,7 @@ func TestResearchConfigBuildsSavedResearchDAG(t *testing.T) {
 	golden.RegisterBlock(new(researchspec.ResearchBlock))
 	directory := t.TempDir()
 	writeR42(t, directory, "main.r42.hcl", `
-research "source" {
+research "static" "source" {
   model         = "test-model"
   system_prompt = "Collect evidence."
 
@@ -483,14 +483,14 @@ research "source" {
   }
 }
 
-research "summary" {
+research "static" "summary" {
   model         = "test-model"
   system_prompt = "Summarize evidence."
-  prompt        = one(research.source.artifact).path
+  prompt        = one(research.static.source.artifact).path
 }
 
 output "report_path" {
-  value = one(research.source.artifact).path
+  value = one(research.static.source.artifact).path
 }
 `)
 
@@ -502,14 +502,14 @@ output "report_path" {
 	require.NotNil(t, planned.Saved)
 	nodes := planned.Saved.Nodes()
 	require.Len(t, nodes, 2)
-	assert.Equal(t, "research.source", nodes[0].Address)
+	assert.Equal(t, "research.static.source", nodes[0].Address)
 	assert.Equal(t, "research", nodes[0].Kind)
 	assert.Empty(t, nodes[0].Dependencies)
 	assert.Equal(t, "test-model", nodes[0].Config.GetAttr("model").AsString())
-	assert.Equal(t, "research.summary", nodes[1].Address)
-	assert.Equal(t, []string{"research.source"}, nodes[1].Dependencies)
+	assert.Equal(t, "research.static.summary", nodes[1].Address)
+	assert.Equal(t, []string{"research.static.source"}, nodes[1].Dependencies)
 	assert.Equal(t,
-		"one(research.source.artifact).path",
+		"one(research.static.source.artifact).path",
 		planned.Saved.Outputs()["report_path"].Expression,
 	)
 	assert.Contains(t, planned.Saved.Context(), "research")
@@ -528,7 +528,7 @@ go_tool "inside" {
   source      = "type Input struct{}"
 }
 
-research "inside" {
+research "static" "inside" {
   model         = "test-model"
   system_prompt = "Work inside the module."
   tool_ids      = [go_tool.inside.id]
@@ -550,7 +550,7 @@ module "child" {
 	assert.Equal(t, "module.child", nodes[0].Address)
 	require.NotNil(t, nodes[0].Module)
 	assert.Equal(t, 2, nodes[0].Module.Parallelism)
-	assert.Equal(t, "research.inside", nodes[0].Module.Plan.Nodes()[0].Address)
+	assert.Equal(t, "research.static.inside", nodes[0].Module.Plan.Nodes()[0].Address)
 	childRegistry := nodes[0].Module.Plan.Tools()
 	require.Len(t, childRegistry, 1)
 	for _, definition := range childRegistry {
@@ -580,7 +580,7 @@ external_tool "private" {
   output_type = string
 }
 
-research "pending" {
+research "static" "pending" {
   model             = "test-model"
   system_prompt     = "Produce an apply-time result."
   terminate_tool_id = external_tool.private.id
@@ -603,7 +603,7 @@ output "nothing" {
 }
 
 output "pending_result" {
-  value = research.pending.result
+  value = research.static.pending.result
 }
 `)
 	writeR42(t, root, "main.r42.hcl", `
@@ -611,7 +611,7 @@ module "tools" {
   source = "./child"
 }
 
-research "consumer" {
+research "static" "consumer" {
   model         = "test-model"
   system_prompt = "Use the exported tool."
   tool_ids      = [module.tools.exported_tool_id]
@@ -626,11 +626,11 @@ research "consumer" {
 	require.Len(t, nodes, 2)
 	var consumer internalplan.NodeSpec
 	for _, node := range nodes {
-		if node.Address == "research.consumer" {
+		if node.Address == "research.static.consumer" {
 			consumer = node
 		}
 	}
-	require.Equal(t, "research.consumer", consumer.Address)
+	require.Equal(t, "research.static.consumer", consumer.Address)
 	decoded, err := modulespec.DecodeResearchPlan(consumer.Config)
 	require.NoError(t, err)
 	require.Len(t, decoded.Config.Policy.ToolIDs, 1)
@@ -654,6 +654,8 @@ func TestResearchConfigRejectsUnknownTypedToolIDsDuringPlan(t *testing.T) {
 		{name: "terminate tool id", fragment: `terminate_tool_id = "` + unknownID + `"`},
 		{name: "allowed tools", fragment: `allowed_tools = ["` + unknownID + `"]`},
 		{name: "disallowed tools", fragment: `disallowed_tools = ["` + unknownID + `"]`},
+		{name: "typed tool call quota", fragment: `tool_ids = ["` + unknownID + `"]
+  typed_tool_call_quota = { "` + unknownID + `" = 1 }`},
 		{
 			name: "qc tool ids",
 			fragment: `qc {
@@ -669,6 +671,14 @@ func TestResearchConfigRejectsUnknownTypedToolIDsDuringPlan(t *testing.T) {
   }`,
 		},
 		{
+			name: "qc typed tool call quota",
+			fragment: `qc {
+    criteria = { accuracy = "Check accuracy." }
+    tool_ids = ["` + unknownID + `"]
+    typed_tool_call_quota = { "` + unknownID + `" = 1 }
+  }`,
+		},
+		{
 			name: "qc disallowed tools",
 			fragment: `qc {
     criteria = { accuracy = "Check accuracy." }
@@ -681,7 +691,7 @@ func TestResearchConfigRejectsUnknownTypedToolIDsDuringPlan(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			directory := t.TempDir()
 			writeR42(t, directory, "main.r42.hcl", `
-research "source" {
+research "static" "source" {
   model         = "test-model"
   system_prompt = "Collect evidence."
 			  `+tt.fragment+`
@@ -691,6 +701,61 @@ research "source" {
 			_, err := planSource(directory, executor.ResearchConfigOptions{})
 
 			assert.ErrorContains(t, err, `references tool id "`+unknownID+`" that was not planned`)
+		})
+	}
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigRejectsQuotaForToolOutsideSession(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(toolspec.GoToolBlock))
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	tests := []struct {
+		name     string
+		fragment string
+		scope    string
+	}{
+		{
+			name:     "research",
+			fragment: `typed_tool_call_quota = { (go_tool.lookup.id) = 1 }`,
+			scope:    "research",
+		},
+		{
+			name: "qc",
+			fragment: `qc {
+    criteria = { accuracy = "Check accuracy." }
+    typed_tool_call_quota = { (go_tool.lookup.id) = 1 }
+  }`,
+			scope: "qc",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			directory := t.TempDir()
+			writeR42(t, directory, "main.r42.hcl", `
+go_tool "lookup" {
+  description = "Look up evidence"
+  source = <<-GO
+    import "context"
+    type Input struct{}
+    type Output string
+    func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+      return ToolResponse[Output]{Accepted: true}, nil
+    }
+  GO
+}
+research "static" "source" {
+  model         = "test-model"
+  system_prompt = "Collect evidence."
+  `+tt.fragment+`
+}
+`)
+
+			_, err := planSource(directory, executor.ResearchConfigOptions{})
+
+			require.ErrorContains(t, err, tt.scope+" typed_tool_call_quota references tool id")
+			assert.ErrorContains(t, err, "that is not configured for this session")
 		})
 	}
 }
@@ -733,7 +798,7 @@ go_tool "finish" {
   GO
 }
 
-research "market" {
+research "static" "market" {
   model_provider       = model_provider.primary
   model                = "test-model"
   reasoning_effort     = "high"
@@ -741,6 +806,10 @@ research "market" {
   prompt               = "Start now."
   tool_ids             = [external_tool.lookup.id]
   terminate_tool_id    = go_tool.finish.id
+  typed_tool_call_quota = {
+    (external_tool.lookup.id) = 4
+    (go_tool.finish.id)       = 1
+  }
   allowed_tools        = [tool_name(external_tool.lookup)]
   disallowed_tools     = ["ask_user"]
   skill_directories    = ["."]
@@ -760,6 +829,10 @@ research "market" {
     criteria     = { accuracy = "Must be accurate" }
     model        = "qc-model"
     max_qc_rounds = 3
+    tool_ids = [external_tool.lookup.id]
+    typed_tool_call_quota = {
+      (external_tool.lookup.id) = 2
+    }
   }
 }
 `)
@@ -783,6 +856,10 @@ research "market" {
 	require.Len(t, registry, 2)
 	require.Contains(t, registry, reconstructed.Config.Policy.ToolIDs[0])
 	assert.Equal(t, "external_tool.lookup", registry[reconstructed.Config.Policy.ToolIDs[0]].Address)
+	assert.Equal(t, map[string]int{
+		reconstructed.Config.Policy.ToolIDs[0]: 4,
+		*reconstructed.Config.TerminateToolID:  1,
+	}, reconstructed.Config.Policy.TypedToolCallQuota)
 	assert.Contains(t, registry[reconstructed.Config.Policy.ToolIDs[0]].InputTypeExpression, "optional(number, 5)")
 	require.NotNil(t, reconstructed.Config.TerminateToolID)
 	require.Contains(t, registry, *reconstructed.Config.TerminateToolID)
@@ -790,6 +867,7 @@ research "market" {
 	require.NotNil(t, reconstructed.Config.QC)
 	assert.Equal(t, "qc-model", *reconstructed.Config.QC.Model)
 	assert.Equal(t, 3, reconstructed.Config.QC.MaxRounds)
+	assert.Equal(t, map[string]int{reconstructed.Config.QC.ToolIDs[0]: 2}, reconstructed.Config.QC.TypedToolCallQuota)
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -805,7 +883,7 @@ model_provider "primary" {
   headers  = {}
 }
 
-research "market" {
+research "static" "market" {
   model_provider = model_provider.primary
   model          = "test-model"
   system_prompt  = "Research carefully."
@@ -975,7 +1053,7 @@ func TestNestedResearchBlockWorkingDirectoryUsesFullModuleAddress(t *testing.T) 
 	child := filepath.Join(root, "child")
 	require.NoError(t, os.Mkdir(child, 0o700))
 	writeR42(t, child, "main.r42.hcl", `
-research "detail" {
+research "static" "detail" {
   model         = "test-model"
   system_prompt = block_wd()
 }
@@ -993,7 +1071,7 @@ research "detail" {
 	require.NoError(t, err)
 	reserved, err := runpkg.Open(planned.Saved.RunDirectory())
 	require.NoError(t, err)
-	want, err := reserved.WorkspacePath("module.child.research.detail")
+	want, err := reserved.WorkspacePath("module.child.research.static.detail")
 	require.NoError(t, err)
 
 	assert.Equal(t, want, decoded.Config.SystemPrompt)

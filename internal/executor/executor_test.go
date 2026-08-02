@@ -37,17 +37,58 @@ func TestExecutorAppliesGoldenBlocksInDependencyOrder(t *testing.T) {
 		}, nil), nil
 	}}
 	planned := savedPlan(t, []plan.NodeSpec{
-		{Address: "research.source", Kind: "research", Config: cty.EmptyObjectVal},
-		{Address: "research.report", Kind: "research", Dependencies: []string{"research.source"}, Config: cty.EmptyObjectVal},
+		{Address: "research.static.source", Kind: "research", Config: cty.EmptyObjectVal},
+		{Address: "research.static.report", Kind: "research", Dependencies: []string{"research.static.source"}, Config: cty.EmptyObjectVal},
 	}, map[string]plan.OutputSpec{"status": {Value: cty.StringVal("complete")}})
 	runner := executor.New(factory, nil)
 
 	outputs, err := runner.Apply(t.Context(), planned, 2)
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"apply research.source", "apply research.report"}, events.values())
+	assert.Equal(t, []string{"apply research.static.source", "apply research.static.report"}, events.values())
 	assert.Equal(t, cty.StringVal("complete"), outputs["status"])
 	assert.Empty(t, runner.Warnings())
+}
+
+func TestExecutorLifecycleEventsUseFactoryCanonicalAddress(t *testing.T) {
+	t.Parallel()
+
+	bus := debuglog.NewEventBus()
+	var observed []debuglog.Event
+	var observedMu sync.Mutex
+	unsubscribe := bus.Subscribe(func(event debuglog.Event) {
+		observedMu.Lock()
+		observed = append(observed, event)
+		observedMu.Unlock()
+	})
+	t.Cleanup(unsubscribe)
+	ctx := debuglog.WithEventBus(t.Context(), bus)
+	factory := &canonicalFactory{fakeFactory: fakeFactory{build: func(
+		_ context.Context, node plan.NodeSpec, _ *r42concurrency.Scope,
+	) (golden.ApplyBlock, error) {
+		return newFakeBlock(node.Address, func() error { return nil }, nil), nil
+	}}, prefix: "module.sources"}
+	planned := savedPlan(t, []plan.NodeSpec{
+		{Address: "research.static.collect", Kind: "research", Config: cty.EmptyObjectVal},
+	}, nil)
+
+	_, err := executor.New(factory, nil).Apply(ctx, planned, 1)
+	require.NoError(t, err)
+	observedMu.Lock()
+	events := append([]debuglog.Event(nil), observed...)
+	observedMu.Unlock()
+
+	var addresses []string
+	for _, event := range events {
+		if event.Action == "block.apply" {
+			addresses = append(addresses, event.BlockAddress)
+		}
+	}
+	require.NotEmpty(t, addresses)
+	assert.Equal(t, []string{
+		"module.sources.research.static.collect",
+		"module.sources.research.static.collect",
+	}, addresses)
 }
 
 func TestExecutorRunsIndependentBlocksInParallelThroughGoldenRunPlan(t *testing.T) {
@@ -74,8 +115,8 @@ func TestExecutorRunsIndependentBlocksInParallelThroughGoldenRunPlan(t *testing.
 		}, nil), nil
 	}}
 	planned := savedPlan(t, []plan.NodeSpec{
-		{Address: "research.first", Kind: "research", Config: cty.EmptyObjectVal},
-		{Address: "research.second", Kind: "research", Config: cty.EmptyObjectVal},
+		{Address: "research.static.first", Kind: "research", Config: cty.EmptyObjectVal},
+		{Address: "research.static.second", Kind: "research", Config: cty.EmptyObjectVal},
 	}, nil)
 
 	_, err := executor.New(factory, nil).Apply(t.Context(), planned, 2)
@@ -107,7 +148,7 @@ func TestExecutorResolvesOutputsAfterSuccessfulApply(t *testing.T) {
 		outputs: map[string]cty.Value{"result": cty.StringVal("applied")},
 	}
 	planned := savedPlan(t, []plan.NodeSpec{{
-		Address: "research.source", Kind: "research", Config: cty.EmptyObjectVal,
+		Address: "research.static.source", Kind: "research", Config: cty.EmptyObjectVal,
 	}}, map[string]plan.OutputSpec{"result": {Value: cty.UnknownVal(cty.String)}})
 
 	outputs, err := executor.New(factory, nil).Apply(t.Context(), planned, 1)
@@ -129,7 +170,7 @@ func TestExecutorApplyInScopeUsesCallerScopeWithoutClosingDebug(t *testing.T) {
 	}}
 	debug := &fakeCloser{}
 	planned := savedPlan(t, []plan.NodeSpec{{
-		Address: "research.source", Kind: "research", Config: cty.EmptyObjectVal,
+		Address: "research.static.source", Kind: "research", Config: cty.EmptyObjectVal,
 	}}, nil)
 	runner := executor.New(factory, debug)
 
@@ -149,7 +190,7 @@ func TestExecutorPreservesPrimaryFailureAndCleanupWarnings(t *testing.T) {
 	events := &eventLog{}
 	factory := &fakeFactory{build: func(_ context.Context, node plan.NodeSpec, _ *r42concurrency.Scope) (golden.ApplyBlock, error) {
 		switch node.Address {
-		case "research.failure":
+		case "research.static.failure":
 			return newFakeBlock(node.Address, func() error {
 				events.add("apply failed")
 				return wantErr
@@ -169,8 +210,8 @@ func TestExecutorPreservesPrimaryFailureAndCleanupWarnings(t *testing.T) {
 		return debugErr
 	}}
 	planned := savedPlan(t, []plan.NodeSpec{
-		{Address: "research.failure", Kind: "research", Config: cty.EmptyObjectVal},
-		{Address: "research.dependent", Kind: "research", Dependencies: []string{"research.failure"}, Config: cty.EmptyObjectVal},
+		{Address: "research.static.failure", Kind: "research", Config: cty.EmptyObjectVal},
+		{Address: "research.static.dependent", Kind: "research", Dependencies: []string{"research.static.failure"}, Config: cty.EmptyObjectVal},
 	}, nil)
 	runner := executor.New(factory, debug)
 
@@ -199,7 +240,7 @@ func TestExecutorRecordsSkippedOutputResolutionAfterBlockFailure(t *testing.T) {
 	factory := &fakeFactory{build: func(_ context.Context, node plan.NodeSpec, _ *r42concurrency.Scope) (golden.ApplyBlock, error) {
 		return newFakeBlock(node.Address, func() error { return assert.AnError }, nil), nil
 	}}
-	planned := savedPlan(t, []plan.NodeSpec{{Address: "research.failure", Kind: "research", Config: cty.EmptyObjectVal}}, nil)
+	planned := savedPlan(t, []plan.NodeSpec{{Address: "research.static.failure", Kind: "research", Config: cty.EmptyObjectVal}}, nil)
 
 	_, err = executor.New(factory, nil).Apply(ctx, planned, 1)
 	require.Error(t, err)
@@ -209,8 +250,8 @@ func TestExecutorRecordsSkippedOutputResolutionAfterBlockFailure(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(content), `"action":"apply.outputs.resolve","status":"skipped"`)
 	assert.NotContains(t, string(content), `"action":"apply.outputs.resolve","status":"failed"`)
-	assert.NotContains(t, string(content), `"block_address":"research.failure","block_type":"research","action":"block.decode","status":"started"`)
-	assert.Equal(t, 1, strings.Count(string(content), `"block_address":"research.failure","block_type":"research","action":"block.decode","status":"completed"`))
+	assert.NotContains(t, string(content), `"block_address":"research.static.failure","block_type":"research","action":"block.decode","status":"started"`)
+	assert.Equal(t, 1, strings.Count(string(content), `"block_address":"research.static.failure","block_type":"research","action":"block.decode","status":"completed"`))
 }
 
 func TestExecutorCleanupUsesLiveContextAfterApplyFailure(t *testing.T) {
@@ -229,7 +270,7 @@ func TestExecutorCleanupUsesLiveContextAfterApplyFailure(t *testing.T) {
 		}), nil
 	}}
 	runner := executor.New(factory, nil)
-	planned := savedPlan(t, []plan.NodeSpec{{Address: "research.failure", Kind: "research", Config: cty.EmptyObjectVal}}, nil)
+	planned := savedPlan(t, []plan.NodeSpec{{Address: "research.static.failure", Kind: "research", Config: cty.EmptyObjectVal}}, nil)
 
 	_, err := runner.Apply(t.Context(), planned, 1)
 
@@ -271,7 +312,7 @@ func TestExecutorCleansNestedApplyBeforeDebugFlush(t *testing.T) {
 	}}
 	planned := savedPlan(t, []plan.NodeSpec{
 		{Address: "module.child", Kind: "module", Config: cty.EmptyObjectVal, Module: &plan.ModuleSpec{Plan: savedPlan(t, nil, nil)}},
-		{Address: "research.failure", Kind: "research", Dependencies: []string{"module.child"}, Config: cty.EmptyObjectVal},
+		{Address: "research.static.failure", Kind: "research", Dependencies: []string{"module.child"}, Config: cty.EmptyObjectVal},
 	}, nil)
 	runner := executor.New(factory, debug)
 
@@ -289,7 +330,7 @@ func TestExecutorDoesNotResumeCompletedNodes(t *testing.T) {
 	factory := &fakeFactory{build: func(_ context.Context, node plan.NodeSpec, _ *r42concurrency.Scope) (golden.ApplyBlock, error) {
 		return newFakeBlock(node.Address, func() error { applied++; return nil }, nil), nil
 	}}
-	planned := savedPlan(t, []plan.NodeSpec{{Address: "research.once", Kind: "research", Config: cty.EmptyObjectVal}}, nil)
+	planned := savedPlan(t, []plan.NodeSpec{{Address: "research.static.once", Kind: "research", Config: cty.EmptyObjectVal}}, nil)
 	runner := executor.New(factory, nil)
 
 	_, firstErr := runner.Apply(t.Context(), planned, 1)
@@ -317,8 +358,8 @@ func TestExecutorResearchPermitIncludesCleanup(t *testing.T) {
 		}), nil
 	}}
 	planned := savedPlan(t, []plan.NodeSpec{
-		{Address: "research.first", Kind: "research", Config: cty.EmptyObjectVal},
-		{Address: "research.second", Kind: "research", Config: cty.EmptyObjectVal},
+		{Address: "research.static.first", Kind: "research", Config: cty.EmptyObjectVal},
+		{Address: "research.static.second", Kind: "research", Config: cty.EmptyObjectVal},
 	}, nil)
 	runner := executor.New(factory, nil)
 
@@ -351,7 +392,7 @@ func TestExecutorCancelsResearchWaitingForPermitWithoutCreatingBlock(t *testing.
 		factoryCalls.Add(1)
 		return newFakeBlock(node.Address, func() error { return nil }, nil), nil
 	}}
-	planned := savedPlan(t, []plan.NodeSpec{{Address: "research.waiting", Kind: "research", Config: cty.EmptyObjectVal}}, nil)
+	planned := savedPlan(t, []plan.NodeSpec{{Address: "research.static.waiting", Kind: "research", Config: cty.EmptyObjectVal}}, nil)
 	runner := executor.New(factory, nil)
 	ctx := newObservedContext()
 	result := make(chan error, 1)
@@ -432,14 +473,14 @@ func TestExecutorReturnsCancellationWhenContextIsCanceledDuringCleanup(t *testin
 	cleanupStarted := make(chan struct{})
 	releaseCleanup := make(chan struct{})
 	factory := &fakeFactory{build: func(context.Context, plan.NodeSpec, *r42concurrency.Scope) (golden.ApplyBlock, error) {
-		return newFakeBlock("research.subject", func() error { return nil }, func(context.Context) error {
+		return newFakeBlock("research.static.subject", func() error { return nil }, func(context.Context) error {
 			close(cleanupStarted)
 			<-releaseCleanup
 			return nil
 		}), nil
 	}}
 	planned := savedPlan(t, []plan.NodeSpec{{
-		Address: "research.subject",
+		Address: "research.static.subject",
 		Kind:    "research",
 		Config:  cty.EmptyObjectVal,
 	}}, nil)
@@ -469,8 +510,8 @@ func TestExecutorValidatesInputsAndFactoryFailures(t *testing.T) {
 		{name: "factory required", runner: executor.New(nil, nil), planned: savedPlan(t, nil, nil), want: "apply block factory is required"},
 		{name: "plan required", runner: executor.New(&fakeFactory{}, nil), want: "saved plan is required"},
 		{name: "parallelism validation", runner: executor.New(&fakeFactory{}, nil), planned: savedPlan(t, nil, nil), limit: -1, want: "global parallelism must not be negative"},
-		{name: "factory error", runner: executor.New(&fakeFactory{err: factoryErr}, nil), planned: savedPlan(t, []plan.NodeSpec{{Address: "research.bad", Kind: "research", Config: cty.EmptyObjectVal}}, nil), want: "create apply block research.bad: factory failed"},
-		{name: "nil block", runner: executor.New(&fakeFactory{}, nil), planned: savedPlan(t, []plan.NodeSpec{{Address: "research.bad", Kind: "research", Config: cty.EmptyObjectVal}}, nil), want: "create apply block research.bad: factory returned nil"},
+		{name: "factory error", runner: executor.New(&fakeFactory{err: factoryErr}, nil), planned: savedPlan(t, []plan.NodeSpec{{Address: "research.static.bad", Kind: "research", Config: cty.EmptyObjectVal}}, nil), want: "create apply block research.static.bad: factory failed"},
+		{name: "nil block", runner: executor.New(&fakeFactory{}, nil), planned: savedPlan(t, []plan.NodeSpec{{Address: "research.static.bad", Kind: "research", Config: cty.EmptyObjectVal}}, nil), want: "create apply block research.static.bad: factory returned nil"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -490,7 +531,7 @@ func TestApplyErrorExposesDefensiveCleanupWarnings(t *testing.T) {
 		return newFakeBlock(node.Address, func() error { return wantErr }, func(context.Context) error { return cleanupErr }), nil
 	}}
 	runner := executor.New(factory, nil)
-	_, err := runner.Apply(t.Context(), savedPlan(t, []plan.NodeSpec{{Address: "research.bad", Kind: "research", Config: cty.EmptyObjectVal}}, nil), 1)
+	_, err := runner.Apply(t.Context(), savedPlan(t, []plan.NodeSpec{{Address: "research.static.bad", Kind: "research", Config: cty.EmptyObjectVal}}, nil), 1)
 
 	var applyErr *executor.ApplyError
 	require.ErrorAs(t, err, &applyErr)
@@ -511,6 +552,15 @@ func savedPlan(t *testing.T, nodes []plan.NodeSpec, outputs map[string]plan.Outp
 type fakeFactory struct {
 	build func(context.Context, plan.NodeSpec, *r42concurrency.Scope) (golden.ApplyBlock, error)
 	err   error
+}
+
+type canonicalFactory struct {
+	fakeFactory
+	prefix string
+}
+
+func (f *canonicalFactory) CanonicalAddress(address string) string {
+	return f.prefix + "." + address
 }
 
 type resolvingFactory struct {

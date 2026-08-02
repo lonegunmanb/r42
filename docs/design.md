@@ -1,9 +1,9 @@
 # r42 Research DAG DSL Design
 
-Status: accepted design baseline for the first implementation
+Status: current implementation contract
 
-This document records the decisions made during the r42 design interview. It is
-the normative source for the first implementation. When this document and an
+This document records the implemented r42 execution contract. It is the
+normative source for the current implementation. When this document and an
 example disagree, the explicit rules in this document win.
 
 ## 1. Purpose
@@ -53,21 +53,28 @@ Plan recursively parses every referenced module directory. Apply consumes the
 saved nested Plans and never reparses module source. `r42 apply <directory>` is
 a convenience form that performs a complete in-memory Plan before Apply.
 
-Golden owns graph construction and dependency evaluation. References create
-implicit dependencies. `depends_on` is available for dependencies that cannot be
-expressed through values, matching Terraform's model.
+Golden owns source-configuration graph construction and dependency evaluation.
+References create implicit dependencies. `depends_on` is available for
+dependencies that cannot be expressed through values, matching Terraform's
+model. r42 serializes the resulting node addresses and dependency lists into its
+immutable Plan.
 
 The pinned Golden version mutates its live block graph during Plan and exposes
 no Plan serialization or nested executor API. r42 owns the immutable
-serializable Plan and persists nested Plans. Apply reconstructs the saved nodes
-as native `research` and `module` blocks in an r42 `ResearchConfig`; Golden
-builds their dependency graph. `RunResearchPlan` delegates traversal directly to
-`ResearchConfig.RunPlan()` and freezes the source result as a serializable r42
-plan. The CLI retains that Config; `loadOrPlan` returns either the source Config
-or a Config restored from a saved plan. `ResearchPlan.Apply` therefore reads its
-apply behavior from the owning Config instead of accepting another runtime
-options object. Internally, saved nodes are reconstructed as native blocks and
-applied by the same Golden traversal. Apply never reparses module source.
+serializable Plan and persists nested Plans. `RunResearchPlan` delegates source
+planning to `ResearchConfig.RunPlan()` and freezes the result. The CLI retains
+that Config; `loadOrPlan` returns either the source Config or a Config restored
+from a saved plan. `ResearchPlan.Apply` therefore reads its Apply behavior from
+the owning Config instead of accepting another runtime options object.
+
+Apply reconstructs saved nodes as native `research` and `module` blocks and
+runs Golden Plan to decode and validate them without running any Apply work. The
+r42 saved-plan scheduler then uses the immutable node dependency lists and
+configured parallelism to invoke `ApplyBlock.Apply()` for ready blocks. This
+separation is deliberate: `ExecuteDuringPlan` validates and snapshots, while
+`Apply()` is the only entry point for Copilot sessions, typed tool processes,
+artifact mutation, and nested-module execution. Apply never reparses module
+source.
 
 Any block failure or timeout triggers fail-fast cancellation of the entire DAG.
 An interrupted Apply cannot resume; another Apply creates a new run and starts
@@ -83,6 +90,7 @@ The first version has these root-level declarations:
 - `research`: a research session and an optional nested QC session.
 - `module`: a statically planned child directory.
 - `variable`: a module input.
+- `locals`: Plan-time names for derived expressions.
 - `output`: a module output.
 
 There is no root `r42 {}` block. Global parallelism and overall timeout are CLI
@@ -147,7 +155,7 @@ go_tool "finish" {
   GO
 }
 
-research "market" {
+research "static" "market" {
   model_provider  = model_provider.primary
   model           = "gpt-5.6-sol"
   reasoning_effort = "max"
@@ -169,7 +177,7 @@ research "market" {
   disallowed_tools = ["ask_user"]
   permission       = "approve_all"
 
-  skill_directories = ["./skills"]
+  skill_directories = ["${path.module}/skills"]
   skills            = ["source-evaluation"]
   disabled_skills   = []
 
@@ -192,22 +200,23 @@ research "market" {
 }
 
 output "summary" {
-  value     = research.market.result
+  value     = research.static.market.result
   sensitive = false
 }
 
 output "report_path" {
-  value = one([for item in research.market.artifact : item if item.name == "report"]).path
+  value = one([for item in research.static.market.artifact : item if item.name == "report"]).path
 }
 ```
 
-The example fixes the public shape of the DSL. Adapter-specific provider
-combinations may be narrowed by Plan validation as the adapter evolves.
+The example fixes the public shape of the DSL. Provider-specific combinations
+may be narrowed by Plan validation as the SDK and provider APIs evolve.
 
 Every nested block keeps its singular HCL block name and is exposed as
 `list(object)`, following Terraform and Golden conventions. This applies to
-`model_provider.retry`, `research.retry`, `research.artifact`, `research.qc`,
-and `research.qc[*].retry`; r42 does not remap labeled nested blocks into
+`model_provider.retry`, `research.static.<name>.retry`,
+`research.static.<name>.artifact`, `research.static.<name>.qc`, and
+`research.static.<name>.qc[*].retry`; r42 does not remap labeled nested blocks into
 name-keyed objects.
 
 ## 5. Model Providers
@@ -268,13 +277,15 @@ reused through all of its turns.
 
 Research session fields include:
 
-- `model_provider`: optional provider reference; omission uses the adapter's
+- `model_provider`: optional provider reference; omission uses the SDK's
   default provider behavior.
 - `model`: required.
 - `reasoning_effort`: an arbitrary non-empty string passed through unchanged.
 - `system_prompt`: required.
 - `prompt`: optional.
 - `tool_ids`: typed tool IDs, normally selected through a tool block's read-only `id` attribute.
+- `typed_tool_call_quota`: optional per-session call limits keyed by configured
+  typed tool ID.
 - `terminate_tool_id`: optional typed tool ID.
 - `allowed_tools` and `disallowed_tools`: SDK tool-name strings.
 - `skill_directories`, `skills`, and `disabled_skills`.
@@ -313,6 +324,11 @@ Tools declared in a module remain private unless the module exposes the tool ID
 as a direct string output. A parent can pass that output to `tool_ids`; Plan then
 imports only the corresponding exported definition into the parent registry.
 
+Research and QC configure typed-tool quotas independently. A successful call
+consumes one unit only after its arguments pass schema validation and the tool
+returns an accepted response. Execution errors and `accepted = false` responses
+roll back the reservation. A zero quota disables that tool for the session.
+
 `one(collection)` follows Terraform's zero-or-one convention: an empty list,
 set, or tuple returns null, one element returns that element, and more than one
 element is an error.
@@ -346,15 +362,18 @@ created by one task.
 
 ### Skills
 
-r42 uses Copilot's native skill mechanism: normalized absolute roots go into
-`SkillDirectories`, and selected skill names go into the custom agent
-configuration. Relative roots are resolved during Plan and must exist. Skills
-are not copied or hashed. With no allowlist, a configured skill is usable unless
+r42 uses Copilot's native skill mechanism. The evaluated `skill_directories`
+strings go into `SkillDirectories`, and selected skill names go into the custom
+agent configuration. r42 records those strings in the Plan but does not copy,
+hash, or check the directories during Plan. Authors should use
+`"${path.module}/skills"` for module-owned skills so the SDK receives a stable
+absolute path. The directories and their `SKILL.md` files must be readable when
+Apply opens the session. With no allowlist, a configured skill is usable unless
 disabled or excluded by tool policy.
 
-If the adapter exposes a native session feature needed for these fields, r42
-uses it; unsupported optional SDK features are not emulated unless required by
-the protocol above.
+If the SDK exposes a native session feature needed for these fields, r42 uses
+it; unsupported optional SDK features are not emulated unless required by the
+protocol above.
 
 ## 7. Typed Tool Contract
 
@@ -514,7 +533,7 @@ An artifact has a name, `type` (`file` or `directory`), `path`, `required`, and
 - For `required = false`, `.path` still returns the expected absolute path when
   the artifact does not exist.
 
-`research.name.artifact` is a `list(object)`, matching Golden's nested-block
+`research.static.name.artifact` is a `list(object)`, matching Golden's nested-block
 representation. Referencing it creates a Golden implicit dependency. A plain
 string containing the same filesystem path creates no dependency; use
 `depends_on` when needed.
@@ -586,11 +605,13 @@ permit plus every explicit ancestor-module permit in root-to-leaf order. Its
 effective concurrency is therefore bounded by the global setting and every
 enclosing module.
 
-Golden `RunPlan` traverses independent ready vertices concurrently. The root or
-effective module scope supplies its traversal limit, while the research Apply
-wrapper acquires the global and ancestor-module permits. Module orchestration
-callbacks therefore do not consume research permits, and r42 does not maintain
-a second DAG scheduler.
+Golden `RunPlan` traverses independent ready vertices concurrently while
+decoding and validating a source or reconstructed configuration. Golden's
+generic `Traverse[ApplyBlock]` is serial, so r42's saved-plan scheduler performs
+the Apply traversal from the serialized dependency lists. The research Apply
+wrapper also acquires the global and ancestor-module permits. Module
+orchestration callbacks therefore do not consume research permits, while ready
+research blocks can execute concurrently up to all effective limits.
 
 Research blocks and modules may set `timeout` using Go duration strings such as
 `30m` and `2h`. CLI overall `--timeout` defaults to `1h`; research and module
@@ -612,10 +633,10 @@ After a session has been created, lifecycle retry repeats the current operation
 on that same session. r42 never silently replaces it. A lost or unrecoverable
 session fails the block.
 
-Only a `CloseSession` failure receives special treatment: after lifecycle
-retries are exhausted, it is recorded as a cleanup warning and does not turn an
-otherwise successful block into failure. This exception does not apply to
-session creation, messages, model calls, tools, or QC.
+Only an exhausted `Session.Disconnect()` failure receives special treatment: it
+is recorded as a cleanup warning and does not turn an otherwise successful
+block into failure. This exception does not apply to session creation, messages,
+model calls, tools, or QC.
 
 ## 14. Runs, Plans, Debugging, and Sensitive Data
 
@@ -640,9 +661,12 @@ contain:
 - Complete research and QC transcripts.
 - Tool arguments, results, stdout, and stderr.
 
-Full debug data is written to files only, never streamed to the terminal.
+Raw SDK payloads and complete tool arguments/results are written to files only.
+The live Apply UI displays normalized assistant text, available reasoning text,
+tool names/progress, and errors so users can observe long-running research.
 Transport credentials are not deliberately emitted, but prompt/tool content may
-contain secrets; the whole run directory is sensitive.
+contain secrets; the whole run directory and any terminal recording are
+sensitive.
 
 When `--debug` is enabled, lifecycle and transcript events are appended to
 `.r42/runs/<run-id>/events.jsonl`. Each JSON object has a monotonic `sequence`,
@@ -670,9 +694,10 @@ Message and tool events contain the complete system, user, and assistant
 payloads plus tool arguments/results/stdout/stderr. Copilot SDK tool-call input
 deltas, tool search/request, execution start/progress/partial-result, and
 execution-complete events are preserved as `sdk_event`, including built-in
-tools and their tool-call/turn correlation IDs. The CLI prints the debug log path
-and a sensitive-data warning to stderr, but writes event content only to the
-file. `skipped` means an operation was deliberately not attempted because a
+tools and their tool-call/turn correlation IDs. Assistant usage events record
+input, output, reasoning, and cache token counts. The CLI prints the debug log
+path and a sensitive-data warning to stderr. `skipped` means an operation was
+deliberately not attempted because a
 prerequisite failed; it is distinct from a failure in the operation itself.
 
 Variables and outputs support `sensitive = true`, and sensitivity propagates
@@ -707,18 +732,49 @@ only writes a saved Plan file when `--out` is present.
 
 `apply` prints the immutable Plan JSON to stdout before execution starts. After
 a successful Apply, it prints the output values as a second JSON document.
+Progress is always written to stderr. `--ui=auto` selects the Bubble Tea TUI
+when stdin and stderr are interactive terminals of at least 50x12 and falls
+back to the line-oriented REPL renderer for redirected output, CI, `TERM=dumb`,
+or smaller terminals. `--ui=tui` requires those capabilities; `--ui=repl`
+forces stable text events.
+
+Both renderers consume the same in-memory event stream used by the debug
+recorder. The stream exists even without `--debug`; that flag controls sensitive
+event persistence, not live state production. The projector builds its initial
+state from the fully expanded saved Plan, including module child Plans, then
+tracks block lifecycle, research/QC phase, assistant reasoning/message deltas,
+tool execution, and usage. Usage is deduplicated by provider API-call ID and the
+displayed total is input plus output tokens; reasoning tokens are shown as a
+breakdown and are not counted twice.
+
+The TUI header reports research completion as `Tasks <done>/<total>`, while its
+running and failed counts and overall status cover every node in the expanded
+DAG. A failed module therefore fails the displayed run even when nested research
+nodes remain waiting. At widths of 100 columns or more, DAG, detail, and timeline
+are shown side by side; narrower supported terminals show only the focused
+panel. Every `WindowSizeMsg` recomputes panel widths, viewport heights, and both
+scroll bounds, then requests a full redraw. A live resize below 50x12 replaces
+the layout with a terminal-size warning until enough space is restored.
+
+The REPL renderer prints the initial expanded DAG and concise research activity,
+tool calls, and module `START`, `DONE`, or `FAILED` transitions. Nested module
+events use their canonical addresses. Both renderers strip terminal control
+sequences from display copies of model, tool, path, and error text; debug JSONL
+keeps the raw SDK event for diagnosis.
 
 The CLI also exposes:
 
 - `--parallelism`, default 10.
 - Overall `--timeout`, default `1h`.
 - `--debug`, disabled by default.
+- `--ui`, default `auto`; accepted values are `auto`, `tui`, and `repl`.
 - Golden's existing root-variable input mechanisms without an r42-specific
   duplicate implementation.
 
 CLI failures must identify the block address, preserve the root cause, and show
 cleanup diagnostics separately. An Apply exits non-zero for any DAG failure,
-except the explicitly downgraded post-success `CloseSession` cleanup warning.
+except the explicitly downgraded post-success `Session.Disconnect()` cleanup
+warning.
 
 ## 16. Validation Boundaries
 
@@ -731,7 +787,6 @@ Plan validates all information that is structurally available:
 - Inline Go syntax, imports, declarations, signature, and cty compatibility.
 - ToolResponse shape and static invariants.
 - Typed-tool IDs, registry membership, and `tool_name()` argument kind.
-- Skill directory existence.
 - Duration syntax and non-negative retry/attempt/concurrency values.
 
 Plan deliberately does not validate:

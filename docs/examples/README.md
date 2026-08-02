@@ -43,3 +43,18 @@ directory where the CLI was started. `path.module` lets the module invoke its
 copied Python file. During Apply, `block_wd()` resolves to the research block's
 absolute workspace and the fetch tool writes `snapshot.md` there. Apply prints
 that artifact path when the DAG completes.
+
+## Deep-research matrix
+
+The `deep-research` example accepts an overall topic and an arbitrary
+`list(string)` research plan through `-var-file`. It expands the plan into N
+independent subquestion research blocks. A required inline Go typed tool makes
+each block submit a structured knowledge graph of claims and exact quotes, and
+each expanded block has its own QC session that checks every claim, source URL,
+and quotation.
+
+After all subquestions pass QC, a conflict-resolution block compares the
+knowledge artifacts and records resolved or preserved contradictions. A final
+block synthesizes a Markdown report and runs one last QC pass. See
+[`deep-research/README.md`](deep-research/README.md) for the variable file and
+commands.

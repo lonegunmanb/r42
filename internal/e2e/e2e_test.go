@@ -90,7 +90,7 @@ func TestDocumentedBasicExamplePlans(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, planned.Nodes(), 1)
-	assert.Equal(t, "research.summary", planned.Nodes()[0].Address)
+	assert.Equal(t, "research.static.summary", planned.Nodes()[0].Address)
 }
 
 func TestTerminalResultAndArtifactsCrossRuntimeBoundaries(t *testing.T) {
@@ -179,7 +179,7 @@ func TestPlanAndApplyRunInDifferentProcesses(t *testing.T) {
 		"--out",
 		planPath,
 	)
-	assert.Contains(t, planOutput, "research.source")
+	assert.Contains(t, planOutput, "research.static.source")
 	assert.FileExists(t, planPath)
 
 	applyOutput := runE2ECLIProcess(t, "apply", planPath, "--parallelism", "1")

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/executor"
@@ -73,6 +74,54 @@ func TestRunDisplaysEveryHCLDiagnostic(t *testing.T) {
 	assert.Contains(t, stderr.String(), "first invalid expression")
 	assert.Contains(t, stderr.String(), "second invalid expression")
 	assert.NotContains(t, stderr.String(), "other diagnostic(s)")
+}
+
+func TestRunAcceptsTerraformStyleVariableFlags(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "separate values",
+			args: []string{"plan", "-var", "topic=markets", "-var-file", "inputs.r42vars"},
+		},
+		{
+			name: "equals values",
+			args: []string{"apply", t.TempDir(), "-var=topic=markets", "-var-file=inputs.r42vars"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			runtime := new(variableCapturingRuntime)
+
+			code := run(t.Context(), test.args, &stdout, &stderr, runtime)
+
+			assert.Equal(t, cli.ExitSuccess, code)
+			assert.Len(t, runtime.variables, 2)
+			if test.args[0] == "apply" {
+				assert.Contains(t, stderr.String(), "Research tasks: 0")
+			} else {
+				assert.Empty(t, stderr.String())
+			}
+		})
+	}
+}
+
+type variableCapturingRuntime struct {
+	stubRuntime
+	variables []golden.CliFlagAssignedVariables
+}
+
+func (r *variableCapturingRuntime) Config(
+	_ string,
+	options executor.ResearchConfigOptions,
+) (*executor.ResearchConfig, error) {
+	r.variables = options.Variables
+	return r.stubRuntime.Config("", options)
 }
 
 type stubRuntime struct{ applyErr error }

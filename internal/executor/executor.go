@@ -18,6 +18,10 @@ type Factory interface {
 	New(context.Context, plan.NodeSpec, *r42concurrency.Scope) (golden.ApplyBlock, error)
 }
 
+type AddressCanonicalizer interface {
+	CanonicalAddress(string) string
+}
+
 type OutputResolver interface {
 	ResolveOutputs(*plan.Plan) (map[string]cty.Value, error)
 }

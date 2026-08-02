@@ -14,7 +14,6 @@ import (
 
 	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
-	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
 	"github.com/lonegunmanb/r42/internal/config"
 	"github.com/lonegunmanb/r42/internal/debuglog"
@@ -458,12 +457,9 @@ func inspectVariables(blocks []*golden.HclBlock) (map[string]variableDeclaration
 			continue
 		}
 		name := block.Labels[1]
-		attribute, ok := block.Attributes()["type"]
+		_, ok := block.Attributes()["type"]
 		if !ok {
 			return nil, fmt.Errorf("variable %q must declare type", name)
-		}
-		if _, diagnostics := typeexpr.TypeConstraint(attribute.Expr); diagnostics.HasErrors() {
-			return nil, fmt.Errorf("variable %q type: %w", name, diagnostics)
 		}
 		declaration := variableDeclaration{}
 		if defaultAttribute, hasDefault := block.Attributes()["default"]; hasDefault {

@@ -30,7 +30,7 @@ external_tool "lookup" {
   input_type = object({ query = string, limit = optional(number, 5) })
   output_type = object({ answer = string })
 }
-research "source" {
+research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
 	tool_ids = [external_tool.lookup.id]
@@ -62,7 +62,7 @@ external_tool "lookup" {
   input_type = object({ query = string })
   output_type = object({ answer = string })
 }
-research "source" {
+research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
 	tool_ids = [external_tool.lookup.id]
@@ -89,15 +89,48 @@ research "source" {
 	assert.Contains(t, string(events), "running external tool")
 }
 
+func TestProductionRuntimeExternalToolQuotaConsumesOnlySuccessfulCalls(t *testing.T) {
+	t.Setenv("R42_EXTERNAL_HELPER", "1")
+	directory := t.TempDir()
+	program, err := json.Marshal(os.Args[0])
+	require.NoError(t, err)
+	source := fmt.Sprintf(`
+external_tool "lookup" {
+  description = "Look up evidence"
+  program = [%s, "-test.run=TestExternalToolHelperProcess", "--"]
+  input_type = object({ query = string })
+  output_type = object({ answer = string })
+}
+research "static" "source" {
+  model         = "test-model"
+  system_prompt = "Collect evidence."
+  tool_ids      = [external_tool.lookup.id]
+  typed_tool_call_quota = {
+    (external_tool.lookup.id) = 1
+  }
+}
+`, program)
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(source), 0o600))
+	opener := &externalQuotaOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+
+	require.NoError(t, err)
+	require.Len(t, opener.results, 5)
+	assert.Contains(t, opener.results[0], `"accepted":false`)
+	assert.Contains(t, opener.results[1], `"accepted":false`)
+	assert.Contains(t, opener.errors[2].Error(), "exit status 7")
+	assert.Contains(t, opener.results[3], `"accepted":true`)
+	assert.ErrorContains(t, opener.errors[4], "call quota exhausted (limit 1)")
+}
+
 //nolint:paralleltest // Helper process owns stdin/stdout and may terminate itself.
 func TestExternalToolHelperProcess(t *testing.T) {
 	if os.Getenv("R42_EXTERNAL_HELPER") != "1" {
 		return
-	}
-	if os.Getenv("R42_EXTERNAL_FAIL") == "1" {
-		_, _ = fmt.Fprint(os.Stdout, "failed stdout")
-		_, _ = fmt.Fprint(os.Stderr, "complete failed stderr")
-		os.Exit(7)
 	}
 	var input struct {
 		Query string  `json:"query"`
@@ -106,11 +139,57 @@ func TestExternalToolHelperProcess(t *testing.T) {
 	if err := json.NewDecoder(bufio.NewReader(os.Stdin)).Decode(&input); err != nil {
 		os.Exit(2)
 	}
+	if os.Getenv("R42_EXTERNAL_FAIL") == "1" || input.Query == "error" {
+		_, _ = fmt.Fprint(os.Stdout, "failed stdout")
+		_, _ = fmt.Fprint(os.Stderr, "complete failed stderr")
+		os.Exit(7)
+	}
+	if input.Query == "reject" {
+		_, _ = fmt.Fprint(os.Stdout, `{"accepted":false,"issues":[{"code":"retry","message":"try again"}]}`)
+		os.Exit(0)
+	}
 	_, _ = fmt.Fprintf(os.Stdout, `{"accepted":true,"output":{"answer":"%s limit=%.0f"}}`, input.Query, input.Limit)
 	os.Exit(0)
 }
 
 type externalCallingOpener struct{ result string }
+
+type externalQuotaOpener struct {
+	results []string
+	errors  []error
+}
+
+func (o *externalQuotaOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
+	return &externalQuotaSession{config: config, opener: o}, nil
+}
+
+type externalQuotaSession struct {
+	config copilot.SessionConfig
+	opener *externalQuotaOpener
+}
+
+func (s *externalQuotaSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	for _, tool := range s.config.Tools {
+		if !strings.HasPrefix(tool.Name, "tool_external_tool_lookup_") {
+			continue
+		}
+		for _, arguments := range []map[string]any{
+			{},
+			{"query": "reject"},
+			{"query": "error"},
+			{"query": "facts"},
+			{"query": "facts"},
+		} {
+			result, err := tool.Handler(sdk.ToolInvocation{Arguments: arguments})
+			s.opener.results = append(s.opener.results, result.TextResultForLLM)
+			s.opener.errors = append(s.opener.errors, err)
+		}
+		return &sdk.SessionEvent{}, nil
+	}
+	return nil, assert.AnError
+}
+
+func (*externalQuotaSession) Close(context.Context) error { return nil }
 
 func (o *externalCallingOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
 	return &externalCallingSession{config: config, opener: o}, nil

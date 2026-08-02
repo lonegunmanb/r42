@@ -1,4 +1,4 @@
-research "summary" {
+research "static" "summary" {
   model            = "gpt-5.6-sol"
   reasoning_effort = "medium"
   system_prompt    = "Act as a rigorous research analyst. Distinguish evidence from inference and cite primary sources."

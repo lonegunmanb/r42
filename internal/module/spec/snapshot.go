@@ -3,6 +3,7 @@ package spec
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"time"
 
@@ -39,28 +40,30 @@ type researchSnapshot struct {
 }
 
 type policySnapshot struct {
-	ToolIDs          []string                `json:"tool_ids,omitempty"`
-	AllowedTools     []string                `json:"allowed_tools,omitempty"`
-	DisallowedTools  []string                `json:"disallowed_tools,omitempty"`
-	SkillDirectories []string                `json:"skill_directories,omitempty"`
-	Skills           []string                `json:"skills,omitempty"`
-	DisabledSkills   []string                `json:"disabled_skills,omitempty"`
-	Permission       researchspec.Permission `json:"permission"`
+	ToolIDs            []string                `json:"tool_ids,omitempty"`
+	TypedToolCallQuota map[string]int          `json:"typed_tool_call_quota,omitempty"`
+	AllowedTools       []string                `json:"allowed_tools,omitempty"`
+	DisallowedTools    []string                `json:"disallowed_tools,omitempty"`
+	SkillDirectories   []string                `json:"skill_directories,omitempty"`
+	Skills             []string                `json:"skills,omitempty"`
+	DisabledSkills     []string                `json:"disabled_skills,omitempty"`
+	Permission         researchspec.Permission `json:"permission"`
 }
 
 type qcSnapshot struct {
-	Criteria         map[string]string        `json:"criteria"`
-	Model            *string                  `json:"model,omitempty"`
-	ReasoningEffort  *string                  `json:"reasoning_effort,omitempty"`
-	Retry            provider.RetryOverride   `json:"retry"`
-	ToolIDs          []string                 `json:"tool_ids,omitempty"`
-	AllowedTools     []string                 `json:"allowed_tools,omitempty"`
-	DisallowedTools  []string                 `json:"disallowed_tools,omitempty"`
-	SkillDirectories []string                 `json:"skill_directories,omitempty"`
-	Skills           []string                 `json:"skills,omitempty"`
-	DisabledSkills   []string                 `json:"disabled_skills,omitempty"`
-	Permission       *researchspec.Permission `json:"permission,omitempty"`
-	MaxRounds        int                      `json:"max_rounds"`
+	Criteria           map[string]string        `json:"criteria"`
+	Model              *string                  `json:"model,omitempty"`
+	ReasoningEffort    *string                  `json:"reasoning_effort,omitempty"`
+	Retry              provider.RetryOverride   `json:"retry"`
+	ToolIDs            []string                 `json:"tool_ids,omitempty"`
+	TypedToolCallQuota map[string]int           `json:"typed_tool_call_quota,omitempty"`
+	AllowedTools       []string                 `json:"allowed_tools,omitempty"`
+	DisallowedTools    []string                 `json:"disallowed_tools,omitempty"`
+	SkillDirectories   []string                 `json:"skill_directories,omitempty"`
+	Skills             []string                 `json:"skills,omitempty"`
+	DisabledSkills     []string                 `json:"disabled_skills,omitempty"`
+	Permission         *researchspec.Permission `json:"permission,omitempty"`
+	MaxRounds          int                      `json:"max_rounds"`
 }
 
 type providerSnapshot struct {
@@ -110,8 +113,9 @@ func EncodeResearchPlan(
 		snapshot.QC = &qcSnapshot{
 			Criteria: criteria, Model: clonePointer(config.QC.Model),
 			ReasoningEffort: clonePointer(config.QC.ReasoningEffort), Retry: config.QC.Retry,
-			ToolIDs:      slices.Clone(config.QC.ToolIDs),
-			AllowedTools: slices.Clone(config.QC.AllowedTools), DisallowedTools: slices.Clone(config.QC.DisallowedTools),
+			ToolIDs:            slices.Clone(config.QC.ToolIDs),
+			TypedToolCallQuota: maps.Clone(config.QC.TypedToolCallQuota),
+			AllowedTools:       slices.Clone(config.QC.AllowedTools), DisallowedTools: slices.Clone(config.QC.DisallowedTools),
 			SkillDirectories: slices.Clone(config.QC.SkillDirectories), Skills: slices.Clone(config.QC.Skills),
 			DisabledSkills: slices.Clone(config.QC.DisabledSkills), Permission: clonePointer(config.QC.Permission),
 			MaxRounds: config.QC.MaxRounds,
@@ -163,7 +167,8 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 			Criteria: cty.MapVal(stringValues(snapshot.QC.Criteria)), Model: clonePointer(snapshot.QC.Model),
 			ReasoningEffort: clonePointer(snapshot.QC.ReasoningEffort), Retry: snapshot.QC.Retry,
 			ToolIDs: slices.Clone(snapshot.QC.ToolIDs), AllowedTools: slices.Clone(snapshot.QC.AllowedTools),
-			DisallowedTools: slices.Clone(snapshot.QC.DisallowedTools), SkillDirectories: slices.Clone(snapshot.QC.SkillDirectories),
+			TypedToolCallQuota: maps.Clone(snapshot.QC.TypedToolCallQuota),
+			DisallowedTools:    slices.Clone(snapshot.QC.DisallowedTools), SkillDirectories: slices.Clone(snapshot.QC.SkillDirectories),
 			Skills: slices.Clone(snapshot.QC.Skills), DisabledSkills: slices.Clone(snapshot.QC.DisabledSkills),
 			Permission: clonePointer(snapshot.QC.Permission), MaxRounds: snapshot.QC.MaxRounds,
 		}
@@ -245,6 +250,9 @@ func validateResearchToolIDs(config researchspec.Config, registry map[string]int
 			return err
 		}
 	}
+	if err := validatePlannedTypedToolCallQuota(config.Policy.TypedToolCallQuota, registry, "research"); err != nil {
+		return err
+	}
 	if err := validateToolFilters(config.Policy.AllowedTools, registry, "research allowed_tools"); err != nil {
 		return err
 	}
@@ -257,10 +265,26 @@ func validateResearchToolIDs(config researchspec.Config, registry map[string]int
 	if err := validateConfiguredToolIDs(config.QC.ToolIDs, registry, "qc tool_ids"); err != nil {
 		return err
 	}
+	if err := validatePlannedTypedToolCallQuota(config.QC.TypedToolCallQuota, registry, "qc"); err != nil {
+		return err
+	}
 	if err := validateToolFilters(config.QC.AllowedTools, registry, "qc allowed_tools"); err != nil {
 		return err
 	}
 	return validateToolFilters(config.QC.DisallowedTools, registry, "qc disallowed_tools")
+}
+
+func validatePlannedTypedToolCallQuota(
+	quota map[string]int,
+	registry map[string]internalplan.ToolSpec,
+	scope string,
+) error {
+	for toolID := range quota {
+		if _, ok := registry[toolID]; !ok {
+			return fmt.Errorf("%s typed_tool_call_quota references tool id %q that was not planned", scope, toolID)
+		}
+	}
+	return nil
 }
 
 func validateConfiguredToolIDs(
@@ -305,8 +329,9 @@ func referenceAddress(value cty.Value) (string, bool, error) {
 
 func snapshotPolicy(policy researchspec.SessionPolicy) policySnapshot {
 	return policySnapshot{
-		ToolIDs:      slices.Clone(policy.ToolIDs),
-		AllowedTools: slices.Clone(policy.AllowedTools), DisallowedTools: slices.Clone(policy.DisallowedTools),
+		ToolIDs:            slices.Clone(policy.ToolIDs),
+		TypedToolCallQuota: maps.Clone(policy.TypedToolCallQuota),
+		AllowedTools:       slices.Clone(policy.AllowedTools), DisallowedTools: slices.Clone(policy.DisallowedTools),
 		SkillDirectories: slices.Clone(policy.SkillDirectories), Skills: slices.Clone(policy.Skills),
 		DisabledSkills: slices.Clone(policy.DisabledSkills), Permission: policy.Permission,
 	}
@@ -315,7 +340,8 @@ func snapshotPolicy(policy researchspec.SessionPolicy) policySnapshot {
 func restorePolicy(policy policySnapshot) researchspec.SessionPolicy {
 	return researchspec.SessionPolicy{
 		ToolIDs: slices.Clone(policy.ToolIDs), AllowedTools: slices.Clone(policy.AllowedTools),
-		DisallowedTools: slices.Clone(policy.DisallowedTools), SkillDirectories: slices.Clone(policy.SkillDirectories),
+		TypedToolCallQuota: maps.Clone(policy.TypedToolCallQuota),
+		DisallowedTools:    slices.Clone(policy.DisallowedTools), SkillDirectories: slices.Clone(policy.SkillDirectories),
 		Skills: slices.Clone(policy.Skills), DisabledSkills: slices.Clone(policy.DisabledSkills), Permission: policy.Permission,
 	}
 }

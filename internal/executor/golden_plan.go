@@ -276,8 +276,9 @@ func (e *planExecution) executeAddress(address string) error {
 }
 
 func (e *planExecution) execute(node plan.NodeSpec) error {
+	address := e.canonicalAddress(node.Address)
 	if err := e.ctx.Err(); err != nil {
-		return e.recordFailure(fmt.Errorf("apply block %s: %w", node.Address, err))
+		return e.recordFailure(fmt.Errorf("apply block %s: %w", address, err))
 	}
 	work := func(ctx context.Context) error { return e.executeBlock(ctx, node) }
 	if node.Kind != "research" {
@@ -289,14 +290,15 @@ func (e *planExecution) execute(node plan.NodeSpec) error {
 		return work(ctx)
 	})
 	if err != nil && !called {
-		return e.recordFailure(fmt.Errorf("apply block %s: %w", node.Address, err))
+		return e.recordFailure(fmt.Errorf("apply block %s: %w", address, err))
 	}
 	return err
 }
 
 func (e *planExecution) executeBlock(ctx context.Context, node plan.NodeSpec) error {
+	address := e.canonicalAddress(node.Address)
 	event := debuglog.Event{
-		BlockAddress: node.Address, BlockType: node.Kind, Dependencies: node.Dependencies,
+		BlockAddress: address, BlockType: node.Kind, Dependencies: e.canonicalAddresses(node.Dependencies),
 	}
 	factoryStarted := time.Now()
 	if err := debuglog.Lifecycle(ctx, "block.factory", debuglog.StatusStarted, event); err != nil {
@@ -304,9 +306,9 @@ func (e *planExecution) executeBlock(ctx context.Context, node plan.NodeSpec) er
 	}
 	block, err := e.factory.New(ctx, node, e.scope)
 	if err != nil {
-		err = fmt.Errorf("create apply block %s: %w", node.Address, err)
+		err = fmt.Errorf("create apply block %s: %w", address, err)
 	} else if block == nil {
-		err = fmt.Errorf("create apply block %s: factory returned nil", node.Address)
+		err = fmt.Errorf("create apply block %s: factory returned nil", address)
 	}
 	factoryLogErr := debuglog.CompleteLifecycle(ctx, "block.factory", factoryStarted, err, event)
 	err = errors.Join(err, factoryLogErr)
@@ -314,9 +316,9 @@ func (e *planExecution) executeBlock(ctx context.Context, node plan.NodeSpec) er
 		applyStarted := time.Now()
 		if err = debuglog.Lifecycle(ctx, "block.apply", debuglog.StatusStarted, event); err == nil {
 			if applyErr := block.Apply(); applyErr != nil {
-				err = fmt.Errorf("apply block %s: %w", node.Address, applyErr)
+				err = fmt.Errorf("apply block %s: %w", address, applyErr)
 			} else if contextErr := ctx.Err(); contextErr != nil {
-				err = fmt.Errorf("apply block %s: %w", node.Address, contextErr)
+				err = fmt.Errorf("apply block %s: %w", address, contextErr)
 			}
 			err = errors.Join(err, debuglog.CompleteLifecycle(ctx, "block.apply", applyStarted, err, event))
 		}
@@ -332,16 +334,31 @@ func (e *planExecution) executeBlock(ctx context.Context, node plan.NodeSpec) er
 			cleanupErr = errors.Join(cleanupErr, debuglog.CompleteLifecycle(ctx, "block.cleanup", cleanupStarted, cleanupErr, event))
 		}
 		if cleanupErr != nil {
-			e.addWarning(fmt.Errorf("cleanup block %s: %w", node.Address, cleanupErr))
+			e.addWarning(fmt.Errorf("cleanup block %s: %w", address, cleanupErr))
 		}
 	}
 	if err == nil {
 		if contextErr := ctx.Err(); contextErr != nil {
-			err = fmt.Errorf("apply block %s: %w", node.Address, contextErr)
+			err = fmt.Errorf("apply block %s: %w", address, contextErr)
 			e.fail(err)
 		}
 	}
 	return err
+}
+
+func (e *planExecution) canonicalAddress(address string) string {
+	if canonicalizer, ok := e.factory.(AddressCanonicalizer); ok {
+		return canonicalizer.CanonicalAddress(address)
+	}
+	return address
+}
+
+func (e *planExecution) canonicalAddresses(addresses []string) []string {
+	result := make([]string, len(addresses))
+	for index, address := range addresses {
+		result[index] = e.canonicalAddress(address)
+	}
+	return result
 }
 
 func (e *planExecution) recordFailure(err error) error {
@@ -438,33 +455,72 @@ func runSavedPlan(directory string, execution *planExecution, parallelism int) e
 }
 
 func nativePlanHCLBlocks(nodes []plan.NodeSpec) ([]*golden.HclBlock, error) {
-	file := hclwrite.NewEmptyFile()
+	type nativePlanBlock struct {
+		address      nativePlanAddress
+		forEach      map[string]cty.Value
+		dependencies map[string]nativePlanAddress
+	}
+
+	blocksByAddress := make(map[string]*nativePlanBlock, len(nodes))
+	orderedBlocks := make([]*nativePlanBlock, 0, len(nodes))
 	for _, node := range nodes {
-		kind, name, ok := strings.Cut(node.Address, ".")
-		if !ok || kind != node.Kind || name == "" {
+		address, ok := parseNativePlanAddress(node.Address)
+		if !ok || address.kind != node.Kind {
 			return nil, fmt.Errorf("saved plan node %q does not match kind %q", node.Address, node.Kind)
 		}
-		block := hclwrite.NewBlock(kind, []string{name})
-		switch kind {
+		baseAddress := address.baseAddress()
+		block, exists := blocksByAddress[baseAddress]
+		if !exists {
+			block = &nativePlanBlock{
+				address:      address,
+				forEach:      make(map[string]cty.Value),
+				dependencies: make(map[string]nativePlanAddress),
+			}
+			blocksByAddress[baseAddress] = block
+			orderedBlocks = append(orderedBlocks, block)
+		}
+		if address.forEachKey != nil {
+			block.forEach[*address.forEachKey] = cty.True
+		}
+		for _, dependency := range node.Dependencies {
+			dependencyAddress, found := parseNativePlanAddress(dependency)
+			if !found {
+				return nil, fmt.Errorf("saved plan node %s depends on unknown node %s", node.Address, dependency)
+			}
+			dependencyAddress.forEachKey = nil
+			block.dependencies[dependencyAddress.baseAddress()] = dependencyAddress
+		}
+	}
+
+	file := hclwrite.NewEmptyFile()
+	for _, savedBlock := range orderedBlocks {
+		address := savedBlock.address
+		block := hclwrite.NewBlock(address.kind, address.labels)
+		if len(savedBlock.forEach) > 0 {
+			block.Body().SetAttributeValue("for_each", cty.ObjectVal(savedBlock.forEach))
+		}
+		switch address.kind {
 		case "research":
 			block.Body().SetAttributeValue("model", cty.StringVal("saved-plan"))
 			block.Body().SetAttributeValue("system_prompt", cty.StringVal("saved-plan"))
 		case "module":
 			block.Body().SetAttributeValue("source", cty.StringVal("."))
 		default:
-			return nil, fmt.Errorf("saved plan node %q has unsupported kind %q", node.Address, kind)
+			return nil, fmt.Errorf(
+				"saved plan node %q has unsupported kind %q",
+				address.baseAddress(),
+				address.kind,
+			)
 		}
-		if len(node.Dependencies) > 0 {
-			dependencies := make([]hclwrite.Tokens, 0, len(node.Dependencies))
-			for _, dependency := range node.Dependencies {
-				dependencyKind, dependencyName, found := strings.Cut(dependency, ".")
-				if !found || dependencyName == "" {
-					return nil, fmt.Errorf("saved plan node %s depends on unknown node %s", node.Address, dependency)
+		if len(savedBlock.dependencies) > 0 {
+			dependencies := make([]hclwrite.Tokens, 0, len(savedBlock.dependencies))
+			for _, dependency := range slices.Sorted(maps.Keys(savedBlock.dependencies)) {
+				dependencyAddress := savedBlock.dependencies[dependency]
+				traversal := hcl.Traversal{hcl.TraverseRoot{Name: dependencyAddress.kind}}
+				for _, label := range dependencyAddress.labels {
+					traversal = append(traversal, hcl.TraverseAttr{Name: label})
 				}
-				dependencies = append(dependencies, hclwrite.TokensForTraversal(hcl.Traversal{
-					hcl.TraverseRoot{Name: dependencyKind},
-					hcl.TraverseAttr{Name: dependencyName},
-				}))
+				dependencies = append(dependencies, hclwrite.TokensForTraversal(traversal))
 			}
 			block.Body().SetAttributeRaw("depends_on", hclwrite.TokensForTuple(dependencies))
 		}
@@ -480,4 +536,51 @@ func nativePlanHCLBlocks(nodes []plan.NodeSpec) ([]*golden.HclBlock, error) {
 		return nil, fmt.Errorf("saved plan has an unexpected syntax body")
 	}
 	return golden.AsHclBlocks(body.Blocks, file.Body().Blocks()), nil
+}
+
+type nativePlanAddress struct {
+	kind       string
+	labels     []string
+	forEachKey *string
+}
+
+func (a nativePlanAddress) baseAddress() string {
+	return a.kind + "." + strings.Join(a.labels, ".")
+}
+
+func parseNativePlanAddress(address string) (nativePlanAddress, bool) {
+	kind, remainder, found := strings.Cut(address, ".")
+	if !found || kind == "" || remainder == "" {
+		return nativePlanAddress{}, false
+	}
+	if kind != "research" {
+		if strings.Contains(remainder, ".") {
+			return nativePlanAddress{}, false
+		}
+		return nativePlanAddress{kind: kind, labels: []string{remainder}}, true
+	}
+
+	researchType, name, found := strings.Cut(remainder, ".")
+	if !found || researchType == "" || name == "" {
+		return nativePlanAddress{}, false
+	}
+	name, key, valid := splitNativePlanInstance(name)
+	if !valid {
+		return nativePlanAddress{}, false
+	}
+	return nativePlanAddress{
+		kind: kind, labels: []string{researchType, name}, forEachKey: key,
+	}, true
+}
+
+func splitNativePlanInstance(name string) (string, *string, bool) {
+	open := strings.LastIndexByte(name, '[')
+	if open < 0 {
+		return name, nil, !strings.Contains(name, "]")
+	}
+	if open == 0 || !strings.HasSuffix(name, "]") || open == len(name)-2 {
+		return "", nil, false
+	}
+	key := name[open+1 : len(name)-1]
+	return name[:open], &key, true
 }

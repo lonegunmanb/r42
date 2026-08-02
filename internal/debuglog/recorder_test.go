@@ -79,6 +79,95 @@ func TestDisabledRecorderPersistsNothing(t *testing.T) {
 	assert.Empty(t, recorder.Warning())
 }
 
+func TestDisabledRecorderPublishesEventsToRunObservers(t *testing.T) {
+	t.Parallel()
+
+	bus := debuglog.NewEventBus()
+	var observed []debuglog.Event
+	unsubscribe := bus.Subscribe(func(event debuglog.Event) {
+		observed = append(observed, event)
+	})
+	t.Cleanup(unsubscribe)
+	recorder, err := debuglog.NewRecorder(filepath.Join(t.TempDir(), "debug"), false)
+	require.NoError(t, err)
+	recorder.SetEventBus(bus)
+
+	require.NoError(t, recorder.Record(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "block.apply", Status: debuglog.StatusStarted,
+		BlockAddress: "research.static.market",
+	}))
+
+	require.Len(t, observed, 1)
+	assert.Equal(t, uint64(1), observed[0].Sequence)
+	assert.False(t, observed[0].Timestamp.IsZero())
+	assert.Equal(t, "research.static.market", observed[0].BlockAddress)
+}
+
+func TestEventBusSequencesDirectAndRecorderEventsMonotonically(t *testing.T) {
+	t.Parallel()
+
+	bus := debuglog.NewEventBus()
+	var sequences []uint64
+	unsubscribe := bus.Subscribe(func(event debuglog.Event) {
+		sequences = append(sequences, event.Sequence)
+	})
+	t.Cleanup(unsubscribe)
+	ctx := debuglog.WithEventBus(t.Context(), bus)
+	require.NoError(t, debuglog.Record(ctx, debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "apply", Status: debuglog.StatusStarted,
+	}))
+	recorder, err := debuglog.NewRecorder(t.TempDir(), false)
+	require.NoError(t, err)
+	recorder.SetEventBus(bus)
+	require.NoError(t, recorder.Record(debuglog.Event{
+		Kind: debuglog.EventMessage, Action: "assistant.message", Content: "complete",
+	}))
+
+	assert.Equal(t, []uint64{1, 2}, sequences)
+}
+
+func TestEventBusDeliversConcurrentEventsInSequenceOrder(t *testing.T) {
+	t.Parallel()
+
+	bus := debuglog.NewEventBus()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var sequences []uint64
+	unsubscribe := bus.Subscribe(func(event debuglog.Event) {
+		if event.Sequence == 1 {
+			close(started)
+			<-release
+		}
+		mu.Lock()
+		sequences = append(sequences, event.Sequence)
+		mu.Unlock()
+	})
+	t.Cleanup(unsubscribe)
+
+	ctx := debuglog.WithEventBus(t.Context(), bus)
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- debuglog.Record(ctx, debuglog.Event{Kind: debuglog.EventMessage})
+	}()
+	<-started
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- debuglog.Record(ctx, debuglog.Event{Kind: debuglog.EventMessage})
+	}()
+	select {
+	case <-secondDone:
+		t.Fatal("second event was delivered before the first observer returned")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	require.NoError(t, <-firstDone)
+	require.NoError(t, <-secondDone)
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []uint64{1, 2}, sequences)
+}
+
 func TestDebugRecorderPersistsCompleteTranscriptToFile(t *testing.T) {
 	t.Parallel()
 

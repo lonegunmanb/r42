@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/Azure/golden"
+	charmterm "github.com/charmbracelet/x/term"
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/lonegunmanb/r42/internal/plan"
+	runui "github.com/lonegunmanb/r42/internal/ui"
 	"github.com/spf13/cobra"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -175,6 +177,7 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 	var debug bool
 	var variables []string
 	var variableFiles []string
+	uiMode := string(runui.ModeAuto)
 	command := &cobra.Command{
 		Use:   "apply PLAN_OR_DIRECTORY",
 		Short: "Apply a saved plan or plan and apply a directory",
@@ -198,6 +201,10 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 				ctx, cancel = context.WithTimeout(ctx, timeout)
 				defer cancel()
 			}
+			ctx, cancelRun := context.WithCancel(ctx)
+			defer cancelRun()
+			eventBus := debuglog.NewEventBus()
+			ctx = debuglog.WithEventBus(ctx, eventBus)
 			debugState := &debugRun{enabled: debug}
 			if debug {
 				ctx = withDebugRun(ctx, debugState)
@@ -229,7 +236,28 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 			if err = writePlan(ctx, command.OutOrStdout(), planned.SavedPlan(), args[0]); err != nil {
 				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
-			err = planned.Apply()
+			selectedMode, err := runui.ResolveMode(
+				runui.Mode(uiMode), terminalCapabilities(command.InOrStdin(), command.ErrOrStderr()),
+			)
+			if err != nil {
+				return errors.Join(err, closeCommandDebug(command, debugState))
+			}
+			projector := runui.NewProjector(planned.SavedPlan())
+			if selectedMode == runui.ModeTUI {
+				unsubscribe := eventBus.Subscribe(projector.Observe)
+				err = runui.RunTUI(
+					ctx, command.InOrStdin(), command.ErrOrStderr(), projector, cancelRun, planned.Apply,
+				)
+				unsubscribe()
+			} else {
+				renderer := runui.NewTextRenderer(command.ErrOrStderr(), projector)
+				if err = renderer.Start(); err != nil {
+					return errors.Join(fmt.Errorf("start repl renderer: %w", err), closeCommandDebug(command, debugState))
+				}
+				unsubscribe := eventBus.Subscribe(renderer.Observe)
+				err = planned.Apply()
+				unsubscribe()
+			}
 			closeErr := closeCommandDebug(command, debugState)
 			for _, warning := range config.Warnings() {
 				if warning != nil {
@@ -250,7 +278,33 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 	command.Flags().BoolVar(&debug, "debug", false, "persist sensitive debug events")
 	command.Flags().StringArrayVar(&variables, "var", nil, "set a Golden input variable for directory apply (name=value)")
 	command.Flags().StringArrayVar(&variableFiles, "var-file", nil, "load Golden input variables for directory apply")
+	command.Flags().StringVar(&uiMode, "ui", uiMode, "run progress UI: auto, tui, or repl")
 	return command
+}
+
+func terminalCapabilities(input io.Reader, output io.Writer) runui.Terminal {
+	terminal := runui.Terminal{TERM: os.Getenv("TERM"), CI: environmentEnabled("CI") || environmentEnabled("GITHUB_ACTIONS")}
+	inputFD, inputOK := fileDescriptor(input)
+	outputFD, outputOK := fileDescriptor(output)
+	terminal.Input = inputOK && charmterm.IsTerminal(inputFD)
+	terminal.Output = outputOK && charmterm.IsTerminal(outputFD)
+	if terminal.Output {
+		terminal.Width, terminal.Height, _ = charmterm.GetSize(outputFD)
+	}
+	return terminal
+}
+
+func fileDescriptor(value any) (uintptr, bool) {
+	file, ok := value.(interface{ Fd() uintptr })
+	if !ok {
+		return 0, false
+	}
+	return file.Fd(), true
+}
+
+func environmentEnabled(name string) bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	return value != "" && value != "0" && value != "false"
 }
 
 func closeCommandDebug(command *cobra.Command, state *debugRun) error {

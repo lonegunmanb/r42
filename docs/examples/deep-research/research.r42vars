@@ -1,0 +1,15 @@
+topic = "What factors should a medium-sized software organization evaluate before adopting a monorepo?"
+
+research_plan = [
+  "Compare build performance, dependency management, testing, and release engineering in monorepos and polyrepos.",
+  "Analyze how repository structure affects team ownership, collaboration, code review, and developer onboarding.",
+  "Find documented monorepo adoption successes and failures, and identify the conditions that explain their different outcomes.",
+]
+
+model            = "deepseek-v4-flash"
+reasoning_effort = "medium"
+model_provider = {
+  endpoint = "https://api.deepseek.com"
+  wire_api = "responses"
+  api_key_ref = "DEEPSEEK_KEY"
+}

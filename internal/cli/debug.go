@@ -90,6 +90,7 @@ func (s *debugRun) ensureRunLocked(
 		s.run = activeRun
 		s.recorder = recorder
 	}
+	s.recorder.SetEventBus(debuglog.EventBusFromContext(ctx))
 	return debuglog.WithRecorder(ctx, s.recorder), s.run, s.recorder, nil
 }
 

@@ -24,6 +24,13 @@ func mainExitCode() int {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer, runtime cli.Runtime) int {
+	args = append([]string(nil), args...)
+	for index, arg := range args {
+		if arg == "-var" || arg == "-var-file" ||
+			strings.HasPrefix(arg, "-var=") || strings.HasPrefix(arg, "-var-file=") {
+			args[index] = "-" + arg
+		}
+	}
 	command := cli.NewCommand(runtime)
 	command.SetArgs(args)
 	command.SetOut(stdout)

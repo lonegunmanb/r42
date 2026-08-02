@@ -108,7 +108,7 @@ func TestProductionRuntimeAppliesTheBlockWorkingDirectoryReservedByPlan(t *testi
 	directory := t.TempDir()
 	runRoot := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
-research "source" {
+research "static" "source" {
   model         = "test-model"
   system_prompt = block_wd()
 }
@@ -168,7 +168,7 @@ func TestProductionRuntimeRunsOneResearchSessionAndPublishesArtifacts(t *testing
 	t.Parallel()
 	directory := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
-research "source" {
+research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
 	retry {
@@ -180,7 +180,7 @@ research "source" {
 	}
 }
 locals {
-  report_with_retries = "${one(research.source.artifact).path}|${one(research.source.retry).lifecycle_retries}"
+  report_with_retries = "${one(research.static.source.artifact).path}|${one(research.static.source.retry).lifecycle_retries}"
 }
 output "report_path" { value = local.report_with_retries }
 `), 0o600))
@@ -226,12 +226,12 @@ go_tool "finish" {
     }
   GO
 }
-research "source" {
+research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
   terminate_tool_id = go_tool.finish.id
 }
-output "summary" { value = research.source.result }
+output "summary" { value = research.static.source.result }
 `), 0o600))
 	opener := &toolCallingOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
@@ -297,12 +297,12 @@ go_tool "finish" {
     }
   GO
 }
-research "source" {
+research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
   terminate_tool_id = go_tool.finish.id
 }
-locals { summary = upper(research.source.result) }
+locals { summary = upper(research.static.source.result) }
 output "summary" { value = local.summary }
 `), 0o600))
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: &toolCallingOpener{}})
@@ -337,7 +337,7 @@ go_tool "lookup" {
     }
   GO
 }
-research "source" {
+research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
   tool_ids = [go_tool.lookup.id]
@@ -411,12 +411,12 @@ go_tool "finish" {
     }
   GO
 }
-research "source" {
+research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
   terminate_tool_id = go_tool.finish.id
 }
-output "summary" { value = research.source.result }
+output "summary" { value = research.static.source.result }
 `), 0o600))
 	return directory
 }

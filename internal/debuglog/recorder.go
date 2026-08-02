@@ -40,6 +40,7 @@ type SessionKind string
 const (
 	SessionResearch SessionKind = "research"
 	SessionQC       SessionKind = "qc"
+	SessionRevision SessionKind = "revision"
 )
 
 type Role string
@@ -73,12 +74,29 @@ type Event struct {
 	Role         Role            `json:"role,omitempty"`
 	Content      string          `json:"content,omitempty"`
 	ToolName     string          `json:"tool_name,omitempty"`
+	ToolCallID   string          `json:"tool_call_id,omitempty"`
+	MessageID    string          `json:"message_id,omitempty"`
 	ToolAddress  string          `json:"tool_address,omitempty"`
 	Arguments    json.RawMessage `json:"arguments,omitempty"`
 	Result       json.RawMessage `json:"result,omitempty"`
 	SDKEvent     json.RawMessage `json:"sdk_event,omitempty"`
 	Stdout       string          `json:"stdout,omitempty"`
 	Stderr       string          `json:"stderr,omitempty"`
+	Usage        *Usage          `json:"usage,omitempty"`
+}
+
+type Usage struct {
+	APICallID        string `json:"api_call_id,omitempty"`
+	Model            string `json:"model,omitempty"`
+	InputTokens      int64  `json:"input_tokens,omitempty"`
+	OutputTokens     int64  `json:"output_tokens,omitempty"`
+	ReasoningTokens  int64  `json:"reasoning_tokens,omitempty"`
+	CacheReadTokens  int64  `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64  `json:"cache_write_tokens,omitempty"`
+}
+
+func (u Usage) TotalTokens() int64 {
+	return u.InputTokens + u.OutputTokens
 }
 
 type Recorder struct {
@@ -89,6 +107,16 @@ type Recorder struct {
 	encoder  *json.Encoder
 	closed   bool
 	sequence uint64
+	bus      *EventBus
+}
+
+func (r *Recorder) SetEventBus(bus *EventBus) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.bus = bus
+	r.mu.Unlock()
 }
 
 type recorderContextKey struct{}
@@ -103,6 +131,7 @@ func Record(ctx context.Context, event Event) error {
 	}
 	recorder, _ := ctx.Value(recorderContextKey{}).(*Recorder)
 	if recorder == nil {
+		EventBusFromContext(ctx).publish(event)
 		return nil
 	}
 	return recorder.Record(event)
@@ -173,27 +202,43 @@ func (r *Recorder) Record(event Event) error {
 		return fmt.Errorf("debug recorder is required")
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.enabled {
-		return nil
+	bus := r.bus
+	r.mu.Unlock()
+	if bus != nil {
+		return bus.dispatch(event, r.recordSequenced)
 	}
+	return r.recordSequenced(event)
+}
+
+func (r *Recorder) recordSequenced(event Event) error {
+	r.mu.Lock()
 	if r.closed {
+		r.mu.Unlock()
 		return fmt.Errorf("debug recorder is closed")
 	}
-	r.sequence++
-	event.Sequence = r.sequence
+	if event.Sequence == 0 {
+		r.sequence++
+		event.Sequence = r.sequence
+	} else if event.Sequence > r.sequence {
+		r.sequence = event.Sequence
+	}
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
 	if event.Kind == EventLifecycle && event.Status != StatusStarted && event.DurationMS == nil {
 		event.DurationMS = new(int64)
 	}
-	if err := r.encoder.Encode(event); err != nil {
-		return fmt.Errorf("writing debug event: %w", err)
+	if r.enabled {
+		if err := r.encoder.Encode(event); err != nil {
+			r.mu.Unlock()
+			return fmt.Errorf("writing debug event: %w", err)
+		}
+		if err := r.buffer.Flush(); err != nil {
+			r.mu.Unlock()
+			return fmt.Errorf("flushing debug event: %w", err)
+		}
 	}
-	if err := r.buffer.Flush(); err != nil {
-		return fmt.Errorf("flushing debug event: %w", err)
-	}
+	r.mu.Unlock()
 	return nil
 }
 

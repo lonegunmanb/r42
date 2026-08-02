@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	sdk "github.com/github/copilot-sdk/go"
@@ -13,10 +15,195 @@ import (
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/lonegunmanb/r42/internal/plan"
+	researchruntime "github.com/lonegunmanb/r42/internal/research/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
 )
+
+func TestPhasedResearchMarksSubsequentRunsAsRevision(t *testing.T) {
+	t.Parallel()
+
+	session := &recordingSession{kind: debuglog.SessionResearch}
+	research := &phaseCapturingResearch{session: session}
+	runner := &phasedResearch{research: research, session: session}
+
+	_, err := runner.Run(t.Context(), researchruntime.Config{})
+	require.NoError(t, err)
+	_, err = runner.Run(t.Context(), researchruntime.Config{})
+	require.NoError(t, err)
+	assert.Equal(t, []debuglog.SessionKind{debuglog.SessionResearch, debuglog.SessionRevision}, research.phases)
+}
+
+type phaseCapturingResearch struct {
+	session *recordingSession
+	phases  []debuglog.SessionKind
+}
+
+func (r *phaseCapturingResearch) Run(context.Context, researchruntime.Config) (researchruntime.Result, error) {
+	r.phases = append(r.phases, r.session.currentKind())
+	return researchruntime.Result{}, nil
+}
+
+func TestToolCallQuotaSuccessfulCallsExhaustLimit(t *testing.T) {
+	t.Parallel()
+
+	quota := newToolCallQuota(map[string]int{"tool_lookup": 1})
+
+	require.NoError(t, quota.reserve("tool_lookup"))
+	assert.ErrorContains(t, quota.reserve("tool_lookup"), `typed tool "tool_lookup" call quota exhausted (limit 1)`)
+}
+
+func TestToolCallQuotaRollbackRestoresReservation(t *testing.T) {
+	t.Parallel()
+
+	quota := newToolCallQuota(map[string]int{"tool_lookup": 1})
+	require.NoError(t, quota.reserve("tool_lookup"))
+
+	quota.rollback("tool_lookup")
+
+	require.NoError(t, quota.reserve("tool_lookup"))
+}
+
+func TestToolCallQuotaConcurrentReservationsDoNotExceedLimit(t *testing.T) {
+	t.Parallel()
+
+	const limit = 5
+	quota := newToolCallQuota(map[string]int{"tool_lookup": limit})
+	var accepted atomic.Int32
+	var group sync.WaitGroup
+	for range 100 {
+		group.Go(func() {
+			if quota.reserve("tool_lookup") == nil {
+				accepted.Add(1)
+			}
+		})
+	}
+	group.Wait()
+
+	assert.Equal(t, int32(limit), accepted.Load())
+}
+
+func TestTypedToolHandlerConsumesOnlySuccessfulCalls(t *testing.T) {
+	t.Parallel()
+
+	tool, closeFactory := buildQuotaTestTool(t, newToolCallQuota(map[string]int{"tool_lookup": 1}))
+	t.Cleanup(closeFactory)
+
+	malformed, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+	require.NoError(t, err)
+	assert.Contains(t, malformed.TextResultForLLM, `"accepted":false`)
+
+	rejected, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Mode": "reject"}})
+	require.NoError(t, err)
+	assert.Contains(t, rejected.TextResultForLLM, `"accepted":false`)
+
+	_, err = tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Mode": "error"}})
+	require.ErrorContains(t, err, "execution failed")
+
+	accepted, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Mode": "accept"}})
+	require.NoError(t, err)
+	assert.Contains(t, accepted.TextResultForLLM, `"accepted":true`)
+
+	_, err = tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Mode": "accept"}})
+	assert.ErrorContains(t, err, `typed tool "tool_lookup" call quota exhausted (limit 1)`)
+}
+
+func TestResearchAndQCTypedToolQuotasAreIndependent(t *testing.T) {
+	t.Parallel()
+
+	researchTool, closeResearch := buildQuotaTestTool(t, newToolCallQuota(map[string]int{"tool_lookup": 1}))
+	t.Cleanup(closeResearch)
+	qcTool, closeQC := buildQuotaTestTool(t, newToolCallQuota(map[string]int{"tool_lookup": 1}))
+	t.Cleanup(closeQC)
+
+	for _, tool := range []sdk.Tool{researchTool, qcTool} {
+		_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Mode": "accept"}})
+		require.NoError(t, err)
+	}
+	for _, tool := range []sdk.Tool{researchTool, qcTool} {
+		_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Mode": "accept"}})
+		assert.ErrorContains(t, err, `typed tool "tool_lookup" call quota exhausted (limit 1)`)
+	}
+}
+
+func buildQuotaTestTool(t *testing.T, quota *toolCallQuota) (sdk.Tool, func()) {
+	t.Helper()
+	recorder, err := debuglog.NewRecorder(t.TempDir(), false)
+	require.NoError(t, err)
+	factory := &runtimeFactory{
+		recorder: recorder,
+		state:    new(runtimeState),
+		tools: map[string]plan.ToolSpec{
+			"tool_lookup": {
+				ID: "tool_lookup", Address: "go_tool.lookup", Kind: "go", Description: "lookup",
+				Source: `
+import (
+  "context"
+  "errors"
+)
+type Input struct { Mode string }
+type Output string
+func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
+  if input.Mode == "error" {
+    return ToolResponse[Output]{}, errors.New("execution failed")
+  }
+  if input.Mode == "reject" {
+    return ToolResponse[Output]{Issues: []Issue{{Code: "retry", Message: "try again"}}}, nil
+  }
+  output := Output("done")
+  return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+}`,
+			},
+		},
+	}
+	tools, _, err := factory.buildTools(
+		t.Context(), "research.static.test", debuglog.SessionResearch, t.TempDir(),
+		[]string{"tool_lookup"}, nil, nil, quota,
+	)
+	require.NoError(t, err)
+	require.Len(t, tools, 1)
+	return tools[0], func() {
+		require.NoError(t, factory.Close())
+		require.NoError(t, recorder.Close())
+	}
+}
+
+func TestResearchApplyBlockMatchesStaticResearchAddressShape(t *testing.T) {
+	t.Parallel()
+
+	block := new(researchApplyBlock)
+
+	assert.Equal(t, "static", block.Type())
+	assert.Equal(t, 3, block.AddressLength())
+}
+
+func TestSetBlockResultMergesStaticResearchForEachInstance(t *testing.T) {
+	t.Parallel()
+
+	contextValues := map[string]cty.Value{
+		"research": cty.ObjectVal(map[string]cty.Value{
+			"static": cty.ObjectVal(map[string]cty.Value{
+				"deep_dive": cty.ObjectVal(map[string]cty.Value{
+					"001": cty.ObjectVal(map[string]cty.Value{
+						"artifact": cty.StringVal("knowledge.json"),
+					}),
+				}),
+			}),
+		}),
+	}
+
+	setBlockResult(contextValues, "research.static.deep_dive[001]", cty.ObjectVal(map[string]cty.Value{
+		"result": cty.StringVal("done"),
+	}))
+
+	instance := contextValues["research"].
+		GetAttr("static").
+		GetAttr("deep_dive").
+		GetAttr("001")
+	assert.Equal(t, "knowledge.json", instance.GetAttr("artifact").AsString())
+	assert.Equal(t, "done", instance.GetAttr("result").AsString())
+}
 
 func TestRuntimeAppliesLegacyPlanWithReservedDebugRun(t *testing.T) {
 	t.Parallel()
@@ -143,9 +330,10 @@ func TestRecordingSessionRecordsReasoningEventsDuringSend(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(directory, debuglog.EventsFileName))
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
-	require.Len(t, lines, 6)
+	require.Len(t, lines, 7)
 
 	wantTypes := []sdk.SessionEventType{
+		sdk.SessionEventTypeAssistantMessage,
 		sdk.SessionEventTypeAssistantReasoningDelta,
 		sdk.SessionEventTypeAssistantReasoning,
 		sdk.SessionEventTypeAssistantMessage,
@@ -156,9 +344,93 @@ func TestRecordingSessionRecordsReasoningEventsDuringSend(t *testing.T) {
 		assert.Equal(t, debuglog.EventMessage, event.Kind)
 		assert.Equal(t, debuglog.RoleAssistant, event.Role)
 		var sessionEvent sdk.SessionEvent
-		require.NoError(t, json.Unmarshal([]byte(event.Content), &sessionEvent))
+		require.NoError(t, json.Unmarshal(event.SDKEvent, &sessionEvent))
 		assert.Equal(t, wantType, sessionEvent.Type())
 	}
+}
+
+func TestRecordingSessionPublishesNormalizedStreamingAndUsageEvents(t *testing.T) {
+	t.Parallel()
+
+	recorder, err := debuglog.NewRecorder(t.TempDir(), false)
+	require.NoError(t, err)
+	bus := debuglog.NewEventBus()
+	recorder.SetEventBus(bus)
+	var observed []debuglog.Event
+	var observedMu sync.Mutex
+	unsubscribe := bus.Subscribe(func(event debuglog.Event) {
+		observedMu.Lock()
+		observed = append(observed, event)
+		observedMu.Unlock()
+	})
+	t.Cleanup(unsubscribe)
+	inputTokens := int64(100)
+	outputTokens := int64(25)
+	reasoningTokens := int64(7)
+	cacheReadTokens := int64(40)
+	apiCallID := "api-call-1"
+	session := &fakeInternalSession{
+		events: []sdk.SessionEvent{
+			{
+				ID:   "reasoning-delta",
+				Data: &sdk.AssistantReasoningDeltaData{DeltaContent: "inspect ", ReasoningID: "reasoning-1"},
+			},
+			{
+				ID:   "message-delta",
+				Data: &sdk.AssistantMessageDeltaData{DeltaContent: "drafting", MessageID: "message-1"},
+			},
+			{
+				ID:   "tool-start",
+				Data: &sdk.ToolExecutionStartData{ToolCallID: "tool-1", ToolName: "pplx_fetch", Arguments: map[string]any{"url": "https://example.test"}},
+			},
+			{
+				ID: "usage",
+				Data: &sdk.AssistantUsageData{
+					APICallID: &apiCallID, InputTokens: &inputTokens, OutputTokens: &outputTokens,
+					ReasoningTokens: &reasoningTokens, CacheReadTokens: &cacheReadTokens,
+				},
+			},
+		},
+		result: &sdk.SessionEvent{
+			ID: "assistant-final", Data: &sdk.AssistantMessageData{Content: "complete"},
+		},
+	}
+	recorded := &recordingSession{
+		Session: session, recorder: recorder, address: "research.static.source", kind: debuglog.SessionResearch,
+	}
+
+	_, err = recorded.SendAndWait(t.Context(), sdk.MessageOptions{Prompt: "research"})
+	require.NoError(t, err)
+	observedMu.Lock()
+	events := append([]debuglog.Event(nil), observed...)
+	observedMu.Unlock()
+
+	reasoning := findObservedEvent(t, events, "assistant.reasoning_delta")
+	assert.Equal(t, "inspect ", reasoning.Content)
+	message := findObservedEvent(t, events, "assistant.message_delta")
+	assert.Equal(t, "drafting", message.Content)
+	tool := findObservedEvent(t, events, "tool.execution_start")
+	assert.Equal(t, "pplx_fetch", tool.ToolName)
+	assert.JSONEq(t, `{"url":"https://example.test"}`, string(tool.Arguments))
+	usage := findObservedEvent(t, events, "assistant.usage")
+	require.NotNil(t, usage.Usage)
+	assert.Equal(t, debuglog.Usage{
+		APICallID: "api-call-1", InputTokens: 100, OutputTokens: 25,
+		ReasoningTokens: 7, CacheReadTokens: 40,
+	}, *usage.Usage)
+	final := findObservedEvent(t, events, "assistant.message")
+	assert.Equal(t, "complete", final.Content)
+}
+
+func findObservedEvent(t *testing.T, events []debuglog.Event, action string) debuglog.Event {
+	t.Helper()
+	for _, event := range events {
+		if event.Action == action {
+			return event
+		}
+	}
+	require.FailNow(t, "event not observed", "action=%s events=%v", action, events)
+	return debuglog.Event{}
 }
 
 func TestRecordingSessionRecordsToolEventsDuringSend(t *testing.T) {
@@ -238,7 +510,7 @@ func TestRecordingSessionRecordsToolEventsDuringSend(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(directory, debuglog.EventsFileName))
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(string(content)), "\n")
-	require.Len(t, lines, len(toolEvents)+4)
+	require.Len(t, lines, len(toolEvents)+5)
 	for index, sdkEvent := range toolEvents {
 		var event debuglog.Event
 		require.NoError(t, json.Unmarshal([]byte(lines[index+2]), &event))

@@ -167,6 +167,7 @@ func (e *Engine) apply(
 		if err != nil {
 			return nil, nil, err
 		}
+		recorder.SetEventBus(debuglog.EventBusFromContext(ctx))
 	}
 	started := time.Now()
 	if err = debuglog.Lifecycle(ctx, "apply", debuglog.StatusStarted, debuglog.Event{
@@ -330,9 +331,10 @@ func (f *runtimeFactory) New(
 		return nil, recordErr
 	}
 	terminal := researchruntime.NewTerminalRecorder()
+	researchQuota := newToolCallQuota(planned.Config.Policy.TypedToolCallQuota)
 	tools, terminalType, err := f.buildTools(
 		ctx, executionAddress, debuglog.SessionResearch, workspace,
-		planned.Config.Policy.ToolIDs, planned.Config.TerminateToolID, terminal,
+		planned.Config.Policy.ToolIDs, planned.Config.TerminateToolID, terminal, researchQuota,
 	)
 	if err != nil {
 		return nil, err
@@ -400,7 +402,7 @@ func (f *runtimeFactory) New(
 		}
 		qcTools, _, toolsErr := f.buildTools(
 			ctx, executionAddress, debuglog.SessionQC, workspace, effective.ToolIDs, nil,
-			researchruntime.NewTerminalRecorder(),
+			researchruntime.NewTerminalRecorder(), newToolCallQuota(effective.TypedToolCallQuota),
 		)
 		if toolsErr != nil {
 			f.closeAfterSetupFailure(ctx, recordedSession)
@@ -431,7 +433,7 @@ func (f *runtimeFactory) New(
 		qcSession = &recordingSession{
 			Session: qcSession, recorder: f.recorder, address: executionAddress, kind: debuglog.SessionQC,
 		}
-		qcRunner = qc.NewRunner(runner, qcSession, verdicts)
+		qcRunner = qc.NewRunner(&phasedResearch{research: runner, session: recordedSession}, qcSession, verdicts)
 		qcConfig = qc.Config{
 			Task:     qc.Task{SystemPrompt: planned.Config.SystemPrompt, Prompt: planned.Config.Prompt},
 			Criteria: effective.Criteria, Artifacts: planned.Config.Artifacts,
@@ -573,6 +575,7 @@ func (f *runtimeFactory) buildTools(
 	toolIDs []string,
 	terminateToolID *string,
 	terminal *researchruntime.TerminalRecorder,
+	quota *toolCallQuota,
 ) ([]sdk.Tool, cty.Type, error) {
 	definitions, err := f.resolveToolDefinitions(toolIDs, terminateToolID)
 	if err != nil {
@@ -583,7 +586,7 @@ func (f *runtimeFactory) buildTools(
 	for _, definition := range definitions {
 		if definition.Kind == string(config.AddressKindExternal) {
 			tool, outputType, err := f.buildExternalTool(
-				ctx, blockAddress, sessionKind, workspace, definition, terminateToolID, terminal,
+				ctx, blockAddress, sessionKind, workspace, definition, terminateToolID, terminal, quota,
 			)
 			if err != nil {
 				return nil, cty.NilType, err
@@ -643,8 +646,12 @@ func (f *runtimeFactory) buildTools(
 				if marshalErr != nil {
 					return sdk.ToolResult{}, fmt.Errorf("encode validated %s arguments: %w", definition.Address, marshalErr)
 				}
+				if reserveErr := quota.reserve(definition.ID); reserveErr != nil {
+					return sdk.ToolResult{}, reserveErr
+				}
 				response, invokeErr := program.Invoke(ctx, arguments)
 				if invokeErr != nil {
+					quota.rollback(definition.ID)
 					var stdout string
 					var stderr string
 					var invocationErr *gotool.InvocationError
@@ -659,6 +666,9 @@ func (f *runtimeFactory) buildTools(
 						return sdk.ToolResult{}, errors.Join(invokeErr, recordErr)
 					}
 					return sdk.ToolResult{}, invokeErr
+				}
+				if !response.Accepted {
+					quota.rollback(definition.ID)
 				}
 				wire := corespec.ToolResponse[json.RawMessage]{
 					Accepted: response.Accepted, Output: response.Output, Issues: response.Issues,
@@ -718,6 +728,7 @@ func (f *runtimeFactory) buildExternalTool(
 	definition plan.ToolSpec,
 	terminateToolID *string,
 	terminal *researchruntime.TerminalRecorder,
+	quota *toolCallQuota,
 ) (sdk.Tool, cty.Type, error) {
 	input, err := parseConstraint(definition.InputTypeExpression)
 	if err != nil {
@@ -757,11 +768,15 @@ func (f *runtimeFactory) buildExternalTool(
 					arguments, validateErr, isTerminal, terminal,
 				)
 			}
+			if reserveErr := quota.reserve(definition.ID); reserveErr != nil {
+				return sdk.ToolResult{}, reserveErr
+			}
 			result, runErr := runner.Run(ctx, externaltool.Config{
 				Program: definition.Program, Workspace: workspace, WorkingDir: definition.WorkingDir,
 				Input: input, Output: output,
 			}, value)
 			if runErr != nil {
+				quota.rollback(definition.ID)
 				var stdout string
 				var stderr string
 				var executionErr *externaltool.ExecutionError
@@ -776,6 +791,9 @@ func (f *runtimeFactory) buildExternalTool(
 					return sdk.ToolResult{}, errors.Join(runErr, recordErr)
 				}
 				return sdk.ToolResult{}, runErr
+			}
+			if !result.Accepted {
+				quota.rollback(definition.ID)
 			}
 			var rawOutput *json.RawMessage
 			if result.Output != nil {
@@ -814,6 +832,38 @@ func (f *runtimeFactory) buildExternalTool(
 		},
 	}
 	return tool, output.Type(), nil
+}
+
+type toolCallQuota struct {
+	mu     sync.Mutex
+	limits map[string]int
+	used   map[string]int
+}
+
+func newToolCallQuota(limits map[string]int) *toolCallQuota {
+	return &toolCallQuota{limits: maps.Clone(limits), used: make(map[string]int)}
+}
+
+func (q *toolCallQuota) reserve(toolID string) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	limit, configured := q.limits[toolID]
+	if !configured {
+		return nil
+	}
+	if q.used[toolID] >= limit {
+		return fmt.Errorf("typed tool %q call quota exhausted (limit %d)", toolID, limit)
+	}
+	q.used[toolID]++
+	return nil
+}
+
+func (q *toolCallQuota) rollback(toolID string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if _, configured := q.limits[toolID]; configured && q.used[toolID] > 0 {
+		q.used[toolID]--
+	}
 }
 
 func (f *runtimeFactory) recordToolFailure(
@@ -1003,22 +1053,87 @@ func evaluateLocals(evaluationContext *hcl.EvalContext, expressions map[string]s
 }
 
 func setBlockResult(contextValues map[string]cty.Value, address string, value cty.Value) {
-	kind, name, ok := strings.Cut(address, ".")
+	path, instanceKey, ok := splitBlockResultAddress(address)
+	if !ok || len(path) < 2 {
+		return
+	}
+	namespace, exists := contextValues[path[0]]
+	if !exists {
+		return
+	}
+	updated, ok := setBlockResultPath(namespace, path[1:], instanceKey, value)
 	if !ok {
 		return
 	}
-	namespace, exists := contextValues[kind]
-	if !exists || !namespace.Type().IsObjectType() {
-		return
+	contextValues[path[0]] = updated
+}
+
+func splitBlockResultAddress(address string) ([]string, *string, bool) {
+	var instanceKey *string
+	if open := strings.LastIndexByte(address, '['); open >= 0 {
+		if open == 0 || !strings.HasSuffix(address, "]") || open == len(address)-2 {
+			return nil, nil, false
+		}
+		key := address[open+1 : len(address)-1]
+		instanceKey = &key
+		address = address[:open]
+	}
+	if strings.Contains(address, "]") {
+		return nil, nil, false
+	}
+	path := strings.Split(address, ".")
+	if slices.Contains(path, "") {
+		return nil, nil, false
+	}
+	return path, instanceKey, true
+}
+
+func setBlockResultPath(
+	namespace cty.Value,
+	path []string,
+	instanceKey *string,
+	value cty.Value,
+) (cty.Value, bool) {
+	if len(path) == 0 || !namespace.Type().IsObjectType() {
+		return cty.NilVal, false
 	}
 	values := namespace.AsValueMap()
-	if existing, ok := values[name]; ok && existing.Type().IsObjectType() && value.Type().IsObjectType() {
-		merged := existing.AsValueMap()
-		maps.Copy(merged, value.AsValueMap())
-		value = cty.ObjectVal(merged)
+	existing, exists := values[path[0]]
+	if !exists {
+		return cty.NilVal, false
 	}
-	values[name] = value
-	contextValues[kind] = cty.ObjectVal(values)
+	if len(path) > 1 {
+		updated, ok := setBlockResultPath(existing, path[1:], instanceKey, value)
+		if !ok {
+			return cty.NilVal, false
+		}
+		values[path[0]] = updated
+		return cty.ObjectVal(values), true
+	}
+	if instanceKey == nil {
+		values[path[0]] = mergeBlockResult(existing, value)
+		return cty.ObjectVal(values), true
+	}
+	if !existing.Type().IsObjectType() {
+		return cty.NilVal, false
+	}
+	instances := existing.AsValueMap()
+	instance, exists := instances[*instanceKey]
+	if !exists {
+		return cty.NilVal, false
+	}
+	instances[*instanceKey] = mergeBlockResult(instance, value)
+	values[path[0]] = cty.ObjectVal(instances)
+	return cty.ObjectVal(values), true
+}
+
+func mergeBlockResult(existing, result cty.Value) cty.Value {
+	if !existing.Type().IsObjectType() || !result.Type().IsObjectType() {
+		return result
+	}
+	values := existing.AsValueMap()
+	maps.Copy(values, result.AsValueMap())
+	return cty.ObjectVal(values)
 }
 
 func (f *runtimeFactory) publish(address string, value cty.Value) {
@@ -1085,9 +1200,9 @@ type researchApplyBlock struct {
 	cancel    context.CancelFunc
 }
 
-func (*researchApplyBlock) Type() string            { return "" }
+func (*researchApplyBlock) Type() string            { return "static" }
 func (*researchApplyBlock) BlockType() string       { return "research" }
-func (*researchApplyBlock) AddressLength() int      { return 2 }
+func (*researchApplyBlock) AddressLength() int      { return 3 }
 func (*researchApplyBlock) CanExecutePrePlan() bool { return false }
 func (b *researchApplyBlock) Address() string       { return b.address }
 
@@ -1131,6 +1246,42 @@ type recordingSession struct {
 	recorder *debuglog.Recorder
 	address  string
 	kind     debuglog.SessionKind
+	eventMu  sync.Mutex
+	kindMu   sync.RWMutex
+	seen     map[string]struct{}
+	toolName map[string]string
+}
+
+func (s *recordingSession) setKind(kind debuglog.SessionKind) {
+	s.kindMu.Lock()
+	s.kind = kind
+	s.kindMu.Unlock()
+}
+
+func (s *recordingSession) currentKind() debuglog.SessionKind {
+	s.kindMu.RLock()
+	defer s.kindMu.RUnlock()
+	return s.kind
+}
+
+type phasedResearch struct {
+	research qc.Research
+	session  *recordingSession
+	mu       sync.Mutex
+	calls    int
+}
+
+func (r *phasedResearch) Run(ctx context.Context, config researchruntime.Config) (researchruntime.Result, error) {
+	r.mu.Lock()
+	r.calls++
+	call := r.calls
+	r.mu.Unlock()
+	if call == 1 {
+		r.session.setKind(debuglog.SessionResearch)
+	} else {
+		r.session.setKind(debuglog.SessionRevision)
+	}
+	return r.research.Run(ctx, config)
 }
 
 type sessionEventSource interface {
@@ -1138,14 +1289,15 @@ type sessionEventSource interface {
 }
 
 func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	kind := s.currentKind()
 	if err := s.recorder.Record(debuglog.Event{
-		Kind: debuglog.EventMessage, BlockAddress: s.address, Session: s.kind,
+		Kind: debuglog.EventMessage, BlockAddress: s.address, Session: kind,
 		Role: debuglog.RoleUser, Content: options.Prompt,
 	}); err != nil {
 		return nil, err
 	}
 	ctx = debuglog.WithRecorder(ctx, s.recorder)
-	lifecycleEvent := debuglog.Event{BlockAddress: s.address, Session: s.kind}
+	lifecycleEvent := debuglog.Event{BlockAddress: s.address, Session: kind}
 	started := time.Now()
 	if err := debuglog.Lifecycle(ctx, "session.send", debuglog.StatusStarted, lifecycleEvent); err != nil {
 		return nil, err
@@ -1155,10 +1307,16 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 	unsubscribe := func() {}
 	if source, ok := s.Session.(sessionEventSource); ok {
 		unsubscribe = source.On(func(event sdk.SessionEvent) {
+			if !s.markEvent(event.ID) {
+				return
+			}
 			var err error
 			switch event.Type() {
-			case sdk.SessionEventTypeAssistantReasoning,
-				sdk.SessionEventTypeAssistantReasoningDelta:
+			case sdk.SessionEventTypeAssistantMessage,
+				sdk.SessionEventTypeAssistantMessageDelta,
+				sdk.SessionEventTypeAssistantReasoning,
+				sdk.SessionEventTypeAssistantReasoningDelta,
+				sdk.SessionEventTypeAssistantUsage:
 				err = s.recordAssistantEvent(&event)
 			case sdk.SessionEventTypeAssistantToolCallDelta,
 				sdk.SessionEventTypeToolSearchActivated,
@@ -1185,7 +1343,7 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 	eventErrMu.Lock()
 	operationErr = errors.Join(operationErr, eventErr)
 	eventErrMu.Unlock()
-	if operationErr == nil {
+	if operationErr == nil && event != nil && s.markEvent(event.ID) {
 		operationErr = s.recordAssistantEvent(event)
 	}
 	logErr := debuglog.CompleteLifecycle(ctx, "session.send", started, operationErr, lifecycleEvent)
@@ -1195,31 +1353,130 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 	return event, nil
 }
 
+func (s *recordingSession) markEvent(id string) bool {
+	if id == "" {
+		return true
+	}
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if s.seen == nil {
+		s.seen = make(map[string]struct{})
+	}
+	if _, exists := s.seen[id]; exists {
+		return false
+	}
+	s.seen[id] = struct{}{}
+	return true
+}
+
 func (s *recordingSession) recordToolEvent(event *sdk.SessionEvent) error {
 	content, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("encode tool event: %w", err)
 	}
-	return s.recorder.Record(debuglog.Event{
+	recorded := debuglog.Event{
 		Timestamp: event.Timestamp, Kind: debuglog.EventTool, Action: string(event.Type()),
-		BlockAddress: s.address, Session: s.kind, SDKEvent: content,
-	})
+		BlockAddress: s.address, Session: s.currentKind(), SDKEvent: content,
+	}
+	s.normalizeToolEvent(&recorded, event)
+	return s.recorder.Record(recorded)
+}
+
+func (s *recordingSession) normalizeToolEvent(recorded *debuglog.Event, event *sdk.SessionEvent) {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if s.toolName == nil {
+		s.toolName = make(map[string]string)
+	}
+	switch data := event.Data.(type) {
+	case *sdk.AssistantToolCallDeltaData:
+		recorded.ToolCallID = data.ToolCallID
+		recorded.Content = data.InputDelta
+		if data.ToolName != nil {
+			recorded.ToolName = *data.ToolName
+			s.toolName[data.ToolCallID] = *data.ToolName
+		}
+	case *sdk.ToolExecutionStartData:
+		recorded.ToolCallID = data.ToolCallID
+		recorded.ToolName = data.ToolName
+		s.toolName[data.ToolCallID] = data.ToolName
+		recorded.Arguments, _ = json.Marshal(data.Arguments)
+	case *sdk.ToolExecutionProgressData:
+		recorded.ToolCallID = data.ToolCallID
+		recorded.ToolName = s.toolName[data.ToolCallID]
+		recorded.Content = data.ProgressMessage
+	case *sdk.ToolExecutionPartialResultData:
+		recorded.ToolCallID = data.ToolCallID
+		recorded.ToolName = s.toolName[data.ToolCallID]
+		recorded.Content = data.PartialOutput
+	case *sdk.ToolExecutionCompleteData:
+		recorded.ToolCallID = data.ToolCallID
+		recorded.ToolName = s.toolName[data.ToolCallID]
+		recorded.Result, _ = json.Marshal(data)
+		if data.Error != nil {
+			recorded.Error = data.Error.Message
+		}
+	}
 }
 
 func (s *recordingSession) recordAssistantEvent(event *sdk.SessionEvent) error {
+	if event == nil {
+		return fmt.Errorf("assistant event is required")
+	}
 	content, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("encode assistant event: %w", err)
 	}
-	return s.recorder.Record(debuglog.Event{
-		Kind: debuglog.EventMessage, BlockAddress: s.address, Session: s.kind,
-		Role: debuglog.RoleAssistant, Content: string(content),
-	})
+	recorded := debuglog.Event{
+		Timestamp: event.Timestamp, Action: string(event.Type()), SDKEvent: content,
+		Kind: debuglog.EventMessage, BlockAddress: s.address, Session: s.currentKind(),
+		Role: debuglog.RoleAssistant,
+	}
+	switch data := event.Data.(type) {
+	case *sdk.AssistantMessageData:
+		recorded.Content = data.Content
+		recorded.MessageID = data.MessageID
+	case *sdk.AssistantMessageDeltaData:
+		recorded.Content = data.DeltaContent
+		recorded.MessageID = data.MessageID
+	case *sdk.AssistantReasoningData:
+		recorded.Content = data.Content
+		recorded.MessageID = data.ReasoningID
+	case *sdk.AssistantReasoningDeltaData:
+		recorded.Content = data.DeltaContent
+		recorded.MessageID = data.ReasoningID
+	case *sdk.AssistantUsageData:
+		recorded.Usage = usageFromSDK(data)
+	}
+	return s.recorder.Record(recorded)
+}
+
+func usageFromSDK(data *sdk.AssistantUsageData) *debuglog.Usage {
+	if data == nil {
+		return nil
+	}
+	usage := &debuglog.Usage{Model: data.Model}
+	if data.APICallID != nil {
+		usage.APICallID = *data.APICallID
+	}
+	usage.InputTokens = int64Value(data.InputTokens)
+	usage.OutputTokens = int64Value(data.OutputTokens)
+	usage.ReasoningTokens = int64Value(data.ReasoningTokens)
+	usage.CacheReadTokens = int64Value(data.CacheReadTokens)
+	usage.CacheWriteTokens = int64Value(data.CacheWriteTokens)
+	return usage
+}
+
+func int64Value(value *int64) int64 {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 func (s *recordingSession) Close(ctx context.Context) error {
 	ctx = debuglog.WithRecorder(ctx, s.recorder)
-	event := debuglog.Event{BlockAddress: s.address, Session: s.kind}
+	event := debuglog.Event{BlockAddress: s.address, Session: s.currentKind()}
 	started := time.Now()
 	startLogErr := debuglog.Lifecycle(ctx, "session.close", debuglog.StatusStarted, event)
 	closeErr := s.Session.Close(ctx)

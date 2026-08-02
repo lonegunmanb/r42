@@ -24,7 +24,7 @@ func TestProductionRuntimeAppliesSavedNestedModuleWithoutReparse(t *testing.T) {
 	require.NoError(t, os.Mkdir(child, 0o700))
 	childPath := filepath.Join(child, "main.r42.hcl")
 	require.NoError(t, os.WriteFile(childPath, []byte(`
-research "inside" {
+research "static" "inside" {
   model = "test-model"
   system_prompt = "Work."
 }
@@ -60,7 +60,7 @@ output "status" { value = module.child.status }
 		root, ".r42", "runs", identities[0].Name(), "block-addresses", addressFiles[0].Name(),
 	))
 	require.NoError(t, err)
-	assert.Equal(t, "module.child.research.inside", string(address))
+	assert.Equal(t, "module.child.research.static.inside", string(address))
 }
 
 func TestProductionRuntimePropagatesModuleTimeoutToChildSession(t *testing.T) {
@@ -99,7 +99,7 @@ func writeModuleFixture(t *testing.T, moduleAttributes string) string {
 	child := filepath.Join(root, "child")
 	require.NoError(t, os.Mkdir(child, 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(child, "main.r42.hcl"), []byte(`
-research "inside" {
+research "static" "inside" {
   model = "test-model"
   system_prompt = "Work."
 }

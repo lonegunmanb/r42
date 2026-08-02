@@ -12,6 +12,7 @@ import (
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/lonegunmanb/r42/internal/provider"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
+	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
@@ -67,6 +68,54 @@ func registerResearchSchemaBlocks() {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
+func TestStaticResearchBlockPlansForEachReferenceMap(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+research "static" "fact" {
+  for_each     = toset(["001", "002"])
+  model         = "model"
+  system_prompt = each.value
+
+  artifact "answer" {
+    type = "file"
+    path = "${block_wd()}/answer.md"
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	blocks := golden.Blocks[*researchspec.ResearchBlock](config)
+	require.Len(t, blocks, 2)
+	_, isSingleValue := any(blocks[0]).(golden.SingleValueBlock)
+	assert.False(t, isSingleValue)
+	_, isValuable := any(blocks[0]).(golden.Valuable)
+	assert.True(t, isValuable)
+
+	research := config.EvalContext().Variables["research"]
+	instances := research.GetAttr("static").GetAttr("fact").AsValueMap()
+	require.Len(t, instances, 2)
+	for _, key := range []string{"001", "002"} {
+		instance, ok := instances[key]
+		require.True(t, ok)
+		assert.Equal(t, key, instance.GetAttr("system_prompt").AsString())
+		artifacts := instance.GetAttr("artifact")
+		require.Equal(t, 1, artifacts.LengthInt())
+		assert.Equal(t, "answer", artifacts.Index(cty.NumberIntVal(0)).GetAttr("name").AsString())
+		assert.False(t, artifacts.Index(cty.NumberIntVal(0)).GetAttr("path").IsKnown())
+	}
+
+	plannedPaths := make(map[string]string, len(blocks))
+	for _, block := range blocks {
+		require.Len(t, block.ResearchConfig().Artifacts, 1)
+		plannedPaths[block.Address()] = block.ResearchConfig().Artifacts[0].Path
+	}
+	assert.Equal(t, map[string]string{
+		"research.static.fact[001]": "workspace/research.static.fact[001]/answer.md",
+		"research.static.fact[002]": "workspace/research.static.fact[002]/answer.md",
+	}, plannedPaths)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
 func TestResearchBlockPlansTypedToolIDsAsStrings(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
@@ -74,15 +123,22 @@ fixture_tool "lookup" {}
 fixture_tool "finish" {}
 fixture_tool "read_only" {}
 
-research "market" {
+research "static" "market" {
   model             = "model"
   system_prompt     = "prompt"
   tool_ids          = [fixture_tool.lookup.id]
   terminate_tool_id = fixture_tool.finish.id
+  typed_tool_call_quota = {
+    (fixture_tool.lookup.id) = 2
+    (fixture_tool.finish.id) = 1
+  }
 
   qc {
     criteria = { accuracy = "Check the report." }
     tool_ids = [fixture_tool.read_only.id]
+    typed_tool_call_quota = {
+      (fixture_tool.read_only.id) = 3
+    }
   }
 }
 `)
@@ -90,10 +146,60 @@ research "market" {
 	require.NoError(t, config.RunPlan())
 	planned := golden.Blocks[*researchspec.ResearchBlock](config)[0].ResearchConfig()
 	assert.Equal(t, []string{"tool_fixture_lookup"}, planned.Policy.ToolIDs)
+	assert.Equal(t, map[string]int{"tool_fixture_lookup": 2, "tool_fixture_finish": 1}, planned.Policy.TypedToolCallQuota)
 	require.NotNil(t, planned.TerminateToolID)
 	assert.Equal(t, "tool_fixture_finish", *planned.TerminateToolID)
 	require.NotNil(t, planned.QC)
 	assert.Equal(t, []string{"tool_fixture_read_only"}, planned.QC.ToolIDs)
+	assert.Equal(t, map[string]int{"tool_fixture_read_only": 3}, planned.QC.TypedToolCallQuota)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockRejectsFractionalTypedToolCallQuota(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+fixture_tool "lookup" {}
+research "static" "market" {
+  model         = "model"
+  system_prompt = "prompt"
+  tool_ids      = [fixture_tool.lookup.id]
+  typed_tool_call_quota = {
+    (fixture_tool.lookup.id) = 1.5
+  }
+}
+`)
+
+	err := config.RunPlan()
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "whole number")
+}
+
+func TestResearchBlockReturnsIndependentTypedToolCallQuota(t *testing.T) {
+	t.Parallel()
+
+	block := researchspec.ResearchBlock{
+		Model:              "model",
+		SystemPrompt:       "prompt",
+		ToolIDs:            []string{"research_tool"},
+		TypedToolCallQuota: map[string]int{"research_tool": 2},
+		QCBlocks: []researchspec.QCBlock{{
+			Criteria:           validCriteria(),
+			ToolIDs:            []string{"qc_tool"},
+			TypedToolCallQuota: map[string]int{"qc_tool": 3},
+		}},
+	}
+	require.NoError(t, block.ExecuteDuringPlan())
+
+	first := block.ResearchConfig()
+	first.Policy.TypedToolCallQuota["research_tool"] = 20
+	require.NotNil(t, first.QC)
+	first.QC.TypedToolCallQuota["qc_tool"] = 30
+
+	second := block.ResearchConfig()
+	assert.Equal(t, 2, second.Policy.TypedToolCallQuota["research_tool"])
+	require.NotNil(t, second.QC)
+	assert.Equal(t, 3, second.QC.TypedToolCallQuota["qc_tool"])
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -105,7 +211,7 @@ model_provider "primary" {
   endpoint = "https://models.example.test"
 }
 
-research "with_provider" {
+research "static" "with_provider" {
   model_provider = model_provider.primary
   model           = "model"
   system_prompt   = "prompt"
@@ -115,7 +221,7 @@ research "with_provider" {
 	require.NoError(t, config.RunPlan())
 	planned := golden.Blocks[*researchspec.ResearchBlock](config)[0].ResearchConfig()
 	assertReference(t, planned.ModelProvider, "model_provider.primary", "provider")
-	ancestors, err := config.GetAncestors("research.with_provider")
+	ancestors, err := config.GetAncestors("research.static.with_provider")
 	require.NoError(t, err)
 	assert.Contains(t, ancestors, "model_provider.primary")
 }
@@ -124,7 +230,7 @@ research "with_provider" {
 func TestResearchBlockPlansForEachInstances(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
-research "fact" {
+research "static" "fact" {
   for_each     = {
     arithmetic = "What is 17 plus 25?"
     geography  = "What is the capital of Japan?"
@@ -158,17 +264,17 @@ research "fact" {
 		}
 	}
 	assert.Equal(t, map[string]plannedResearch{
-		"research.fact[arithmetic]": {
-			systemPrompt: "workspace/research.fact[arithmetic]: What is 17 plus 25?",
-			artifactPath: "workspace/research.fact[arithmetic]/answer.md",
+		"research.static.fact[arithmetic]": {
+			systemPrompt: "workspace/research.static.fact[arithmetic]: What is 17 plus 25?",
+			artifactPath: "workspace/research.static.fact[arithmetic]/answer.md",
 		},
-		"research.fact[geography]": {
-			systemPrompt: "workspace/research.fact[geography]: What is the capital of Japan?",
-			artifactPath: "workspace/research.fact[geography]/answer.md",
+		"research.static.fact[geography]": {
+			systemPrompt: "workspace/research.static.fact[geography]: What is the capital of Japan?",
+			artifactPath: "workspace/research.static.fact[geography]/answer.md",
 		},
-		"research.fact[science]": {
-			systemPrompt: "workspace/research.fact[science]: At what temperature in Celsius does water freeze?",
-			artifactPath: "workspace/research.fact[science]/answer.md",
+		"research.static.fact[science]": {
+			systemPrompt: "workspace/research.static.fact[science]: At what temperature in Celsius does water freeze?",
+			artifactPath: "workspace/research.static.fact[science]/answer.md",
 		},
 	}, planned)
 }
@@ -189,7 +295,7 @@ fixture_tool "lookup" {}
 fixture_tool "finish" {}
 fixture_tool "read_only" {}
 
-research "market" {
+research "static" "market" {
 	model_provider       = model_provider.primary
   model                = "gpt-5.6-sol"
   reasoning_effort     = "max"
@@ -246,7 +352,7 @@ research "market" {
 	require.Len(t, blocks, 1)
 	block := blocks[0]
 	assert.Equal(t, "market", block.Name())
-	assert.Equal(t, "research.market", block.Address())
+	assert.Equal(t, "research.static.market", block.Address())
 	assert.False(t, block.CanExecutePrePlan())
 
 	planned := block.ResearchConfig()
@@ -289,7 +395,7 @@ research "market" {
 	assertReference(t, effective.ModelProvider, "model_provider.quality", "provider")
 	assert.Equal(t, []string{"tool_fixture_read_only"}, effective.ToolIDs)
 
-	ancestors, err := config.GetAncestors("research.market")
+	ancestors, err := config.GetAncestors("research.static.market")
 	require.NoError(t, err)
 	for _, address := range []string{
 		"model_provider.primary",
@@ -301,7 +407,30 @@ research "market" {
 		assert.Contains(t, ancestors, address)
 	}
 
-	value := block.Value()
+	value := cty.ObjectVal(block.Values())
+	for _, attribute := range []string{
+		"model_provider",
+		"model",
+		"reasoning_effort",
+		"system_prompt",
+		"prompt",
+		"tool_ids",
+		"terminate_tool_id",
+		"allowed_tools",
+		"disallowed_tools",
+		"skill_directories",
+		"skills",
+		"disabled_skills",
+		"permission",
+		"max_protocol_attempts",
+		"timeout",
+		"retry",
+		"artifact",
+		"qc",
+		"result",
+	} {
+		assert.True(t, value.Type().HasAttribute(attribute), attribute)
+	}
 	assert.True(t, value.Type().HasAttribute("result"))
 	artifacts := value.GetAttr("artifact")
 	assert.True(t, artifacts.Type().IsListType())
@@ -313,7 +442,7 @@ research "market" {
 func TestResearchBlockExposesEveryNestedBlockAsListOfObjects(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
-research "market" {
+research "static" "market" {
   model         = "gpt-5.6-sol"
   system_prompt = "Research carefully."
 
@@ -342,7 +471,7 @@ research "market" {
 `)
 
 	require.NoError(t, config.RunPlan())
-	value := golden.Blocks[*researchspec.ResearchBlock](config)[0].Value()
+	value := cty.ObjectVal(golden.Blocks[*researchspec.ResearchBlock](config)[0].Values())
 	assert.False(t, value.Type().HasAttribute("artifacts"))
 
 	for _, name := range []string{"retry", "artifact", "qc"} {
@@ -368,7 +497,7 @@ research "market" {
 func TestResearchBlockAppliesDefaultsAndOmitsResultWithoutTerminateTool(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
-research "minimal" {
+research "static" "minimal" {
   model         = "gpt-5.6-sol"
   system_prompt = "Research carefully."
   disallowed_tools = []
@@ -384,6 +513,7 @@ research "minimal" {
 	require.NoError(t, config.RunPlan())
 	block := golden.Blocks[*researchspec.ResearchBlock](config)[0]
 	planned := block.ResearchConfig()
+	require.NoError(t, corespec.ValidateType(cty.ObjectVal(block.Values()).Type()))
 	assert.Nil(t, block.Prompt)
 	assert.Nil(t, block.MaxProtocolAttempts)
 	assert.Equal(t, researchspec.PermissionApproveAll, planned.Policy.Permission)
@@ -393,7 +523,7 @@ research "minimal" {
 	require.NotNil(t, planned.QC)
 	assert.Equal(t, researchspec.DefaultMaxQCRounds, planned.QC.MaxRounds)
 	assert.Equal(t, researchspec.DefaultQCDisallowedTools(), planned.QC.DisallowedTools)
-	assert.False(t, block.Value().Type().HasAttribute("result"))
+	assert.False(t, cty.ObjectVal(block.Values()).Type().HasAttribute("result"))
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -413,7 +543,7 @@ func TestResearchBlockRejectsStringReferencePlaceholders(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := parseResearchConfig(t, "research \"invalid\" {\nmodel = \"model\"\nsystem_prompt = \"prompt\"\n"+tt.attribute+"\n}")
+			config := parseResearchConfig(t, "research \"static\" \"invalid\" {\nmodel = \"model\"\nsystem_prompt = \"prompt\"\n"+tt.attribute+"\n}")
 			err := config.RunPlan()
 			require.Error(t, err)
 			assert.ErrorContains(t, err, tt.expectedError)
@@ -444,7 +574,7 @@ model_provider "primary" {
   endpoint = "https://models.example.test"
 }
 fixture_tool "lookup" {}
-research "invalid" {
+research "static" "invalid" {
   model         = "model"
   system_prompt = "prompt"
 `+tt.attribute+`
@@ -567,7 +697,7 @@ qc { criteria = { accuracy = true } }`,
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := parseResearchConfig(t, "research \"invalid\" {\n"+tt.body+"\n}")
+			config := parseResearchConfig(t, "research \"static\" \"invalid\" {\n"+tt.body+"\n}")
 			err := config.RunPlan()
 			require.Error(t, err)
 			assert.ErrorContains(t, err, tt.expectedError)
@@ -619,7 +749,7 @@ func TestResearchBlockRejectsCoercedFieldsInDynamicBlocks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := parseResearchConfig(t, `research "dynamic" {
+			config := parseResearchConfig(t, `research "static" "dynamic" {
   model         = "model"
   system_prompt = "prompt"
 `+tt.dynamicBlock+`
@@ -653,7 +783,7 @@ func TestResearchBlockPreservesCriteriaMarks(t *testing.T) {
 func TestResearchBlockNormalizesExplicitNullTools(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
-research "null_tools" {
+research "static" "null_tools" {
   model         = "model"
   system_prompt = "prompt"
   tool_ids      = null
@@ -723,7 +853,7 @@ func TestResearchBlockReturnsIndependentRetryConfig(t *testing.T) {
 func TestResearchBlockNativeFieldsPreserveExplicitZeroAndFalse(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
-research "explicit_zero" {
+research "static" "explicit_zero" {
   model                 = "gpt-5.6-sol"
   system_prompt         = "Research carefully."
   max_protocol_attempts = 0
@@ -781,7 +911,7 @@ func TestResearchBlockRejectsMultipleNestedBlocks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := parseResearchConfig(t, "research \"invalid\" {\nmodel = \"model\"\nsystem_prompt = \"prompt\"\n"+tt.nested+"\n}")
+			config := parseResearchConfig(t, "research \"static\" \"invalid\" {\nmodel = \"model\"\nsystem_prompt = \"prompt\"\n"+tt.nested+"\n}")
 			err := config.RunPlan()
 			require.Error(t, err)
 			assert.ErrorContains(t, err, tt.expectedError)
