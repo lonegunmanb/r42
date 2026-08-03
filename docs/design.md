@@ -302,6 +302,10 @@ Research session fields include:
 - `model_provider`: optional provider reference; omission uses the SDK's
   default provider behavior.
 - `model`: required.
+- `profile`: optional Copilot runtime model identity, defaulting to `model`.
+  With BYOK, r42 sends `profile` as `ProviderConfig.ModelID` for capability and
+  built-in-tool selection, while `model` remains `ProviderConfig.WireModel` and
+  is sent to the inference provider.
 - `reasoning_effort`: an arbitrary non-empty string passed through unchanged.
 - `system_prompt`: required.
 - `prompt`: optional.

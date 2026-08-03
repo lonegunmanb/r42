@@ -430,6 +430,7 @@ that depend on its successful completion are not run.
 | --- | --- | --- |
 | `model_provider` | No | References a `model_provider` block containing endpoint, authentication, transport, and retry defaults. When omitted, the Copilot SDK uses its default provider behavior. |
 | `model` | Yes | Model identifier passed to the provider, for example `gpt-5.6-sol`. |
+| `profile` | No | Copilot runtime profile used for model capabilities and built-in tools. Defaults to `model`; set it separately when a BYOK provider model should use another known model's runtime profile. |
 | `reasoning_effort` | No | Non-empty provider-specific reasoning level. r42 passes it through without restricting the allowed names. |
 | `system_prompt` | Yes | Instructions appended to r42's fixed research protocol system prompt. |
 | `prompt` | No | Initial user task. When omitted, r42 sends a fixed start message. |

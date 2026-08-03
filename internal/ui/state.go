@@ -260,6 +260,17 @@ func (p *Projector) updateTimeline(
 	if content == "" && toolName == "" && errorText == "" {
 		return
 	}
+	if event.MessageID == "" && strings.HasSuffix(event.Action, "_delta") && len(p.timeline) > 0 {
+		entry := &p.timeline[len(p.timeline)-1]
+		if entry.Address == event.BlockAddress && entry.Session == event.Session &&
+			strings.HasSuffix(entry.Action, "_delta") &&
+			timelineStream(entry.Action) == timelineStream(event.Action) {
+			entry.Activity = activity
+			entry.Content = appendContent(entry.Content, content)
+			entry.Error = errorText
+			return
+		}
+	}
 	for index := range slices.Backward(p.timeline) {
 		entry := &p.timeline[index]
 		if entry.Address != event.BlockAddress || entry.Session != event.Session {

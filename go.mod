@@ -115,4 +115,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/Azure/golden => github.com/lonegunmanb/golden v0.0.0-20260803043641-fb66e286e6c9
+replace github.com/Azure/golden => github.com/lonegunmanb/golden v0.0.0-20260803112212-d69a7c5a8e97

@@ -168,6 +168,7 @@ research "static" "source" {
 
 research "static" "summary" {
   model             = "model"
+  profile           = null
   system_prompt     = "summary"
   prompt            = research.static.source.result
   terminate_tool_id = fixture_tool.finish.id
@@ -198,6 +199,7 @@ research "static" "summary" {
 	require.NotNil(t, summary)
 	assert.NotEmpty(t, summary.DeferredTaskExpression())
 	value := config.EvalContext().Variables["research"].GetAttr("static").GetAttr("summary")
+	assert.Equal(t, "model", value.GetAttr("profile").AsString())
 	assert.False(t, value.GetAttr("prompt").IsKnown())
 	assert.False(t, value.GetAttr("result").IsKnown())
 	artifacts := value.GetAttr("artifact")
@@ -380,6 +382,7 @@ fixture_tool "read_only" {}
 research "static" "market" {
 	model_provider       = model_provider.primary
   model                = "gpt-5.6-sol"
+  profile              = "gpt-5.4"
   reasoning_effort     = "max"
   system_prompt        = "Act as a rigorous researcher."
   prompt               = "Research the market."
@@ -440,6 +443,7 @@ research "static" "market" {
 	planned := block.ResearchConfig()
 	assertReference(t, planned.ModelProvider, "model_provider.primary", "provider")
 	assert.Equal(t, "gpt-5.6-sol", planned.Model)
+	assert.Equal(t, "gpt-5.4", planned.Profile)
 	require.NotNil(t, planned.ReasoningEffort)
 	assert.Equal(t, "max", *planned.ReasoningEffort)
 	assert.Equal(t, "Act as a rigorous researcher.", planned.SystemPrompt)
@@ -493,6 +497,7 @@ research "static" "market" {
 	for _, attribute := range []string{
 		"model_provider",
 		"model",
+		"profile",
 		"reasoning_effort",
 		"system_prompt",
 		"prompt",
@@ -518,6 +523,39 @@ research "static" "market" {
 	assert.True(t, artifacts.Type().IsListType())
 	require.Equal(t, 1, artifacts.LengthInt())
 	assert.False(t, artifacts.Index(cty.NumberIntVal(0)).GetAttr("path").IsKnown())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockDefaultsProfileToModel(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+research "static" "market" {
+  model         = "wire-model"
+  system_prompt = "Research carefully."
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	block := golden.Blocks[*researchspec.ResearchBlock](config)[0]
+
+	assert.Equal(t, "wire-model", block.ResearchConfig().Profile)
+	assert.Equal(t, "wire-model", block.Values()["profile"].AsString())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockRejectsEmptyProfile(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+research "static" "market" {
+  model         = "wire-model"
+  profile       = " "
+  system_prompt = "Research carefully."
+}
+`)
+
+	err := config.RunPlan()
+
+	require.ErrorContains(t, err, "research profile must not be empty")
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

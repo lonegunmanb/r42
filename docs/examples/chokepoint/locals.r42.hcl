@@ -14,7 +14,8 @@ locals {
   source_tool_guidance = var.use_pplx ? join("\n", [
     "Use ${module.pplx_tools.pplx_pro_search_tool_id} to discover current sources",
     "and ${module.pplx_tools.pplx_fetch_tool_id} to fetch every source retained",
-    "as evidence. Record the snapshot_path returned by each fetch.",
+    "as evidence. Every fetch call must include url and the absolute snapshot_dir",
+    "stated below. Record the final snapshot_path returned by each fetch.",
     ]) : join("\n", [
     "Use the built-in web_search tool to discover current sources and web_fetch",
     "to read every source retained as evidence.",

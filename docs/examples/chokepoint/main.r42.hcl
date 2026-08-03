@@ -16,6 +16,7 @@ research "static" "whiteboard" {
     Market universe: ${var.market}
 
     ${local.source_tool_guidance}
+    ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
 
     Test the most important hypotheses and preserve the most decision-relevant
     sources. Write ${block_wd()}/whiteboard.md with:
@@ -69,6 +70,7 @@ research "static" "graph_track" {
 
     Read the whiteboard, then research only this track.
     ${local.source_tool_guidance}
+    ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
 
     Finish by calling ${go_tool.submit_track_evidence.id}. Set artifact_path to
     "${block_wd()}/track-evidence.json", track to "${each.key}", and submit
@@ -78,9 +80,7 @@ research "static" "graph_track" {
   tool_ids = concat(local.pplx_tool_ids, [
     go_tool.submit_track_evidence.id,
   ])
-  typed_tool_call_quota = merge(local.pplx_tool_call_quota, {
-    (go_tool.submit_track_evidence.id)      = 1
-  })
+  typed_tool_call_quota = local.pplx_tool_call_quota
   terminate_tool_id = go_tool.submit_track_evidence.id
   disallowed_tools  = local.research_disallowed_tools
   permission        = "approve_all"
@@ -124,6 +124,7 @@ research "static" "select_chokepoints" {
 
     Read every artifact.
     ${local.source_tool_guidance}
+    ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
 
     Only perform new research to close a material gap or resolve a
     contradiction. Then call ${go_tool.submit_chokepoint_chain.id} with
@@ -138,9 +139,7 @@ research "static" "select_chokepoints" {
   tool_ids = concat(local.pplx_tool_ids, [
     go_tool.submit_chokepoint_chain.id,
   ])
-  typed_tool_call_quota = merge(local.pplx_tool_call_quota, {
-    (go_tool.submit_chokepoint_chain.id)    = 1
-  })
+  typed_tool_call_quota = local.pplx_tool_call_quota
   terminate_tool_id = go_tool.submit_chokepoint_chain.id
   disallowed_tools  = local.research_disallowed_tools
   permission        = "approve_all"
@@ -183,6 +182,7 @@ research "dynamic" "discover_candidates" {
         Exclude generic beneficiaries, downstream customers, funds, and firms
         linked only to adjacent nodes.
         ${local.source_tool_guidance}
+        ${var.use_pplx ? format("Perplexity snapshot_dir: %s/%03d/sources", block_wd(), index + 1) : ""}
 
         Call ${go_tool.submit_candidates.id} with artifact_path
         "${block_wd()}/${format("%03d", index + 1)}/candidates.json", the exact
@@ -193,9 +193,7 @@ research "dynamic" "discover_candidates" {
       tool_ids = concat(local.pplx_tool_ids, [
         go_tool.submit_candidates.id,
       ])
-      typed_tool_call_quota = merge(local.pplx_tool_call_quota, {
-        (go_tool.submit_candidates.id)          = 1
-      })
+      typed_tool_call_quota = local.pplx_tool_call_quota
       terminate_tool_id = go_tool.submit_candidates.id
       disallowed_tools  = local.research_disallowed_tools
       permission        = "approve_all"
@@ -241,6 +239,7 @@ research "dynamic" "assess_candidates" {
           yield constraints, peer alternatives, substitution resilience, and
           concrete falsification conditions.
           ${local.source_tool_guidance}
+          ${var.use_pplx ? format("Perplexity snapshot_dir: %s/%03d-%03d/sources", block_wd(), discovery_index + 1, candidate_index + 1) : ""}
 
           Call ${go_tool.submit_candidate_scorecard.id} with artifact_path
           "${block_wd()}/${format("%03d", discovery_index + 1)}-${format("%03d", candidate_index + 1)}/scorecard.json".
@@ -251,9 +250,7 @@ research "dynamic" "assess_candidates" {
         tool_ids = concat(local.pplx_tool_ids, [
           go_tool.submit_candidate_scorecard.id,
         ])
-        typed_tool_call_quota = merge(local.pplx_tool_call_quota, {
-          (go_tool.submit_candidate_scorecard.id) = 1
-        })
+        typed_tool_call_quota = local.pplx_tool_call_quota
         terminate_tool_id = go_tool.submit_candidate_scorecard.id
         disallowed_tools  = local.research_disallowed_tools
         permission        = "approve_all"
@@ -303,6 +300,7 @@ research "static" "synthesize" {
 
     Read every artifact.
     ${local.source_tool_guidance}
+    ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
 
     Only perform new research for a clearly identified final evidence gap.
     Write ${block_wd()}/report.md with an executive summary, the audited graph
@@ -333,26 +331,6 @@ research "static" "synthesize" {
     max_qc_rounds    = 3
     permission       = "approve_all"
   }
-}
-
-output "whiteboard_path" {
-  description = "Exploratory whiteboard artifact."
-  value       = one(research.static.whiteboard.artifact).path
-}
-
-output "chokepoint_chain_path" {
-  description = "Evidence-backed supply-chain graph and selected chokepoints."
-  value       = one(research.static.select_chokepoints.artifact).path
-}
-
-output "candidate_discovery_paths" {
-  description = "One candidate-discovery artifact per selected chokepoint."
-  value       = [for task in research.dynamic.discover_candidates.tasks : one(task.artifacts).path]
-}
-
-output "candidate_scorecard_paths" {
-  description = "One independently checked scorecard per discovered candidate."
-  value       = [for task in research.dynamic.assess_candidates.tasks : one(task.artifacts).path]
 }
 
 output "report_path" {

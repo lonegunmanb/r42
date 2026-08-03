@@ -14,7 +14,7 @@ import (
 )
 
 var researchAttributeNames = map[string]struct{}{
-	"model_provider": {}, "model": {}, "reasoning_effort": {}, "system_prompt": {}, "prompt": {},
+	"model_provider": {}, "model": {}, "profile": {}, "reasoning_effort": {}, "system_prompt": {}, "prompt": {},
 	"tool_ids": {}, "typed_tool_call_quota": {}, "terminate_tool_id": {}, "allowed_tools": {},
 	"disallowed_tools": {}, "skill_directories": {}, "skills": {}, "disabled_skills": {},
 	"permission": {}, "max_protocol_attempts": {}, "timeout": {},
@@ -206,8 +206,9 @@ func sortedKeys[T any](values map[string]T) []string {
 
 func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 	values := map[string]cty.Value{
-		"model_provider": cty.NullVal(cty.EmptyObject), "reasoning_effort": cty.NullVal(cty.String),
-		"prompt": cty.NullVal(cty.String), "tool_ids": cty.EmptyTupleVal,
+		"model_provider": cty.NullVal(cty.EmptyObject), "profile": cty.UnknownVal(cty.String),
+		"reasoning_effort": cty.NullVal(cty.String),
+		"prompt":           cty.NullVal(cty.String), "tool_ids": cty.EmptyTupleVal,
 		"typed_tool_call_quota": cty.EmptyObjectVal, "terminate_tool_id": cty.NullVal(cty.String),
 		"allowed_tools": cty.EmptyTupleVal, "disallowed_tools": cty.EmptyTupleVal,
 		"skill_directories": cty.EmptyTupleVal, "skills": cty.EmptyTupleVal,
@@ -227,6 +228,9 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 			default:
 				values[name] = value
 			}
+		}
+		if _, exists := task.Type().AttributeTypes()["profile"]; !exists || task.GetAttr("profile").IsNull() {
+			values["profile"] = values["model"]
 		}
 	}
 	if _, exists := task.Type().AttributeTypes()["terminate_tool_id"]; exists {

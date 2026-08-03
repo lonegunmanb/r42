@@ -30,6 +30,15 @@ func TestConfigValidateRequiredFields(t *testing.T) {
 			expectedError: "research system prompt is required",
 		},
 		{
+			name: "profile must not be blank",
+			config: researchspec.Config{
+				Model:        "gpt-5.6-sol",
+				Profile:      "  ",
+				SystemPrompt: "research carefully",
+			},
+			expectedError: "research profile must not be empty",
+		},
+		{
 			name: "reasoning effort must not be blank",
 			config: researchspec.Config{
 				Model:           "gpt-5.6-sol",
@@ -208,6 +217,7 @@ func TestConfigEffectiveQCInheritsOnlySessionFields(t *testing.T) {
 	config := researchspec.Config{
 		ModelProvider:   providerRef,
 		Model:           "research-model",
+		Profile:         "gpt-5.4",
 		SystemPrompt:    "research carefully",
 		ReasoningEffort: stringPointer("high"),
 		Retry: provider.RetryOverride{
@@ -238,6 +248,7 @@ func TestConfigEffectiveQCInheritsOnlySessionFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, providerRef.RawEquals(effective.ModelProvider))
 	assert.Equal(t, "research-model", effective.Model)
+	assert.Equal(t, "gpt-5.4", effective.Profile)
 	require.NotNil(t, effective.ReasoningEffort)
 	assert.Equal(t, "high", *effective.ReasoningEffort)
 	assert.Equal(t, researchspec.PermissionApproveAll, effective.Permission)
@@ -281,6 +292,7 @@ func TestConfigEffectiveQCAppliesPerFieldOverrides(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, qcProvider.RawEquals(effective.ModelProvider))
 	assert.Equal(t, "qc-model", effective.Model)
+	assert.Equal(t, "qc-model", effective.Profile)
 	require.NotNil(t, effective.ReasoningEffort)
 	assert.Equal(t, "max", *effective.ReasoningEffort)
 	assert.Equal(t, 3, effective.MaxRounds)

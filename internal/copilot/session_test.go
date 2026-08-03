@@ -38,6 +38,7 @@ func TestFactoryOpenMaterializesProviderAndAssemblesSession(t *testing.T) {
 		},
 		Retry:            retryPolicy(t, 2, 3),
 		Model:            "gpt-5.6-sol",
+		Profile:          "gpt-5.4",
 		ReasoningEffort:  "max",
 		SystemPrompt:     "r42 protocol\nauthor instructions",
 		WorkingDirectory: "D:/run/research.market",
@@ -74,7 +75,7 @@ func TestFactoryOpenMaterializesProviderAndAssemblesSession(t *testing.T) {
 		Name:            "r42_research",
 		Prompt:          "r42 protocol\nauthor instructions",
 		Skills:          []string{"source-evaluation"},
-		Model:           "gpt-5.6-sol",
+		Model:           "gpt-5.4",
 		ReasoningEffort: "max",
 	}, config.CustomAgents[0])
 	require.NotNil(t, config.Provider)
@@ -84,6 +85,8 @@ func TestFactoryOpenMaterializesProviderAndAssemblesSession(t *testing.T) {
 	assert.Equal(t, "websockets", config.Provider.Transport)
 	assert.Equal(t, "secret-at-apply", config.Provider.APIKey)
 	assert.Equal(t, map[string]string{"X-R42": "test"}, config.Provider.Headers)
+	assert.Equal(t, "gpt-5.4", config.Provider.ModelID)
+	assert.Equal(t, "gpt-5.6-sol", config.Provider.WireModel)
 }
 
 func TestFactoryOpenSupportsDefaultProviderAndNoSelectedSkills(t *testing.T) {

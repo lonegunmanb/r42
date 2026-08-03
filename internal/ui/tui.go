@@ -281,28 +281,31 @@ func (m *TUIModel) ensureSelectedVisible() {
 }
 
 func (m *TUIModel) followTimeline() {
-	lines := strings.Split(m.timelineContent(), "\n")
+	width := max(1, m.panelWidth(panelTimeline)-2)
+	lines := strings.Split(m.panelContent(panelTimeline, width), "\n")
 	visible := max(1, m.bodyHeight()-4)
 	offset := max(0, len(lines)-visible)
 	m.scroll[panelTimeline].y = offset
 }
 
 func (m *TUIModel) clampScroll() {
-	contents := [panelCount]string{m.dagContent(), m.detailContent(), m.timelineContent()}
 	visible := max(1, m.bodyHeight()-3)
 	for index := range m.scroll {
+		target := panel(index)
+		width := max(1, m.panelWidth(target)-2)
+		content := m.panelContent(target, width)
 		if m.scroll[index].x < 0 {
 			m.scroll[index].x = 0
 		}
 		if m.scroll[index].y < 0 {
 			m.scroll[index].y = 0
 		}
-		maximum := max(0, len(strings.Split(contents[index], "\n"))-visible)
+		maximum := max(0, len(strings.Split(content, "\n"))-visible)
 		if m.scroll[index].y > maximum {
 			m.scroll[index].y = maximum
 		}
 		contentWidth := 0
-		for line := range strings.SplitSeq(contents[index], "\n") {
+		for line := range strings.SplitSeq(content, "\n") {
 			contentWidth = max(contentWidth, ansi.StringWidth(line))
 		}
 		maximum = max(0, contentWidth-max(1, m.panelWidth(panel(index))-2))
@@ -395,15 +398,6 @@ func (m TUIModel) renderPanel(target panel, width, height int) string {
 	if m.focus == target {
 		title += " *"
 	}
-	content := ""
-	switch target {
-	case panelDAG:
-		content = m.dagContent()
-	case panelDetail:
-		content = m.detailContent()
-	case panelTimeline:
-		content = m.timelineContent()
-	}
 	innerWidth := width - 2
 	innerHeight := height - 2
 	if innerWidth < 1 {
@@ -412,6 +406,7 @@ func (m TUIModel) renderPanel(target panel, width, height int) string {
 	if innerHeight < 1 {
 		innerHeight = 1
 	}
+	content := m.panelContent(target, innerWidth)
 	lines := visibleLines(content, m.scroll[target], innerWidth, innerHeight-1)
 	panelContent := clipLine(title, innerWidth, 0)
 	if innerHeight > 1 {
@@ -425,6 +420,22 @@ func (m TUIModel) renderPanel(target panel, width, height int) string {
 		Width(innerWidth).Height(innerHeight).
 		Border(lipgloss.NormalBorder()).BorderForeground(borderColor).
 		Render(panelContent)
+}
+
+func (m TUIModel) panelContent(target panel, width int) string {
+	content := ""
+	switch target {
+	case panelDAG:
+		content = m.dagContent()
+	case panelDetail:
+		content = m.detailContent()
+	case panelTimeline:
+		content = m.timelineContent()
+	}
+	if target == panelDetail || target == panelTimeline {
+		return ansi.Wrap(content, max(1, width), "")
+	}
+	return content
 }
 
 func panelName(target panel) string {

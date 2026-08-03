@@ -87,7 +87,8 @@ func PlanDynamicTasks(value cty.Value) (cty.Value, error) {
 		return cty.EmptyTupleVal.MarkWithPaths(marks), nil
 	}
 	result := make([]cty.Value, 0, unmarked.LengthInt())
-	iterator := unmarked.ElementIterator()
+	marked, inheritedMarks := unmarked.MarkWithPaths(marks).Unmark()
+	iterator := marked.ElementIterator()
 	for index := 0; iterator.Next(); index++ {
 		_, task := iterator.Element()
 		if !task.IsWhollyKnown() {
@@ -100,7 +101,7 @@ func PlanDynamicTasks(value cty.Value) (cty.Value, error) {
 		}
 		result = append(result, plannedDynamicTaskValue(task, config))
 	}
-	return cty.TupleVal(result).MarkWithPaths(marks), nil
+	return cty.TupleVal(result).WithMarks(inheritedMarks), nil
 }
 
 func DecodeDynamicTasks(value cty.Value) ([]Config, []cty.Value, error) {
@@ -122,7 +123,7 @@ func DecodeDynamicTasks(value cty.Value) ([]Config, []cty.Value, error) {
 			return nil, nil, fmt.Errorf("dynamic research task %d: %w", index, err)
 		}
 		configs = append(configs, config)
-		values = append(values, task.WithMarks(inheritedMarks))
+		values = append(values, dynamicTaskValueWithProfile(task).WithMarks(inheritedMarks))
 	}
 	return configs, values, nil
 }
@@ -142,6 +143,9 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 		return Config{}, err
 	}
 	if block.Model, err = dynamicRequiredString(unmarked, "model"); err != nil {
+		return Config{}, err
+	}
+	if block.Profile, err = dynamicOptionalString(unmarked, "profile"); err != nil {
 		return Config{}, err
 	}
 	if block.ReasoningEffort, err = dynamicOptionalString(unmarked, "reasoning_effort"); err != nil {
@@ -463,12 +467,30 @@ func dynamicAttribute(object cty.Value, name string) (cty.Value, bool) {
 }
 
 func plannedDynamicTaskValue(task cty.Value, config Config) cty.Value {
-	values := maps.Clone(task.AsValueMap())
+	values, marks := dynamicTaskValuesWithProfile(task)
 	values["artifacts"] = ArtifactsValue(config.Artifacts, nil)
 	if config.TerminateToolID != nil {
 		values["result"] = cty.UnknownVal(cty.String)
 	}
-	return cty.ObjectVal(values)
+	return cty.ObjectVal(values).WithMarks(marks)
+}
+
+func dynamicTaskValueWithProfile(task cty.Value) cty.Value {
+	values, marks := dynamicTaskValuesWithProfile(task)
+	return cty.ObjectVal(values).WithMarks(marks)
+}
+
+func dynamicTaskValuesWithProfile(task cty.Value) (map[string]cty.Value, cty.ValueMarks) {
+	unmarked, marks := task.Unmark()
+	values := maps.Clone(unmarked.AsValueMap())
+	profile, exists := values["profile"]
+	if exists {
+		profile, _ = profile.Unmark()
+	}
+	if !exists || profile.IsNull() {
+		values["profile"] = values["model"]
+	}
+	return values, marks
 }
 
 func AppliedDynamicTaskValue(task, result cty.Value) cty.Value {
@@ -506,6 +528,7 @@ func dynamicTaskOutputType(taskType cty.Type) cty.Type {
 		return cty.DynamicPseudoType
 	}
 	attributes := taskType.AttributeTypes()
+	attributes["profile"] = cty.String
 	attributes["artifacts"] = cty.List(artifactValueType)
 	if taskType.HasAttribute("terminate_tool_id") {
 		attributes["result"] = cty.String

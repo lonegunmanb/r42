@@ -113,15 +113,17 @@ QC reads the complete chain, every discovery result, and every scorecard.
 ## Source tools and optional Perplexity quotas
 
 The local `pplx_tools` module follows `docs/examples/multi-step` and exports two
-external typed-tool IDs:
+inline Go typed-tool IDs:
 
 - `pplx_pro_search` searches current sources with the Perplexity Search API.
-- `pplx_fetch` fetches one selected URL and writes a Markdown snapshot.
+- `pplx_fetch` fetches one selected URL. The researcher supplies an absolute
+  `snapshot_dir`; the tool derives `snapshot-<url-hash>.md` and returns its
+  absolute `snapshot_path`.
 
 The `use_pplx` variable defaults to `false`. In that mode, researchers use the
 built-in `web_search` and `web_fetch` tools, receive neither Perplexity typed
 tool, and have no Perplexity quota. Set `use_pplx = true` to give every static
-research block and every materialized dynamic task both external tools. r42
+research block and every materialized dynamic task both Go tools. r42
 then disables the built-in `web_search` and `web_fetch` tools for those research
 sessions and independently configures:
 
@@ -138,14 +140,15 @@ Perplexity cost grows with the number of selected nodes and candidates, so use
 `max_candidates_per_chokepoint` and the CLI `--parallelism` deliberately.
 
 Unlike the multi-step smoke test, this workflow may fetch several sources in
-one block. The adapted module writes `snapshot-<url-hash>.md` instead of always
-overwriting `snapshot.md`. Dynamic tasks share their parent block's
-`block_wd()`, so the HCL comprehension gives typed artifacts indexed child
-directories while URL-addressed names keep fetched snapshots distinct.
+one block. Each prompt gives the researcher a `snapshot_dir` derived from that
+block's `block_wd()`. The tool hashes the final fetched URL to produce a stable
+filename, so repeated fetches of the same URL overwrite the same snapshot.
+Dynamic tasks share their parent block's `block_wd()`, so their prompts include
+the task index in `snapshot_dir` to keep concurrent task files apart.
 
-When enabled, the external tools require Python 3 and `PPLX_API_KEY`. Their
-stdin and stdout are JSON values matching the declared HCL `input_type` and
-`output_type`.
+When enabled, the Go tools require `PPLX_API_KEY`. r42 compiles their inline Go
+source and derives the input and output schemas from the `Input` and `Output`
+types.
 
 ## Run the example
 

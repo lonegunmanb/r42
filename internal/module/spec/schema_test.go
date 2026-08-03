@@ -801,6 +801,7 @@ go_tool "finish" {
 research "static" "market" {
   model_provider       = model_provider.primary
   model                = "test-model"
+  profile              = "gpt-5.4"
   reasoning_effort     = "high"
   system_prompt        = "Research carefully."
   prompt               = "Start now."
@@ -845,6 +846,7 @@ research "static" "market" {
 	reconstructed, err := modulespec.DecodeResearchPlan(node.Config)
 	require.NoError(t, err)
 	assert.Equal(t, "test-model", reconstructed.Config.Model)
+	assert.Equal(t, "gpt-5.4", reconstructed.Config.Profile)
 	assert.Equal(t, "high", *reconstructed.Config.ReasoningEffort)
 	assert.Equal(t, "Start now.", *reconstructed.Config.Prompt)
 	assert.Equal(t, 7, reconstructed.Config.MaxProtocolAttempts)
@@ -897,6 +899,17 @@ research "static" "market" {
 	require.NoError(t, err)
 	require.NotNil(t, reconstructed.Provider)
 	assert.True(t, reconstructed.Provider.Headers.RawEquals(cty.MapValEmpty(cty.String)))
+}
+
+func TestDecodeResearchPlanDefaultsLegacyProfileToModel(t *testing.T) {
+	t.Parallel()
+
+	planned, err := modulespec.DecodeResearchPlan(cty.ObjectVal(map[string]cty.Value{
+		"payload": cty.StringVal(`{"model":"legacy-model","system_prompt":"Research."}`),
+	}))
+
+	require.NoError(t, err)
+	assert.Equal(t, "legacy-model", planned.Config.Profile)
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

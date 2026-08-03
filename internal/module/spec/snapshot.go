@@ -29,6 +29,7 @@ type researchSnapshot struct {
 	Expression          string                       `json:"expression,omitempty"`
 	Providers           map[string]*providerSnapshot `json:"providers,omitempty"`
 	Model               string                       `json:"model"`
+	Profile             string                       `json:"profile,omitempty"`
 	ReasoningEffort     *string                      `json:"reasoning_effort,omitempty"`
 	SystemPrompt        string                       `json:"system_prompt"`
 	Prompt              *string                      `json:"prompt,omitempty"`
@@ -119,6 +120,7 @@ func EncodeResearchPlan(
 	}
 	snapshot := researchSnapshot{
 		Model:               config.Model,
+		Profile:             config.ProfileName(),
 		ReasoningEffort:     clonePointer(config.ReasoningEffort),
 		SystemPrompt:        config.SystemPrompt,
 		Prompt:              clonePointer(config.Prompt),
@@ -186,12 +188,15 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 		}, nil
 	}
 	configValue := researchspec.Config{
-		Model: snapshot.Model, ReasoningEffort: clonePointer(snapshot.ReasoningEffort),
+		Model: snapshot.Model, Profile: snapshot.Profile, ReasoningEffort: clonePointer(snapshot.ReasoningEffort),
 		SystemPrompt: snapshot.SystemPrompt, Prompt: clonePointer(snapshot.Prompt),
 		MaxProtocolAttempts: snapshot.MaxProtocolAttempts, Timeout: nanosecondsDuration(snapshot.TimeoutNanoseconds),
 		Retry: snapshot.Retry, Policy: restorePolicy(snapshot.Policy),
 		Artifacts:       slices.Clone(snapshot.Artifacts),
 		TerminateToolID: clonePointer(snapshot.TerminateToolID),
+	}
+	if configValue.Profile == "" {
+		configValue.Profile = configValue.Model
 	}
 	if snapshot.QC != nil {
 		configValue.QC = &researchspec.QCConfig{

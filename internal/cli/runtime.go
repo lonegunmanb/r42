@@ -389,7 +389,7 @@ func (f *runtimeFactory) newResearchBlock(
 		return nil, err
 	}
 	session, err := f.openSession(ctx, executionAddress, debuglog.SessionResearch, copilot.SessionConfig{
-		Provider: planned.Provider, Retry: retry, Model: planned.Config.Model,
+		Provider: planned.Provider, Retry: retry, Model: planned.Config.Model, Profile: planned.Config.ProfileName(),
 		ReasoningEffort: reasoning, SystemPrompt: systemPrompt, WorkingDirectory: workspace,
 		AvailableTools:   slices.Clone(planned.Config.Policy.AllowedTools),
 		ExcludedTools:    slices.Clone(planned.Config.Policy.DisallowedTools),
@@ -453,7 +453,7 @@ func (f *runtimeFactory) newResearchBlock(
 			Role: debuglog.RoleSystem, Content: qcSystemPrompt,
 		})
 		qcSession, err = f.openSession(ctx, executionAddress, debuglog.SessionQC, copilot.SessionConfig{
-			Provider: selectedProvider, Retry: effective.Retry, Model: effective.Model,
+			Provider: selectedProvider, Retry: effective.Retry, Model: effective.Model, Profile: effective.Profile,
 			ReasoningEffort: qcReasoning, SystemPrompt: qcSystemPrompt, WorkingDirectory: workspace,
 			Tools: qcTools, AvailableTools: slices.Clone(effective.AllowedTools), ExcludedTools: slices.Clone(effective.DisallowedTools),
 			SkillDirectories: slices.Clone(effective.SkillDirectories), Skills: slices.Clone(effective.Skills),
@@ -684,7 +684,7 @@ func (f *runtimeFactory) buildTools(
 				if reserveErr := quota.reserve(definition.ID); reserveErr != nil {
 					return sdk.ToolResult{}, reserveErr
 				}
-				response, invokeErr := program.Invoke(ctx, arguments)
+				response, invokeErr := program.Invoke(ctx, arguments, workspace)
 				if invokeErr != nil {
 					quota.rollback(definition.ID)
 					var stdout string

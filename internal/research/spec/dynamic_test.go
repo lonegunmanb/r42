@@ -35,8 +35,52 @@ func TestPlanDynamicTasksPreservesTaskShape(t *testing.T) {
 	require.True(t, task.Type().HasAttribute("artifacts"))
 	assert.Equal(t, "alpha", task.GetAttr("topic").AsString())
 	assert.Equal(t, "alpha", task.GetAttr("prompt").AsString())
+	assert.Equal(t, "test-model", task.GetAttr("profile").AsString())
 	assert.False(t, task.GetAttr("result").IsKnown())
 	assert.True(t, task.GetAttr("artifacts").Type().IsListType())
+}
+
+func TestDecodeDynamicTaskResolvesProfile(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		profile  cty.Value
+		expected string
+	}{
+		{name: "defaults to model", profile: cty.NilVal, expected: "wire-model"},
+		{name: "uses explicit profile", profile: cty.StringVal("gpt-5.4"), expected: "gpt-5.4"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			values := map[string]cty.Value{
+				"model": cty.StringVal("wire-model"), "system_prompt": cty.StringVal("Research."),
+				"artifacts": cty.EmptyTupleVal, "retry": cty.NullVal(cty.DynamicPseudoType),
+				"qc": cty.NullVal(cty.DynamicPseudoType),
+			}
+			if tt.profile != cty.NilVal {
+				values["profile"] = tt.profile
+			}
+
+			config, err := researchspec.DecodeDynamicTask(cty.ObjectVal(values))
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, config.Profile)
+		})
+	}
+}
+
+func TestDecodeDynamicTaskRejectsEmptyProfile(t *testing.T) {
+	t.Parallel()
+
+	_, err := researchspec.DecodeDynamicTask(cty.ObjectVal(map[string]cty.Value{
+		"model": cty.StringVal("wire-model"), "profile": cty.StringVal(" "),
+		"system_prompt": cty.StringVal("Research."), "artifacts": cty.EmptyTupleVal,
+		"retry": cty.NullVal(cty.DynamicPseudoType), "qc": cty.NullVal(cty.DynamicPseudoType),
+	}))
+
+	require.ErrorContains(t, err, "research profile must not be empty")
 }
 
 func TestPlanDynamicTasksPreservesSensitiveFields(t *testing.T) {
@@ -44,7 +88,7 @@ func TestPlanDynamicTasksPreservesSensitiveFields(t *testing.T) {
 
 	planned, err := researchspec.PlanDynamicTasks(cty.TupleVal([]cty.Value{
 		cty.ObjectVal(map[string]cty.Value{
-			"model":         cty.StringVal("test-model"),
+			"model":         corespec.MarkSensitive(cty.StringVal("test-model")),
 			"system_prompt": cty.StringVal("Research the topic."),
 			"prompt":        corespec.MarkSensitive(cty.StringVal("secret topic")),
 			"artifacts":     cty.EmptyTupleVal,
@@ -56,6 +100,7 @@ func TestPlanDynamicTasksPreservesSensitiveFields(t *testing.T) {
 
 	task := planned.Index(cty.NumberIntVal(0))
 	assert.True(t, corespec.IsSensitive(task.GetAttr("prompt")))
+	assert.True(t, corespec.IsSensitive(task.GetAttr("profile")))
 	display, err := plan.DisplayValues(map[string]cty.Value{"tasks": planned})
 	require.NoError(t, err)
 	assert.Contains(t, display, "<sensitive>")
@@ -155,7 +200,7 @@ func TestAppliedDynamicTaskPreservesSensitiveFields(t *testing.T) {
 
 	input := cty.TupleVal([]cty.Value{
 		cty.ObjectVal(map[string]cty.Value{
-			"model":         cty.StringVal("test-model"),
+			"model":         corespec.MarkSensitive(cty.StringVal("test-model")),
 			"system_prompt": cty.StringVal("Research."),
 			"prompt":        corespec.MarkSensitive(cty.StringVal("secret topic")),
 			"artifacts":     cty.EmptyTupleVal,
@@ -167,12 +212,14 @@ func TestAppliedDynamicTaskPreservesSensitiveFields(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	assert.True(t, corespec.IsSensitive(tasks[0].GetAttr("prompt")))
+	assert.True(t, corespec.IsSensitive(tasks[0].GetAttr("profile")))
 
 	applied := researchspec.AppliedDynamicTaskValue(tasks[0], cty.ObjectVal(map[string]cty.Value{
 		"artifact": cty.EmptyTupleVal,
 	}))
 
 	assert.True(t, corespec.IsSensitive(applied.GetAttr("prompt")))
+	assert.True(t, corespec.IsSensitive(applied.GetAttr("profile")))
 }
 
 func TestDecodeDynamicTasksPropagatesCollectionSensitivity(t *testing.T) {

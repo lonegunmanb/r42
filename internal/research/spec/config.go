@@ -35,6 +35,7 @@ type SessionPolicy struct {
 type Config struct {
 	ModelProvider       cty.Value
 	Model               string
+	Profile             string
 	ReasoningEffort     *string
 	SystemPrompt        string
 	Prompt              *string
@@ -47,9 +48,19 @@ type Config struct {
 	QC                  *QCConfig
 }
 
+func (c Config) ProfileName() string {
+	if c.Profile == "" {
+		return c.Model
+	}
+	return c.Profile
+}
+
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.Model) == "" {
 		return errors.New("research model is required")
+	}
+	if c.Profile != "" && strings.TrimSpace(c.Profile) == "" {
+		return errors.New("research profile must not be empty")
 	}
 	if strings.TrimSpace(c.SystemPrompt) == "" {
 		return errors.New("research system prompt is required")
@@ -179,6 +190,7 @@ type EffectiveQC struct {
 	Criteria           cty.Value
 	ModelProvider      cty.Value
 	Model              string
+	Profile            string
 	ReasoningEffort    *string
 	Retry              provider.RetryPolicy
 	ToolIDs            []string
@@ -213,8 +225,10 @@ func (c Config) EffectiveQC(providerRetry provider.RetryPolicy) (EffectiveQC, er
 		modelProvider = c.QC.ModelProvider
 	}
 	model := c.Model
+	profile := c.ProfileName()
 	if c.QC.Model != nil {
 		model = *c.QC.Model
+		profile = model
 	}
 	reasoningEffort := cloneStringPointer(c.ReasoningEffort)
 	if c.QC.ReasoningEffort != nil {
@@ -233,6 +247,7 @@ func (c Config) EffectiveQC(providerRetry provider.RetryPolicy) (EffectiveQC, er
 		Criteria:           c.QC.Criteria,
 		ModelProvider:      modelProvider,
 		Model:              model,
+		Profile:            profile,
 		ReasoningEffort:    reasoningEffort,
 		Retry:              qcRetry,
 		ToolIDs:            slices.Clone(c.QC.ToolIDs),

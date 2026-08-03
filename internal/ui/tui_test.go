@@ -88,14 +88,41 @@ func TestTUIModelNavigatesPanelsNodesAndLongContent(t *testing.T) {
 	model = updateTUI(t, model, tea.KeyMsg{Type: tea.KeyRight})
 	assert.Contains(t, model.View(), "Detail *")
 	assert.Contains(t, model.View(), "begin-")
+	detail := model.View()
 	model = updateTUI(t, model, tea.KeyMsg{Type: tea.KeyRight, Alt: true})
 	model = updateTUI(t, model, tea.KeyMsg{Type: tea.KeyRight, Alt: true})
-	assert.NotContains(t, model.View(), "begin-")
+	assert.Equal(t, detail, model.View())
 
 	model = updateTUI(t, model, tea.KeyMsg{Type: tea.KeyLeft})
 	model = updateTUI(t, model, tea.KeyMsg{Type: tea.KeyDown})
 	model = updateTUI(t, model, tea.KeyMsg{Type: tea.KeyRight})
 	assert.Contains(t, model.View(), "Address: research.static.summary")
+}
+
+func TestTUIModelWrapsStreamingContentWithinDetailPanel(t *testing.T) {
+	t.Parallel()
+
+	projector := newTUIProjector(t)
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventMessage, Action: "assistant.message_delta", MessageID: "message-1",
+		BlockAddress: "research.static.collect", Session: debuglog.SessionResearch,
+		Content: "start " + strings.Repeat("wrapped content ", 12) + "tail-marker", Sequence: 1,
+	})
+	model := resizeTUI(t, ui.NewTUIModel(projector, nil), 120, 24)
+	model = updateTUI(t, model, tea.KeyMsg{Type: tea.KeyRight})
+
+	view := model.View()
+	assert.Contains(t, view, "start wrapped")
+	assert.Contains(t, view, "tail-marker")
+
+	model = updateTUI(t, model, tea.KeyMsg{Type: tea.KeyRight, Alt: true})
+	assert.Equal(t, view, model.View())
+
+	model = resizeTUI(t, model, 70, 24)
+	resized := model.View()
+	assert.Contains(t, resized, "start wrapped")
+	assert.Contains(t, resized, "tail-marker")
+	assertViewFitsTerminal(t, resized, 70, 24)
 }
 
 func TestTUIModelCollapsesModuleAndConfirmsCancellation(t *testing.T) {
@@ -265,7 +292,7 @@ func TestTUIModelClampsPanelScrollAfterWindowResize(t *testing.T) {
 	assert.Contains(t, model.View(), "Address: research.static.collect")
 }
 
-func TestTUIModelClampsHorizontalScrollAfterWindowResize(t *testing.T) {
+func TestTUIModelRewrapsDetailAfterWindowResize(t *testing.T) {
 	t.Parallel()
 
 	projector := newTUIProjector(t)
@@ -276,10 +303,11 @@ func TestTUIModelClampsHorizontalScrollAfterWindowResize(t *testing.T) {
 	})
 	model := resizeTUI(t, ui.NewTUIModel(projector, nil), 100, 20)
 	model = updateTUI(t, model, tea.KeyMsg{Type: tea.KeyRight})
+	detail := model.View()
 	for range 5 {
 		model = updateTUI(t, model, tea.KeyMsg{Type: tea.KeyRight, Alt: true})
 	}
-	assert.Equal(t, 1, strings.Count(model.View(), "begin-"))
+	assert.Equal(t, detail, model.View())
 
 	model = resizeTUI(t, model, 90, 20)
 	assert.Contains(t, model.View(), "begin-")

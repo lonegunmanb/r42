@@ -198,6 +198,27 @@ func TestProjectorCoalescesStreamingMessagesAndToolCallsInTimeline(t *testing.T)
 	assert.Contains(t, timeline[1].Content, "downloading")
 }
 
+func TestProjectorCoalescesAdjacentStreamingDeltasWithoutMessageID(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{
+		{Address: "research.static.market", Kind: "research"},
+	}, nil, nil, nil)
+	require.NoError(t, err)
+	projector := ui.NewProjector(planned)
+	for _, content := range []string{"inspect ", "sources"} {
+		projector.Observe(debuglog.Event{
+			Kind: debuglog.EventMessage, Action: "assistant.reasoning_delta",
+			BlockAddress: "research.static.market", Session: debuglog.SessionResearch,
+			Content: content,
+		})
+	}
+
+	timeline := projector.Snapshot().Timeline
+	require.Len(t, timeline, 1)
+	assert.Equal(t, "inspect sources", timeline[0].Content)
+}
+
 func TestProjectorResetsContentWhenAssistantStreamChanges(t *testing.T) {
 	t.Parallel()
 

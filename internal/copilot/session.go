@@ -19,6 +19,7 @@ type SessionConfig struct {
 	Provider         *provider.Config
 	Retry            provider.RetryPolicy
 	Model            string
+	Profile          string
 	ReasoningEffort  string
 	SystemPrompt     string
 	WorkingDirectory string
@@ -77,7 +78,11 @@ func (f *Factory) Open(ctx context.Context, config SessionConfig) (*Session, err
 }
 
 func (f *Factory) sessionConfig(config SessionConfig) (*sdk.SessionConfig, error) {
-	providerConfig, err := f.providerConfig(config.Provider)
+	profile := config.Profile
+	if profile == "" {
+		profile = config.Model
+	}
+	providerConfig, err := f.providerConfig(config.Provider, profile, config.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +108,7 @@ func (f *Factory) sessionConfig(config SessionConfig) (*sdk.SessionConfig, error
 			Name:            researchAgentName,
 			Prompt:          config.SystemPrompt,
 			Skills:          slices.Clone(config.Skills),
-			Model:           config.Model,
+			Model:           profile,
 			ReasoningEffort: config.ReasoningEffort,
 		}}
 		result.Agent = researchAgentName
@@ -111,7 +116,7 @@ func (f *Factory) sessionConfig(config SessionConfig) (*sdk.SessionConfig, error
 	return result, nil
 }
 
-func (f *Factory) providerConfig(config *provider.Config) (*sdk.ProviderConfig, error) {
+func (f *Factory) providerConfig(config *provider.Config, profile, model string) (*sdk.ProviderConfig, error) {
 	if config == nil {
 		return nil, nil
 	}
@@ -120,9 +125,11 @@ func (f *Factory) providerConfig(config *provider.Config) (*sdk.ProviderConfig, 
 		return nil, fmt.Errorf("materialize provider: %w", err)
 	}
 	result := &sdk.ProviderConfig{
-		Type:    string(materialized.Type),
-		BaseURL: materialized.Endpoint,
-		Headers: materialized.Headers,
+		Type:      string(materialized.Type),
+		BaseURL:   materialized.Endpoint,
+		Headers:   materialized.Headers,
+		ModelID:   profile,
+		WireModel: model,
 	}
 	if materialized.WireAPI != nil {
 		result.WireAPI = string(*materialized.WireAPI)

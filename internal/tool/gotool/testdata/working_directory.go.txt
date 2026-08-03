@@ -1,0 +1,18 @@
+import (
+	"context"
+	"os"
+)
+
+type Input struct{}
+
+type Output struct {
+	WorkingDirectory string `json:"working_directory"`
+}
+
+func Invoke(_ context.Context, _ Input) (ToolResponse[Output], error) {
+	directory, err := os.Getwd()
+	if err != nil {
+		return ToolResponse[Output]{}, err
+	}
+	return ToolResponse[Output]{Accepted: true, Output: &Output{WorkingDirectory: directory}}, nil
+}

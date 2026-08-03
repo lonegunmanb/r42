@@ -130,8 +130,9 @@ func (p *Program) Analysis() Analysis {
 	return p.analysis
 }
 
-func (p *Program) Invoke(ctx context.Context, input json.RawMessage) (Response, error) {
+func (p *Program) Invoke(ctx context.Context, input json.RawMessage, workingDirectory string) (Response, error) {
 	command := exec.CommandContext(ctx, p.path)
+	command.Dir = workingDirectory
 	command.Stdin = bytes.NewReader(input)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

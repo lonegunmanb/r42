@@ -7,6 +7,7 @@ import (
 	"math"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/Azure/golden"
@@ -29,6 +30,7 @@ type ResearchBlock struct {
 	*golden.BaseBlock
 	ModelProvider       cty.Value       `hcl:"model_provider,optional"`
 	Model               string          `hcl:"model"`
+	Profile             *string         `hcl:"profile,optional"`
 	ReasoningEffort     *string         `hcl:"reasoning_effort,optional"`
 	SystemPrompt        string          `hcl:"system_prompt"`
 	Prompt              *string         `hcl:"prompt,optional"`
@@ -133,7 +135,7 @@ func (b *ResearchBlock) validateNativeStringFields() error {
 		return err
 	}
 	if err := validateStringAttributes(root, b.EvalContext(), "research", []string{
-		"model", "reasoning_effort", "system_prompt", "prompt", "terminate_tool_id", "permission", "timeout",
+		"model", "profile", "reasoning_effort", "system_prompt", "prompt", "terminate_tool_id", "permission", "timeout",
 	}); err != nil {
 		return err
 	}
@@ -289,6 +291,7 @@ func (b *ResearchBlock) Values() map[string]cty.Value {
 	values := map[string]cty.Value{
 		"model_provider":        optionalObjectValue(b.ModelProvider),
 		"model":                 cty.StringVal(b.Model),
+		"profile":               cty.StringVal(b.planned.ProfileName()),
 		"reasoning_effort":      optionalStringValue(b.ReasoningEffort),
 		"system_prompt":         cty.StringVal(b.SystemPrompt),
 		"prompt":                optionalStringValue(b.Prompt),
@@ -483,9 +486,14 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	profile, err := resolveProfile(b.Model, b.Profile)
+	if err != nil {
+		return Config{}, err
+	}
 	config := Config{
 		ModelProvider:       b.ModelProvider,
 		Model:               b.Model,
+		Profile:             profile,
 		ReasoningEffort:     clonePointer(b.ReasoningEffort),
 		SystemPrompt:        b.SystemPrompt,
 		Prompt:              clonePointer(b.Prompt),
@@ -529,6 +537,16 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 		}
 	}
 	return config, nil
+}
+
+func resolveProfile(model string, profile *string) (string, error) {
+	if profile == nil {
+		return model, nil
+	}
+	if strings.TrimSpace(*profile) == "" {
+		return "", errors.New("research profile must not be empty")
+	}
+	return *profile, nil
 }
 
 func (b RetryBlock) override() (provider.RetryOverride, error) {

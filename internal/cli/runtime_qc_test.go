@@ -23,6 +23,7 @@ func TestProductionRuntimeRunsPersistentQCSessionWithVerdictTool(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 research "static" "source" {
   model = "test-model"
+  profile = "gpt-5.4"
   system_prompt = "Collect evidence."
   qc { criteria = { accuracy = "Must be accurate" } }
 }
@@ -36,6 +37,8 @@ research "static" "source" {
 
 	require.NoError(t, err)
 	require.Len(t, opener.configs, 2)
+	assert.Equal(t, "gpt-5.4", opener.configs[0].Profile)
+	assert.Equal(t, "gpt-5.4", opener.configs[1].Profile)
 	assert.Empty(t, opener.configs[0].Tools)
 	require.Len(t, opener.configs[1].Tools, 1)
 	assert.Equal(t, "r42_qc_verdict", opener.configs[1].Tools[0].Name)
