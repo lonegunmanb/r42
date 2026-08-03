@@ -155,6 +155,88 @@ research "static" "market" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
+func TestStaticResearchBlockPlansUnknownPromptWithMultipleArtifacts(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+fixture_tool "finish" {}
+
+research "static" "source" {
+  model             = "model"
+  system_prompt     = "source"
+  terminate_tool_id = fixture_tool.finish.id
+}
+
+research "static" "summary" {
+  model             = "model"
+  system_prompt     = "summary"
+  prompt            = research.static.source.result
+  terminate_tool_id = fixture_tool.finish.id
+
+  artifact "report" {
+    type = "file"
+    path = "${block_wd()}/report.md"
+  }
+
+  artifact "evidence" {
+    type      = "file"
+    path      = "${block_wd()}/evidence.json"
+    required  = true
+    non_empty = true
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	blocks := golden.Blocks[*researchspec.ResearchBlock](config)
+	require.Len(t, blocks, 2)
+	var summary *researchspec.ResearchBlock
+	for _, block := range blocks {
+		if block.Name() == "summary" {
+			summary = block
+		}
+	}
+	require.NotNil(t, summary)
+	assert.NotEmpty(t, summary.DeferredTaskExpression())
+	value := config.EvalContext().Variables["research"].GetAttr("static").GetAttr("summary")
+	assert.False(t, value.GetAttr("prompt").IsKnown())
+	assert.False(t, value.GetAttr("result").IsKnown())
+	artifacts := value.GetAttr("artifact")
+	require.Equal(t, 2, artifacts.LengthInt())
+	assert.Equal(t, "report", artifacts.Index(cty.NumberIntVal(0)).GetAttr("name").AsString())
+	assert.Equal(t, "evidence", artifacts.Index(cty.NumberIntVal(1)).GetAttr("name").AsString())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestStaticResearchBlockRejectsMultipleQCRetryBlocksWithUnknownPrompt(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+fixture_tool "finish" {}
+
+research "static" "source" {
+  model             = "model"
+  system_prompt     = "source"
+  terminate_tool_id = fixture_tool.finish.id
+}
+
+research "static" "summary" {
+  model         = "model"
+  system_prompt = "summary"
+  prompt        = research.static.source.result
+
+  qc {
+    criteria = { accuracy = "accurate" }
+    retry {}
+    retry {}
+  }
+}
+`)
+
+	err := config.RunPlan()
+
+	require.ErrorContains(t, err, "qc supports at most one retry block")
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
 func TestResearchBlockRejectsFractionalTypedToolCallQuota(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `

@@ -365,6 +365,9 @@ func (c *ResearchConfig) savedPlan(planned modulespec.Plan) (*internalplan.Plan,
 	for _, block := range golden.Blocks[*researchspec.ResearchBlock](c) {
 		executable[block.Address()] = struct{}{}
 	}
+	for _, block := range golden.Blocks[*researchspec.DynamicResearchBlock](c) {
+		executable[block.Address()] = struct{}{}
+	}
 	for _, block := range golden.Blocks[*modulespec.ModuleBlock](c) {
 		executable[block.Address()] = struct{}{}
 	}
@@ -383,7 +386,16 @@ func (c *ResearchConfig) savedPlan(planned modulespec.Plan) (*internalplan.Plan,
 	toolRegistry := modulespec.BuildToolRegistry(c, planned.Modules)
 	nodes := make([]internalplan.NodeSpec, 0, len(executable))
 	for _, block := range golden.Blocks[*researchspec.ResearchBlock](c) {
-		snapshot, err := modulespec.EncodeResearchPlan(block.ResearchConfig(), c, toolRegistry)
+		snapshot, err := modulespec.EncodeResearchPlan(block, c, toolRegistry)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot %s: %w", block.Address(), err)
+		}
+		nodes = append(nodes, internalplan.NodeSpec{
+			Address: block.Address(), Kind: "research", Dependencies: dependencies[block.Address()], Config: snapshot,
+		})
+	}
+	for _, block := range golden.Blocks[*researchspec.DynamicResearchBlock](c) {
+		snapshot, err := modulespec.EncodeDynamicResearchPlan(block, c, toolRegistry)
 		if err != nil {
 			return nil, fmt.Errorf("snapshot %s: %w", block.Address(), err)
 		}

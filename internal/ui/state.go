@@ -40,6 +40,7 @@ type ResearchCounts struct {
 type Node struct {
 	Address      string
 	Kind         string
+	ResearchTask bool
 	Parent       string
 	Dependencies []string
 	Status       Status
@@ -123,6 +124,7 @@ func (p *Projector) addPlan(planned *plan.Plan, prefix, parent string) {
 		p.order = append(p.order, address)
 		p.nodes[address] = &Node{
 			Address: address, Kind: spec.Kind, Parent: parent,
+			ResearchTask: spec.Kind == "research",
 			Dependencies: dependencies, Status: StatusWaiting, Activity: ActivityIdle,
 		}
 		if spec.Module != nil && spec.Module.Plan != nil {
@@ -141,6 +143,9 @@ func canonicalAddress(prefix, address string) string {
 func (p *Projector) Observe(event debuglog.Event) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if event.Action == "dynamic.tasks.materialized" {
+		p.materializeDynamicTasks(event)
+	}
 	node := p.nodes[event.BlockAddress]
 	if node == nil {
 		return
@@ -194,6 +199,37 @@ func (p *Projector) Observe(event debuglog.Event) {
 		p.addUsage(node, event.Usage)
 	}
 	p.updateTimeline(event, node.Activity, content, toolName)
+}
+
+func (p *Projector) materializeDynamicTasks(event debuglog.Event) {
+	parent := p.nodes[event.BlockAddress]
+	if parent == nil || parent.Kind != "research" || !parent.ResearchTask {
+		return
+	}
+	parent.ResearchTask = false
+	children := make([]string, 0, len(event.Paths))
+	for _, address := range event.Paths {
+		if address == "" {
+			continue
+		}
+		if _, exists := p.nodes[address]; exists {
+			continue
+		}
+		p.nodes[address] = &Node{
+			Address: address, Kind: "research", ResearchTask: true, Parent: event.BlockAddress,
+			Status: StatusWaiting, Activity: ActivityIdle,
+		}
+		children = append(children, address)
+	}
+	if len(children) == 0 {
+		return
+	}
+	parentIndex := slices.Index(p.order, event.BlockAddress)
+	if parentIndex < 0 {
+		p.order = append(p.order, children...)
+		return
+	}
+	p.order = slices.Insert(p.order, parentIndex+1, children...)
 }
 
 func (p *Projector) prepareContent(node *Node, event debuglog.Event, streamKind string) {
@@ -331,7 +367,7 @@ func (p *Projector) Snapshot() Snapshot {
 		node := *p.nodes[address]
 		node.Dependencies = slices.Clone(node.Dependencies)
 		snapshot.Nodes = append(snapshot.Nodes, node)
-		if node.Kind != "research" {
+		if !node.ResearchTask {
 			continue
 		}
 		snapshot.Research.Total++

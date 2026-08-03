@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
@@ -50,6 +51,7 @@ var (
 	registerLifecycleFixture sync.Once
 	lifecyclePlanCalls       atomic.Int64
 	lifecycleApplyCalls      atomic.Int64
+	lifecycleApplyHook       func() error
 )
 
 type lifecycleFixtureBlock struct {
@@ -67,6 +69,9 @@ func (*lifecycleFixtureBlock) ExecuteDuringPlan() error {
 
 func (*lifecycleFixtureBlock) Apply() error {
 	lifecycleApplyCalls.Add(1)
+	if lifecycleApplyHook != nil {
+		return lifecycleApplyHook()
+	}
 	return nil
 }
 
@@ -398,6 +403,53 @@ func TestResearchPlanApplyCallsApplyBlockWithoutRunningPlanAgain(t *testing.T) {
 	require.NoError(t, planned.Apply())
 	assert.Equal(t, int64(1), lifecyclePlanCalls.Load())
 	assert.Equal(t, int64(1), lifecycleApplyCalls.Load())
+}
+
+//nolint:paralleltest // Golden's block registry and lifecycle hook are process-global.
+func TestResearchPlanApplyDelegatesParallelSchedulingToGolden(t *testing.T) {
+	registerLifecycleFixture.Do(func() { golden.RegisterBlock(new(lifecycleFixtureBlock)) })
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	lifecycleApplyHook = func() error {
+		started <- struct{}{}
+		<-release
+		return nil
+	}
+	t.Cleanup(func() { lifecycleApplyHook = nil })
+
+	writeFile := hclwrite.NewEmptyFile()
+	writeFile.Body().AppendBlock(hclwrite.NewBlock("lifecycle_fixture", []string{"first"}))
+	writeFile.Body().AppendBlock(hclwrite.NewBlock("lifecycle_fixture", []string{"second"}))
+	syntaxFile, diagnostics := hclsyntax.ParseConfig(writeFile.Bytes(), "fixture.r42", hcl.InitialPos)
+	require.False(t, diagnostics.HasErrors())
+	syntaxBody, ok := syntaxFile.Body.(*hclsyntax.Body)
+	require.True(t, ok)
+
+	config := &ResearchConfig{
+		BaseConfig:  golden.NewBasicConfigFromArgs(golden.NewBaseConfigArgs{Basedir: ".", Ctx: t.Context()}),
+		parallelism: 2,
+	}
+	require.NoError(t, golden.InitConfig(config, golden.AsHclBlocks(syntaxBody.Blocks, writeFile.Body().Blocks())))
+	planned, err := RunResearchPlan(config)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() { done <- planned.Apply() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		require.FailNow(t, "first ApplyBlock did not start")
+	}
+
+	secondStarted := false
+	select {
+	case <-started:
+		secondStarted = true
+	case <-time.After(time.Second):
+	}
+	close(release)
+	require.NoError(t, <-done)
+	assert.True(t, secondStarted, "second ApplyBlock did not start before the first was released")
 }
 
 func TestRunResearchPlanRequiresConfig(t *testing.T) {

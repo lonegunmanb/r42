@@ -21,22 +21,26 @@ type ResearchPlan struct {
 	Config     researchspec.Config
 	Provider   *provider.Config
 	QCProvider *provider.Config
+	Expression string
+	Providers  map[string]*provider.Config
 }
 
 type researchSnapshot struct {
-	Model               string                  `json:"model"`
-	ReasoningEffort     *string                 `json:"reasoning_effort,omitempty"`
-	SystemPrompt        string                  `json:"system_prompt"`
-	Prompt              *string                 `json:"prompt,omitempty"`
-	MaxProtocolAttempts int                     `json:"max_protocol_attempts"`
-	TimeoutNanoseconds  *int64                  `json:"timeout_nanoseconds,omitempty"`
-	Retry               provider.RetryOverride  `json:"retry"`
-	Policy              policySnapshot          `json:"policy"`
-	Artifacts           []researchspec.Artifact `json:"artifacts"`
-	QC                  *qcSnapshot             `json:"qc,omitempty"`
-	Provider            *providerSnapshot       `json:"provider,omitempty"`
-	TerminateToolID     *string                 `json:"terminate_tool_id,omitempty"`
-	QCProvider          *providerSnapshot       `json:"qc_provider,omitempty"`
+	Expression          string                       `json:"expression,omitempty"`
+	Providers           map[string]*providerSnapshot `json:"providers,omitempty"`
+	Model               string                       `json:"model"`
+	ReasoningEffort     *string                      `json:"reasoning_effort,omitempty"`
+	SystemPrompt        string                       `json:"system_prompt"`
+	Prompt              *string                      `json:"prompt,omitempty"`
+	MaxProtocolAttempts int                          `json:"max_protocol_attempts"`
+	TimeoutNanoseconds  *int64                       `json:"timeout_nanoseconds,omitempty"`
+	Retry               provider.RetryOverride       `json:"retry"`
+	Policy              policySnapshot               `json:"policy"`
+	Artifacts           []researchspec.Artifact      `json:"artifacts"`
+	QC                  *qcSnapshot                  `json:"qc,omitempty"`
+	Provider            *providerSnapshot            `json:"provider,omitempty"`
+	TerminateToolID     *string                      `json:"terminate_tool_id,omitempty"`
+	QCProvider          *providerSnapshot            `json:"qc_provider,omitempty"`
 }
 
 type policySnapshot struct {
@@ -81,11 +85,32 @@ type providerSnapshot struct {
 }
 
 func EncodeResearchPlan(
-	config researchspec.Config,
+	block *researchspec.ResearchBlock,
 	planning golden.Config,
 	registry map[string]internalplan.ToolSpec,
 ) (cty.Value, error) {
-	if err := validateResearchToolIDs(config, registry); err != nil {
+	if block == nil {
+		return cty.NilVal, fmt.Errorf("research block is required")
+	}
+	if expression := block.DeferredTaskExpression(); expression != "" {
+		providers, sensitive, err := snapshotAllProviders(planning)
+		if err != nil {
+			return cty.NilVal, err
+		}
+		encoded, err := json.Marshal(researchSnapshot{Expression: expression, Providers: providers})
+		if err != nil {
+			return cty.NilVal, fmt.Errorf("encode deferred research plan: %w", err)
+		}
+		payload := cty.StringVal(string(encoded))
+		if sensitive {
+			payload = corespec.MarkSensitive(payload)
+		}
+		return cty.ObjectVal(map[string]cty.Value{
+			"model": cty.StringVal("<dynamic>"), "payload": payload,
+		}), nil
+	}
+	config := block.ResearchConfig()
+	if err := ValidateResearchToolIDs(config, registry); err != nil {
 		return cty.NilVal, err
 	}
 	providerConfig, sensitive, err := resolveProvider(config.ModelProvider, planning)
@@ -154,6 +179,12 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 	if err := json.Unmarshal([]byte(payload.AsString()), &snapshot); err != nil {
 		return ResearchPlan{}, fmt.Errorf("decode research plan: %w", err)
 	}
+	if snapshot.Expression != "" {
+		return ResearchPlan{
+			Expression: snapshot.Expression,
+			Providers:  restoreProviders(snapshot.Providers),
+		}, nil
+	}
 	configValue := researchspec.Config{
 		Model: snapshot.Model, ReasoningEffort: clonePointer(snapshot.ReasoningEffort),
 		SystemPrompt: snapshot.SystemPrompt, Prompt: clonePointer(snapshot.Prompt),
@@ -179,6 +210,19 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 	}, nil
 }
 
+func (p ResearchPlan) Resolve(config researchspec.Config) (ResearchPlan, error) {
+	if p.Expression == "" {
+		return p, nil
+	}
+	resolved, err := (DynamicResearchPlan{Providers: p.Providers}).Resolve(config)
+	if err != nil {
+		return ResearchPlan{}, err
+	}
+	return ResearchPlan{
+		Config: resolved.Config, Provider: resolved.Provider, QCProvider: resolved.QCProvider,
+	}, nil
+}
+
 func resolveProvider(value cty.Value, planning golden.Config) (*providerSnapshot, bool, error) {
 	address, ok, err := referenceAddress(value)
 	if err != nil || !ok {
@@ -188,20 +232,23 @@ func resolveProvider(value cty.Value, planning golden.Config) (*providerSnapshot
 		if block.Address() != address {
 			continue
 		}
-		configValue := block.ProviderConfig()
-		headers, headerErr := provider.MaterializeHeaders(configValue.Headers)
-		if headerErr != nil {
-			return nil, false, headerErr
-		}
-		return &providerSnapshot{
-			Type: configValue.Type, Endpoint: configValue.Endpoint, WireAPI: clonePointer(configValue.WireAPI),
-			Transport: clonePointer(configValue.Transport), Headers: headers,
-			HasHeaders: !configValue.Headers.Type().Equals(cty.NilType), APIKey: clonePointer(configValue.APIKey),
-			APIKeyRef: clonePointer(configValue.APIKeyRef), BearerToken: clonePointer(configValue.BearerToken),
-			BearerTokenRef: clonePointer(configValue.BearerTokenRef), Retry: configValue.Retry,
-		}, configValue.APIKey != nil || configValue.BearerToken != nil || provider.HeadersSensitive(configValue.Headers), nil
+		return snapshotProviderConfig(block.ProviderConfig())
 	}
 	return nil, false, fmt.Errorf("model provider %q was not planned", address)
+}
+
+func snapshotProviderConfig(configValue provider.Config) (*providerSnapshot, bool, error) {
+	headers, err := provider.MaterializeHeaders(configValue.Headers)
+	if err != nil {
+		return nil, false, err
+	}
+	return &providerSnapshot{
+		Type: configValue.Type, Endpoint: configValue.Endpoint, WireAPI: clonePointer(configValue.WireAPI),
+		Transport: clonePointer(configValue.Transport), Headers: headers,
+		HasHeaders: !configValue.Headers.Type().Equals(cty.NilType), APIKey: clonePointer(configValue.APIKey),
+		APIKeyRef: clonePointer(configValue.APIKeyRef), BearerToken: clonePointer(configValue.BearerToken),
+		BearerTokenRef: clonePointer(configValue.BearerTokenRef), Retry: configValue.Retry,
+	}, configValue.APIKey != nil || configValue.BearerToken != nil || provider.HeadersSensitive(configValue.Headers), nil
 }
 
 func BuildToolRegistry(
@@ -241,7 +288,7 @@ func BuildToolRegistry(
 	return registry
 }
 
-func validateResearchToolIDs(config researchspec.Config, registry map[string]internalplan.ToolSpec) error {
+func ValidateResearchToolIDs(config researchspec.Config, registry map[string]internalplan.ToolSpec) error {
 	if err := validateConfiguredToolIDs(config.Policy.ToolIDs, registry, "research tool_ids"); err != nil {
 		return err
 	}

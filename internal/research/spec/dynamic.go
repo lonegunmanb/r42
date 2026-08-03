@@ -1,0 +1,514 @@
+package spec
+
+import (
+	"fmt"
+	"maps"
+	"math/big"
+
+	"github.com/Azure/golden"
+	"github.com/hashicorp/hcl/v2"
+	"github.com/lonegunmanb/r42/internal/debuglog"
+	"github.com/zclconf/go-cty/cty"
+)
+
+var (
+	_ golden.PlanBlock  = (*DynamicResearchBlock)(nil)
+	_ golden.ApplyBlock = (*DynamicResearchBlock)(nil)
+	_ golden.Valuable   = (*DynamicResearchBlock)(nil)
+)
+
+type DynamicResearchBlock struct {
+	*golden.BaseBlock
+	Tasks cty.Value `hcl:"tasks"`
+
+	plannedTasks cty.Value
+}
+
+func (*DynamicResearchBlock) Type() string { return "dynamic" }
+
+func (*DynamicResearchBlock) BlockType() string { return "research" }
+
+func (*DynamicResearchBlock) AddressLength() int { return 3 }
+
+func (*DynamicResearchBlock) CanExecutePrePlan() bool { return false }
+
+func (b *DynamicResearchBlock) EvalContext() *hcl.EvalContext {
+	return researchBlockEvalContext(b.BaseBlock)
+}
+
+func (b *DynamicResearchBlock) ExecuteDuringPlan() error {
+	return debuglog.PlanBlock(b.Context(), b.Address(), b.BlockType(), func() error {
+		planned, err := PlanDynamicTasks(b.Tasks)
+		if err != nil {
+			return err
+		}
+		b.plannedTasks = planned
+		return nil
+	})
+}
+
+func (b *DynamicResearchBlock) Apply() error {
+	applier, ok := b.Config().(blockApplier)
+	if !ok {
+		return fmt.Errorf("research %q requires an r42 apply config", b.Name())
+	}
+	return applier.ApplyBlock(b.Address())
+}
+
+func (b *DynamicResearchBlock) Values() map[string]cty.Value {
+	value := b.plannedTasks
+	if value == cty.NilVal {
+		value = cty.DynamicVal
+	}
+	return map[string]cty.Value{"tasks": value}
+}
+
+func (b *DynamicResearchBlock) TasksExpression() string {
+	attribute, ok := b.HclBlock().Attributes()["tasks"]
+	if !ok {
+		return ""
+	}
+	return attribute.ExprString()
+}
+
+func PlanDynamicTasks(value cty.Value) (cty.Value, error) {
+	unmarked, marks := value.UnmarkDeepWithPaths()
+	if !unmarked.IsKnown() {
+		plannedType, err := dynamicTasksOutputType(unmarked.Type())
+		if err != nil {
+			return cty.NilVal, err
+		}
+		return cty.UnknownVal(plannedType).MarkWithPaths(marks), nil
+	}
+	if !unmarked.Type().IsListType() && !unmarked.Type().IsTupleType() {
+		return cty.NilVal, fmt.Errorf("dynamic research tasks must be a list")
+	}
+	if unmarked.LengthInt() == 0 {
+		return cty.EmptyTupleVal.MarkWithPaths(marks), nil
+	}
+	result := make([]cty.Value, 0, unmarked.LengthInt())
+	iterator := unmarked.ElementIterator()
+	for index := 0; iterator.Next(); index++ {
+		_, task := iterator.Element()
+		if !task.IsWhollyKnown() {
+			result = append(result, cty.UnknownVal(dynamicTaskOutputType(task.Type())))
+			continue
+		}
+		config, err := DecodeDynamicTask(task)
+		if err != nil {
+			return cty.NilVal, fmt.Errorf("dynamic research task %d: %w", index, err)
+		}
+		result = append(result, plannedDynamicTaskValue(task, config))
+	}
+	return cty.TupleVal(result).MarkWithPaths(marks), nil
+}
+
+func DecodeDynamicTasks(value cty.Value) ([]Config, []cty.Value, error) {
+	unmarked, marks := value.UnmarkDeepWithPaths()
+	if !unmarked.IsWhollyKnown() {
+		return nil, nil, fmt.Errorf("dynamic research tasks must be known before apply")
+	}
+	if !unmarked.Type().IsListType() && !unmarked.Type().IsTupleType() {
+		return nil, nil, fmt.Errorf("dynamic research tasks must be a list")
+	}
+	configs := make([]Config, 0, unmarked.LengthInt())
+	values := make([]cty.Value, 0, unmarked.LengthInt())
+	marked, inheritedMarks := unmarked.MarkWithPaths(marks).Unmark()
+	iterator := marked.ElementIterator()
+	for index := 0; iterator.Next(); index++ {
+		_, task := iterator.Element()
+		config, err := DecodeDynamicTask(task)
+		if err != nil {
+			return nil, nil, fmt.Errorf("dynamic research task %d: %w", index, err)
+		}
+		configs = append(configs, config)
+		values = append(values, task.WithMarks(inheritedMarks))
+	}
+	return configs, values, nil
+}
+
+func DecodeDynamicTask(value cty.Value) (Config, error) {
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.IsWhollyKnown() {
+		return Config{}, fmt.Errorf("task must be wholly known")
+	}
+	if !unmarked.Type().IsObjectType() && !unmarked.Type().IsMapType() {
+		return Config{}, fmt.Errorf("task must be an object")
+	}
+
+	block := &ResearchBlock{ModelProvider: cty.NilVal}
+	var err error
+	if block.ModelProvider, err = dynamicOptionalValue(unmarked, "model_provider"); err != nil {
+		return Config{}, err
+	}
+	if block.Model, err = dynamicRequiredString(unmarked, "model"); err != nil {
+		return Config{}, err
+	}
+	if block.ReasoningEffort, err = dynamicOptionalString(unmarked, "reasoning_effort"); err != nil {
+		return Config{}, err
+	}
+	if block.SystemPrompt, err = dynamicRequiredString(unmarked, "system_prompt"); err != nil {
+		return Config{}, err
+	}
+	if block.Prompt, err = dynamicOptionalString(unmarked, "prompt"); err != nil {
+		return Config{}, err
+	}
+	if block.ToolIDs, err = dynamicStringList(unmarked, "tool_ids"); err != nil {
+		return Config{}, err
+	}
+	if block.TypedToolCallQuota, err = dynamicIntMap(unmarked, "typed_tool_call_quota"); err != nil {
+		return Config{}, err
+	}
+	if block.TerminateToolID, err = dynamicOptionalString(unmarked, "terminate_tool_id"); err != nil {
+		return Config{}, err
+	}
+	if block.AllowedTools, err = dynamicStringList(unmarked, "allowed_tools"); err != nil {
+		return Config{}, err
+	}
+	if block.DisallowedTools, err = dynamicStringList(unmarked, "disallowed_tools"); err != nil {
+		return Config{}, err
+	}
+	if block.SkillDirectories, err = dynamicStringList(unmarked, "skill_directories"); err != nil {
+		return Config{}, err
+	}
+	if block.Skills, err = dynamicStringList(unmarked, "skills"); err != nil {
+		return Config{}, err
+	}
+	if block.DisabledSkills, err = dynamicStringList(unmarked, "disabled_skills"); err != nil {
+		return Config{}, err
+	}
+	permission, err := dynamicOptionalString(unmarked, "permission")
+	if err != nil {
+		return Config{}, err
+	}
+	if permission != nil {
+		value := Permission(*permission)
+		block.Permission = &value
+	}
+	if block.MaxProtocolAttempts, err = dynamicOptionalInt(unmarked, "max_protocol_attempts"); err != nil {
+		return Config{}, err
+	}
+	if block.Timeout, err = dynamicOptionalString(unmarked, "timeout"); err != nil {
+		return Config{}, err
+	}
+	if block.RetryBlocks, err = dynamicRetryBlocks(unmarked); err != nil {
+		return Config{}, err
+	}
+	if block.ArtifactBlocks, err = dynamicArtifactBlocks(unmarked); err != nil {
+		return Config{}, err
+	}
+	if block.QCBlocks, err = dynamicQCBlocks(unmarked); err != nil {
+		return Config{}, err
+	}
+	config, err := block.toConfig()
+	if err != nil {
+		return Config{}, err
+	}
+	if err = config.Validate(); err != nil {
+		return Config{}, err
+	}
+	return config, nil
+}
+
+func dynamicOptionalValue(object cty.Value, name string) (cty.Value, error) {
+	value, ok := dynamicAttribute(object, name)
+	if !ok || value.IsNull() {
+		return cty.NilVal, nil
+	}
+	return value, nil
+}
+
+func dynamicRequiredString(object cty.Value, name string) (string, error) {
+	value, ok := dynamicAttribute(object, name)
+	if !ok || value.IsNull() {
+		return "", fmt.Errorf("%s is required", name)
+	}
+	unmarked, _ := value.Unmark()
+	if !unmarked.Type().Equals(cty.String) {
+		return "", fmt.Errorf("%s must be a string", name)
+	}
+	return unmarked.AsString(), nil
+}
+
+func dynamicOptionalString(object cty.Value, name string) (*string, error) {
+	value, ok := dynamicAttribute(object, name)
+	if !ok || value.IsNull() {
+		return nil, nil
+	}
+	unmarked, _ := value.Unmark()
+	if !unmarked.Type().Equals(cty.String) {
+		return nil, fmt.Errorf("%s must be a string", name)
+	}
+	result := unmarked.AsString()
+	return &result, nil
+}
+
+func dynamicStringList(object cty.Value, name string) ([]string, error) {
+	value, ok := dynamicAttribute(object, name)
+	if !ok || value.IsNull() {
+		return nil, nil
+	}
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.CanIterateElements() {
+		return nil, fmt.Errorf("%s must be a list of string", name)
+	}
+	result := make([]string, 0, unmarked.LengthInt())
+	iterator := unmarked.ElementIterator()
+	for iterator.Next() {
+		_, element := iterator.Element()
+		if element.IsNull() || !element.Type().Equals(cty.String) {
+			return nil, fmt.Errorf("%s must be a list of string", name)
+		}
+		result = append(result, element.AsString())
+	}
+	return result, nil
+}
+
+func dynamicIntMap(object cty.Value, name string) (map[string]int, error) {
+	value, ok := dynamicAttribute(object, name)
+	if !ok || value.IsNull() {
+		return nil, nil
+	}
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.CanIterateElements() {
+		return nil, fmt.Errorf("%s must be a map of number", name)
+	}
+	result := make(map[string]int, unmarked.LengthInt())
+	iterator := unmarked.ElementIterator()
+	for iterator.Next() {
+		key, element := iterator.Element()
+		if !key.Type().Equals(cty.String) || !element.Type().Equals(cty.Number) {
+			return nil, fmt.Errorf("%s must be a map of number", name)
+		}
+		integer, accuracy := element.AsBigFloat().Int64()
+		if accuracy != big.Exact {
+			return nil, fmt.Errorf("%s values must be whole numbers", name)
+		}
+		result[key.AsString()] = int(integer)
+	}
+	return result, nil
+}
+
+func dynamicOptionalInt(object cty.Value, name string) (*int, error) {
+	value, ok := dynamicAttribute(object, name)
+	if !ok || value.IsNull() {
+		return nil, nil
+	}
+	unmarked, _ := value.Unmark()
+	if !unmarked.Type().Equals(cty.Number) {
+		return nil, fmt.Errorf("%s must be a number", name)
+	}
+	integer, accuracy := unmarked.AsBigFloat().Int64()
+	if accuracy != big.Exact {
+		return nil, fmt.Errorf("%s must be a whole number", name)
+	}
+	result := int(integer)
+	return &result, nil
+}
+
+func dynamicRetryBlocks(object cty.Value) ([]RetryBlock, error) {
+	value, ok := dynamicAttribute(object, "retry")
+	if !ok || value.IsNull() {
+		return nil, nil
+	}
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.Type().IsObjectType() && !unmarked.Type().IsMapType() {
+		return nil, fmt.Errorf("retry must be an object")
+	}
+	block := RetryBlock{}
+	var err error
+	if block.LifecycleRetries, err = dynamicOptionalInt(unmarked, "lifecycle_retries"); err != nil {
+		return nil, err
+	}
+	if block.ModelCallRetries, err = dynamicOptionalInt(unmarked, "model_call_retries"); err != nil {
+		return nil, err
+	}
+	if block.IntervalSeconds, err = dynamicOptionalInt(unmarked, "interval_seconds"); err != nil {
+		return nil, err
+	}
+	if block.MaxIntervalSeconds, err = dynamicOptionalInt(unmarked, "max_interval_seconds"); err != nil {
+		return nil, err
+	}
+	if block.ErrorMessageRegex, err = dynamicStringList(unmarked, "error_message_regex"); err != nil {
+		return nil, err
+	}
+	return []RetryBlock{block}, nil
+}
+
+func dynamicArtifactBlocks(object cty.Value) ([]ArtifactBlock, error) {
+	value, ok := dynamicAttribute(object, "artifacts")
+	if !ok || value.IsNull() {
+		return nil, nil
+	}
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.Type().IsListType() && !unmarked.Type().IsTupleType() {
+		return nil, fmt.Errorf("artifacts must be a list")
+	}
+	result := make([]ArtifactBlock, 0, unmarked.LengthInt())
+	iterator := unmarked.ElementIterator()
+	for index := 0; iterator.Next(); index++ {
+		_, artifact := iterator.Element()
+		name, err := dynamicRequiredString(artifact, "name")
+		if err != nil {
+			return nil, fmt.Errorf("artifact %d: %w", index, err)
+		}
+		artifactType, err := dynamicRequiredString(artifact, "type")
+		if err != nil {
+			return nil, fmt.Errorf("artifact %d: %w", index, err)
+		}
+		path, err := dynamicRequiredString(artifact, "path")
+		if err != nil {
+			return nil, fmt.Errorf("artifact %d: %w", index, err)
+		}
+		required, err := dynamicOptionalBool(artifact, "required")
+		if err != nil {
+			return nil, fmt.Errorf("artifact %d: %w", index, err)
+		}
+		nonEmpty, err := dynamicOptionalBool(artifact, "non_empty")
+		if err != nil {
+			return nil, fmt.Errorf("artifact %d: %w", index, err)
+		}
+		result = append(result, ArtifactBlock{
+			Name: name, ArtifactType: artifactType, Path: path, Required: required, NonEmpty: nonEmpty,
+		})
+	}
+	return result, nil
+}
+
+func dynamicQCBlocks(object cty.Value) ([]QCBlock, error) {
+	value, ok := dynamicAttribute(object, "qc")
+	if !ok || value.IsNull() {
+		return nil, nil
+	}
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.Type().IsObjectType() && !unmarked.Type().IsMapType() {
+		return nil, fmt.Errorf("qc must be an object")
+	}
+	criteria, ok := dynamicAttribute(unmarked, "criteria")
+	if !ok {
+		return nil, fmt.Errorf("qc criteria is required")
+	}
+	block := QCBlock{Criteria: criteria, ModelProvider: cty.NilVal}
+	var err error
+	if block.ModelProvider, err = dynamicOptionalValue(unmarked, "model_provider"); err != nil {
+		return nil, err
+	}
+	if block.Model, err = dynamicOptionalString(unmarked, "model"); err != nil {
+		return nil, err
+	}
+	if block.ReasoningEffort, err = dynamicOptionalString(unmarked, "reasoning_effort"); err != nil {
+		return nil, err
+	}
+	if block.ToolIDs, err = dynamicStringList(unmarked, "tool_ids"); err != nil {
+		return nil, err
+	}
+	if block.TypedToolCallQuota, err = dynamicIntMap(unmarked, "typed_tool_call_quota"); err != nil {
+		return nil, err
+	}
+	if block.AllowedTools, err = dynamicStringList(unmarked, "allowed_tools"); err != nil {
+		return nil, err
+	}
+	if block.DisallowedTools, err = dynamicStringList(unmarked, "disallowed_tools"); err != nil {
+		return nil, err
+	}
+	if block.SkillDirectories, err = dynamicStringList(unmarked, "skill_directories"); err != nil {
+		return nil, err
+	}
+	if block.Skills, err = dynamicStringList(unmarked, "skills"); err != nil {
+		return nil, err
+	}
+	if block.DisabledSkills, err = dynamicStringList(unmarked, "disabled_skills"); err != nil {
+		return nil, err
+	}
+	permission, err := dynamicOptionalString(unmarked, "permission")
+	if err != nil {
+		return nil, err
+	}
+	if permission != nil {
+		parsed := Permission(*permission)
+		block.Permission = &parsed
+	}
+	if block.MaxQCRounds, err = dynamicOptionalInt(unmarked, "max_qc_rounds"); err != nil {
+		return nil, err
+	}
+	if block.RetryBlocks, err = dynamicRetryBlocks(unmarked); err != nil {
+		return nil, err
+	}
+	return []QCBlock{block}, nil
+}
+
+func dynamicOptionalBool(object cty.Value, name string) (bool, error) {
+	value, ok := dynamicAttribute(object, name)
+	if !ok || value.IsNull() {
+		return false, nil
+	}
+	unmarked, _ := value.Unmark()
+	if !unmarked.Type().Equals(cty.Bool) {
+		return false, fmt.Errorf("%s must be a bool", name)
+	}
+	return unmarked.True(), nil
+}
+
+func dynamicAttribute(object cty.Value, name string) (cty.Value, bool) {
+	if object.Type().IsObjectType() {
+		if !object.Type().HasAttribute(name) {
+			return cty.NilVal, false
+		}
+		return object.GetAttr(name), true
+	}
+	if object.Type().IsMapType() {
+		return object.AsValueMap()[name], object.HasIndex(cty.StringVal(name)).True()
+	}
+	return cty.NilVal, false
+}
+
+func plannedDynamicTaskValue(task cty.Value, config Config) cty.Value {
+	values := maps.Clone(task.AsValueMap())
+	values["artifacts"] = ArtifactsValue(config.Artifacts, nil)
+	if config.TerminateToolID != nil {
+		values["result"] = cty.UnknownVal(cty.String)
+	}
+	return cty.ObjectVal(values)
+}
+
+func AppliedDynamicTaskValue(task, result cty.Value) cty.Value {
+	unmarked, marks := task.UnmarkDeepWithPaths()
+	values := maps.Clone(unmarked.AsValueMap())
+	resultValues := result.AsValueMap()
+	if artifacts, ok := resultValues["artifact"]; ok {
+		values["artifacts"] = artifacts
+	}
+	if value, ok := resultValues["result"]; ok {
+		values["result"] = value
+	}
+	return cty.ObjectVal(values).MarkWithPaths(marks)
+}
+
+func dynamicTasksOutputType(tasksType cty.Type) (cty.Type, error) {
+	switch {
+	case tasksType.Equals(cty.DynamicPseudoType):
+		return cty.DynamicPseudoType, nil
+	case tasksType.IsListType():
+		return cty.List(dynamicTaskOutputType(tasksType.ElementType())), nil
+	case tasksType.IsTupleType():
+		elementTypes := tasksType.TupleElementTypes()
+		for index := range elementTypes {
+			elementTypes[index] = dynamicTaskOutputType(elementTypes[index])
+		}
+		return cty.Tuple(elementTypes), nil
+	default:
+		return cty.NilType, fmt.Errorf("dynamic research tasks must be a list")
+	}
+}
+
+func dynamicTaskOutputType(taskType cty.Type) cty.Type {
+	if !taskType.IsObjectType() {
+		return cty.DynamicPseudoType
+	}
+	attributes := taskType.AttributeTypes()
+	attributes["artifacts"] = cty.List(artifactValueType)
+	if taskType.HasAttribute("terminate_tool_id") {
+		attributes["result"] = cty.String
+	}
+	return cty.Object(attributes)
+}

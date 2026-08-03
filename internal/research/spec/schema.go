@@ -19,9 +19,10 @@ import (
 )
 
 var (
-	_ golden.PlanBlock  = (*ResearchBlock)(nil)
-	_ golden.ApplyBlock = (*ResearchBlock)(nil)
-	_ golden.Valuable   = (*ResearchBlock)(nil)
+	_ golden.CustomDecode = (*ResearchBlock)(nil)
+	_ golden.PlanBlock    = (*ResearchBlock)(nil)
+	_ golden.ApplyBlock   = (*ResearchBlock)(nil)
+	_ golden.Valuable     = (*ResearchBlock)(nil)
 )
 
 type ResearchBlock struct {
@@ -46,7 +47,9 @@ type ResearchBlock struct {
 	ArtifactBlocks      []ArtifactBlock `hcl:"artifact,block"`
 	QCBlocks            []QCBlock       `hcl:"qc,block"`
 
-	planned Config
+	planned                Config
+	deferredTaskExpression string
+	plannedTaskValue       cty.Value
 }
 
 type blockApplier interface {
@@ -66,7 +69,11 @@ func (*ResearchBlock) AddressLength() int { return 3 }
 func (*ResearchBlock) CanExecutePrePlan() bool { return false }
 
 func (b *ResearchBlock) EvalContext() *hcl.EvalContext {
-	context := b.BaseBlock.EvalContext()
+	return researchBlockEvalContext(b.BaseBlock)
+}
+
+func researchBlockEvalContext(block *golden.BaseBlock) *hcl.EvalContext {
+	context := block.EvalContext()
 	context.Functions = maps.Clone(context.Functions)
 	if context.Functions == nil {
 		context.Functions = make(map[string]function.Function)
@@ -75,11 +82,11 @@ func (b *ResearchBlock) EvalContext() *hcl.EvalContext {
 		Params: []function.Parameter{},
 		Type:   function.StaticReturnType(cty.String),
 		Impl: func([]cty.Value, cty.Type) (cty.Value, error) {
-			provider, ok := b.Config().(blockWorkingDirectoryProvider)
+			provider, ok := block.Config().(blockWorkingDirectoryProvider)
 			if !ok {
-				return cty.NilVal, fmt.Errorf("research %q requires an r42 workspace config", b.Name())
+				return cty.NilVal, fmt.Errorf("research %q requires an r42 workspace config", block.Name())
 			}
-			directory, err := provider.BlockWorkingDirectory(b.Address())
+			directory, err := provider.BlockWorkingDirectory(block.Address())
 			if err != nil {
 				return cty.NilVal, err
 			}
@@ -91,6 +98,9 @@ func (b *ResearchBlock) EvalContext() *hcl.EvalContext {
 
 func (b *ResearchBlock) ExecuteDuringPlan() error {
 	return debuglog.PlanBlock(b.Context(), b.Address(), b.BlockType(), func() error {
+		if b.deferredTaskExpression != "" {
+			return nil
+		}
 		if err := b.validateNativeStringFields(); err != nil {
 			return err
 		}
@@ -268,7 +278,14 @@ func (b *ResearchBlock) ResearchConfig() Config {
 	return cloneConfig(b.planned)
 }
 
+func (b *ResearchBlock) DeferredTaskExpression() string {
+	return b.deferredTaskExpression
+}
+
 func (b *ResearchBlock) Values() map[string]cty.Value {
+	if b.deferredTaskExpression != "" {
+		return deferredStaticResearchValues(b.plannedTaskValue)
+	}
 	values := map[string]cty.Value{
 		"model_provider":        optionalObjectValue(b.ModelProvider),
 		"model":                 cty.StringVal(b.Model),
@@ -645,12 +662,14 @@ func clonePointer[T any](value *T) *T {
 	return &result
 }
 
+var artifactValueType = cty.Object(map[string]cty.Type{
+	"name": cty.String, "type": cty.String, "path": cty.String,
+	"required": cty.Bool, "non_empty": cty.Bool,
+})
+
 func ArtifactsValue(artifacts []Artifact, resolvedPaths map[string]string) cty.Value {
 	if len(artifacts) == 0 {
-		return cty.ListValEmpty(cty.Object(map[string]cty.Type{
-			"name": cty.String, "type": cty.String, "path": cty.String,
-			"required": cty.Bool, "non_empty": cty.Bool,
-		}))
+		return cty.ListValEmpty(artifactValueType)
 	}
 	values := make([]cty.Value, len(artifacts))
 	for index, artifact := range artifacts {

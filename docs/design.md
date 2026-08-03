@@ -219,6 +219,28 @@ Every nested block keeps its singular HCL block name and is exposed as
 `research.static.<name>.qc[*].retry`; r42 does not remap labeled nested blocks into
 name-keyed objects.
 
+### Dynamic research
+
+`research "dynamic" "name"` is one Golden DAG node whose `tasks` attribute is a
+list of research configuration objects. Unlike `for_each`, task members are not
+planned DAG nodes and therefore do not acquire independent DAG addresses. r42
+materializes the complete list at the start of the block's Apply operation,
+runs its members under the same research concurrency scope as static blocks,
+and publishes the completed list as `research.dynamic.<name>.tasks`.
+
+The list may be unknown in a saved Plan. r42 preserves the cty unknown value and
+the HCL expression; it does not require a narrower element type merely for plan
+serialization. At Apply, the list must be wholly known before any member starts.
+An empty list succeeds, while a member failure after retry and QC repair fails
+the containing block and cancels its siblings.
+
+Each member uses the static session fields described above. `artifacts` is a
+list of artifact objects; `retry` and `qc` are each one object or `null`, not a
+list. A completed member retains the original object fields and overlays the
+resolved `artifacts` and optional terminate-tool `result`. All members share the
+dynamic block's `block_wd()` and the HCL author is responsible for adding an
+index or key when task files need separate directories.
+
 ## 5. Model Providers
 
 `model_provider` contains endpoint and wire configuration only. The `model`

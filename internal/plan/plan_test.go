@@ -379,6 +379,37 @@ func TestPlanUnknownValuesRoundTripAsKnownAfterApply(t *testing.T) {
 	assert.Contains(t, display, "<sensitive>")
 }
 
+func TestPlanDynamicUnknownOutputRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	values := map[string]cty.Value{
+		"dynamic": cty.DynamicVal,
+		"list":    cty.UnknownVal(cty.List(cty.DynamicPseudoType)),
+		"object": cty.UnknownVal(cty.Object(map[string]cty.Type{
+			"tasks": cty.List(cty.DynamicPseudoType),
+		})),
+	}
+	outputs := make(map[string]plan.OutputSpec, len(values))
+	for name, value := range values {
+		outputs[name] = plan.OutputSpec{
+			Value:      value,
+			Expression: "research.dynamic.followups.tasks",
+		}
+	}
+	planned, err := plan.NewWithContextAndLocals(".", nil, outputs, nil, nil)
+	require.NoError(t, err)
+
+	encoded, err := plan.Marshal(planned)
+	require.NoError(t, err)
+	decoded, err := plan.Unmarshal(encoded)
+	require.NoError(t, err)
+
+	for name, value := range values {
+		assert.True(t, decoded.Outputs()[name].Value.RawEquals(value), name)
+		assert.Equal(t, "research.dynamic.followups.tasks", decoded.Outputs()[name].Expression, name)
+	}
+}
+
 func TestPlanApplyEvaluationRecipeRoundTrip(t *testing.T) {
 	t.Parallel()
 

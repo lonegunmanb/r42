@@ -1,0 +1,13 @@
+topic  = "Advanced semiconductor packaging for AI accelerators"
+market = "global"
+
+max_candidates_per_chokepoint = 3
+model                           = "deepseek-v4-flash"
+reasoning_effort                = "low"
+use_pplx                       = true
+
+model_provider = {
+  endpoint    = "https://api.deepseek.com"
+  wire_api    = "responses"
+  api_key_ref = "DEEPSEEK_KEY"
+}

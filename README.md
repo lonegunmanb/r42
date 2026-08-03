@@ -302,14 +302,54 @@ already captured in that file.
 
 ## Research blocks
 
-Each `research "static" "name"` block defines one unit of work in the DAG and
-owns one persistent model session for all of that unit's initial and repair
-turns. `static` is the currently supported research subtype and forms part of
-the block's address. Value
-references create implicit dependencies between blocks; `depends_on` adds an
-explicit dependency when no value is exchanged. `for_each` can expand one
-declaration into independently addressed instances such as
-`research.static.name["key"]`.
+Each `research "static" "name"` block defines one known unit of work in the DAG
+and owns one persistent model session for all of that unit's initial and repair
+turns. The subtype forms part of the block address. Value references create
+implicit dependencies between blocks; `depends_on` adds an explicit dependency
+when no value is exchanged. `for_each` can expand one declaration into
+independently addressed instances such as `research.static.name["key"]`.
+
+A `research "dynamic" "name"` block is still one planned DAG node, but its
+`tasks` attribute is a list of complete research configurations materialized
+when that node begins Apply. Use it when an upstream result determines how many
+research sessions are needed:
+
+```hcl
+research "dynamic" "followups" {
+  tasks = [
+    for index, question in jsondecode(research.static.plan.result).questions : {
+      model         = var.model
+      system_prompt = "Investigate one accepted follow-up question."
+      prompt        = question
+      artifacts = [{
+        name      = "report"
+        type      = "file"
+        path      = "${block_wd()}/${index}/report.md"
+        required  = true
+        non_empty = true
+      }]
+      retry = null
+      qc    = null
+    }
+  ]
+}
+```
+
+There are no block-level defaults for dynamic tasks: each object carries the
+same session, tool, quota, artifact, retry, and QC fields needed by that task.
+Within a task, `retry` and `qc` are an object or `null`, while `artifacts` is a
+list of objects. The `tasks` expression may be unknown in the saved Plan, but it
+must be wholly known when the block starts Apply. Empty tasks succeed
+immediately. Materialized tasks run concurrently under the same global and
+module parallelism budgets as static research; one exhausted task failure fails
+the dynamic block.
+
+All task objects remain available through `research.dynamic.<name>.tasks` and
+retain their declared fields plus resolved `artifacts` and, when a terminate
+tool is configured, `result`. Tasks share the parent `block_wd()`; use a `for`
+index or another stable key when separate subdirectories are required. The TUI
+keeps the dynamic block as one DAG node but expands its task rows and research
+count when materialization occurs.
 
 ### Dependencies
 

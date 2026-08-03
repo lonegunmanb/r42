@@ -189,9 +189,6 @@ func decodePlan(wire wirePlan) (*Plan, error) {
 
 func encodeValue(value cty.Value) (wireValue, error) {
 	unmarked, pathMarks := value.UnmarkDeepWithPaths()
-	if err := corespec.ValidateType(unmarked.Type()); err != nil {
-		return wireValue{}, err
-	}
 	typeJSON, err := ctyjson.MarshalType(unmarked.Type())
 	if err != nil {
 		return wireValue{}, fmt.Errorf("encode type: %w", err)
@@ -218,9 +215,6 @@ func decodeValue(wire wireValue) (cty.Value, error) {
 	typeValue, err := ctyjson.UnmarshalType(wire.Type)
 	if err != nil {
 		return cty.NilVal, fmt.Errorf("decode type: %w", err)
-	}
-	if err := corespec.ValidateType(typeValue); err != nil {
-		return cty.NilVal, err
 	}
 	value, err := ctymsgpack.Unmarshal(wire.Value, typeValue)
 	if err != nil {

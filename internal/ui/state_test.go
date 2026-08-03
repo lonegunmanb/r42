@@ -55,6 +55,64 @@ func TestProjectorBuildsExpandedResearchDAGAndTracksActivity(t *testing.T) {
 	assert.Contains(t, ui.RenderDAG(snapshot), "research.static.summary")
 }
 
+func TestProjectorReplacesDynamicResearchCountWithMaterializedTasks(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{
+		{Address: "research.dynamic.followups", Kind: "research"},
+		{
+			Address: "research.static.summary", Kind: "research",
+			Dependencies: []string{"research.dynamic.followups"},
+		},
+	}, nil, nil, nil)
+	require.NoError(t, err)
+	projector := ui.NewProjector(planned)
+	assert.Equal(t, 2, projector.Snapshot().Research.Total)
+
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "dynamic.tasks.materialized",
+		Status: debuglog.StatusCompleted, BlockAddress: "research.dynamic.followups",
+		BlockType: "research", Count: 2,
+		Paths: []string{
+			"research.dynamic.followups.tasks[0]",
+			"research.dynamic.followups.tasks[1]",
+		},
+	})
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "block.apply", Status: debuglog.StatusStarted,
+		BlockAddress: "research.dynamic.followups.tasks[0]", BlockType: "research",
+	})
+
+	snapshot := projector.Snapshot()
+	assert.Equal(t, 3, snapshot.Research.Total)
+	assert.Equal(t, 1, snapshot.Research.Running)
+	first, ok := snapshot.Node("research.dynamic.followups.tasks[0]")
+	require.True(t, ok)
+	second, ok := snapshot.Node("research.dynamic.followups.tasks[1]")
+	require.True(t, ok)
+	assert.Equal(t, "research.dynamic.followups", first.Parent)
+	assert.Equal(t, ui.StatusWaiting, second.Status)
+	assert.Equal(t, []string{"research.dynamic.followups"}, snapshot.MustNode("research.static.summary").Dependencies)
+}
+
+func TestProjectorRemovesEmptyDynamicResearchFromTaskCount(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{
+		{Address: "research.dynamic.followups", Kind: "research"},
+	}, nil, nil, nil)
+	require.NoError(t, err)
+	projector := ui.NewProjector(planned)
+
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "dynamic.tasks.materialized",
+		Status: debuglog.StatusCompleted, BlockAddress: "research.dynamic.followups",
+		BlockType: "research", Count: 0,
+	})
+
+	assert.Equal(t, 0, projector.Snapshot().Research.Total)
+}
+
 func TestProjectorDeduplicatesUsageByAPICallIDAcrossSessions(t *testing.T) {
 	t.Parallel()
 

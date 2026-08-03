@@ -172,76 +172,27 @@ func (p *ResearchPlan) Apply() error {
 	if p.config.execution != nil {
 		return p.applySavedBlocks()
 	}
-	return golden.Traverse[golden.ApplyBlock](p.config.BaseConfig, func(block golden.ApplyBlock) error {
-		return block.Apply()
+	return p.config.RunApply(func(block golden.Block) error {
+		applyBlock, ok := block.(golden.ApplyBlock)
+		if !ok {
+			return nil
+		}
+		return applyBlock.Apply()
 	})
 }
 
 func (p *ResearchPlan) applySavedBlocks() error {
-	nodes := p.config.execution.nodes
-	blocks := make(map[string]golden.ApplyBlock, len(nodes))
-	for _, block := range golden.Blocks[golden.ApplyBlock](p.config) {
-		blocks[block.Address()] = block
-	}
-
-	remaining := make(map[string]int, len(nodes))
-	dependents := make(map[string][]string, len(nodes))
-	ready := make([]string, 0, len(nodes))
-	for _, node := range nodes {
-		if _, ok := blocks[node.Address]; !ok {
-			return fmt.Errorf("saved plan block %q does not implement golden.ApplyBlock", node.Address)
+	runErr := p.config.RunApply(func(block golden.Block) error {
+		applyBlock, ok := block.(golden.ApplyBlock)
+		if !ok {
+			return fmt.Errorf("saved plan block %q does not implement golden.ApplyBlock", block.Address())
 		}
-		remaining[node.Address] = len(node.Dependencies)
-		if len(node.Dependencies) == 0 {
-			ready = append(ready, node.Address)
-		}
-		for _, dependency := range node.Dependencies {
-			dependents[dependency] = append(dependents[dependency], node.Address)
-		}
-	}
-
-	type result struct {
-		address string
-		err     error
-	}
-	results := make(chan result, len(nodes))
-	running := 0
-	completed := 0
-	failed := false
-	for completed < len(nodes) {
-		for !failed && running < p.config.parallelism && len(ready) > 0 {
-			address := ready[0]
-			ready = ready[1:]
-			block := blocks[address]
-			running++
-			go func() {
-				results <- result{address: address, err: block.Apply()}
-			}()
-		}
-		if running == 0 {
-			break
-		}
-		result := <-results
-		running--
-		completed++
-		if result.err != nil {
-			failed = true
-			continue
-		}
-		for _, dependent := range dependents[result.address] {
-			remaining[dependent]--
-			if remaining[dependent] == 0 {
-				ready = append(ready, dependent)
-			}
-		}
-	}
+		return applyBlock.Apply()
+	})
 	if failure := p.config.execution.failureError(); failure != nil {
 		return failure
 	}
-	if completed != len(nodes) {
-		return fmt.Errorf("apply stopped with %d of %d saved plan blocks completed", completed, len(nodes))
-	}
-	return nil
+	return runErr
 }
 
 type planExecution struct {
@@ -281,7 +232,7 @@ func (e *planExecution) execute(node plan.NodeSpec) error {
 		return e.recordFailure(fmt.Errorf("apply block %s: %w", address, err))
 	}
 	work := func(ctx context.Context) error { return e.executeBlock(ctx, node) }
-	if node.Kind != "research" {
+	if node.Kind != "research" || strings.HasPrefix(node.Address, "research.dynamic.") {
 		return work(e.ctx)
 	}
 	called := false
@@ -405,6 +356,7 @@ func registerResearchBlocks() {
 		golden.RegisterBlock(new(toolspec.GoToolBlock))
 		golden.RegisterBlock(new(toolspec.ExternalToolBlock))
 		golden.RegisterBlock(new(researchspec.ResearchBlock))
+		golden.RegisterBlock(new(researchspec.DynamicResearchBlock))
 		golden.RegisterBlock(new(modulespec.ModuleBlock))
 		golden.RegisterBlock(new(modulespec.OutputBlock))
 	})
@@ -501,8 +453,12 @@ func nativePlanHCLBlocks(nodes []plan.NodeSpec) ([]*golden.HclBlock, error) {
 		}
 		switch address.kind {
 		case "research":
-			block.Body().SetAttributeValue("model", cty.StringVal("saved-plan"))
-			block.Body().SetAttributeValue("system_prompt", cty.StringVal("saved-plan"))
+			if len(address.labels) > 0 && address.labels[0] == "dynamic" {
+				block.Body().SetAttributeValue("tasks", cty.EmptyTupleVal)
+			} else {
+				block.Body().SetAttributeValue("model", cty.StringVal("saved-plan"))
+				block.Body().SetAttributeValue("system_prompt", cty.StringVal("saved-plan"))
+			}
 		case "module":
 			block.Body().SetAttributeValue("source", cty.StringVal("."))
 		default:

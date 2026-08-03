@@ -53,6 +53,39 @@ func TestTextRendererShowsRunDAGAndMeaningfulTransitions(t *testing.T) {
 	assert.Contains(t, text, "[1/2] DONE research.static.collect")
 }
 
+func TestTextRendererShowsMaterializedDynamicTasksWithoutZeroOrdinal(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewForRun("root", "D:/run-42", []plan.NodeSpec{
+		{Address: "research.dynamic.followups", Kind: "research"},
+	}, nil, nil, nil)
+	require.NoError(t, err)
+	projector := ui.NewProjector(planned)
+	var output bytes.Buffer
+	renderer := ui.NewTextRenderer(&output, projector)
+	require.NoError(t, renderer.Start())
+
+	renderer.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "dynamic.tasks.materialized",
+		Status: debuglog.StatusCompleted, BlockAddress: "research.dynamic.followups",
+		BlockType: "research", Count: 1,
+		Paths: []string{"research.dynamic.followups.tasks[0]"},
+	})
+	renderer.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "block.apply", Status: debuglog.StatusStarted,
+		BlockAddress: "research.dynamic.followups.tasks[0]", BlockType: "research",
+	})
+	renderer.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "block.apply", Status: debuglog.StatusCompleted,
+		BlockAddress: "research.dynamic.followups", BlockType: "research",
+	})
+
+	text := output.String()
+	assert.Contains(t, text, "[dynamic] MATERIALIZED research.dynamic.followups tasks=1")
+	assert.Contains(t, text, "[1/1] START research.dynamic.followups.tasks[0]")
+	assert.NotContains(t, text, "[0/1]")
+}
+
 func TestTextRendererRemovesTerminalControlSequencesFromModelContent(t *testing.T) {
 	t.Parallel()
 

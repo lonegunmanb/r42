@@ -37,6 +37,11 @@ func (r *TextRenderer) Observe(event debuglog.Event) {
 	if !ok {
 		return
 	}
+	if event.Action == "dynamic.tasks.materialized" {
+		_, _ = fmt.Fprintf(r.writer, "[dynamic] MATERIALIZED %s tasks=%d\n",
+			terminalText(event.BlockAddress), event.Count)
+		return
+	}
 	if node.Kind == "module" {
 		address := terminalText(event.BlockAddress)
 		if event.Action == "block.apply" ||
@@ -55,8 +60,11 @@ func (r *TextRenderer) Observe(event debuglog.Event) {
 	if node.Kind != "research" {
 		return
 	}
-	ordinal, total := r.researchOrdinal(event.BlockAddress)
-	prefix := fmt.Sprintf("[%d/%d]", ordinal, total)
+	prefix := "[dynamic]"
+	if node.ResearchTask {
+		ordinal, total := r.researchOrdinal(event.BlockAddress)
+		prefix = fmt.Sprintf("[%d/%d]", ordinal, total)
+	}
 	if event.Action == "block.apply" {
 		switch event.Status {
 		case debuglog.StatusStarted:
@@ -98,7 +106,7 @@ func (r *TextRenderer) researchOrdinal(address string) (int, int) {
 	ordinal := 0
 	total := 0
 	for _, node := range r.projector.Snapshot().Nodes {
-		if node.Kind != "research" {
+		if !node.ResearchTask {
 			continue
 		}
 		total++

@@ -143,10 +143,6 @@ func (b *OutputBlock) ExecuteDuringPlan() error {
 		if err := b.validatePrimitiveFields(); err != nil {
 			return err
 		}
-		unmarked, _ := b.Expression.UnmarkDeep()
-		if err := corespec.ValidateType(unmarked.Type()); err != nil {
-			return fmt.Errorf("output %q type: %w", b.Name(), err)
-		}
 		b.planned = b.Expression
 		if b.Sensitive {
 			b.planned = corespec.MarkSensitive(b.planned)

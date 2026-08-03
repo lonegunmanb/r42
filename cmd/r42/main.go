@@ -20,7 +20,15 @@ func main() {
 func mainExitCode() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	restoreInterruptHandling(ctx, stop)
 	return run(ctx, os.Args[1:], os.Stdout, os.Stderr, cli.NewRuntime())
+}
+
+func restoreInterruptHandling(ctx context.Context, stop context.CancelFunc) {
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer, runtime cli.Runtime) int {

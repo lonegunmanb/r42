@@ -100,11 +100,16 @@ func (m TUIModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m TUIModel) updateKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	name := key.String()
-	if m.confirm && name != "q" && name != "Q" && name != "ctrl+c" {
+	if m.confirm && name != "q" && name != "Q" {
 		m.confirm = false
 	}
 	switch name {
-	case "q", "Q", "ctrl+c":
+	case "ctrl+c":
+		if m.cancel != nil {
+			m.cancel()
+		}
+		return m, tea.Quit
+	case "q", "Q":
 		if !m.confirm {
 			m.confirm = true
 			return m, nil

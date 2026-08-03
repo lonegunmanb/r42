@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
@@ -41,6 +42,21 @@ func TestRunMapsErrorsToProcessExitCodesAndStderr(t *testing.T) {
 			assert.Equal(t, test.wantPlan, strings.Contains(stdout.String(), `"nodes"`))
 			assert.NotEmpty(t, stderr.String())
 		})
+	}
+}
+
+func TestRestoreInterruptHandlingAfterFirstCancellation(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	stopped := make(chan struct{})
+	restoreInterruptHandling(ctx, func() { close(stopped) })
+
+	cancel()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("signal handling was not restored after cancellation")
 	}
 }
 

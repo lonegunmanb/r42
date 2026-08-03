@@ -47,6 +47,32 @@ func TestTUIModelShowsRunDAGCurrentActivityAndTokenTotal(t *testing.T) {
 	assert.Contains(t, view, "checking source dates")
 }
 
+func TestTUIModelAdjustsResearchTotalForMaterializedDynamicTasks(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewForRun("root", "D:/run-42", []plan.NodeSpec{
+		{Address: "research.dynamic.followups", Kind: "research"},
+		{Address: "research.static.summary", Kind: "research"},
+	}, nil, nil, nil)
+	require.NoError(t, err)
+	projector := ui.NewProjector(planned)
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "dynamic.tasks.materialized",
+		Status: debuglog.StatusCompleted, BlockAddress: "research.dynamic.followups",
+		BlockType: "research", Count: 2,
+		Paths: []string{
+			"research.dynamic.followups.tasks[0]",
+			"research.dynamic.followups.tasks[1]",
+		},
+	})
+	model := resizeTUI(t, ui.NewTUIModel(projector, nil), 140, 32)
+
+	view := model.View()
+
+	assert.Contains(t, view, "Tasks: 0/3 done")
+	assert.Equal(t, 2, strings.Count(view, "research.dynamic.followups.tasks"))
+}
+
 func TestTUIModelNavigatesPanelsNodesAndLongContent(t *testing.T) {
 	t.Parallel()
 
@@ -100,6 +126,19 @@ func TestTUIModelCollapsesModuleAndConfirmsCancellation(t *testing.T) {
 	_ = next
 	require.NotNil(t, secondQuit)
 	assert.IsType(t, tea.QuitMsg{}, secondQuit())
+	assert.True(t, cancelled)
+}
+
+func TestTUIModelCtrlCImmediatelyCancels(t *testing.T) {
+	t.Parallel()
+
+	cancelled := false
+	model := ui.NewTUIModel(newTUIProjector(t), func() { cancelled = true })
+
+	_, command := model.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+
+	require.NotNil(t, command)
+	assert.IsType(t, tea.QuitMsg{}, command())
 	assert.True(t, cancelled)
 }
 

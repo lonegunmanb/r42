@@ -184,7 +184,8 @@ func (e *Engine) apply(
 	}
 	factory := &runtimeFactory{
 		results: make(map[string]cty.Value), run: activeRun, sessions: sessions, recorder: recorder,
-		state: new(runtimeState), tools: planned.Tools(),
+		state: new(runtimeState), tools: planned.Tools(), directory: planned.Directory(),
+		contextValues: planned.Context(), localExpressions: planned.LocalExpressions(),
 	}
 	runner := executor.New(factory, nil)
 	outputs, applyErr := runner.Apply(ctx, planned, options.Parallelism)
@@ -253,14 +254,17 @@ func recordLifecycleCompletion(
 }
 
 type runtimeFactory struct {
-	mu       sync.Mutex
-	results  map[string]cty.Value
-	run      *run.Run
-	sessions SessionOpener
-	recorder *debuglog.Recorder
-	state    *runtimeState
-	prefix   string
-	tools    map[string]plan.ToolSpec
+	mu               sync.Mutex
+	results          map[string]cty.Value
+	run              *run.Run
+	sessions         SessionOpener
+	recorder         *debuglog.Recorder
+	state            *runtimeState
+	prefix           string
+	tools            map[string]plan.ToolSpec
+	directory        string
+	contextValues    map[string]cty.Value
+	localExpressions map[string]string
 }
 
 type runtimeState struct {
@@ -296,10 +300,39 @@ func (f *runtimeFactory) New(
 	if node.Kind != "research" {
 		return nil, fmt.Errorf("unsupported apply node kind %q", node.Kind)
 	}
+	if strings.HasPrefix(node.Address, "research.dynamic.") {
+		return f.newDynamicResearchBlock(ctx, node, scope)
+	}
 	planned, err := modulespec.DecodeResearchPlan(node.Config)
 	if err != nil {
 		return nil, err
 	}
+	if planned.Expression != "" {
+		value, evaluateErr := f.evaluateResearchExpression(node.Address, planned.Expression, "research")
+		if evaluateErr != nil {
+			return nil, evaluateErr
+		}
+		configValue, decodeErr := researchspec.DecodeDynamicTask(value)
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		planned, err = planned.Resolve(configValue)
+		if err != nil {
+			return nil, err
+		}
+		if err = modulespec.ValidateResearchToolIDs(configValue, f.tools); err != nil {
+			return nil, err
+		}
+	}
+	return f.newResearchBlock(ctx, node.Address, planned, f.publish)
+}
+
+func (f *runtimeFactory) newResearchBlock(
+	ctx context.Context,
+	address string,
+	planned modulespec.ResearchPlan,
+	publish func(string, cty.Value),
+) (golden.ApplyBlock, error) {
 	var blockCancel context.CancelFunc
 	if planned.Config.Timeout != nil {
 		ctx, blockCancel = context.WithTimeout(ctx, *planned.Config.Timeout)
@@ -310,7 +343,7 @@ func (f *runtimeFactory) New(
 			blockCancel()
 		}
 	}()
-	executionAddress := f.CanonicalAddress(node.Address)
+	executionAddress := f.CanonicalAddress(address)
 	workspace, err := f.run.Workspace(executionAddress)
 	if err != nil {
 		return nil, err
@@ -447,12 +480,12 @@ func (f *runtimeFactory) New(
 		}
 	}
 	block := &researchApplyBlock{
-		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address, session: recordedSession,
+		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: address, session: recordedSession,
 		runner: runner, qcRunner: qcRunner, qcConfig: qcConfig, qcSession: qcSession, config: researchruntime.Config{
 			InitialPrompt: initialPrompt, MaxProtocolAttempts: planned.Config.MaxProtocolAttempts,
 			Timeout: planned.Config.Timeout, Workspace: workspace, Artifacts: planned.Config.Artifacts,
 			TerminateToolName: terminateName,
-		}, publish: f.publish, cancel: blockCancel,
+		}, publish: publish, cancel: blockCancel,
 	}
 	keepBlockContext = true
 	return block, nil
@@ -513,6 +546,8 @@ func (f *runtimeFactory) newModuleBlock(
 	childFactory := &runtimeFactory{
 		results: make(map[string]cty.Value), run: f.run, sessions: f.sessions,
 		recorder: f.recorder, state: f.state, prefix: executionAddress, tools: node.Module.Plan.Tools(),
+		directory: node.Module.Plan.Directory(), contextValues: node.Module.Plan.Context(),
+		localExpressions: node.Module.Plan.LocalExpressions(),
 	}
 	return &moduleApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address,
