@@ -170,19 +170,21 @@ func TestNestedModulesPublishOutputsWithGoldenTraversal(t *testing.T) {
 func TestPlanAndApplyRunInDifferentProcesses(t *testing.T) {
 	t.Parallel()
 
+	workingDirectory := t.TempDir()
+	configurationDirectory := fixtureDirectory(t, "terminal_artifacts")
 	planPath := filepath.Join(t.TempDir(), "research.r42plan")
+	runE2ECLIProcess(t, workingDirectory, "init", configurationDirectory)
 	planOutput := runE2ECLIProcess(
 		t,
+		workingDirectory,
 		"plan",
-		"--directory",
-		fixtureDirectory(t, "terminal_artifacts"),
 		"--out",
 		planPath,
 	)
 	assert.Contains(t, planOutput, "research.static.source")
 	assert.FileExists(t, planPath)
 
-	applyOutput := runE2ECLIProcess(t, "apply", planPath, "--parallelism", "1")
+	applyOutput := runE2ECLIProcess(t, workingDirectory, "apply", planPath, "--parallelism", "1")
 	assert.Contains(t, applyOutput, `"summary":"research complete"`)
 }
 
@@ -193,11 +195,11 @@ func fixtureDirectory(t *testing.T, name string) string {
 	return directory
 }
 
-func runE2ECLIProcess(t *testing.T, arguments ...string) string {
+func runE2ECLIProcess(t *testing.T, workingDirectory string, arguments ...string) string {
 	t.Helper()
 	commandArguments := append([]string{"-test.run=^TestE2ECLIProcess$", "--"}, arguments...)
 	command := exec.CommandContext(t.Context(), os.Args[0], commandArguments...)
-	command.Dir = t.TempDir()
+	command.Dir = workingDirectory
 	command.Env = append(os.Environ(), "R42_E2E_CLI=1")
 	output, err := command.CombinedOutput()
 	require.NoError(t, err, string(output))

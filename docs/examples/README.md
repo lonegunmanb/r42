@@ -7,14 +7,15 @@ GitHub Copilot CLI installation with an authenticated account.
 From the repository root:
 
 ```powershell
-go run ./cmd/r42 plan --directory ./docs/examples/basic --out ./basic.r42plan
+go run ./cmd/r42 init ./docs/examples/basic
+go run ./cmd/r42 plan --out ./basic.r42plan
 go run ./cmd/r42 apply ./basic.r42plan
 ```
 
-The same directory can be planned and applied in one command:
+The initialized snapshot can be planned and applied in one command:
 
 ```powershell
-go run ./cmd/r42 apply ./docs/examples/basic
+go run ./cmd/r42 apply
 ```
 
 This block has no terminal tool, so a successful Apply produces no output
@@ -34,15 +35,16 @@ library. Initialize the module before planning:
 
 ```powershell
 go run ./cmd/r42 init ./docs/examples/multi-step
-go run ./cmd/r42 plan --directory ./docs/examples/multi-step --out ./multi-step.r42plan
+go run ./cmd/r42 plan --out ./multi-step.r42plan
 go run ./cmd/r42 apply ./multi-step.r42plan
 ```
 
-The initialized module is copied to `.r42/modules/pplx_tools` below the
-directory where the CLI was started. `path.module` lets the module invoke its
-copied Python file. During Apply, `block_wd()` resolves to the research block's
-absolute workspace and the fetch tool writes `snapshot.md` there. Apply prints
-that artifact path when the DAG completes.
+The root configuration is copied to `.r42/config` and the initialized module to
+`.r42/modules/pplx_tools` below the directory where the CLI was started.
+`path.module` lets the module invoke its copied Python file. During Apply,
+`block_wd()` resolves to the research block's absolute workspace and the fetch
+tool writes `snapshot.md` there. Apply prints that artifact path when the DAG
+completes.
 
 ## Deep-research matrix
 

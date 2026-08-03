@@ -50,8 +50,9 @@ ResearchPlan.Apply -> ResearchConfig.Outputs / Warnings
 ```
 
 Plan recursively parses every referenced module directory. Apply consumes the
-saved nested Plans and never reparses module source. `r42 apply <directory>` is
-a convenience form that performs a complete in-memory Plan before Apply.
+saved nested Plans and never reparses module source. A parameterless `r42 apply`
+performs a complete in-memory Plan of the initialized configuration snapshot
+before Apply.
 
 Golden owns source-configuration graph construction and dependency evaluation.
 References create implicit dependencies. `depends_on` is available for
@@ -584,28 +585,51 @@ output "sector_report" {
 ```
 
 `module.source` must be a literal string because it is resolved before Plan.
-`r42 init [DIRECTORY]` recursively discovers module blocks in `*.r42.hcl`
-files. A local source (`./`, `../`, or an absolute filesystem path) is copied;
-other source strings are passed to go-getter v2.2.3. Installed modules live
-under `<cwd>/.r42/modules` according to their canonical module address:
+Both that attribute and the root argument to `r42 init [SOURCE]` accept local
+filesystem locations or go-getter source locators. Explicit local paths (`./`,
+`../`, or absolute paths) are resolved directly; Init also recognizes an
+existing bare relative root path as local. Other strings are passed unchanged to
+go-getter v2.2.3, which supports forms such as GitHub shorthand, forced `git::`
+URLs, repository subdirectories, and supported HTTP archives. Terraform
+Registry addresses and version negotiation are outside this contract.
+
+The root source is downloaded to a private temporary directory when necessary,
+then the complete resolved package is copied to `<cwd>/.r42/config`, excluding
+`.r42` and `.git` directories. Init recursively discovers module blocks in that
+package's `*.r42.hcl` files. Installed modules live under
+`<cwd>/.r42/modules` according to their canonical module address:
 
 ```text
 module.a                      -> <cwd>/.r42/modules/a
 module.a.module.b.module.c    -> <cwd>/.r42/modules/a/b/c
 ```
 
-Existing installations are reused. `r42 init --upgrade [DIRECTORY]` refreshes
+Existing installations are reused. `r42 init --upgrade [SOURCE]` refreshes
 them through a staging directory so a failed copy or download leaves the
-previous installation intact. Source cycles fail Init.
+previous installation intact. Changing the root source locator also forces a
+module refresh. Source cycles fail Init.
 
-Plan requires every declared module to be initialized and parses only its
-canonical installed directory; it does not read the original source directory.
-Apply creates a new nested r42 executor over the saved Plan and never reparses
-module source.
+Successful Init writes `<cwd>/.r42/config/.initialized.json`, recording the
+initialization format and a SHA-256 identity of the canonical local path or
+remote locator. The original locator is not persisted because it may contain
+credentials. Plan and Apply fail fast when this marker is absent or invalid.
+Init also uses
+`<cwd>/.r42/.initializing` as a transaction marker: if a process is interrupted
+after module activation but before configuration activation, Plan and Apply
+refuse the potentially inconsistent state until Init is run again. Recovery
+forces a complete module refresh before clearing the transaction marker.
+
+Plan and unsaved-plan Apply accept no source-directory argument. They parse only
+`<cwd>/.r42/config` and the canonical installed module directories, so edits to
+the source package have no effect until Init runs again. Saved-plan Apply still
+requires a valid initialized project because tools and module-owned resources
+may depend on the active module installation. Apply creates a new nested r42
+executor over the saved Plan and never reparses module source.
 
 Every block can read `path.module`. It is an absolute `/`-normalized path to the
-directory containing that block: the root configuration directory for root
-blocks, or the corresponding `.r42/modules/a/b/c` directory for nested blocks.
+directory containing that block: `<cwd>/.r42/config` for root blocks, or the
+corresponding `.r42/modules/a/b/c` directory for nested blocks. `cwd()` remains
+the absolute directory where the r42 CLI process started.
 
 `variable` uses Terraform's basic semantics: `type` is required, `default` is
 optional, and a variable without a default must be supplied by its caller during
@@ -744,20 +768,25 @@ and planned configuration values themselves remain immutable.
 Required workflows:
 
 ```text
-r42 init [<directory>] [--upgrade]
-r42 plan [-d|--directory <directory>] [--out <file.r42plan>]
-r42 apply <file.r42plan>
-r42 apply <directory>
+r42 init [<source>] [--upgrade]
+r42 plan [--out <file.r42plan>]
+r42 apply [<file.r42plan>]
 ```
 
-`init` defaults its directory to `.`. It reuses installed modules unless
-`--upgrade` is present.
+`init` defaults its source to `.`. It refreshes the active
+configuration snapshot on every invocation and reuses installed modules unless
+`--upgrade`, a changed root source locator, or interrupted initialization
+requires a refresh.
 
-`plan` defaults `--directory` to `.`. It always prints the Plan to stdout and
+`plan` reads only `<cwd>/.r42/config`. It always prints the Plan to stdout and
 only writes a saved Plan file when `--out` is present.
 
-`apply` prints the immutable Plan JSON to stdout before execution starts. After
-a successful Apply, it prints the output values as a second JSON document.
+`apply` without an argument plans the active configuration snapshot in memory;
+with one argument it loads that saved Plan. Configuration directories are not
+valid Apply arguments. Both forms require a successfully initialized current
+working directory. Apply prints the immutable Plan JSON to stdout before
+execution starts. After a successful Apply, it prints the output values as a
+second JSON document.
 Progress is always written to stderr. `--ui=auto` selects the Bubble Tea TUI
 when stdin and stderr are interactive terminals of at least 50x12 and falls
 back to the line-oriented REPL renderer for redirected output, CI, `TERM=dumb`,

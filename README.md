@@ -166,8 +166,9 @@ session-level `retry` blocks can override individual fields.
 
 ## Example
 
-r42 loads every `*.r42.hcl` file in the target directory. The following
-configuration creates one research session:
+`r42 init` resolves a local directory or go-getter source and copies every
+`*.r42.hcl` file plus its supporting resources into the active configuration
+snapshot. The following configuration creates one research session:
 
 ```hcl
 research "static" "summary" {
@@ -183,16 +184,17 @@ Initialize referenced modules, inspect and save the plan, then apply it:
 
 ```powershell
 r42 init .
-r42 plan --directory . --out research.r42plan
+r42 plan --out research.r42plan
 r42 apply research.r42plan
 
-# Or plan and apply the directory directly
-r42 apply .
+# Or plan and apply the initialized snapshot directly
+r42 apply
 ```
 
-`r42 apply .` is the convenience form that plans the directory, prints the plan
-as JSON, and immediately applies it. The overall Apply timeout defaults to one
-hour and can be changed with `--timeout`.
+`r42 apply` is the convenience form that plans `<cwd>/.r42/config`, prints the
+plan as JSON, and immediately applies it. Source changes do not affect the
+active snapshot until `r42 init` is run again. The overall Apply timeout
+defaults to one hour and can be changed with `--timeout`.
 
 Apply selects its progress UI with `--ui=auto|tui|repl` (default `auto`). An
 interactive terminal at least 50 columns by 12 rows uses the Bubble Tea TUI;
@@ -272,13 +274,13 @@ A research block exposes `.result` only when it configures
 typed tool. A normal assistant completion without a terminate tool can publish
 artifacts, as above, but has no `.result` attribute.
 
-Root variables can be assigned on `plan` or on a directory-form `apply`. Both
+Root variables can be assigned on `plan` or on an unsaved-plan `apply`. Both
 Terraform-style single-dash flags and conventional double-dash flags are
 accepted, and each flag can be repeated:
 
 ```powershell
 r42 plan -var 'topic="USD/JPY"' -var-file inputs.r42vars --out research.r42plan
-r42 apply -var 'topic="USD/JPY"' .
+r42 apply -var 'topic="USD/JPY"'
 
 # These spellings are equivalent
 r42 plan --var 'topic="USD/JPY"' --var-file inputs.r42vars --out research.r42plan
@@ -740,10 +742,32 @@ subgraph in many investigations without copying its prompts, schemas, QC rules,
 and helper programs. The boundary also makes dependencies explicit and limits
 what callers can access to declared outputs.
 
-`r42 init` resolves each module's `source`, copies local modules or downloads
-remote sources through go-getter, and installs them under
-`<cwd>/.r42/modules`. Plan reads those initialized copies, and Apply uses the
-saved Plan rather than reparsing module sources.
+`r42 init <source>` resolves the complete root configuration package and copies
+it to `<cwd>/.r42/config`, excluding nested `.r42` and `.git` directories. A
+local directory is read directly. Any non-local source locator is downloaded
+through [go-getter v2.2.3](https://github.com/hashicorp/go-getter/tree/v2.2.3),
+following Terraform's
+[getter-backed module source conventions](https://developer.hashicorp.com/terraform/language/block/module#specify-the-location-of-module-source-files).
+This includes GitHub shorthand, `git::` URLs, repository subdirectories, and
+supported HTTP archives:
+
+```powershell
+r42 init 'github.com/acme/research-config//r42?ref=v1.2.3'
+```
+
+Terraform Registry address and version negotiation are not implemented; use a
+concrete go-getter locator.
+
+The same source rules apply to each module's literal `source` attribute. Modules
+are installed under `<cwd>/.r42/modules`. Remote root sources are fetched into a
+private staging directory before activation, so a failed download leaves the
+current initialized project available. Initialization metadata stores only a
+SHA-256 source identity, not the potentially credential-bearing source URL.
+Plan and unsaved-plan Apply accept no configuration directory and read only the
+initialized snapshot. Root `path.module` is therefore `<cwd>/.r42/config`;
+module blocks use their canonical installed directories. `cwd()` remains the
+directory where the CLI was started. Run `r42 init` again after changing the
+source configuration.
 
 ## Typed tools
 

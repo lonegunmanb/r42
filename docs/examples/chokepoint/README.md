@@ -184,7 +184,6 @@ Inspect and save the immutable plan:
 
 ```powershell
 r42 plan `
-  --directory ./docs/examples/chokepoint `
   -var-file ./docs/examples/chokepoint/research.r42vars `
   --out ./chokepoint.r42plan
 ```
@@ -195,14 +194,13 @@ Then apply it:
 r42 apply --timeout 2h --parallelism 5 ./chokepoint.r42plan
 ```
 
-The convenience form plans and applies the directory in one command:
+The convenience form plans and applies the initialized snapshot in one command:
 
 ```powershell
 r42 apply `
   --timeout 2h `
   --parallelism 5 `
-  -var-file ./docs/examples/chokepoint/research.r42vars `
-  ./docs/examples/chokepoint
+  -var-file ./docs/examples/chokepoint/research.r42vars
 ```
 
 `research.r42vars` is analogous to `terraform.tfvars`. Change `topic`,

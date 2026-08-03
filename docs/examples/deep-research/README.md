@@ -19,11 +19,12 @@ synthesize. The difference is that there is no model-driven planning stage.
 The caller supplies the plan as `research_plan = list(string)` in a variable
 file, so Plan knows the complete DAG before any session starts.
 
-From the repository root, inspect and save the plan without starting Copilot:
+From the repository root, initialize the active configuration, then inspect and
+save the plan without starting Copilot:
 
 ```powershell
+go run ./cmd/r42 init ./docs/examples/deep-research
 go run ./cmd/r42 plan `
-  --directory ./docs/examples/deep-research `
   -var-file ./docs/examples/deep-research/research.r42vars `
   --out ./deep-research.r42plan
 ```
@@ -34,12 +35,12 @@ Then apply the immutable plan:
 go run ./cmd/r42 apply ./deep-research.r42plan
 ```
 
-The directory can also be planned and applied directly:
+The initialized snapshot can also be planned and applied directly:
 
 ```powershell
 go run ./cmd/r42 apply `
   -var-file ./docs/examples/deep-research/research.r42vars `
-  ./docs/examples/deep-research
+  --parallelism 10
 ```
 
 Before Apply, provide the API key referenced by the selected provider. The

@@ -194,7 +194,7 @@ func (i installer) install(
 		}
 		fetch := i.options.Fetch
 		if fetch == nil {
-			fetch = fetchModule
+			fetch = Fetch
 		}
 		if err = fetch(ctx, source, staging, workingDirectory); err != nil {
 			return false, err
@@ -298,7 +298,7 @@ func moduleLabel(labels []string) (string, bool) {
 }
 
 func resolveSource(directory, source string) (resolved, key string, local bool, err error) {
-	if !isLocalSource(source) {
+	if !IsLocalSource(source) {
 		return source, "remote:" + source, false, nil
 	}
 	resolved = source
@@ -312,7 +312,7 @@ func resolveSource(directory, source string) (resolved, key string, local bool, 
 	return resolved, "local:" + resolved, true, nil
 }
 
-func isLocalSource(source string) bool {
+func IsLocalSource(source string) bool {
 	if filepath.IsAbs(source) || source == "." || source == ".." {
 		return true
 	}
@@ -359,7 +359,7 @@ func cloneSet(source map[string]struct{}) map[string]struct{} {
 	return result
 }
 
-func fetchModule(ctx context.Context, source, destination, workingDirectory string) error {
+func Fetch(ctx context.Context, source, destination, workingDirectory string) error {
 	client := getter.Client{DisableSymlinks: true}
 	_, err := client.Get(ctx, &getter.Request{
 		Src:             source,

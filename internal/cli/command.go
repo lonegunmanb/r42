@@ -31,8 +31,12 @@ type Runtime interface {
 	ConfigFromPlan(*plan.Plan, executor.ResearchConfigOptions) (*executor.ResearchConfig, error)
 }
 
-type moduleInitializer interface {
-	InitModules(context.Context, string, string, bool) error
+type projectInitializer interface {
+	InitProject(context.Context, string, string, bool) error
+}
+
+type projectOpener interface {
+	OpenProject(string) (string, string, error)
 }
 
 type usageError struct {
@@ -71,26 +75,24 @@ func NewCommand(runtime Runtime) *cobra.Command {
 func newInitCommand(runtime Runtime) *cobra.Command {
 	var upgrade bool
 	command := &cobra.Command{
-		Use:   "init [DIRECTORY]",
-		Short: "Install modules required by the configuration",
+		Use:   "init [SOURCE]",
+		Short: "Initialize the active configuration and modules",
 		Args:  usageArgs(cobra.MaximumNArgs(1)),
 		RunE: func(command *cobra.Command, args []string) error {
-			initializer, ok := runtime.(moduleInitializer)
+			initializer, ok := runtime.(projectInitializer)
 			if !ok {
-				return fmt.Errorf("module initializer is required")
+				return fmt.Errorf("project initializer is required")
 			}
 			directory := "."
 			if len(args) == 1 {
 				directory = args[0]
 			}
-			workingDirectory, err := os.Getwd()
+			stateDirectory, err := workingStateDirectory()
 			if err != nil {
-				// note: untested because os.Getwd failure requires invalidating process-wide filesystem state.
-				return fmt.Errorf("get current working directory: %w", err)
+				return err
 			}
-			modulesDirectory := filepath.Join(workingDirectory, ".r42", "modules")
-			if err = initializer.InitModules(command.Context(), directory, modulesDirectory, upgrade); err != nil {
-				return fmt.Errorf("initialize modules: %w", err)
+			if err = initializer.InitProject(command.Context(), directory, stateDirectory, upgrade); err != nil {
+				return fmt.Errorf("initialize project: %w", err)
 			}
 			return nil
 		},
@@ -100,7 +102,6 @@ func newInitCommand(runtime Runtime) *cobra.Command {
 }
 
 func newPlanCommand(runtime Runtime) *cobra.Command {
-	directory := "."
 	var outputPath string
 	var debug bool
 	var variables []string
@@ -119,9 +120,9 @@ func newPlanCommand(runtime Runtime) *cobra.Command {
 				writeWarning(command.ErrOrStderr(), "debug output contains sensitive configuration, prompts, transcripts, and tool data")
 				ctx = withDebugRun(ctx, debugState)
 			}
-			modulesDirectory, err := workingModulesDirectory()
+			directory, modulesDirectory, err := openWorkingProject(runtime)
 			if err != nil {
-				return err
+				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
 			options := executor.ResearchConfigOptions{
 				Context: ctx, Variables: goldenVariables(variables, variableFiles), RunDirectory: ".",
@@ -163,7 +164,6 @@ func newPlanCommand(runtime Runtime) *cobra.Command {
 			return closeCommandDebug(command, debugState)
 		},
 	}
-	command.Flags().StringVarP(&directory, "directory", "d", directory, "directory containing .r42.hcl files")
 	command.Flags().StringVar(&outputPath, "out", "", "saved plan path")
 	command.Flags().BoolVar(&debug, "debug", false, "persist sensitive planning debug events")
 	command.Flags().StringArrayVar(&variables, "var", nil, "set a Golden input variable (name=value)")
@@ -179,9 +179,9 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 	var variableFiles []string
 	uiMode := string(runui.ModeAuto)
 	command := &cobra.Command{
-		Use:   "apply PLAN_OR_DIRECTORY",
-		Short: "Apply a saved plan or plan and apply a directory",
-		Args:  usageArgs(cobra.ExactArgs(1)),
+		Use:   "apply [PLAN]",
+		Short: "Apply the initialized configuration or a saved plan",
+		Args:  usageArgs(cobra.MaximumNArgs(1)),
 		PreRunE: func(command *cobra.Command, _ []string) error {
 			if parallelism <= 0 {
 				return &usageError{err: fmt.Errorf("parallelism must be positive")}
@@ -210,7 +210,7 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 				ctx = withDebugRun(ctx, debugState)
 				writeWarning(command.ErrOrStderr(), "debug output contains sensitive configuration, prompts, transcripts, and tool data")
 			}
-			modulesDirectory, err := workingModulesDirectory()
+			directory, modulesDirectory, err := openWorkingProject(runtime)
 			if err != nil {
 				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
@@ -219,9 +219,14 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 				RunDirectory: ".", ModuleDirectory: modulesDirectory,
 				Parallelism: parallelism, Debug: debug,
 			}
-			config, err := loadOrPlan(
-				runtime, args[0], options,
-			)
+			displayPath := directory
+			var config *executor.ResearchConfig
+			if len(args) == 0 {
+				config, err = planConfig(runtime, directory, options)
+			} else {
+				displayPath = args[0]
+				config, err = loadSavedPlan(runtime, args[0], options)
+			}
 			if err != nil {
 				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
@@ -233,7 +238,7 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 			if err != nil {
 				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
-			if err = writePlan(ctx, command.OutOrStdout(), planned.SavedPlan(), args[0]); err != nil {
+			if err = writePlan(ctx, command.OutOrStdout(), planned.SavedPlan(), displayPath); err != nil {
 				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
 			selectedMode, err := runui.ResolveMode(
@@ -276,8 +281,8 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 	command.Flags().IntVar(&parallelism, "parallelism", parallelism, "maximum concurrent research blocks")
 	command.Flags().DurationVar(&timeout, "timeout", time.Hour, "overall apply timeout")
 	command.Flags().BoolVar(&debug, "debug", false, "persist sensitive debug events")
-	command.Flags().StringArrayVar(&variables, "var", nil, "set a Golden input variable for directory apply (name=value)")
-	command.Flags().StringArrayVar(&variableFiles, "var-file", nil, "load Golden input variables for directory apply")
+	command.Flags().StringArrayVar(&variables, "var", nil, "set a Golden input variable (name=value)")
+	command.Flags().StringArrayVar(&variableFiles, "var-file", nil, "load Golden input variables from a file")
 	command.Flags().StringVar(&uiMode, "ui", uiMode, "run progress UI: auto, tui, or repl")
 	return command
 }
@@ -343,7 +348,7 @@ func goldenVariables(values, files []string) []golden.CliFlagAssignedVariables {
 	return result
 }
 
-func loadOrPlan(
+func loadSavedPlan(
 	runtime Runtime,
 	target string,
 	options executor.ResearchConfigOptions,
@@ -353,11 +358,7 @@ func loadOrPlan(
 		return nil, fmt.Errorf("inspect apply target %q: %w", target, err)
 	}
 	if info.IsDir() {
-		config, err := planConfig(runtime, target, options)
-		if err != nil {
-			return nil, fmt.Errorf("plan directory %q: %w", target, err)
-		}
-		return config, nil
+		return nil, &usageError{err: fmt.Errorf("apply argument must be a saved plan, not configuration directory %q", target)}
 	}
 	planned, err := plan.Load(target)
 	if err != nil {
@@ -398,13 +399,29 @@ func writeWarning(writer io.Writer, message string) {
 	_, _ = fmt.Fprintf(writer, "warning: %s\n", message)
 }
 
-func workingModulesDirectory() (string, error) {
+func workingStateDirectory() (string, error) {
 	workingDirectory, err := os.Getwd()
 	if err != nil {
 		// note: untested because os.Getwd failure requires invalidating process-wide filesystem state.
 		return "", fmt.Errorf("get current working directory: %w", err)
 	}
-	return filepath.Join(workingDirectory, ".r42", "modules"), nil
+	return filepath.Join(workingDirectory, ".r42"), nil
+}
+
+func openWorkingProject(runtime Runtime) (string, string, error) {
+	opener, ok := runtime.(projectOpener)
+	if !ok {
+		return "", "", fmt.Errorf("project opener is required")
+	}
+	stateDirectory, err := workingStateDirectory()
+	if err != nil {
+		return "", "", err
+	}
+	configDirectory, modulesDirectory, err := opener.OpenProject(stateDirectory)
+	if err != nil {
+		return "", "", err
+	}
+	return configDirectory, modulesDirectory, nil
 }
 
 func writePlan(ctx context.Context, writer io.Writer, planned *plan.Plan, path string) error {

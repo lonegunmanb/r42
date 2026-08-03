@@ -23,9 +23,9 @@ import (
 	"github.com/lonegunmanb/r42/internal/copilot"
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/executor"
-	module "github.com/lonegunmanb/r42/internal/module"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/plan"
+	"github.com/lonegunmanb/r42/internal/project"
 	"github.com/lonegunmanb/r42/internal/provider"
 	"github.com/lonegunmanb/r42/internal/qc"
 	researchruntime "github.com/lonegunmanb/r42/internal/research/runtime"
@@ -67,16 +67,17 @@ func NewRuntimeWithOptions(options RuntimeOptions) *Engine {
 	return &Engine{options: options}
 }
 
-func (*Engine) InitModules(
+func (*Engine) InitProject(
 	ctx context.Context,
 	directory string,
-	modulesDirectory string,
+	stateDirectory string,
 	upgrade bool,
 ) error {
-	return module.Init(ctx, directory, module.InitOptions{
-		ModulesDirectory: modulesDirectory,
-		Upgrade:          upgrade,
-	})
+	return project.Init(ctx, directory, stateDirectory, project.InitOptions{Upgrade: upgrade})
+}
+
+func (*Engine) OpenProject(stateDirectory string) (string, string, error) {
+	return project.Open(stateDirectory)
 }
 
 func (e *Engine) Config(

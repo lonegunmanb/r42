@@ -26,6 +26,7 @@ type fakeRuntime struct {
 	planned          *plan.Plan
 	plannedDirectory string
 	initialized      string
+	stateDirectory   string
 	modulesDirectory string
 	upgradeModules   bool
 	variables        []golden.CliFlagAssignedVariables
@@ -38,18 +39,30 @@ type fakeRuntime struct {
 	applyErr         error
 	initErr          error
 	applyHook        func()
+	openErr          error
 }
 
-func (f *fakeRuntime) InitModules(
+func (f *fakeRuntime) InitProject(
 	_ context.Context,
 	directory string,
-	modulesDirectory string,
+	stateDirectory string,
 	upgrade bool,
 ) error {
 	f.initialized = directory
-	f.modulesDirectory = modulesDirectory
+	f.stateDirectory = stateDirectory
 	f.upgradeModules = upgrade
 	return f.initErr
+}
+
+func (f *fakeRuntime) OpenProject(stateDirectory string) (string, string, error) {
+	f.stateDirectory = stateDirectory
+	if f.openErr != nil {
+		return "", "", f.openErr
+	}
+	config := filepath.Join(stateDirectory, "config")
+	modules := filepath.Join(stateDirectory, "modules")
+	f.modulesDirectory = modules
+	return config, modules, nil
 }
 
 func (f *fakeRuntime) Config(
@@ -65,7 +78,7 @@ func (f *fakeRuntime) Config(
 }
 
 //nolint:paralleltest // t.Chdir verifies the CLI process working-directory contract.
-func TestCommandInitUsesWorkingDirectoryModuleCache(t *testing.T) {
+func TestCommandInitUsesWorkingDirectoryStateDirectory(t *testing.T) {
 	workingDirectory := t.TempDir()
 	t.Chdir(workingDirectory)
 	target := t.TempDir()
@@ -77,7 +90,7 @@ func TestCommandInitUsesWorkingDirectoryModuleCache(t *testing.T) {
 	assert.Empty(t, stdout)
 	assert.Empty(t, stderr)
 	assert.Equal(t, target, runtime.initialized)
-	assert.Equal(t, filepath.Join(workingDirectory, ".r42", "modules"), runtime.modulesDirectory)
+	assert.Equal(t, filepath.Join(workingDirectory, ".r42"), runtime.stateDirectory)
 	assert.True(t, runtime.upgradeModules)
 }
 
@@ -91,17 +104,18 @@ func TestCommandInitDefaultsToCurrentDirectoryWithoutUpgrade(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, ".", runtime.initialized)
-	assert.Equal(t, filepath.Join(workingDirectory, ".r42", "modules"), runtime.modulesDirectory)
+	assert.Equal(t, filepath.Join(workingDirectory, ".r42"), runtime.stateDirectory)
 	assert.False(t, runtime.upgradeModules)
 }
 
-func TestCommandInitHelpDescribesDirectoryAndUpgrade(t *testing.T) {
+func TestCommandInitHelpDescribesSourceAndUpgrade(t *testing.T) {
 	t.Parallel()
 
 	stdout, _, err := execute(t, nil, "init", "--help")
 
 	require.NoError(t, err)
-	assert.Contains(t, stdout, "r42 init [DIRECTORY]")
+	assert.Contains(t, stdout, "r42 init [SOURCE]")
+	assert.Contains(t, stdout, "Initialize the active configuration and modules")
 	assert.Contains(t, stdout, "--upgrade")
 }
 
@@ -118,20 +132,23 @@ output "answer" { value = "42" }
 	require.NoError(t, os.WriteFile(filepath.Join(root, "main.r42.hcl"), []byte(`
 module "child" { source = "./child" }
 output "answer" { value = module.child.answer }
+output "root_module" { value = path.module }
 `), 0o600))
 	runtime := cli.NewRuntime()
 
-	_, _, err := execute(t, runtime, "apply", root)
+	_, _, err := execute(t, runtime, "apply")
 	require.Error(t, err)
 	require.ErrorContains(t, err, "run r42 init")
 
 	_, _, err = execute(t, runtime, "init", root)
 	require.NoError(t, err)
-	stdout, _, err := execute(t, runtime, "apply", root)
+	stdout, _, err := execute(t, runtime, "apply")
 
 	require.NoError(t, err)
 	assert.FileExists(t, filepath.Join(workingDirectory, ".r42", "modules", "child", "main.r42.hcl"))
+	assert.FileExists(t, filepath.Join(workingDirectory, ".r42", "config", "main.r42.hcl"))
 	assert.Contains(t, stdout, `"42"`)
+	assert.Contains(t, stdout, filepath.ToSlash(filepath.Join(workingDirectory, ".r42", "config")))
 	assert.NoDirExists(t, filepath.Join(root, ".r42"))
 }
 
@@ -169,14 +186,14 @@ func TestCommandPlanSavesOptionalOutputAndSeparatesPermissionWarning(t *testing.
 	outPath := filepath.Join(t.TempDir(), "research.r42plan")
 
 	stdout, stderr, executeErr := execute(t, runtime,
-		"plan", "--directory", directory,
+		"plan",
 		"--out", outPath,
 		"--var", "topic=markets",
 		"--var-file", "inputs.r42vars",
 	)
 
 	require.NoError(t, executeErr)
-	assert.Equal(t, directory, runtime.plannedDirectory)
+	assert.Equal(t, filepath.Join(runtime.stateDirectory, "config"), runtime.plannedDirectory)
 	assert.Len(t, runtime.variables, 2)
 	assert.Contains(t, stdout, `"answer"`)
 	assert.NotContains(t, stdout, "unencrypted")
@@ -186,34 +203,18 @@ func TestCommandPlanSavesOptionalOutputAndSeparatesPermissionWarning(t *testing.
 	assert.Equal(t, planned.Outputs(), loaded.Outputs())
 }
 
-func TestCommandPlanFlagsAndDefaultPrintWithoutSaving(t *testing.T) {
+func TestCommandPlanUsesInitializedConfigurationWithoutSaving(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name          string
-		arguments     []string
-		wantDirectory string
-	}{
-		{name: "default", arguments: []string{"plan"}, wantDirectory: "."},
-		{name: "long flag", arguments: []string{"plan", "--directory", "research"}, wantDirectory: "research"},
-		{name: "short flag", arguments: []string{"plan", "-d", "research"}, wantDirectory: "research"},
-	}
+	planned := mustPlan(t)
+	runtime := &fakeRuntime{planned: planned}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
+	stdout, stderr, err := execute(t, runtime, "plan")
 
-			planned := mustPlan(t)
-			runtime := &fakeRuntime{planned: planned}
-
-			stdout, stderr, err := execute(t, runtime, test.arguments...)
-
-			require.NoError(t, err)
-			assert.Equal(t, test.wantDirectory, runtime.plannedDirectory)
-			assert.Contains(t, stdout, `"nodes"`)
-			assert.Empty(t, stderr)
-		})
-	}
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(runtime.stateDirectory, "config"), runtime.plannedDirectory)
+	assert.Contains(t, stdout, `"nodes"`)
+	assert.Empty(t, stderr)
 }
 
 func TestCommandPlanPrintsBeforeReportingSaveFailure(t *testing.T) {
@@ -239,16 +240,14 @@ func TestCommandPlanTreatsWhitespaceOutputAsOmitted(t *testing.T) {
 	assert.Empty(t, stderr)
 }
 
-func TestCommandPlanHelpDescribesOptionalDirectoryAndOutput(t *testing.T) {
+func TestCommandPlanHelpDoesNotOfferConfigurationDirectory(t *testing.T) {
 	t.Parallel()
 
 	stdout, _, err := execute(t, nil, "plan", "--help")
 
 	require.NoError(t, err)
 	assert.Contains(t, stdout, "r42 plan [flags]")
-	assert.Contains(t, stdout, "-d, --directory string")
-	assert.Contains(t, stdout, "directory containing .r42.hcl files")
-	assert.Contains(t, stdout, `(default ".")`)
+	assert.NotContains(t, stdout, "--directory")
 	assert.NotContains(t, stdout, "plan DIRECTORY")
 }
 
@@ -262,7 +261,10 @@ output "answer" { value = "42" }
 `), 0o600))
 
 	planPath := filepath.Join(t.TempDir(), "saved.r42plan")
-	_, stderr, err := execute(t, cli.NewRuntime(), "plan", "--directory", directory, "--out", planPath, "--debug")
+	runtime := cli.NewRuntime()
+	_, _, err := execute(t, runtime, "init", directory)
+	require.NoError(t, err)
+	_, stderr, err := execute(t, runtime, "plan", "--out", planPath, "--debug")
 
 	require.NoError(t, err)
 	assert.Contains(t, stderr, "sensitive")
@@ -284,7 +286,7 @@ output "answer" { value = "42" }
 	} {
 		assert.Contains(t, events, `"action":"`+action+`"`)
 	}
-	encodedPath, err := json.Marshal(filepath.Join(directory, "main.r42.hcl"))
+	encodedPath, err := json.Marshal(filepath.Join(workingDirectory, ".r42", "config", "main.r42.hcl"))
 	require.NoError(t, err)
 	assert.Contains(t, events, string(encodedPath))
 	assert.NoDirExists(t, filepath.Join(directory, ".r42"))
@@ -299,7 +301,10 @@ func TestCommandPlanStoresDebugRunInWorkingDirectory(t *testing.T) {
 output "answer" { value = "42" }
 `), 0o600))
 
-	_, _, err := execute(t, cli.NewRuntime(), "plan", "--directory", configurationDirectory, "--debug")
+	runtime := cli.NewRuntime()
+	_, _, err := execute(t, runtime, "init", configurationDirectory)
+	require.NoError(t, err)
+	_, _, err = execute(t, runtime, "plan", "--debug")
 
 	require.NoError(t, err)
 	assert.Contains(t, readDebugEvents(t, workingDirectory), `"action":"plan"`)
@@ -307,15 +312,13 @@ output "answer" { value = "42" }
 }
 
 //nolint:paralleltest // t.Chdir isolates debug output from the repository.
-func TestCommandPlanDebugDoesNotCreateMissingDirectory(t *testing.T) {
+func TestCommandPlanFailsFastBeforeInitialization(t *testing.T) {
 	t.Chdir(t.TempDir())
-	directory := filepath.Join(t.TempDir(), "missing")
 
-	_, _, err := execute(t, cli.NewRuntime(), "plan", "--directory", directory, "--debug")
+	_, _, err := execute(t, cli.NewRuntime(), "plan", "--debug")
 
 	require.Error(t, err)
-	_, statErr := os.Stat(directory)
-	require.ErrorIs(t, statErr, os.ErrNotExist)
+	assert.ErrorContains(t, err, "run r42 init")
 }
 
 //nolint:paralleltest // t.Chdir isolates debug output from the repository.
@@ -323,9 +326,16 @@ func TestCommandPlanDebugRecordsParseFailure(t *testing.T) {
 	workingDirectory := t.TempDir()
 	directory := t.TempDir()
 	t.Chdir(workingDirectory)
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "broken.r42.hcl"), []byte(`research "static" "broken" {`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`output "answer" { value = "42" }`), 0o600))
+	runtime := cli.NewRuntime()
+	_, _, err := execute(t, runtime, "init", directory)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(workingDirectory, ".r42", "config", "broken.r42.hcl"),
+		[]byte(`research "static" "broken" {`), 0o600,
+	))
 
-	_, _, err := execute(t, cli.NewRuntime(), "plan", "--directory", directory, "--debug")
+	_, _, err = execute(t, runtime, "plan", "--debug")
 
 	require.Error(t, err)
 	events := readDebugEvents(t, workingDirectory)
@@ -345,10 +355,12 @@ research "static" "source" {
   system_prompt = "Collect evidence."
 }
 output "answer" { value = "42" }
-`), 0o600))
+	`), 0o600))
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: &fakeSessionOpener{}})
+	_, _, err := execute(t, runtime, "init", directory)
+	require.NoError(t, err)
 
-	_, _, err := execute(t, runtime, "apply", directory, "--debug", "--parallelism", "1")
+	_, _, err = execute(t, runtime, "apply", "--debug", "--parallelism", "1")
 
 	require.NoError(t, err)
 	events := readDebugEvents(t, workingDirectory)
@@ -400,8 +412,11 @@ func TestCommandApplyStoresRunInWorkingDirectory(t *testing.T) {
 output "answer" { value = "42" }
 `), 0o600))
 
-			arguments := append([]string{"apply", configurationDirectory}, test.arguments...)
-			_, _, err := execute(t, cli.NewRuntime(), arguments...)
+			runtime := cli.NewRuntime()
+			_, _, err := execute(t, runtime, "init", configurationDirectory)
+			require.NoError(t, err)
+			arguments := append([]string{"apply"}, test.arguments...)
+			_, _, err = execute(t, runtime, arguments...)
 
 			require.NoError(t, err)
 			runs, err := os.ReadDir(filepath.Join(workingDirectory, ".r42", "runs"))
@@ -426,7 +441,7 @@ func readDebugEvents(t *testing.T, directory string) string {
 }
 
 //nolint:paralleltest // t.Chdir isolates CLI run artifacts from the source tree.
-func TestCommandApplySupportsSavedPlanAndDirectory(t *testing.T) {
+func TestCommandApplySupportsSavedPlanAndInitializedConfiguration(t *testing.T) {
 	t.Chdir(t.TempDir())
 
 	directory := t.TempDir()
@@ -438,11 +453,11 @@ func TestCommandApplySupportsSavedPlanAndDirectory(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		target        string
+		arguments     []string
 		wantPlanCalls bool
 	}{
-		{name: "saved plan", target: planPath},
-		{name: "directory", target: directory, wantPlanCalls: true},
+		{name: "saved plan", arguments: []string{planPath}},
+		{name: "initialized configuration", wantPlanCalls: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -452,12 +467,13 @@ func TestCommandApplySupportsSavedPlanAndDirectory(t *testing.T) {
 				warnings: []error{errors.New("close session failed")},
 			}
 
-			stdout, stderr, executeErr := execute(t, runtime,
-				"apply", test.target,
+			arguments := append([]string{"apply"}, test.arguments...)
+			arguments = append(arguments,
 				"--parallelism", "3",
 				"--timeout", "2s",
 				"--debug",
 			)
+			stdout, stderr, executeErr := execute(t, runtime, arguments...)
 
 			require.NoError(t, executeErr)
 			assert.Equal(t, test.wantPlanCalls, runtime.plannedDirectory != "")
@@ -490,7 +506,7 @@ func TestCommandApplyPrintsPlanBeforeExecution(t *testing.T) {
 	command := cli.NewCommand(runtime)
 	command.SetOut(&stdout)
 	command.SetErr(&stderr)
-	command.SetArgs([]string{"apply", t.TempDir()})
+	command.SetArgs([]string{"apply"})
 
 	err = command.ExecuteContext(t.Context())
 
@@ -527,7 +543,7 @@ func TestCommandApplyREPLShowsDAGAndLiveProgressOnStderr(t *testing.T) {
 		}))
 	}
 
-	stdout, stderr, err := execute(t, runtime, "apply", t.TempDir(), "--ui=repl")
+	stdout, stderr, err := execute(t, runtime, "apply", "--ui=repl")
 
 	require.NoError(t, err)
 	assert.Contains(t, stdout, `"nodes"`)
@@ -546,6 +562,7 @@ func TestCommandApplyHelpDescribesAutomaticUISelection(t *testing.T) {
 	stdout, _, err := execute(t, nil, "apply", "--help")
 
 	require.NoError(t, err)
+	assert.Contains(t, stdout, "r42 apply [PLAN]")
 	assert.Contains(t, stdout, "--ui string")
 	assert.Contains(t, stdout, "auto, tui, or repl")
 	assert.Contains(t, stdout, `(default "auto")`)
@@ -558,7 +575,7 @@ func TestCommandApplyPrintsPlanWhenExecutionFails(t *testing.T) {
 	require.NoError(t, err)
 	runtime := &fakeRuntime{planned: planned, applyErr: assert.AnError}
 
-	stdout, _, err := execute(t, runtime, "apply", t.TempDir())
+	stdout, _, err := execute(t, runtime, "apply")
 
 	require.ErrorIs(t, err, assert.AnError)
 	assert.Equal(t, wantPlan, stdout)
@@ -571,7 +588,7 @@ func TestCommandApplyFailsFastWhenPlanCannotBeWritten(t *testing.T) {
 	command := cli.NewCommand(runtime)
 	command.SetOut(failingWriter{})
 	command.SetErr(new(bytes.Buffer))
-	command.SetArgs([]string{"apply", t.TempDir()})
+	command.SetArgs([]string{"apply"})
 
 	err := command.ExecuteContext(t.Context())
 
@@ -597,28 +614,28 @@ func TestCommandDiagnosticsAndExitCodes(t *testing.T) {
 	}{
 		{
 			name:     "usage",
-			args:     []string{"apply"},
+			args:     []string{"apply", "one.r42plan", "two.r42plan"},
 			runtime:  &fakeRuntime{},
 			wantCode: cli.ExitUsage,
-			wantErr:  "received 0",
+			wantErr:  "at most 1",
 		},
 		{
 			name:     "plan block diagnostic",
-			args:     []string{"plan", "--directory", t.TempDir()},
+			args:     []string{"plan"},
 			runtime:  &fakeRuntime{planErr: errors.New("research.market: model is required")},
 			wantCode: cli.ExitFailure,
 			wantErr:  "research.market",
 		},
 		{
-			name:     "plan positional directory is rejected",
-			args:     []string{"plan", t.TempDir()},
+			name:     "plan directory flag is rejected",
+			args:     []string{"plan", "--directory", t.TempDir()},
 			runtime:  &fakeRuntime{planned: mustPlan(t)},
 			wantCode: cli.ExitUsage,
-			wantErr:  "unknown command",
+			wantErr:  "unknown flag",
 		},
 		{
 			name:     "apply failure",
-			args:     []string{"apply", t.TempDir()},
+			args:     []string{"apply"},
 			runtime:  &fakeRuntime{planned: mustPlan(t), applyErr: errors.New("apply block research.market: failed")},
 			wantCode: cli.ExitFailure,
 			wantErr:  "research.market",
@@ -647,6 +664,16 @@ func TestCommandApplyFailsFastWhenTargetCannotBeInspected(t *testing.T) {
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestCommandApplyRejectsConfigurationDirectoryArgument(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := execute(t, &fakeRuntime{}, "apply", t.TempDir())
+
+	require.Error(t, err)
+	assert.Equal(t, cli.ExitUsage, cli.ExitCode(err))
+	assert.ErrorContains(t, err, "saved plan")
+}
+
 func execute(t *testing.T, runtime cli.Runtime, args ...string) (string, string, error) {
 	t.Helper()
 	var stdout bytes.Buffer
@@ -669,7 +696,7 @@ func mustPlan(t *testing.T) *plan.Plan {
 func TestApplyTimeoutValidation(t *testing.T) {
 	t.Parallel()
 
-	_, _, err := execute(t, &fakeRuntime{planned: mustPlan(t)}, "apply", t.TempDir(), "--timeout", "0s")
+	_, _, err := execute(t, &fakeRuntime{planned: mustPlan(t)}, "apply", "--timeout", "0s")
 	require.Error(t, err)
 	assert.Equal(t, cli.ExitUsage, cli.ExitCode(err))
 	assert.ErrorContains(t, err, "timeout must be positive")
@@ -679,7 +706,7 @@ func TestApplyDefaultParallelism(t *testing.T) {
 	t.Parallel()
 
 	runtime := &fakeRuntime{planned: mustPlan(t)}
-	_, _, err := execute(t, runtime, "apply", t.TempDir())
+	_, _, err := execute(t, runtime, "apply")
 	require.NoError(t, err)
 	assert.Equal(t, 10, runtime.configOptions.Parallelism)
 }
@@ -688,7 +715,7 @@ func TestApplyDefaultTimeout(t *testing.T) {
 	t.Parallel()
 
 	runtime := &fakeRuntime{planned: mustPlan(t)}
-	_, _, err := execute(t, runtime, "apply", t.TempDir())
+	_, _, err := execute(t, runtime, "apply")
 	require.NoError(t, err)
 	assert.WithinDuration(t, time.Now().Add(time.Hour), runtime.applyDeadlineAt, time.Second)
 }
@@ -702,7 +729,7 @@ func TestApplyRedactsSensitiveOutputFromStdout(t *testing.T) {
 			"secret": corespec.MarkSensitive(cty.StringVal("do-not-print")),
 		},
 	}
-	stdout, _, err := execute(t, runtime, "apply", t.TempDir())
+	stdout, _, err := execute(t, runtime, "apply")
 	require.NoError(t, err)
 	assert.Contains(t, stdout, "<sensitive>")
 	assert.NotContains(t, stdout, "do-not-print")
@@ -712,7 +739,7 @@ func TestApplyCancelledContextUsesFailureExit(t *testing.T) {
 	t.Parallel()
 
 	runtime := &fakeRuntime{planned: mustPlan(t), applyErr: context.Canceled}
-	_, _, err := execute(t, runtime, "apply", t.TempDir())
+	_, _, err := execute(t, runtime, "apply")
 	require.Error(t, err)
 	assert.Equal(t, cli.ExitFailure, cli.ExitCode(err))
 }
@@ -729,7 +756,7 @@ func TestTimeoutContextActuallyExpires(t *testing.T) {
 			return ctx.Err()
 		},
 	}
-	_, _, err := execute(t, runtime, "apply", t.TempDir(), "--timeout", "1ms")
+	_, _, err := execute(t, runtime, "apply", "--timeout", "1ms")
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	select {
 	case <-deadlineObserved:
@@ -738,17 +765,21 @@ func TestTimeoutContextActuallyExpires(t *testing.T) {
 	}
 }
 
-func TestApplyTimeoutIncludesDirectDirectoryPlanning(t *testing.T) {
+func TestApplyTimeoutIncludesInitializedConfigurationPlanning(t *testing.T) {
 	t.Parallel()
 
 	runtime := &blockingPlanRuntime{}
-	_, _, err := execute(t, runtime, "apply", t.TempDir(), "--timeout", "1ms")
+	_, _, err := execute(t, runtime, "apply", "--timeout", "1ms")
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.False(t, runtime.applyCalled)
 }
 
 type blockingPlanRuntime struct{ applyCalled bool }
+
+func (*blockingPlanRuntime) OpenProject(stateDirectory string) (string, string, error) {
+	return filepath.Join(stateDirectory, "config"), filepath.Join(stateDirectory, "modules"), nil
+}
 
 func (*blockingPlanRuntime) Config(
 	_ string,
@@ -776,6 +807,10 @@ func (r *blockingPlanRuntime) ConfigFromPlan(
 type runtimeFunc struct {
 	plan  *plan.Plan
 	apply func(context.Context) error
+}
+
+func (runtimeFunc) OpenProject(stateDirectory string) (string, string, error) {
+	return filepath.Join(stateDirectory, "config"), filepath.Join(stateDirectory, "modules"), nil
 }
 
 func (r runtimeFunc) Config(

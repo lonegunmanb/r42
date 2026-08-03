@@ -28,9 +28,9 @@ func TestRunMapsErrorsToProcessExitCodesAndStderr(t *testing.T) {
 		want     int
 		wantPlan bool
 	}{
-		{name: "usage", ctx: t.Context(), args: []string{"apply"}, runtime: stubRuntime{}, want: cli.ExitUsage},
-		{name: "runtime", ctx: t.Context(), args: []string{"apply", t.TempDir()}, runtime: stubRuntime{applyErr: errors.New("failed")}, want: cli.ExitFailure, wantPlan: true},
-		{name: "signal", ctx: canceledContext(), args: []string{"apply", t.TempDir()}, runtime: stubRuntime{applyErr: context.Canceled}, want: 130, wantPlan: true},
+		{name: "usage", ctx: t.Context(), args: []string{"apply", "one.r42plan", "two.r42plan"}, runtime: stubRuntime{}, want: cli.ExitUsage},
+		{name: "runtime", ctx: t.Context(), args: []string{"apply"}, runtime: stubRuntime{applyErr: errors.New("failed")}, want: cli.ExitFailure, wantPlan: true},
+		{name: "signal", ctx: canceledContext(), args: []string{"apply"}, runtime: stubRuntime{applyErr: context.Canceled}, want: 130, wantPlan: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -79,7 +79,7 @@ func TestRunDisplaysEveryHCLDiagnostic(t *testing.T) {
 
 	code := run(
 		t.Context(),
-		[]string{"apply", t.TempDir()},
+		[]string{"apply"},
 		&stdout,
 		&stderr,
 		stubRuntime{applyErr: fmt.Errorf("validate configuration: %w", diagnostics)},
@@ -104,7 +104,7 @@ func TestRunAcceptsTerraformStyleVariableFlags(t *testing.T) {
 		},
 		{
 			name: "equals values",
-			args: []string{"apply", t.TempDir(), "-var=topic=markets", "-var-file=inputs.r42vars"},
+			args: []string{"apply", "-var=topic=markets", "-var-file=inputs.r42vars"},
 		},
 	}
 	for _, test := range tests {
@@ -141,6 +141,10 @@ func (r *variableCapturingRuntime) Config(
 }
 
 type stubRuntime struct{ applyErr error }
+
+func (stubRuntime) OpenProject(stateDirectory string) (string, string, error) {
+	return stateDirectory + "/config", stateDirectory + "/modules", nil
+}
 
 func (r stubRuntime) Config(
 	_ string,
