@@ -2,12 +2,12 @@ module "pplx_tools" {
   source = "./modules/pplx_tools"
 }
 
-research "static" "whiteboard" {
+research "static" "brainstorm" {
   model_provider   = model_provider.primary
   model            = var.model
   reasoning_effort = var.reasoning_effort
   system_prompt = <<-PROMPT
-    You chair an exploratory supply-chain whiteboard. Generate competing
+    You facilitate an exploratory supply-chain brainstorm. Generate competing
     hypotheses before committing to a graph. Separate structural chokepoints
     from fashionable companies and generic demand beneficiaries.
   PROMPT
@@ -19,7 +19,7 @@ research "static" "whiteboard" {
     ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
 
     Test the most important hypotheses and preserve the most decision-relevant
-    sources. Write ${block_wd()}/whiteboard.md with:
+    sources. Write ${block_wd()}/brainstorm.md with:
 
     - the focal system boundary;
     - competing hypotheses about components, processes, equipment, materials,
@@ -35,17 +35,17 @@ research "static" "whiteboard" {
   disallowed_tools      = local.research_disallowed_tools
   permission            = "approve_all"
 
-  artifact "whiteboard" {
+  artifact "brainstorm" {
     type      = "file"
-    path      = "${block_wd()}/whiteboard.md"
+    path      = "${block_wd()}/brainstorm.md"
     required  = true
     non_empty = true
   }
 
   qc {
     criteria = {
-      scope = "Read whiteboard.md and verify it defines one bounded focal system and does not mix industry-function nodes with company names."
-      breadth = "Verify the whiteboard proposes testable hypotheses for product structure, manufacturing and testing, equipment, materials, and qualification or integration lock-in."
+      scope = "Read brainstorm.md and verify it defines one bounded focal system and does not mix industry-function nodes with company names."
+      breadth = "Verify the brainstorm proposes testable hypotheses for product structure, manufacturing and testing, equipment, materials, and qualification or integration lock-in."
       evidence = "For every source-backed claim, verify the referenced snapshot exists and supports the claim; hypotheses may remain explicitly unverified."
       uncertainty = "Verify competing explanations and material unknowns are preserved rather than silently collapsed into one story."
     }
@@ -66,9 +66,9 @@ research "static" "graph_track" {
     Topic: ${var.topic}
     Track: ${each.value.title}
     Assigned question: ${each.value.question}
-    Whiteboard artifact: ${one(research.static.whiteboard.artifact).path}
+    Brainstorm artifact: ${one(research.static.brainstorm.artifact).path}
 
-    Read the whiteboard, then research only this track.
+    Read the brainstorm, then research only this track.
     ${local.source_tool_guidance}
     ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
 
@@ -117,7 +117,7 @@ research "static" "select_chokepoints" {
   PROMPT
   prompt = <<-PROMPT
     Topic: ${var.topic}
-    Whiteboard: ${one(research.static.whiteboard.artifact).path}
+    Brainstorm: ${one(research.static.brainstorm.artifact).path}
 
     Validated track artifacts:
     ${join("\n", [for item in research.static.graph_track : "- ${one(item.artifact).path}"])}
@@ -289,7 +289,7 @@ research "static" "synthesize" {
   PROMPT
   prompt = <<-PROMPT
     Topic: ${var.topic}
-    Whiteboard: ${one(research.static.whiteboard.artifact).path}
+    Brainstorm: ${one(research.static.brainstorm.artifact).path}
     Audited chain: ${one(research.static.select_chokepoints.artifact).path}
 
     Candidate discovery artifacts:

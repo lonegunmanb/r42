@@ -1,7 +1,7 @@
 # Dynamic chokepoint research
 
 This example adapts the supply-chain bottleneck workflow from
-`ai-institute/cmd/chokepoint` to r42. It starts with an exploratory whiteboard,
+`ai-institute/cmd/chokepoint` to r42. It starts with an exploratory brainstorm,
 checks the proposed decomposition through five independent evidence tracks,
 selects structural chokepoints, discovers companies for the resulting nodes,
 and independently assesses every discovered company.
@@ -13,7 +13,7 @@ ask which public companies control or critically supply those exact nodes.
 ## Research flow
 
 ```text
-whiteboard hypotheses
+brainstorm hypotheses
         |
         v
 five parallel graph tracks
@@ -212,7 +212,7 @@ environment-variable reference without editing the research graph. Toggle
 
 The root outputs expose:
 
-- the exploratory `whiteboard.md`;
+- the exploratory `brainstorm.md`;
 - the reconciled `chokepoints.json` graph;
 - one `candidates.json` path per selected chokepoint;
 - one `scorecard.json` path per discovered company;
