@@ -751,6 +751,9 @@ supported HTTP archives:
 
 ```powershell
 r42 init 'github.com/acme/research-config//r42?ref=v1.2.3'
+
+# Initialize the chokepoint example directly from its Git repository subdirectory
+r42 init 'git::https://github.com/lonegunmanb/r42.git//docs/examples/chokepoint'
 ```
 
 Terraform Registry address and version negotiation are not implemented; use a
