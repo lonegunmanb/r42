@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
+	"github.com/lonegunmanb/golden"
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/plan"

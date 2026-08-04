@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/lonegunmanb/r42/internal/plan"

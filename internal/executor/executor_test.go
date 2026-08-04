@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Azure/golden"
+	"github.com/lonegunmanb/golden"
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/executor"

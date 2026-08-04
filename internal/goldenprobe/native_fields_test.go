@@ -3,7 +3,7 @@ package goldenprobe
 import (
 	"testing"
 
-	"github.com/Azure/golden"
+	"github.com/lonegunmanb/golden"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"

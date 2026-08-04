@@ -5,8 +5,8 @@ import (
 	"maps"
 	"math/big"
 
-	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/zclconf/go-cty/cty"
 )

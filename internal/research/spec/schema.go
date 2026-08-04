@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/provider"
 	"github.com/zclconf/go-cty/cty"

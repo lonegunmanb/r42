@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Azure/golden"
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/executor"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	internalplan "github.com/lonegunmanb/r42/internal/plan"

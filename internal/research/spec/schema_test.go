@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/provider"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	corespec "github.com/lonegunmanb/r42/internal/spec"

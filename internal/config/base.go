@@ -1,6 +1,6 @@
 package config
 
-import "github.com/Azure/golden"
+import "github.com/lonegunmanb/golden"
 
 func NewBaseConfig(arguments golden.NewBaseConfigArgs) *golden.BaseConfig {
 	arguments.DslFullName = "r42"

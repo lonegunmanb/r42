@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/Azure/golden"
+	"github.com/lonegunmanb/golden"
 	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"

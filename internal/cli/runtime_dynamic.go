@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/hclfuncs"
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
 	"github.com/lonegunmanb/r42/internal/config"

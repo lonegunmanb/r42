@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Azure/golden"
 	sdk "github.com/github/copilot-sdk/go"
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/copilot"
 	"github.com/lonegunmanb/r42/internal/executor"

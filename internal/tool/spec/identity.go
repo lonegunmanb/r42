@@ -6,7 +6,7 @@ import (
 	"maps"
 	"strings"
 
-	"github.com/Azure/golden"
+	"github.com/lonegunmanb/golden"
 	"github.com/zclconf/go-cty/cty"
 )
 

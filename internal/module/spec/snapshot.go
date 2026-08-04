@@ -7,7 +7,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/Azure/golden"
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/config"
 	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"

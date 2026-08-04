@@ -6,7 +6,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/Azure/golden"
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"

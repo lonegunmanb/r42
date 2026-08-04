@@ -3,7 +3,6 @@ module github.com/lonegunmanb/r42
 go 1.25.0
 
 require (
-	github.com/Azure/golden v0.0.0-20260603014844-1d1c394b55ea
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.10.1
@@ -11,6 +10,7 @@ require (
 	github.com/github/copilot-sdk/go v1.0.8
 	github.com/hashicorp/go-getter/v2 v2.2.3
 	github.com/hashicorp/hcl/v2 v2.24.0
+	github.com/lonegunmanb/golden v0.0.0-20260804110449-b79b3b09385c
 	github.com/lonegunmanb/hclfuncs v0.12.0
 	github.com/spf13/cobra v1.10.1
 	github.com/stretchr/testify v1.11.1
@@ -114,5 +114,3 @@ require (
 	golang.org/x/tools v0.44.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/Azure/golden => github.com/lonegunmanb/golden v0.0.0-20260803112212-d69a7c5a8e97

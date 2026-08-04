@@ -5,11 +5,11 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/config"
 	toolspec "github.com/lonegunmanb/r42/internal/tool/spec"
 	"github.com/stretchr/testify/assert"

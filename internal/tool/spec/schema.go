@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Azure/golden"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/ext/typeexpr"
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/config"
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	corespec "github.com/lonegunmanb/r42/internal/spec"

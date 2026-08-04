@@ -4,8 +4,8 @@ import (
 	"runtime/debug"
 	"testing"
 
-	_ "github.com/Azure/golden"
 	_ "github.com/github/copilot-sdk/go"
+	_ "github.com/lonegunmanb/golden"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
