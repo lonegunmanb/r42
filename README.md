@@ -1,8 +1,6 @@
 # r42
 
-~~the world, the universe and everything~~
-
-r42 is an HCL-based configuration and execution engine for reproducible AI research
+r42 is an HCL-based configuration and execution engine for ~~the world, the universe and everything~~ reproducible AI research
 workflows. A configuration describes a directed acyclic graph (DAG) of research
 sessions, quality-control sessions, typed tools, artifacts, modules, variables,
 and outputs. r42 plans the complete graph before it starts any model session,
