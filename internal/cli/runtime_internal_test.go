@@ -51,7 +51,54 @@ func TestToolCallQuotaSuccessfulCallsExhaustLimit(t *testing.T) {
 	quota := newToolCallQuota(map[string]int{"tool_lookup": 1})
 
 	require.NoError(t, quota.reserve("tool_lookup"))
-	assert.ErrorContains(t, quota.reserve("tool_lookup"), `typed tool "tool_lookup" call quota exhausted (limit 1)`)
+	err := quota.reserve("tool_lookup")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `typed tool "tool_lookup" per-session call quota exhausted (limit 1 accepted calls)`)
+	assert.Contains(t, err.Error(), "this quota will not reset during this session")
+	assert.Contains(t, err.Error(), "do not call this tool again")
+	assert.Contains(t, err.Error(), "continue with existing results or another available tool")
+}
+
+func TestTypedToolDescriptionExplainsConfiguredQuota(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		quota        map[string]int
+		wantExact    string
+		wantContains []string
+	}{
+		{
+			name:      "unlimited tool keeps configured description",
+			quota:     nil,
+			wantExact: "lookup",
+		},
+		{
+			name:  "limited tool explains quota lifecycle",
+			quota: map[string]int{"tool_lookup": 1},
+			wantContains: []string{
+				"lookup",
+				"r42 per-session call quota: at most 1 accepted calls",
+				"this quota will not reset during this session",
+				"do not call this tool again",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tool, closeFactory := buildQuotaTestTool(t, newToolCallQuota(tt.quota))
+			t.Cleanup(closeFactory)
+
+			if tt.wantExact != "" {
+				assert.Equal(t, tt.wantExact, tool.Description)
+			}
+			for _, fragment := range tt.wantContains {
+				assert.Contains(t, tool.Description, fragment)
+			}
+		})
+	}
 }
 
 func TestToolCallQuotaRollbackRestoresReservation(t *testing.T) {
@@ -106,7 +153,7 @@ func TestTypedToolHandlerConsumesOnlySuccessfulCalls(t *testing.T) {
 	assert.Contains(t, accepted.TextResultForLLM, `"accepted":true`)
 
 	_, err = tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Mode": "accept"}})
-	assert.ErrorContains(t, err, `typed tool "tool_lookup" call quota exhausted (limit 1)`)
+	assert.ErrorContains(t, err, `typed tool "tool_lookup" per-session call quota exhausted (limit 1 accepted calls)`)
 }
 
 func TestResearchAndQCTypedToolQuotasAreIndependent(t *testing.T) {
@@ -123,7 +170,7 @@ func TestResearchAndQCTypedToolQuotasAreIndependent(t *testing.T) {
 	}
 	for _, tool := range []sdk.Tool{researchTool, qcTool} {
 		_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Mode": "accept"}})
-		assert.ErrorContains(t, err, `typed tool "tool_lookup" call quota exhausted (limit 1)`)
+		assert.ErrorContains(t, err, `typed tool "tool_lookup" per-session call quota exhausted (limit 1 accepted calls)`)
 	}
 }
 

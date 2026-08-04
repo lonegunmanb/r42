@@ -594,7 +594,10 @@ Research and QC quotas use independent counters, even when both sessions use the
 same typed tool ID. A call consumes quota only after its arguments pass schema
 validation and the tool returns an accepted response. Execution errors and
 `accepted = false` responses release the reservation. A limit of `0` disables
-calls to that typed tool for the session.
+calls to that typed tool for the session. r42 appends the configured limit and
+non-retry guidance to the tool description shown to the model. Once the limit
+is exhausted, the tool error tells the model that the limit will not reset in
+the current session and that it must continue without calling that tool again.
 
 For each QC round, r42 sends one JSON context document to the QC session. It
 contains the original task, the complete `criteria` map, the current candidate

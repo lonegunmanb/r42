@@ -120,11 +120,17 @@ research "static" "source" {
 
 	require.NoError(t, err)
 	require.Len(t, opener.results, 5)
+	assert.Contains(t, opener.description, "r42 per-session call quota: at most 1 accepted calls")
+	assert.Contains(t, opener.description, "this quota will not reset during this session")
+	assert.Contains(t, opener.description, "do not call this tool again")
 	assert.Contains(t, opener.results[0], `"accepted":false`)
 	assert.Contains(t, opener.results[1], `"accepted":false`)
 	assert.Contains(t, opener.errors[2].Error(), "exit status 7")
 	assert.Contains(t, opener.results[3], `"accepted":true`)
-	assert.ErrorContains(t, opener.errors[4], "call quota exhausted (limit 1)")
+	quotaErr := opener.errors[4]
+	require.Error(t, quotaErr)
+	assert.Contains(t, quotaErr.Error(), "per-session call quota exhausted (limit 1 accepted calls)")
+	assert.Contains(t, quotaErr.Error(), "do not call this tool again")
 }
 
 //nolint:paralleltest // Helper process owns stdin/stdout and may terminate itself.
@@ -155,8 +161,9 @@ func TestExternalToolHelperProcess(t *testing.T) {
 type externalCallingOpener struct{ result string }
 
 type externalQuotaOpener struct {
-	results []string
-	errors  []error
+	description string
+	results     []string
+	errors      []error
 }
 
 func (o *externalQuotaOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
@@ -173,6 +180,7 @@ func (s *externalQuotaSession) SendAndWait(context.Context, sdk.MessageOptions) 
 		if !strings.HasPrefix(tool.Name, "tool_external_tool_lookup_") {
 			continue
 		}
+		s.opener.description = tool.Description
 		for _, arguments := range []map[string]any{
 			{},
 			{"query": "reject"},

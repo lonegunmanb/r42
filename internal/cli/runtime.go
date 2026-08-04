@@ -655,7 +655,7 @@ func (f *runtimeFactory) buildTools(
 			terminalType = analysis.OutputType
 		}
 		result = append(result, sdk.Tool{
-			Name: definition.ID, Description: definition.Description, Parameters: parameters,
+			Name: definition.ID, Description: quota.describe(definition.ID, definition.Description), Parameters: parameters,
 			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
 				arguments, marshalErr := json.Marshal(invocation.Arguments)
 				if marshalErr != nil {
@@ -781,7 +781,7 @@ func (f *runtimeFactory) buildExternalTool(
 	isTerminal := terminateToolID != nil && definition.ID == *terminateToolID
 	runner := externaltool.NewRunner()
 	tool := sdk.Tool{
-		Name: definition.ID, Description: definition.Description, Parameters: parameters,
+		Name: definition.ID, Description: quota.describe(definition.ID, definition.Description), Parameters: parameters,
 		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
 			arguments, marshalErr := json.Marshal(invocation.Arguments)
 			if marshalErr != nil {
@@ -888,10 +888,28 @@ func (q *toolCallQuota) reserve(toolID string) error {
 		return nil
 	}
 	if q.used[toolID] >= limit {
-		return fmt.Errorf("typed tool %q call quota exhausted (limit %d)", toolID, limit)
+		return fmt.Errorf(
+			"typed tool %q per-session call quota exhausted (limit %d accepted calls); "+
+				"this quota will not reset during this session; do not call this tool again; "+
+				"continue with existing results or another available tool",
+			toolID, limit,
+		)
 	}
 	q.used[toolID]++
 	return nil
+}
+
+func (q *toolCallQuota) describe(toolID, description string) string {
+	limit, configured := q.limits[toolID]
+	if !configured {
+		return description
+	}
+	return fmt.Sprintf(
+		"%s\n\nr42 per-session call quota: at most %d accepted calls. "+
+			"Invalid arguments, execution errors, and accepted=false responses do not consume this quota. "+
+			"Once exhausted, this quota will not reset during this session; do not call this tool again.",
+		description, limit,
+	)
 }
 
 func (q *toolCallQuota) rollback(toolID string) {
