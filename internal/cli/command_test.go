@@ -101,13 +101,13 @@ func (f *fakeRuntime) Config(
 }
 
 //nolint:paralleltest // t.Chdir verifies the CLI process working-directory contract.
-func TestCommandInitUsesWorkingDirectoryStateDirectory(t *testing.T) {
+func TestCommandInitUsesWorkingDirectoryStateDirectoryAndRefreshesModules(t *testing.T) {
 	workingDirectory := t.TempDir()
 	t.Chdir(workingDirectory)
 	target := t.TempDir()
 	runtime := new(fakeRuntime)
 
-	stdout, stderr, err := execute(t, runtime, "init", target, "--upgrade")
+	stdout, stderr, err := execute(t, runtime, "init", target)
 
 	require.NoError(t, err)
 	assert.Empty(t, stdout)
@@ -118,7 +118,7 @@ func TestCommandInitUsesWorkingDirectoryStateDirectory(t *testing.T) {
 }
 
 //nolint:paralleltest // t.Chdir verifies the CLI process working-directory contract.
-func TestCommandInitDefaultsToCurrentDirectoryWithoutUpgrade(t *testing.T) {
+func TestCommandInitDefaultsToCurrentDirectoryAndRefreshesModules(t *testing.T) {
 	workingDirectory := t.TempDir()
 	t.Chdir(workingDirectory)
 	runtime := new(fakeRuntime)
@@ -128,10 +128,10 @@ func TestCommandInitDefaultsToCurrentDirectoryWithoutUpgrade(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ".", runtime.initialized)
 	assert.Equal(t, filepath.Join(workingDirectory, ".r42"), runtime.stateDirectory)
-	assert.False(t, runtime.upgradeModules)
+	assert.True(t, runtime.upgradeModules)
 }
 
-func TestCommandInitHelpDescribesSourceAndUpgrade(t *testing.T) {
+func TestCommandInitHelpDoesNotExposeUpgradeSwitch(t *testing.T) {
 	t.Parallel()
 
 	stdout, _, err := execute(t, nil, "init", "--help")
@@ -139,7 +139,7 @@ func TestCommandInitHelpDescribesSourceAndUpgrade(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, stdout, "r42 init [SOURCE]")
 	assert.Contains(t, stdout, "Initialize the active configuration and modules")
-	assert.Contains(t, stdout, "--upgrade")
+	assert.NotContains(t, stdout, "--upgrade")
 }
 
 //nolint:paralleltest // t.Chdir verifies the output state path contract.

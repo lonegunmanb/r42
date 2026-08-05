@@ -448,7 +448,7 @@ that depend on its successful completion are not run.
 | `system_prompt` | Yes | Instructions appended to r42's fixed research protocol system prompt. |
 | `prompt` | No | Initial user task. When omitted, r42 sends a fixed start message. |
 | `tool_ids` | No | IDs of typed `go_tool` or `external_tool` blocks available to this research session. |
-| `typed_tool_call_quota` | No | `map(number)` from configured typed tool IDs to non-negative integer per-session call limits. The terminate tool ID may also be limited. |
+| `tool_call_quota` | No | `map(number)` of non-negative per-session call limits. A key matching an r42 tool ID limits that configured typed tool; any other key names a Copilot built-in tool such as `web_fetch`. The terminate tool ID may also be limited. |
 | `terminate_tool_id` | No | Typed tool that must return an accepted response before the stage can finish. Its output must be string-compatible and becomes `research.static.<name>.result`. Without it, a normal assistant completion ends the stage. |
 | `allowed_tools` | No | SDK tool-name allowlist. When present, only listed built-in or typed tools remain available. |
 | `disallowed_tools` | No | SDK tool-name denylist, applied after `allowed_tools` and therefore taking precedence. `ask_user` is denied by default because DAG execution is unattended. |
@@ -593,7 +593,7 @@ research session for another revision round.
 | `model` | No | QC model override; otherwise inherits the research model. |
 | `reasoning_effort` | No | QC reasoning override; otherwise inherits the research value. |
 | `tool_ids` | No | Typed tools available only to QC. Research tools are not inherited. |
-| `typed_tool_call_quota` | No | QC-only `map(number)` non-negative integer call limits. Every key must also appear in this QC block's `tool_ids`. |
+| `tool_call_quota` | No | QC-only `map(number)` of non-negative call limits. Typed-tool ID keys must also appear in this QC block's `tool_ids`; ordinary keys limit Copilot built-in tools. |
 | `allowed_tools` | No | QC SDK tool allowlist. The research allowlist is not inherited. |
 | `disallowed_tools` | No | QC denylist. By default QC disables `bash`, `powershell`, `edit`, `task`, and `ask_user`; the research denylist is not inherited. |
 | `skill_directories` | No | Skill roots available only to QC; research skill roots are not inherited. |
@@ -604,13 +604,14 @@ research session for another revision round.
 | `retry` | No | One retry block using the same fields as research. It overrides the effective research retry policy field by field. |
 
 Research and QC quotas use independent counters, even when both sessions use the
-same typed tool ID. A call consumes quota only after its arguments pass schema
-validation and the tool returns an accepted response. Execution errors and
-`accepted = false` responses release the reservation. A limit of `0` disables
-calls to that typed tool for the session. r42 appends the configured limit and
-non-retry guidance to the tool description shown to the model. Once the limit
-is exhausted, the tool error tells the model that the limit will not reset in
-the current session and that it must continue without calling that tool again.
+same tool. Typed-tool calls consume quota only after their arguments pass schema
+validation and the tool returns an accepted response; execution errors and
+`accepted = false` responses release the reservation. Built-in calls reserve
+quota immediately before execution and release it when the SDK reports tool
+failure. A limit of `0` disables the named tool for the session. r42 adds typed
+limits to the typed-tool descriptions and built-in limits to the session system
+prompt. Once a limit is exhausted, r42 denies the call before execution and
+tells the model not to retry it during that session.
 
 For each QC round, r42 sends one JSON context document to the QC session. It
 contains the original task, the complete `criteria` map, the current candidate

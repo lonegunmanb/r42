@@ -83,6 +83,8 @@ type Event struct {
 	Stdout       string          `json:"stdout,omitempty"`
 	Stderr       string          `json:"stderr,omitempty"`
 	Usage        *Usage          `json:"usage,omitempty"`
+	WaitFor      string          `json:"wait_for,omitempty"`
+	LastEvent    string          `json:"last_event,omitempty"`
 }
 
 type Usage struct {

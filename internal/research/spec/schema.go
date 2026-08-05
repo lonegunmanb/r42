@@ -35,7 +35,7 @@ type ResearchBlock struct {
 	SystemPrompt        string          `hcl:"system_prompt"`
 	Prompt              *string         `hcl:"prompt,optional"`
 	ToolIDs             []string        `hcl:"tool_ids,optional"`
-	TypedToolCallQuota  map[string]int  `hcl:"typed_tool_call_quota,optional"`
+	ToolCallQuota       map[string]int  `hcl:"tool_call_quota,optional"`
 	TerminateToolID     *string         `hcl:"terminate_tool_id,optional"`
 	AllowedTools        []string        `hcl:"allowed_tools,optional"`
 	DisallowedTools     []string        `hcl:"disallowed_tools,optional"`
@@ -296,7 +296,7 @@ func (b *ResearchBlock) Values() map[string]cty.Value {
 		"system_prompt":         cty.StringVal(b.SystemPrompt),
 		"prompt":                optionalStringValue(b.Prompt),
 		"tool_ids":              stringListValue(b.ToolIDs),
-		"typed_tool_call_quota": intMapValue(b.TypedToolCallQuota),
+		"tool_call_quota":       intMapValue(b.ToolCallQuota),
 		"terminate_tool_id":     optionalStringValue(b.TerminateToolID),
 		"allowed_tools":         stringListValue(b.AllowedTools),
 		"disallowed_tools":      stringListValue(b.DisallowedTools),
@@ -355,20 +355,20 @@ func qcBlockValues(blocks []QCBlock) cty.Value {
 	}
 	block := blocks[0]
 	value := cty.ObjectVal(map[string]cty.Value{
-		"criteria":              qcCriteriaValue(block.Criteria),
-		"model_provider":        optionalObjectValue(block.ModelProvider),
-		"model":                 optionalStringValue(block.Model),
-		"reasoning_effort":      optionalStringValue(block.ReasoningEffort),
-		"tool_ids":              stringListValue(block.ToolIDs),
-		"typed_tool_call_quota": intMapValue(block.TypedToolCallQuota),
-		"allowed_tools":         stringListValue(block.AllowedTools),
-		"disallowed_tools":      stringListValue(block.DisallowedTools),
-		"skill_directories":     stringListValue(block.SkillDirectories),
-		"skills":                stringListValue(block.Skills),
-		"disabled_skills":       stringListValue(block.DisabledSkills),
-		"permission":            optionalPermissionValue(block.Permission),
-		"max_qc_rounds":         optionalIntValue(block.MaxQCRounds),
-		"retry":                 retryBlockValues(block.RetryBlocks),
+		"criteria":          qcCriteriaValue(block.Criteria),
+		"model_provider":    optionalObjectValue(block.ModelProvider),
+		"model":             optionalStringValue(block.Model),
+		"reasoning_effort":  optionalStringValue(block.ReasoningEffort),
+		"tool_ids":          stringListValue(block.ToolIDs),
+		"tool_call_quota":   intMapValue(block.ToolCallQuota),
+		"allowed_tools":     stringListValue(block.AllowedTools),
+		"disallowed_tools":  stringListValue(block.DisallowedTools),
+		"skill_directories": stringListValue(block.SkillDirectories),
+		"skills":            stringListValue(block.Skills),
+		"disabled_skills":   stringListValue(block.DisabledSkills),
+		"permission":        optionalPermissionValue(block.Permission),
+		"max_qc_rounds":     optionalIntValue(block.MaxQCRounds),
+		"retry":             retryBlockValues(block.RetryBlocks),
 	})
 	return cty.ListVal([]cty.Value{value})
 }
@@ -383,20 +383,20 @@ func qcCriteriaValue(value cty.Value) cty.Value {
 
 func qcBlockType() cty.Type {
 	return cty.Object(map[string]cty.Type{
-		"criteria":              cty.Map(cty.String),
-		"model_provider":        cty.EmptyObject,
-		"model":                 cty.String,
-		"reasoning_effort":      cty.String,
-		"tool_ids":              cty.List(cty.String),
-		"typed_tool_call_quota": cty.Map(cty.Number),
-		"allowed_tools":         cty.List(cty.String),
-		"disallowed_tools":      cty.List(cty.String),
-		"skill_directories":     cty.List(cty.String),
-		"skills":                cty.List(cty.String),
-		"disabled_skills":       cty.List(cty.String),
-		"permission":            cty.String,
-		"max_qc_rounds":         cty.Number,
-		"retry":                 cty.List(retryBlockType),
+		"criteria":          cty.Map(cty.String),
+		"model_provider":    cty.EmptyObject,
+		"model":             cty.String,
+		"reasoning_effort":  cty.String,
+		"tool_ids":          cty.List(cty.String),
+		"tool_call_quota":   cty.Map(cty.Number),
+		"allowed_tools":     cty.List(cty.String),
+		"disallowed_tools":  cty.List(cty.String),
+		"skill_directories": cty.List(cty.String),
+		"skills":            cty.List(cty.String),
+		"disabled_skills":   cty.List(cty.String),
+		"permission":        cty.String,
+		"max_qc_rounds":     cty.Number,
+		"retry":             cty.List(retryBlockType),
 	})
 }
 
@@ -459,20 +459,20 @@ type ArtifactBlock struct {
 }
 
 type QCBlock struct {
-	Criteria           cty.Value      `hcl:"criteria"`
-	ModelProvider      cty.Value      `hcl:"model_provider,optional"`
-	Model              *string        `hcl:"model,optional"`
-	ReasoningEffort    *string        `hcl:"reasoning_effort,optional"`
-	ToolIDs            []string       `hcl:"tool_ids,optional"`
-	TypedToolCallQuota map[string]int `hcl:"typed_tool_call_quota,optional"`
-	AllowedTools       []string       `hcl:"allowed_tools,optional"`
-	DisallowedTools    []string       `hcl:"disallowed_tools,optional"`
-	SkillDirectories   []string       `hcl:"skill_directories,optional"`
-	Skills             []string       `hcl:"skills,optional"`
-	DisabledSkills     []string       `hcl:"disabled_skills,optional"`
-	Permission         *Permission    `hcl:"permission,optional"`
-	MaxQCRounds        *int           `hcl:"max_qc_rounds,optional"`
-	RetryBlocks        []RetryBlock   `hcl:"retry,block"`
+	Criteria         cty.Value      `hcl:"criteria"`
+	ModelProvider    cty.Value      `hcl:"model_provider,optional"`
+	Model            *string        `hcl:"model,optional"`
+	ReasoningEffort  *string        `hcl:"reasoning_effort,optional"`
+	ToolIDs          []string       `hcl:"tool_ids,optional"`
+	ToolCallQuota    map[string]int `hcl:"tool_call_quota,optional"`
+	AllowedTools     []string       `hcl:"allowed_tools,optional"`
+	DisallowedTools  []string       `hcl:"disallowed_tools,optional"`
+	SkillDirectories []string       `hcl:"skill_directories,optional"`
+	Skills           []string       `hcl:"skills,optional"`
+	DisabledSkills   []string       `hcl:"disabled_skills,optional"`
+	Permission       *Permission    `hcl:"permission,optional"`
+	MaxQCRounds      *int           `hcl:"max_qc_rounds,optional"`
+	RetryBlocks      []RetryBlock   `hcl:"retry,block"`
 }
 
 func (b *ResearchBlock) toConfig() (Config, error) {
@@ -501,14 +501,14 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 		MaxProtocolAttempts: DefaultMaxProtocolAttempts,
 		Timeout:             timeout,
 		Policy: SessionPolicy{
-			ToolIDs:            slices.Clone(b.ToolIDs),
-			TypedToolCallQuota: maps.Clone(b.TypedToolCallQuota),
-			AllowedTools:       slices.Clone(b.AllowedTools),
-			DisallowedTools:    slices.Clone(b.DisallowedTools),
-			SkillDirectories:   slices.Clone(b.SkillDirectories),
-			Skills:             slices.Clone(b.Skills),
-			DisabledSkills:     slices.Clone(b.DisabledSkills),
-			Permission:         PermissionApproveAll,
+			ToolIDs:          slices.Clone(b.ToolIDs),
+			ToolCallQuota:    maps.Clone(b.ToolCallQuota),
+			AllowedTools:     slices.Clone(b.AllowedTools),
+			DisallowedTools:  slices.Clone(b.DisallowedTools),
+			SkillDirectories: slices.Clone(b.SkillDirectories),
+			Skills:           slices.Clone(b.Skills),
+			DisabledSkills:   slices.Clone(b.DisabledSkills),
+			Permission:       PermissionApproveAll,
 		},
 	}
 	if config.Policy.DisallowedTools == nil {
@@ -586,19 +586,19 @@ func (b QCBlock) toConfig() (*QCConfig, error) {
 		return nil, err
 	}
 	config := &QCConfig{
-		Criteria:           criteria,
-		ModelProvider:      b.ModelProvider,
-		Model:              clonePointer(b.Model),
-		ReasoningEffort:    clonePointer(b.ReasoningEffort),
-		ToolIDs:            slices.Clone(b.ToolIDs),
-		TypedToolCallQuota: maps.Clone(b.TypedToolCallQuota),
-		AllowedTools:       slices.Clone(b.AllowedTools),
-		DisallowedTools:    slices.Clone(b.DisallowedTools),
-		SkillDirectories:   slices.Clone(b.SkillDirectories),
-		Skills:             slices.Clone(b.Skills),
-		DisabledSkills:     slices.Clone(b.DisabledSkills),
-		Permission:         clonePointer(b.Permission),
-		MaxRounds:          DefaultMaxQCRounds,
+		Criteria:         criteria,
+		ModelProvider:    b.ModelProvider,
+		Model:            clonePointer(b.Model),
+		ReasoningEffort:  clonePointer(b.ReasoningEffort),
+		ToolIDs:          slices.Clone(b.ToolIDs),
+		ToolCallQuota:    maps.Clone(b.ToolCallQuota),
+		AllowedTools:     slices.Clone(b.AllowedTools),
+		DisallowedTools:  slices.Clone(b.DisallowedTools),
+		SkillDirectories: slices.Clone(b.SkillDirectories),
+		Skills:           slices.Clone(b.Skills),
+		DisabledSkills:   slices.Clone(b.DisabledSkills),
+		Permission:       clonePointer(b.Permission),
+		MaxRounds:        DefaultMaxQCRounds,
 	}
 	if config.DisallowedTools == nil {
 		config.DisallowedTools = DefaultQCDisallowedTools()
@@ -721,7 +721,7 @@ func cloneConfig(config Config) Config {
 	result.Retry = cloneRetryOverride(config.Retry)
 	result.Policy.AllowedTools = slices.Clone(config.Policy.AllowedTools)
 	result.Policy.ToolIDs = slices.Clone(config.Policy.ToolIDs)
-	result.Policy.TypedToolCallQuota = maps.Clone(config.Policy.TypedToolCallQuota)
+	result.Policy.ToolCallQuota = maps.Clone(config.Policy.ToolCallQuota)
 	result.Policy.DisallowedTools = slices.Clone(config.Policy.DisallowedTools)
 	result.Policy.SkillDirectories = slices.Clone(config.Policy.SkillDirectories)
 	result.Policy.Skills = slices.Clone(config.Policy.Skills)
@@ -737,7 +737,7 @@ func cloneConfig(config Config) Config {
 		}
 		qc.Retry = cloneRetryOverride(config.QC.Retry)
 		qc.ToolIDs = slices.Clone(config.QC.ToolIDs)
-		qc.TypedToolCallQuota = maps.Clone(config.QC.TypedToolCallQuota)
+		qc.ToolCallQuota = maps.Clone(config.QC.ToolCallQuota)
 		qc.AllowedTools = slices.Clone(config.QC.AllowedTools)
 		qc.DisallowedTools = slices.Clone(config.QC.DisallowedTools)
 		qc.SkillDirectories = slices.Clone(config.QC.SkillDirectories)

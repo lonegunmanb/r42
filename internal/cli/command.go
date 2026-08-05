@@ -77,7 +77,6 @@ func NewCommand(runtime Runtime) *cobra.Command {
 }
 
 func newInitCommand(runtime Runtime) *cobra.Command {
-	var upgrade bool
 	command := &cobra.Command{
 		Use:   "init [SOURCE]",
 		Short: "Initialize the active configuration and modules",
@@ -95,13 +94,12 @@ func newInitCommand(runtime Runtime) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err = initializer.InitProject(command.Context(), directory, stateDirectory, upgrade); err != nil {
+			if err = initializer.InitProject(command.Context(), directory, stateDirectory, true); err != nil {
 				return fmt.Errorf("initialize project: %w", err)
 			}
 			return nil
 		},
 	}
-	command.Flags().BoolVar(&upgrade, "upgrade", false, "refresh installed modules")
 	return command
 }
 

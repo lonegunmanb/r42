@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/lonegunmanb/golden"
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
 	"github.com/lonegunmanb/r42/internal/config"
@@ -425,7 +426,7 @@ func (c *ResearchConfig) savedPlan(planned modulespec.Plan) (*internalplan.Plan,
 	localExpressions := make(map[string]string)
 	for _, block := range golden.Blocks[*golden.LocalBlock](c) {
 		if attribute, ok := block.HclBlock().Attributes()["value"]; ok {
-			localExpressions[block.Name()] = attribute.ExprString()
+			localExpressions[block.Name()] = savedExpressionSource(attribute)
 		}
 	}
 	result, err := internalplan.NewForRunWithTools(
@@ -435,6 +436,16 @@ func (c *ResearchConfig) savedPlan(planned modulespec.Plan) (*internalplan.Plan,
 		return nil, fmt.Errorf("build saved plan: %w", err)
 	}
 	return result, nil
+}
+
+func savedExpressionSource(attribute *golden.HclAttribute) string {
+	source := attribute.ExprString()
+	for _, token := range attribute.ExprTokens() {
+		if token.Type == hclsyntax.TokenOHeredoc {
+			return source + "\n"
+		}
+	}
+	return source
 }
 
 func (c *ResearchConfig) researchRun() (*run.Run, error) {

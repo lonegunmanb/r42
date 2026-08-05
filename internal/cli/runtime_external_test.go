@@ -105,7 +105,7 @@ research "static" "source" {
   model         = "test-model"
   system_prompt = "Collect evidence."
   tool_ids      = [external_tool.lookup.id]
-  typed_tool_call_quota = {
+  tool_call_quota = {
     (external_tool.lookup.id) = 1
   }
 }
@@ -129,7 +129,7 @@ research "static" "source" {
 	assert.Contains(t, opener.results[3], `"accepted":true`)
 	quotaErr := opener.errors[4]
 	require.Error(t, quotaErr)
-	assert.Contains(t, quotaErr.Error(), "per-session call quota exhausted (limit 1 accepted calls)")
+	assert.Contains(t, quotaErr.Error(), "per-session call quota exhausted (limit 1 successful calls)")
 	assert.Contains(t, quotaErr.Error(), "do not call this tool again")
 }
 

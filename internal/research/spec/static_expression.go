@@ -15,7 +15,7 @@ import (
 
 var researchAttributeNames = map[string]struct{}{
 	"model_provider": {}, "model": {}, "profile": {}, "reasoning_effort": {}, "system_prompt": {}, "prompt": {},
-	"tool_ids": {}, "typed_tool_call_quota": {}, "terminate_tool_id": {}, "allowed_tools": {},
+	"tool_ids": {}, "tool_call_quota": {}, "terminate_tool_id": {}, "allowed_tools": {},
 	"disallowed_tools": {}, "skill_directories": {}, "skills": {}, "disabled_skills": {},
 	"permission": {}, "max_protocol_attempts": {}, "timeout": {},
 }
@@ -209,7 +209,7 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 		"model_provider": cty.NullVal(cty.EmptyObject), "profile": cty.UnknownVal(cty.String),
 		"reasoning_effort": cty.NullVal(cty.String),
 		"prompt":           cty.NullVal(cty.String), "tool_ids": cty.EmptyTupleVal,
-		"typed_tool_call_quota": cty.EmptyObjectVal, "terminate_tool_id": cty.NullVal(cty.String),
+		"tool_call_quota": cty.EmptyObjectVal, "terminate_tool_id": cty.NullVal(cty.String),
 		"allowed_tools": cty.EmptyTupleVal, "disallowed_tools": cty.EmptyTupleVal,
 		"skill_directories": cty.EmptyTupleVal, "skills": cty.EmptyTupleVal,
 		"disabled_skills": cty.EmptyTupleVal, "permission": cty.NullVal(cty.String),

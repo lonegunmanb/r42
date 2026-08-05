@@ -161,7 +161,7 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 	if block.ToolIDs, err = dynamicStringList(unmarked, "tool_ids"); err != nil {
 		return Config{}, err
 	}
-	if block.TypedToolCallQuota, err = dynamicIntMap(unmarked, "typed_tool_call_quota"); err != nil {
+	if block.ToolCallQuota, err = dynamicIntMap(unmarked, "tool_call_quota"); err != nil {
 		return Config{}, err
 	}
 	if block.TerminateToolID, err = dynamicOptionalString(unmarked, "terminate_tool_id"); err != nil {
@@ -407,7 +407,7 @@ func dynamicQCBlocks(object cty.Value) ([]QCBlock, error) {
 	if block.ToolIDs, err = dynamicStringList(unmarked, "tool_ids"); err != nil {
 		return nil, err
 	}
-	if block.TypedToolCallQuota, err = dynamicIntMap(unmarked, "typed_tool_call_quota"); err != nil {
+	if block.ToolCallQuota, err = dynamicIntMap(unmarked, "tool_call_quota"); err != nil {
 		return nil, err
 	}
 	if block.AllowedTools, err = dynamicStringList(unmarked, "allowed_tools"); err != nil {

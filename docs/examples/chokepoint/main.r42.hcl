@@ -10,6 +10,13 @@ research "static" "brainstorm" {
     You facilitate an exploratory supply-chain brainstorm. Generate competing
     hypotheses before committing to a graph. Separate structural chokepoints
     from fashionable companies and generic demand beneficiaries.
+
+    Never use PowerShell, a shell, curl, wget, or scripts and command-line
+    programs to search the web or download remote content. Do not use them as
+    a workaround when a search or source-reading tool reaches its call quota
+    or returns an error. Only the search and source-reading tools configured
+    for this task may access remote sources. When their quotas are exhausted,
+    continue with the evidence already collected.
   PROMPT
   prompt = <<-PROMPT
     Topic: ${var.topic}
@@ -31,7 +38,7 @@ research "static" "brainstorm" {
     This is ideation, not final selection. Do not name candidate companies.
   PROMPT
   tool_ids             = local.pplx_tool_ids
-  typed_tool_call_quota = local.pplx_tool_call_quota
+  tool_call_quota       = local.pplx_tool_call_quota
   disallowed_tools      = local.research_disallowed_tools
   permission            = "approve_all"
 
@@ -80,7 +87,7 @@ research "static" "graph_track" {
   tool_ids = concat(local.pplx_tool_ids, [
     go_tool.submit_track_evidence.id,
   ])
-  typed_tool_call_quota = local.pplx_tool_call_quota
+  tool_call_quota  = local.pplx_tool_call_quota
   terminate_tool_id = go_tool.submit_track_evidence.id
   disallowed_tools  = local.research_disallowed_tools
   permission        = "approve_all"
@@ -114,6 +121,13 @@ research "static" "select_chokepoints" {
     evidence tracks into one bounded graph, then select only genuine structural
     chokepoints. A required input is not automatically a chokepoint. Preserve
     disagreements when the evidence cannot resolve them.
+
+    Never use PowerShell, a shell, curl, wget, or scripts and command-line
+    programs to search the web or download remote content. Do not use them as
+    a workaround when a search or source-reading tool reaches its call quota
+    or returns an error. Only the search and source-reading tools configured
+    for this task may access remote sources. When their quotas are exhausted,
+    continue with the evidence already collected.
   PROMPT
   prompt = <<-PROMPT
     Topic: ${var.topic}
@@ -139,7 +153,7 @@ research "static" "select_chokepoints" {
   tool_ids = concat(local.pplx_tool_ids, [
     go_tool.submit_chokepoint_chain.id,
   ])
-  typed_tool_call_quota = local.pplx_tool_call_quota
+  tool_call_quota  = local.pplx_tool_call_quota
   terminate_tool_id = go_tool.submit_chokepoint_chain.id
   disallowed_tools  = local.research_disallowed_tools
   permission        = "approve_all"
@@ -193,7 +207,7 @@ research "dynamic" "discover_candidates" {
       tool_ids = concat(local.pplx_tool_ids, [
         go_tool.submit_candidates.id,
       ])
-      typed_tool_call_quota = local.pplx_tool_call_quota
+      tool_call_quota  = local.pplx_tool_call_quota
       terminate_tool_id = go_tool.submit_candidates.id
       disallowed_tools  = local.research_disallowed_tools
       permission        = "approve_all"
@@ -250,7 +264,7 @@ research "dynamic" "assess_candidates" {
         tool_ids = concat(local.pplx_tool_ids, [
           go_tool.submit_candidate_scorecard.id,
         ])
-        typed_tool_call_quota = local.pplx_tool_call_quota
+        tool_call_quota  = local.pplx_tool_call_quota
         terminate_tool_id = go_tool.submit_candidate_scorecard.id
         disallowed_tools  = local.research_disallowed_tools
         permission        = "approve_all"
@@ -286,6 +300,13 @@ research "static" "synthesize" {
     You are the senior chokepoint editor. Produce a decision-useful report that
     separates structural supply-chain conclusions from company hypotheses.
     Preserve rejected and unverified candidates and every material uncertainty.
+
+    Never use PowerShell, a shell, curl, wget, or scripts and command-line
+    programs to search the web or download remote content. Do not use them as
+    a workaround when a search or source-reading tool reaches its call quota
+    or returns an error. Only the search and source-reading tools configured
+    for this task may access remote sources. When their quotas are exhausted,
+    continue with the evidence already collected.
   PROMPT
   prompt = <<-PROMPT
     Topic: ${var.topic}
@@ -309,7 +330,7 @@ research "static" "synthesize" {
     falsification conditions, limitations, and a source table.
   PROMPT
   tool_ids              = local.pplx_tool_ids
-  typed_tool_call_quota = local.pplx_tool_call_quota
+  tool_call_quota       = local.pplx_tool_call_quota
   disallowed_tools      = local.research_disallowed_tools
   permission            = "approve_all"
 

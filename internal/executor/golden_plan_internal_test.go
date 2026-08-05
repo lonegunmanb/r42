@@ -108,6 +108,33 @@ output "summary" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigPreservesHeredocLocalExpression(t *testing.T) {
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+locals {
+  system_prompt = <<-PROMPT
+    Research carefully.
+    Stop when the evidence is sufficient.
+  PROMPT
+
+  tool_call_quota = {
+    web_fetch = 20
+  }
+}
+`), 0o600))
+
+	config, err := NewResearchConfig(directory, ResearchConfigOptions{Context: t.Context()})
+	require.NoError(t, err)
+	planned, err := RunResearchPlan(config)
+	require.NoError(t, err)
+	source, ok := planned.SavedPlan().LocalExpressions()["system_prompt"]
+	require.True(t, ok)
+
+	_, diagnostics := hclsyntax.ParseExpression([]byte(source), "saved-plan-local", hcl.InitialPos)
+	require.False(t, diagnostics.HasErrors(), "%s; source=%q", diagnostics.Error(), source)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
 func TestResearchConfigDelegatesVariableTypeDefaultsToGolden(t *testing.T) {
 	directory := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`

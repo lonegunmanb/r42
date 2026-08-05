@@ -1,11 +1,4 @@
-topic = "What factors should a medium-sized software organization evaluate before adopting a monorepo?"
-
-research_plan = [
-  "Compare build performance, dependency management, testing, and release engineering in monorepos and polyrepos.",
-  "Analyze how repository structure affects team ownership, collaboration, code review, and developer onboarding.",
-  "Find documented monorepo adoption successes and failures, and identify the conditions that explain their different outcomes.",
-]
-
+topic = "美国与日本联手于 2026 年 08 月 02 日干预了日本汇率，我希望研究一下此事件中美日动用的工具和资金量，后续日本汇率的走势分析，分短期（一个月）中期（六个月）长期（一年以上），最终报告采用中文撰写"
 model            = "deepseek-v4-flash"
 reasoning_effort = "medium"
 model_provider = {

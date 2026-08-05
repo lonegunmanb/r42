@@ -103,6 +103,24 @@ func TestFactoryOpenSupportsDefaultProviderAndNoSelectedSkills(t *testing.T) {
 	assert.Empty(t, client.configs[0].Agent)
 }
 
+func TestFactoryOpenForwardsSessionHooks(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+	hooks := &sdk.SessionHooks{
+		OnPreToolUse: func(sdk.PreToolUseHookInput, sdk.HookInvocation) (*sdk.PreToolUseHookOutput, error) {
+			return &sdk.PreToolUseHookOutput{PermissionDecision: "allow"}, nil
+		},
+	}
+
+	_, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 0, 0), Hooks: hooks})
+
+	require.NoError(t, err)
+	require.Len(t, client.configs, 1)
+	assert.Same(t, hooks, client.configs[0].Hooks)
+}
+
 func TestFactoryOpenRejectsMissingProviderEnvironmentValueBeforeSDKCall(t *testing.T) {
 	t.Parallel()
 

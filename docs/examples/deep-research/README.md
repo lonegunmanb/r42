@@ -1,82 +1,130 @@
-# Deep-research matrix
+# Planner-driven deep research
 
-This example turns a user-supplied research plan into a reproducible r42 DAG:
+This example answers one topic through a planner-created research matrix. The
+caller normally supplies only `topic`; a static planner research session
+decomposes it into three task groups and submits the plan through a typed Go
+tool. An optional `research_plan = list(string)` can bypass that planner when
+the caller already has the subquestions: every supplied subquestion is sent to
+the parallel dynamic group, while the two serial groups remain empty.
 
 ```text
-N independent subquestion researchers
-        | each submits typed knowledge + exact quotes
-        | each passes an independent QC loop
-        v
-cross-subquestion conflict detection and resolution
-        | passes its own QC loop
-        v
-final Markdown synthesis and final QC
+static planner
+      |
+      +--> parallel_deep_dive              (all tasks may run concurrently)
+      +--> independent_serial_deep_dive    (tasks run one at a time)
+      |        both groups start after the planner
+      |
+      +--> final_serial_deep_dive           (waits for both groups)
+                    |
+                    v
+          conflict detection and resolution
+                    |
+                    v
+              final Markdown synthesis
 ```
 
-It follows the high-level matrix flow in `ai-institute`: execute planned
-research subtasks, build evidence-backed knowledge, resolve conflicts, then
-synthesize. The difference is that there is no model-driven planning stage.
-The caller supplies the plan as `research_plan = list(string)` in a variable
-file, so Plan knows the complete DAG before any session starts.
+The three dynamic blocks are still single nodes in the planned Golden DAG.
+When Apply reaches one of them, r42 evaluates its `tasks` list, materializes
+one research session per element, and gives those sessions the same global
+parallelism budget as every other research block. `serial = true` only changes
+the scheduling inside that dynamic block. An empty group succeeds immediately.
+If one materialized task fails after retries and QC repair, its whole dynamic
+block fails.
 
-From the repository root, initialize the active configuration, then inspect and
-save the plan without starting Copilot:
+## Run it
+
+Install r42 once:
 
 ```powershell
-go run ./cmd/r42 init ./docs/examples/deep-research
-go run ./cmd/r42 plan `
+go install github.com/lonegunmanb/r42/cmd/r42@latest
+```
+
+From the repository root, initialize the example, then create and apply a
+saved plan:
+
+```powershell
+r42 init ./docs/examples/deep-research
+r42 plan `
   -var-file ./docs/examples/deep-research/research.r42vars `
   --out ./deep-research.r42plan
+r42 apply ./deep-research.r42plan
 ```
 
-Then apply the immutable plan:
+The initialized configuration can also be applied directly after planning:
 
 ```powershell
-go run ./cmd/r42 apply ./deep-research.r42plan
-```
-
-The initialized snapshot can also be planned and applied directly:
-
-```powershell
-go run ./cmd/r42 apply `
+r42 apply `
   -var-file ./docs/examples/deep-research/research.r42vars `
   --parallelism 10
 ```
 
-Before Apply, provide the API key referenced by the selected provider. The
-checked-in `research.r42vars` overrides the variable default with DeepSeek and
-therefore expects:
+The checked-in `research.r42vars` selects DeepSeek, so provide the referenced
+key before Apply:
 
 ```powershell
 $env:DEEPSEEK_KEY = Read-Host -MaskInput "DeepSeek API key"
 ```
 
-Edit `research.r42vars` to replace the topic, add or remove subquestions, or
-select another provider model identifier. The optional `system_prompt` variable
-overrides the default analyst instructions for every deep-dive instance. Each
-list element becomes one `research.static.deep_dive[...]` instance. Those
-instances are independent and can run in parallel; the conflict resolver waits
-for every `knowledge.json`, and the final synthesizer waits for the validated
-`resolution.json`.
+Edit `research.r42vars` to change the topic, model, or reasoning effort. To
+provide a fixed plan, add `research_plan = ["...", "..."]`; a non-empty value
+skips the planner and creates one parallel task per list element. A null or
+empty value keeps the planner-driven three-group flow. When the planner is
+used, it decides how many tasks belong to each group. It must use globally
+unique, filesystem-safe task IDs and provide a subquestion plus concrete
+instructions for every task. If a later task needs an earlier artifact, the
+planner must say so in that task's instructions. The researcher is explicitly
+told to locate and inspect the exact upstream file with available search/file
+tools such as `grep` before relying on it.
 
-All sessions use `model_provider.primary`. Its complete configuration is
-exposed as the `model_provider` object variable. `variables.r42.hcl` defaults to
-OpenRouter and `OPENROUTER_API_KEY`, while the supplied `research.r42vars`
-selects DeepSeek and `DEEPSEEK_KEY`. Override the object in a variable file to
-change the endpoint, protocol, transport, headers, authentication mode, or
-retry policy. Only one of `api_key`, `api_key_ref`, `bearer_token`, and
-`bearer_token_ref` may be non-null.
+## Evidence pipeline
 
-The `submit_knowledge` typed tool rejects malformed evidence graphs before a
-subquestion can finish. It requires unique knowledge and quote IDs, at least one
-quote per claim, no unused quotes, valid source URLs, exact quote text, and a
-high/medium/low confidence. It writes the accepted payload to that block's
-`knowledge.json`. The nested QC session then opens every source and checks every
-knowledge item and quote individually. A failed QC verdict returns issues to
-the same research session for repair, up to `max_qc_rounds`.
+This example requires Python 3 for the local `audit_synthesis` external tool;
+the research and planning tools remain inline Go tools compiled by r42.
 
-No module initialization or `external_tool` executable is required. The typed
-tools use inline Go and the research sessions use Copilot's built-in web tools.
-Apply requires an installed Copilot CLI, but the default BYOK provider does not
-require a GitHub account or Copilot subscription. Override the provider and
-model variables together when using a different API.
+`save_snapshot` is the typed boundary for source capture: it accepts complete
+Markdown content and writes only absolute `.md` paths under the current block's
+`snapshots/` directory. `submit_research_plan` rejects an empty plan, duplicate task IDs, blank
+subquestions, and vague instructions. Its accepted JSON becomes
+`research.static.plan["default"].result`, which the three dynamic blocks decode
+with HCL `for` expressions when no caller-supplied plan is present.
+
+Every deep-dive task must call `submit_knowledge`. The typed tool validates
+unique knowledge and quote IDs, bidirectional claim-to-quote references, valid
+source URLs, existing Markdown snapshot paths, and confidence
+values before writing `knowledge.json` under that task's workspace. Before
+submitting knowledge, the researcher must call `save_snapshot` for every
+source it uses, storing the complete fetched material under
+`<block_wd>/snapshots/`; each quote records its exact `snapshot_path`. Its QC
+session then reads each claim, quote, snapshot, and artifact independently;
+failed QC returns issues to the same research session for repair up to
+`max_qc_rounds`.
+
+Each materialized deep-dive task has its own `web_fetch = 20` entry in
+`tool_call_quota`. The limit is twenty successful built-in fetch calls for that
+task's research session; failed fetches do not consume it.
+
+The conflict resolver reads all knowledge artifacts from all three dynamic
+groups, records resolved and unresolved contradictions in `resolution.json`,
+and has its own QC loop. The final synthesizer reads every knowledge artifact
+and the resolution, then writes `report.md` with source and quote references.
+Its QC calls `audit_synthesis` once per round for bounded mechanical checks:
+invented or unused quote IDs, source-table URL mappings, snapshot existence,
+and quote text presence. Text matching first tries the original bytes, then
+line-ending equivalence, paragraph-preserving whitespace equivalence, and
+Unicode NFC equivalence. These modes never fold case, punctuation, numbers,
+hyphens, or paragraph boundaries. The complete audit is written beside the
+report as `synthesis-audit.json`; only compact statistics and issues enter the
+model context. The QC model remains responsible for semantic support,
+unsupported extrapolation, plan coverage, and faithful conflict handling.
+
+The `knowledge_paths`, `conflict_resolution_path`, and `report_path` outputs
+expose the resulting artifact locations. Each dynamic task also retains its
+own `result` and `artifacts` values in the parent block's `tasks` list, so
+downstream HCL can iterate over structured results without inventing extra DAG
+addresses.
+
+All sessions use `model_provider.primary`, whose complete configuration is
+provided by the `model_provider` object variable. The example uses inline Go
+typed tools and Copilot's built-in web tools; Apply still requires an installed
+Copilot CLI, while BYOK means the selected provider does not require a GitHub
+Copilot subscription.

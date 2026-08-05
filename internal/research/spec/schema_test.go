@@ -128,7 +128,7 @@ research "static" "market" {
   system_prompt     = "prompt"
   tool_ids          = [fixture_tool.lookup.id]
   terminate_tool_id = fixture_tool.finish.id
-  typed_tool_call_quota = {
+  tool_call_quota = {
     (fixture_tool.lookup.id) = 2
     (fixture_tool.finish.id) = 1
   }
@@ -136,7 +136,7 @@ research "static" "market" {
   qc {
     criteria = { accuracy = "Check the report." }
     tool_ids = [fixture_tool.read_only.id]
-    typed_tool_call_quota = {
+    tool_call_quota = {
       (fixture_tool.read_only.id) = 3
     }
   }
@@ -146,12 +146,43 @@ research "static" "market" {
 	require.NoError(t, config.RunPlan())
 	planned := golden.Blocks[*researchspec.ResearchBlock](config)[0].ResearchConfig()
 	assert.Equal(t, []string{"tool_fixture_lookup"}, planned.Policy.ToolIDs)
-	assert.Equal(t, map[string]int{"tool_fixture_lookup": 2, "tool_fixture_finish": 1}, planned.Policy.TypedToolCallQuota)
+	assert.Equal(t, map[string]int{"tool_fixture_lookup": 2, "tool_fixture_finish": 1}, planned.Policy.ToolCallQuota)
 	require.NotNil(t, planned.TerminateToolID)
 	assert.Equal(t, "tool_fixture_finish", *planned.TerminateToolID)
 	require.NotNil(t, planned.QC)
 	assert.Equal(t, []string{"tool_fixture_read_only"}, planned.QC.ToolIDs)
-	assert.Equal(t, map[string]int{"tool_fixture_read_only": 3}, planned.QC.TypedToolCallQuota)
+	assert.Equal(t, map[string]int{"tool_fixture_read_only": 3}, planned.QC.ToolCallQuota)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockPlansUnifiedToolCallQuota(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+fixture_tool "lookup" {}
+
+research "static" "market" {
+  model         = "model"
+  system_prompt = "prompt"
+  tool_ids      = [fixture_tool.lookup.id]
+  tool_call_quota = {
+    (fixture_tool.lookup.id) = 2
+    web_fetch                = 10
+  }
+
+  qc {
+    criteria = { accuracy = "Check the report." }
+    tool_call_quota = {
+      web_search = 3
+    }
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	planned := golden.Blocks[*researchspec.ResearchBlock](config)[0].ResearchConfig()
+	assert.Equal(t, map[string]int{"tool_fixture_lookup": 2, "web_fetch": 10}, planned.Policy.ToolCallQuota)
+	require.NotNil(t, planned.QC)
+	assert.Equal(t, map[string]int{"web_search": 3}, planned.QC.ToolCallQuota)
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -239,7 +270,7 @@ research "static" "summary" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestResearchBlockRejectsFractionalTypedToolCallQuota(t *testing.T) {
+func TestResearchBlockRejectsFractionalToolCallQuota(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
 fixture_tool "lookup" {}
@@ -247,7 +278,7 @@ research "static" "market" {
   model         = "model"
   system_prompt = "prompt"
   tool_ids      = [fixture_tool.lookup.id]
-  typed_tool_call_quota = {
+  tool_call_quota = {
     (fixture_tool.lookup.id) = 1.5
   }
 }
@@ -259,31 +290,31 @@ research "static" "market" {
 	assert.ErrorContains(t, err, "whole number")
 }
 
-func TestResearchBlockReturnsIndependentTypedToolCallQuota(t *testing.T) {
+func TestResearchBlockReturnsIndependentToolCallQuota(t *testing.T) {
 	t.Parallel()
 
 	block := researchspec.ResearchBlock{
-		Model:              "model",
-		SystemPrompt:       "prompt",
-		ToolIDs:            []string{"research_tool"},
-		TypedToolCallQuota: map[string]int{"research_tool": 2},
+		Model:         "model",
+		SystemPrompt:  "prompt",
+		ToolIDs:       []string{"research_tool"},
+		ToolCallQuota: map[string]int{"research_tool": 2},
 		QCBlocks: []researchspec.QCBlock{{
-			Criteria:           validCriteria(),
-			ToolIDs:            []string{"qc_tool"},
-			TypedToolCallQuota: map[string]int{"qc_tool": 3},
+			Criteria:      validCriteria(),
+			ToolIDs:       []string{"qc_tool"},
+			ToolCallQuota: map[string]int{"qc_tool": 3},
 		}},
 	}
 	require.NoError(t, block.ExecuteDuringPlan())
 
 	first := block.ResearchConfig()
-	first.Policy.TypedToolCallQuota["research_tool"] = 20
+	first.Policy.ToolCallQuota["research_tool"] = 20
 	require.NotNil(t, first.QC)
-	first.QC.TypedToolCallQuota["qc_tool"] = 30
+	first.QC.ToolCallQuota["qc_tool"] = 30
 
 	second := block.ResearchConfig()
-	assert.Equal(t, 2, second.Policy.TypedToolCallQuota["research_tool"])
+	assert.Equal(t, 2, second.Policy.ToolCallQuota["research_tool"])
 	require.NotNil(t, second.QC)
-	assert.Equal(t, 3, second.QC.TypedToolCallQuota["qc_tool"])
+	assert.Equal(t, 3, second.QC.ToolCallQuota["qc_tool"])
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

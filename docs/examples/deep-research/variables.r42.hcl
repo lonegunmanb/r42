@@ -10,14 +10,15 @@ variable "topic" {
 
 variable "research_plan" {
   type        = list(string)
-  description = "Ordered subquestions investigated as independent deep-research tasks."
-  nullable    = false
+  description = "Optional caller-provided subquestions. A non-empty list skips the planner and runs in parallel."
+  default     = []
+  nullable    = true
 
   validation {
-    condition = length(var.research_plan) > 0 && alltrue([
+    condition = var.research_plan == null ? true : alltrue([
       for question in var.research_plan : length(trimspace(question)) > 0
     ])
-    error_message = "research_plan must contain at least one non-empty subquestion."
+    error_message = "research_plan must contain only non-empty subquestions."
   }
 }
 
@@ -38,10 +39,13 @@ variable "system_prompt" {
     gap that matters to the answer.
 
     You must finish by calling the configured terminate tool. The call must
-    submit atomic knowledge claims and separate verbatim quote records. Every
-    claim must reference at least one quote ID, and every quote must be used.
-    Before calling the tool, be ready for it to write the accepted payload to
-    the declared knowledge.json artifact.
+    submit atomic knowledge claims and separate verbatim quote records. Save
+    the complete material returned by every source read as Markdown under the
+    current block workspace's snapshots/ directory before citing it. Every quote must include the
+    exact snapshot_path, locator, URL, and verbatim text from that snapshot.
+    Every claim must reference at least one quote ID, and every quote must be
+    used. Before calling the tool, be ready for it to write the accepted
+    payload to the declared knowledge.json artifact.
   PROMPT
 }
 

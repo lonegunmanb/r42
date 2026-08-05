@@ -654,8 +654,8 @@ func TestResearchConfigRejectsUnknownTypedToolIDsDuringPlan(t *testing.T) {
 		{name: "terminate tool id", fragment: `terminate_tool_id = "` + unknownID + `"`},
 		{name: "allowed tools", fragment: `allowed_tools = ["` + unknownID + `"]`},
 		{name: "disallowed tools", fragment: `disallowed_tools = ["` + unknownID + `"]`},
-		{name: "typed tool call quota", fragment: `tool_ids = ["` + unknownID + `"]
-  typed_tool_call_quota = { "` + unknownID + `" = 1 }`},
+		{name: "tool call quota", fragment: `tool_ids = ["` + unknownID + `"]
+  tool_call_quota = { "` + unknownID + `" = 1 }`},
 		{
 			name: "qc tool ids",
 			fragment: `qc {
@@ -675,7 +675,7 @@ func TestResearchConfigRejectsUnknownTypedToolIDsDuringPlan(t *testing.T) {
 			fragment: `qc {
     criteria = { accuracy = "Check accuracy." }
     tool_ids = ["` + unknownID + `"]
-    typed_tool_call_quota = { "` + unknownID + `" = 1 }
+    tool_call_quota = { "` + unknownID + `" = 1 }
   }`,
 		},
 		{
@@ -717,14 +717,14 @@ func TestResearchConfigRejectsQuotaForToolOutsideSession(t *testing.T) {
 	}{
 		{
 			name:     "research",
-			fragment: `typed_tool_call_quota = { (go_tool.lookup.id) = 1 }`,
+			fragment: `tool_call_quota = { (go_tool.lookup.id) = 1 }`,
 			scope:    "research",
 		},
 		{
 			name: "qc",
 			fragment: `qc {
     criteria = { accuracy = "Check accuracy." }
-    typed_tool_call_quota = { (go_tool.lookup.id) = 1 }
+    tool_call_quota = { (go_tool.lookup.id) = 1 }
   }`,
 			scope: "qc",
 		},
@@ -754,7 +754,7 @@ research "static" "source" {
 
 			_, err := planSource(directory, executor.ResearchConfigOptions{})
 
-			require.ErrorContains(t, err, tt.scope+" typed_tool_call_quota references tool id")
+			require.ErrorContains(t, err, tt.scope+" tool_call_quota references tool id")
 			assert.ErrorContains(t, err, "that is not configured for this session")
 		})
 	}
@@ -807,9 +807,10 @@ research "static" "market" {
   prompt               = "Start now."
   tool_ids             = [external_tool.lookup.id]
   terminate_tool_id    = go_tool.finish.id
-  typed_tool_call_quota = {
+  tool_call_quota = {
     (external_tool.lookup.id) = 4
     (go_tool.finish.id)       = 1
+    web_fetch                 = 6
   }
   allowed_tools        = [tool_name(external_tool.lookup)]
   disallowed_tools     = ["ask_user"]
@@ -831,8 +832,9 @@ research "static" "market" {
     model        = "qc-model"
     max_qc_rounds = 3
     tool_ids = [external_tool.lookup.id]
-    typed_tool_call_quota = {
+    tool_call_quota = {
       (external_tool.lookup.id) = 2
+      web_search                = 3
     }
   }
 }
@@ -861,7 +863,8 @@ research "static" "market" {
 	assert.Equal(t, map[string]int{
 		reconstructed.Config.Policy.ToolIDs[0]: 4,
 		*reconstructed.Config.TerminateToolID:  1,
-	}, reconstructed.Config.Policy.TypedToolCallQuota)
+		"web_fetch":                            6,
+	}, reconstructed.Config.Policy.ToolCallQuota)
 	assert.Contains(t, registry[reconstructed.Config.Policy.ToolIDs[0]].InputTypeExpression, "optional(number, 5)")
 	require.NotNil(t, reconstructed.Config.TerminateToolID)
 	require.Contains(t, registry, *reconstructed.Config.TerminateToolID)
@@ -869,7 +872,10 @@ research "static" "market" {
 	require.NotNil(t, reconstructed.Config.QC)
 	assert.Equal(t, "qc-model", *reconstructed.Config.QC.Model)
 	assert.Equal(t, 3, reconstructed.Config.QC.MaxRounds)
-	assert.Equal(t, map[string]int{reconstructed.Config.QC.ToolIDs[0]: 2}, reconstructed.Config.QC.TypedToolCallQuota)
+	assert.Equal(t, map[string]int{
+		reconstructed.Config.QC.ToolIDs[0]: 2,
+		"web_search":                       3,
+	}, reconstructed.Config.QC.ToolCallQuota)
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

@@ -128,7 +128,7 @@ then disables the built-in `web_search` and `web_fetch` tools for those research
 sessions and independently configures:
 
 ```hcl
-typed_tool_call_quota = {
+tool_call_quota = {
   (module.pplx_tools.pplx_fetch_tool_id) = 10
 }
 ```

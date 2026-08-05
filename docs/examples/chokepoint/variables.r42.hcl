@@ -88,6 +88,13 @@ variable "research_system_prompt" {
     for the assigned task. Stop searching when it is sufficient; continue only
     when you can name a remaining gap that could change the conclusion.
 
+    Never use PowerShell, a shell, curl, wget, or scripts and command-line
+    programs to search the web or download remote content. Do not use them as
+    a workaround when a search or source-reading tool reaches its call quota
+    or returns an error. Only the search and source-reading tools configured
+    for this task may access remote sources. When their quotas are exhausted,
+    continue with the evidence already collected.
+
     When a terminate tool is configured, its accepted call is the only valid
     completion. Repair every schema or validation issue returned by the tool.
   PROMPT

@@ -373,7 +373,11 @@ func (f *runtimeFactory) newResearchBlock(
 	if planned.Config.ReasoningEffort != nil {
 		reasoning = *planned.Config.ReasoningEffort
 	}
-	systemPrompt := researchSystemProtocol + "\n\n" + planned.Config.SystemPrompt
+	typedQuotaLimits, builtInQuotaLimits := splitToolCallQuota(planned.Config.Policy.ToolCallQuota)
+	systemPrompt := appendBuiltInToolCallQuotaPrompt(
+		researchSystemProtocol+"\n\n"+planned.Config.SystemPrompt,
+		builtInQuotaLimits,
+	)
 	if recordErr := f.recorder.Record(debuglog.Event{
 		Kind: debuglog.EventMessage, BlockAddress: executionAddress, Session: debuglog.SessionResearch,
 		Role: debuglog.RoleSystem, Content: systemPrompt,
@@ -381,7 +385,7 @@ func (f *runtimeFactory) newResearchBlock(
 		return nil, recordErr
 	}
 	terminal := researchruntime.NewTerminalRecorder()
-	researchQuota := newToolCallQuota(planned.Config.Policy.TypedToolCallQuota)
+	researchQuota := newToolCallQuota(typedQuotaLimits)
 	tools, terminalType, err := f.buildTools(
 		ctx, executionAddress, debuglog.SessionResearch, workspace,
 		planned.Config.Policy.ToolIDs, planned.Config.TerminateToolID, terminal, researchQuota,
@@ -412,7 +416,7 @@ func (f *runtimeFactory) newResearchBlock(
 		ExcludedTools:    slices.Clone(planned.Config.Policy.DisallowedTools),
 		SkillDirectories: slices.Clone(planned.Config.Policy.SkillDirectories),
 		Skills:           slices.Clone(planned.Config.Policy.Skills), DisabledSkills: slices.Clone(planned.Config.Policy.DisabledSkills),
-		Tools: tools,
+		Tools: tools, Hooks: builtInToolCallQuotaHooks(newToolCallQuota(builtInQuotaLimits)),
 	})
 	if err != nil {
 		return nil, err
@@ -450,9 +454,10 @@ func (f *runtimeFactory) newResearchBlock(
 			f.closeAfterSetupFailure(ctx, recordedSession)
 			return nil, effectiveErr
 		}
+		qcTypedQuotaLimits, qcBuiltInQuotaLimits := splitToolCallQuota(effective.ToolCallQuota)
 		qcTools, _, toolsErr := f.buildTools(
 			ctx, executionAddress, debuglog.SessionQC, workspace, effective.ToolIDs, nil,
-			researchruntime.NewTerminalRecorder(), newToolCallQuota(effective.TypedToolCallQuota),
+			researchruntime.NewTerminalRecorder(), newToolCallQuota(qcTypedQuotaLimits),
 		)
 		if toolsErr != nil {
 			f.closeAfterSetupFailure(ctx, recordedSession)
@@ -464,7 +469,10 @@ func (f *runtimeFactory) newResearchBlock(
 		if effective.ReasoningEffort != nil {
 			qcReasoning = *effective.ReasoningEffort
 		}
-		qcSystemPrompt := "You are the independent QC session for an unattended r42 research block. Call r42_qc_verdict with pass or repair issues."
+		qcSystemPrompt := appendBuiltInToolCallQuotaPrompt(
+			"You are the independent QC session for an unattended r42 research block. Call r42_qc_verdict with pass or repair issues.",
+			qcBuiltInQuotaLimits,
+		)
 		_ = f.recorder.Record(debuglog.Event{
 			Kind: debuglog.EventMessage, BlockAddress: executionAddress, Session: debuglog.SessionQC,
 			Role: debuglog.RoleSystem, Content: qcSystemPrompt,
@@ -475,6 +483,7 @@ func (f *runtimeFactory) newResearchBlock(
 			Tools: qcTools, AvailableTools: slices.Clone(effective.AllowedTools), ExcludedTools: slices.Clone(effective.DisallowedTools),
 			SkillDirectories: slices.Clone(effective.SkillDirectories), Skills: slices.Clone(effective.Skills),
 			DisabledSkills: slices.Clone(effective.DisabledSkills),
+			Hooks:          builtInToolCallQuotaHooks(newToolCallQuota(qcBuiltInQuotaLimits)),
 		})
 		if err != nil {
 			f.closeAfterSetupFailure(ctx, recordedSession)
@@ -896,22 +905,22 @@ func newToolCallQuota(limits map[string]int) *toolCallQuota {
 	return &toolCallQuota{limits: maps.Clone(limits), used: make(map[string]int)}
 }
 
-func (q *toolCallQuota) reserve(toolID string) error {
+func (q *toolCallQuota) reserve(toolName string) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	limit, configured := q.limits[toolID]
+	limit, configured := q.limits[toolName]
 	if !configured {
 		return nil
 	}
-	if q.used[toolID] >= limit {
+	if q.used[toolName] >= limit {
 		return fmt.Errorf(
-			"typed tool %q per-session call quota exhausted (limit %d accepted calls); "+
+			"tool %q per-session call quota exhausted (limit %d successful calls); "+
 				"this quota will not reset during this session; do not call this tool again; "+
 				"continue with existing results or another available tool",
-			toolID, limit,
+			toolName, limit,
 		)
 	}
-	q.used[toolID]++
+	q.used[toolName]++
 	return nil
 }
 
@@ -934,6 +943,68 @@ func (q *toolCallQuota) rollback(toolID string) {
 	if _, configured := q.limits[toolID]; configured && q.used[toolID] > 0 {
 		q.used[toolID]--
 	}
+}
+
+func splitToolCallQuota(limits map[string]int) (map[string]int, map[string]int) {
+	typed := make(map[string]int)
+	builtIn := make(map[string]int)
+	for name, limit := range limits {
+		if plan.IsToolID(name) {
+			typed[name] = limit
+			continue
+		}
+		builtIn[name] = limit
+	}
+	return typed, builtIn
+}
+
+func builtInToolCallQuotaHooks(quota *toolCallQuota) *sdk.SessionHooks {
+	if quota == nil || len(quota.limits) == 0 {
+		return nil
+	}
+	return &sdk.SessionHooks{
+		OnPreToolUse: func(input sdk.PreToolUseHookInput, _ sdk.HookInvocation) (*sdk.PreToolUseHookOutput, error) {
+			return toolCallQuotaDecision(quota, input.ToolName), nil
+		},
+		OnPostToolUseFailure: func(
+			input sdk.PostToolUseFailureHookInput,
+			_ sdk.HookInvocation,
+		) (*sdk.PostToolUseFailureHookOutput, error) {
+			quota.rollback(input.ToolName)
+			return &sdk.PostToolUseFailureHookOutput{}, nil
+		},
+	}
+}
+
+func toolCallQuotaDecision(quota *toolCallQuota, toolName string) *sdk.PreToolUseHookOutput {
+	reservationError := quota.reserve(toolName)
+	if reservationError == nil {
+		return &sdk.PreToolUseHookOutput{PermissionDecision: "allow"}
+	}
+	return &sdk.PreToolUseHookOutput{
+		PermissionDecision:       "deny",
+		PermissionDecisionReason: reservationError.Error(),
+	}
+}
+
+func appendBuiltInToolCallQuotaPrompt(systemPrompt string, limits map[string]int) string {
+	if len(limits) == 0 {
+		return systemPrompt
+	}
+	names := make([]string, 0, len(limits))
+	for name := range limits {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	var result strings.Builder
+	result.WriteString(systemPrompt)
+	result.WriteString("\n\nr42 built-in tool call quotas for this session:\n")
+	for _, name := range names {
+		fmt.Fprintf(&result, "- %s: at most %d successful calls.\n", name, limits[name])
+	}
+	result.WriteString("failed calls do not consume quota. Once a tool is exhausted, do not retry it; continue with existing results or another available tool.")
+	return result.String()
 }
 
 func (f *runtimeFactory) recordToolFailure(
@@ -1219,10 +1290,24 @@ func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.Ver
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"pass":   map[string]any{"type": "boolean"},
-				"issues": map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"pass": map[string]any{"type": "boolean"},
+				"issues": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"code":        map[string]any{"type": "string"},
+							"message":     map[string]any{"type": "string"},
+							"path":        map[string]any{"type": "string"},
+							"repair_hint": map[string]any{"type": "string"},
+						},
+						"required":             []string{"code", "message"},
+						"additionalProperties": false,
+					},
+				},
 			},
-			"required": []string{"pass"},
+			"required":             []string{"pass"},
+			"additionalProperties": false,
 		},
 		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
 			arguments, marshalErr := json.Marshal(invocation.Arguments)
@@ -1313,13 +1398,14 @@ func (b *researchApplyBlock) Cleanup(ctx context.Context) error {
 
 type recordingSession struct {
 	Session
-	recorder *debuglog.Recorder
-	address  string
-	kind     debuglog.SessionKind
-	eventMu  sync.Mutex
-	kindMu   sync.RWMutex
-	seen     map[string]struct{}
-	toolName map[string]string
+	recorder  *debuglog.Recorder
+	address   string
+	kind      debuglog.SessionKind
+	eventMu   sync.Mutex
+	kindMu    sync.RWMutex
+	seen      map[string]struct{}
+	toolName  map[string]string
+	lastEvent string
 }
 
 func (s *recordingSession) setKind(kind debuglog.SessionKind) {
@@ -1380,21 +1466,24 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 			if !s.markEvent(event.ID) {
 				return
 			}
+			s.setLastEvent(event.Type())
 			var err error
-			switch event.Type() {
-			case sdk.SessionEventTypeAssistantMessage,
-				sdk.SessionEventTypeAssistantMessageDelta,
-				sdk.SessionEventTypeAssistantReasoning,
-				sdk.SessionEventTypeAssistantReasoningDelta,
-				sdk.SessionEventTypeAssistantUsage:
+			switch {
+			case strings.HasPrefix(string(event.Type()), "session."):
+				err = s.recordSessionEvent(&event)
+			case event.Type() == sdk.SessionEventTypeAssistantMessage ||
+				event.Type() == sdk.SessionEventTypeAssistantMessageDelta ||
+				event.Type() == sdk.SessionEventTypeAssistantReasoning ||
+				event.Type() == sdk.SessionEventTypeAssistantReasoningDelta ||
+				event.Type() == sdk.SessionEventTypeAssistantUsage:
 				err = s.recordAssistantEvent(&event)
-			case sdk.SessionEventTypeAssistantToolCallDelta,
-				sdk.SessionEventTypeToolSearchActivated,
-				sdk.SessionEventTypeToolUserRequested,
-				sdk.SessionEventTypeToolExecutionStart,
-				sdk.SessionEventTypeToolExecutionProgress,
-				sdk.SessionEventTypeToolExecutionPartialResult,
-				sdk.SessionEventTypeToolExecutionComplete:
+			case event.Type() == sdk.SessionEventTypeAssistantToolCallDelta ||
+				event.Type() == sdk.SessionEventTypeToolSearchActivated ||
+				event.Type() == sdk.SessionEventTypeToolUserRequested ||
+				event.Type() == sdk.SessionEventTypeToolExecutionStart ||
+				event.Type() == sdk.SessionEventTypeToolExecutionProgress ||
+				event.Type() == sdk.SessionEventTypeToolExecutionPartialResult ||
+				event.Type() == sdk.SessionEventTypeToolExecutionComplete:
 				err = s.recordToolEvent(&event)
 			default:
 				return
@@ -1408,8 +1497,22 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 			}
 		})
 	}
+	waitEvent := debuglog.Event{
+		BlockAddress: s.address,
+		Session:      kind,
+		WaitFor:      string(sdk.SessionEventTypeSessionIdle),
+	}
+	s.resetLastEvent()
+	waitStarted := time.Now()
+	if err := debuglog.Lifecycle(ctx, "session.wait", debuglog.StatusStarted, waitEvent); err != nil {
+		unsubscribe()
+		return nil, err
+	}
 	event, operationErr := s.Session.SendAndWait(ctx, options)
 	unsubscribe()
+	waitEvent.LastEvent = s.lastSDKEvent()
+	waitLogErr := debuglog.CompleteLifecycle(ctx, "session.wait", waitStarted, operationErr, waitEvent)
+	operationErr = errors.Join(operationErr, waitLogErr)
 	eventErrMu.Lock()
 	operationErr = errors.Join(operationErr, eventErr)
 	eventErrMu.Unlock()
@@ -1437,6 +1540,59 @@ func (s *recordingSession) markEvent(id string) bool {
 	}
 	s.seen[id] = struct{}{}
 	return true
+}
+
+func (s *recordingSession) setLastEvent(eventType sdk.SessionEventType) {
+	s.eventMu.Lock()
+	s.lastEvent = string(eventType)
+	s.eventMu.Unlock()
+}
+
+func (s *recordingSession) resetLastEvent() {
+	s.eventMu.Lock()
+	s.lastEvent = ""
+	s.eventMu.Unlock()
+}
+
+func (s *recordingSession) lastSDKEvent() string {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	return s.lastEvent
+}
+
+func (s *recordingSession) recordSessionEvent(event *sdk.SessionEvent) error {
+	if event == nil {
+		return fmt.Errorf("session event is required")
+	}
+	content, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("encode session event: %w", err)
+	}
+	recorded := debuglog.Event{
+		Timestamp:    event.Timestamp,
+		Kind:         debuglog.EventLifecycle,
+		Action:       string(event.Type()),
+		Status:       debuglog.StatusCompleted,
+		BlockAddress: s.address,
+		Session:      s.currentKind(),
+		SDKEvent:     content,
+	}
+	switch data := event.Data.(type) {
+	case *sdk.SessionErrorData:
+		recorded.Status = debuglog.StatusFailed
+		recorded.Content = data.Message
+		recorded.Error = data.Message
+	case *sdk.SessionWarningData:
+		recorded.Content = data.Message
+	case *sdk.SessionTaskCompleteData:
+		if data.Summary != nil {
+			recorded.Content = *data.Summary
+		}
+		if data.Success != nil && !*data.Success {
+			recorded.Status = debuglog.StatusFailed
+		}
+	}
+	return s.recorder.Record(recorded)
 }
 
 func (s *recordingSession) recordToolEvent(event *sdk.SessionEvent) error {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -22,14 +23,14 @@ type Permission string
 const PermissionApproveAll Permission = "approve_all"
 
 type SessionPolicy struct {
-	ToolIDs            []string
-	TypedToolCallQuota map[string]int
-	AllowedTools       []string
-	DisallowedTools    []string
-	SkillDirectories   []string
-	Skills             []string
-	DisabledSkills     []string
-	Permission         Permission
+	ToolIDs          []string
+	ToolCallQuota    map[string]int
+	AllowedTools     []string
+	DisallowedTools  []string
+	SkillDirectories []string
+	Skills           []string
+	DisabledSkills   []string
+	Permission       Permission
 }
 
 type Config struct {
@@ -75,7 +76,7 @@ func (c Config) Validate() error {
 	if c.TerminateToolID != nil {
 		researchToolIDs = append(researchToolIDs, *c.TerminateToolID)
 	}
-	if err := validateTypedToolCallQuota(c.Policy.TypedToolCallQuota, researchToolIDs, "research"); err != nil {
+	if err := validateToolCallQuota(c.Policy.ToolCallQuota, researchToolIDs, "research"); err != nil {
 		return err
 	}
 	if err := validateOptionalToolID(c.TerminateToolID, "research terminate_tool_id"); err != nil {
@@ -115,20 +116,20 @@ func (c Config) Validate() error {
 }
 
 type QCConfig struct {
-	Criteria           cty.Value
-	ModelProvider      cty.Value
-	Model              *string
-	ReasoningEffort    *string
-	Retry              provider.RetryOverride
-	ToolIDs            []string
-	TypedToolCallQuota map[string]int
-	AllowedTools       []string
-	DisallowedTools    []string
-	SkillDirectories   []string
-	Skills             []string
-	DisabledSkills     []string
-	Permission         *Permission
-	MaxRounds          int
+	Criteria         cty.Value
+	ModelProvider    cty.Value
+	Model            *string
+	ReasoningEffort  *string
+	Retry            provider.RetryOverride
+	ToolIDs          []string
+	ToolCallQuota    map[string]int
+	AllowedTools     []string
+	DisallowedTools  []string
+	SkillDirectories []string
+	Skills           []string
+	DisabledSkills   []string
+	Permission       *Permission
+	MaxRounds        int
 }
 
 func (c QCConfig) Validate() error {
@@ -141,7 +142,7 @@ func (c QCConfig) Validate() error {
 	if err := validateToolIDs(c.ToolIDs, "qc tool_ids"); err != nil {
 		return err
 	}
-	if err := validateTypedToolCallQuota(c.TypedToolCallQuota, c.ToolIDs, "qc"); err != nil {
+	if err := validateToolCallQuota(c.ToolCallQuota, c.ToolIDs, "qc"); err != nil {
 		return err
 	}
 	if c.Model != nil && strings.TrimSpace(*c.Model) == "" {
@@ -187,21 +188,21 @@ func validateCriteria(criteria cty.Value) error {
 }
 
 type EffectiveQC struct {
-	Criteria           cty.Value
-	ModelProvider      cty.Value
-	Model              string
-	Profile            string
-	ReasoningEffort    *string
-	Retry              provider.RetryPolicy
-	ToolIDs            []string
-	TypedToolCallQuota map[string]int
-	AllowedTools       []string
-	DisallowedTools    []string
-	SkillDirectories   []string
-	Skills             []string
-	DisabledSkills     []string
-	Permission         Permission
-	MaxRounds          int
+	Criteria         cty.Value
+	ModelProvider    cty.Value
+	Model            string
+	Profile          string
+	ReasoningEffort  *string
+	Retry            provider.RetryPolicy
+	ToolIDs          []string
+	ToolCallQuota    map[string]int
+	AllowedTools     []string
+	DisallowedTools  []string
+	SkillDirectories []string
+	Skills           []string
+	DisabledSkills   []string
+	Permission       Permission
+	MaxRounds        int
 }
 
 func (c Config) EffectiveQC(providerRetry provider.RetryPolicy) (EffectiveQC, error) {
@@ -244,21 +245,21 @@ func (c Config) EffectiveQC(providerRetry provider.RetryPolicy) (EffectiveQC, er
 		disallowedTools = DefaultQCDisallowedTools()
 	}
 	return EffectiveQC{
-		Criteria:           c.QC.Criteria,
-		ModelProvider:      modelProvider,
-		Model:              model,
-		Profile:            profile,
-		ReasoningEffort:    reasoningEffort,
-		Retry:              qcRetry,
-		ToolIDs:            slices.Clone(c.QC.ToolIDs),
-		TypedToolCallQuota: maps.Clone(c.QC.TypedToolCallQuota),
-		AllowedTools:       slices.Clone(c.QC.AllowedTools),
-		DisallowedTools:    disallowedTools,
-		SkillDirectories:   slices.Clone(c.QC.SkillDirectories),
-		Skills:             slices.Clone(c.QC.Skills),
-		DisabledSkills:     slices.Clone(c.QC.DisabledSkills),
-		Permission:         permission,
-		MaxRounds:          maxRounds,
+		Criteria:         c.QC.Criteria,
+		ModelProvider:    modelProvider,
+		Model:            model,
+		Profile:          profile,
+		ReasoningEffort:  reasoningEffort,
+		Retry:            qcRetry,
+		ToolIDs:          slices.Clone(c.QC.ToolIDs),
+		ToolCallQuota:    maps.Clone(c.QC.ToolCallQuota),
+		AllowedTools:     slices.Clone(c.QC.AllowedTools),
+		DisallowedTools:  disallowedTools,
+		SkillDirectories: slices.Clone(c.QC.SkillDirectories),
+		Skills:           slices.Clone(c.QC.Skills),
+		DisabledSkills:   slices.Clone(c.QC.DisabledSkills),
+		Permission:       permission,
+		MaxRounds:        maxRounds,
 	}, nil
 }
 
@@ -314,13 +315,16 @@ func validateToolIDs(values []string, name string) error {
 	return nil
 }
 
-func validateTypedToolCallQuota(quota map[string]int, sessionToolIDs []string, scope string) error {
-	for toolID, limit := range quota {
-		if limit < 0 {
-			return fmt.Errorf("%s typed_tool_call_quota for %q must be non-negative", scope, toolID)
+func validateToolCallQuota(quota map[string]int, sessionToolIDs []string, scope string) error {
+	for toolName, limit := range quota {
+		if strings.TrimSpace(toolName) == "" {
+			return fmt.Errorf("%s tool_call_quota must not contain an empty tool name", scope)
 		}
-		if !slices.Contains(sessionToolIDs, toolID) {
-			return fmt.Errorf("%s typed_tool_call_quota references tool id %q that is not configured for this session", scope, toolID)
+		if limit < 0 {
+			return fmt.Errorf("%s tool_call_quota for %q must be non-negative", scope, toolName)
+		}
+		if internalplan.IsToolID(toolName) && !slices.Contains(sessionToolIDs, toolName) {
+			return fmt.Errorf("%s tool_call_quota references tool id %q that is not configured for this session", scope, toolName)
 		}
 	}
 	return nil

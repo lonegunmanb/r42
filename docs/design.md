@@ -316,8 +316,9 @@ Research session fields include:
 - `system_prompt`: required.
 - `prompt`: optional.
 - `tool_ids`: typed tool IDs, normally selected through a tool block's read-only `id` attribute.
-- `typed_tool_call_quota`: optional per-session call limits keyed by configured
-  typed tool ID.
+- `tool_call_quota`: optional per-session call limits. Keys matching the r42
+  tool-ID format limit configured typed tools; all other keys name Copilot
+  built-in tools.
 - `terminate_tool_id`: optional typed tool ID.
 - `allowed_tools` and `disallowed_tools`: SDK tool-name strings.
 - `skill_directories`, `skills`, and `disabled_skills`.
@@ -609,10 +610,9 @@ module.a                      -> <cwd>/.r42/modules/a
 module.a.module.b.module.c    -> <cwd>/.r42/modules/a/b/c
 ```
 
-Existing installations are reused. `r42 init --upgrade [SOURCE]` refreshes
-them through a staging directory so a failed copy or download leaves the
-previous installation intact. Changing the root source locator also forces a
-module refresh. Source cycles fail Init.
+Every `r42 init [SOURCE]` refreshes installed modules through a staging
+directory, so a failed copy or download leaves the previous installation
+intact. Source cycles fail Init.
 
 Successful Init writes `<cwd>/.r42/config/.initialized.json`, recording the
 initialization format and a SHA-256 identity of the canonical local path or
@@ -776,16 +776,14 @@ and planned configuration values themselves remain immutable.
 Required workflows:
 
 ```text
-r42 init [<source>] [--upgrade]
+r42 init [<source>]
 r42 plan [--out <file.r42plan>]
 r42 apply [<file.r42plan>]
 r42 output
 ```
 
-`init` defaults its source to `.`. It refreshes the active
-configuration snapshot on every invocation and reuses installed modules unless
-`--upgrade`, a changed root source locator, or interrupted initialization
-requires a refresh.
+`init` defaults its source to `.`. It refreshes the active configuration
+snapshot and installed modules on every invocation through a staging directory.
 
 `plan` reads only `<cwd>/.r42/config`. It always prints the Plan to stdout and
 only writes a saved Plan file when `--out` is present.

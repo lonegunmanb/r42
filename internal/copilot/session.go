@@ -29,6 +29,7 @@ type SessionConfig struct {
 	SkillDirectories []string
 	Skills           []string
 	DisabledSkills   []string
+	Hooks            *sdk.SessionHooks
 }
 
 type Factory struct {
@@ -102,6 +103,7 @@ func (f *Factory) sessionConfig(config SessionConfig) (*sdk.SessionConfig, error
 		EnableSkills:        sdk.Bool(true),
 		SkillDirectories:    slices.Clone(config.SkillDirectories),
 		DisabledSkills:      slices.Clone(config.DisabledSkills),
+		Hooks:               config.Hooks,
 	}
 	if len(config.Skills) > 0 {
 		result.CustomAgents = []sdk.CustomAgentConfig{{
