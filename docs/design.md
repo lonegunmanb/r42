@@ -229,6 +229,11 @@ materializes the complete list at the start of the block's Apply operation,
 runs its members under the same research concurrency scope as static blocks,
 and publishes the completed list as `research.dynamic.<name>.tasks`.
 
+The optional `serial` attribute defaults to `false`. When true, the block runs
+its materialized members one at a time in list order while each member still
+acquires the shared research concurrency scope. The setting does not serialize
+unrelated ready DAG nodes.
+
 The list may be unknown in a saved Plan. r42 preserves the cty unknown value and
 the HCL expression; it does not require a narrower element type merely for plan
 serialization. At Apply, the list must be wholly known before any member starts.
@@ -611,8 +616,11 @@ module refresh. Source cycles fail Init.
 
 Successful Init writes `<cwd>/.r42/config/.initialized.json`, recording the
 initialization format and a SHA-256 identity of the canonical local path or
-remote locator. The original locator is not persisted because it may contain
-credentials. Plan and Apply fail fast when this marker is absent or invalid.
+remote locator. It also atomically replaces `<cwd>/.r42/state.json`, which
+records the active local source path or sanitized remote locator, the active
+snapshot directory, and no outputs. Remote URL credentials, fragments, and
+query parameters other than `ref` are not persisted. Plan and Apply fail fast
+when the marker and state are absent, invalid, or inconsistent.
 Init also uses
 `<cwd>/.r42/.initializing` as a transaction marker: if a process is interrupted
 after module activation but before configuration activation, Plan and Apply
@@ -771,6 +779,7 @@ Required workflows:
 r42 init [<source>] [--upgrade]
 r42 plan [--out <file.r42plan>]
 r42 apply [<file.r42plan>]
+r42 output
 ```
 
 `init` defaults its source to `.`. It refreshes the active
@@ -785,13 +794,21 @@ only writes a saved Plan file when `--out` is present.
 with one argument it loads that saved Plan. Configuration directories are not
 valid Apply arguments. Both forms require a successfully initialized current
 working directory. Apply prints the immutable Plan JSON to stdout before
-execution starts. After a successful Apply, it prints the output values as a
-second JSON document.
+execution starts. After a successful Apply, it atomically publishes the output
+values and run metadata to `<cwd>/.r42/state.json`, then prints the output values
+as a pretty second JSON document. Apply failure does not replace outputs from
+the previous successful Apply. A subsequent successful Init clears them.
 Progress is always written to stderr. `--ui=auto` selects the Bubble Tea TUI
 when stdin and stderr are interactive terminals of at least 50x12 and falls
 back to the line-oriented REPL renderer for redirected output, CI, `TERM=dumb`,
 or smaller terminals. `--ui=tui` requires those capabilities; `--ui=repl`
 forces stable text events.
+
+`output` accepts no arguments or formatting flags. It reads the values saved by
+the latest successful Apply and writes one pretty JSON object to stdout. It
+writes no diagnostics to stdout, so `r42 output | jq ...` is the stable pipeline
+interface. It fails when the current configuration has no saved outputs. Empty
+but successfully published outputs are represented by `{}`.
 
 Both renderers consume the same in-memory event stream used by the debug
 recorder. The stream exists even without `--debug`; that flag controls sensitive

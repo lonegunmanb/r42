@@ -38,8 +38,14 @@ type fakeRuntime struct {
 	planErr          error
 	applyErr         error
 	initErr          error
+	saveOutputsErr   error
+	readOutputsErr   error
 	applyHook        func()
 	openErr          error
+	savedOutputs     map[string]cty.Value
+	savedRun         string
+	saveOutputsCalls int
+	storedOutputs    []byte
 }
 
 func (f *fakeRuntime) InitProject(
@@ -63,6 +69,23 @@ func (f *fakeRuntime) OpenProject(stateDirectory string) (string, string, error)
 	modules := filepath.Join(stateDirectory, "modules")
 	f.modulesDirectory = modules
 	return config, modules, nil
+}
+
+func (f *fakeRuntime) SaveProjectOutputs(
+	stateDirectory string,
+	runDirectory string,
+	outputs map[string]cty.Value,
+) error {
+	f.stateDirectory = stateDirectory
+	f.savedRun = runDirectory
+	f.savedOutputs = outputs
+	f.saveOutputsCalls++
+	return f.saveOutputsErr
+}
+
+func (f *fakeRuntime) ReadProjectOutputs(stateDirectory string) ([]byte, error) {
+	f.stateDirectory = stateDirectory
+	return f.storedOutputs, f.readOutputsErr
 }
 
 func (f *fakeRuntime) Config(
@@ -119,6 +142,42 @@ func TestCommandInitHelpDescribesSourceAndUpgrade(t *testing.T) {
 	assert.Contains(t, stdout, "--upgrade")
 }
 
+//nolint:paralleltest // t.Chdir verifies the output state path contract.
+func TestCommandOutputPrintsStoredOutputsAsPrettyJSON(t *testing.T) {
+	workingDirectory := t.TempDir()
+	t.Chdir(workingDirectory)
+	runtime := &fakeRuntime{storedOutputs: []byte(`{"nested":{"count":2},"answer":"42"}`)}
+
+	stdout, stderr, err := execute(t, runtime, "output")
+
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"answer":"42","nested":{"count":2}}`, stdout)
+	assert.Contains(t, stdout, "\n  \"answer\": \"42\"")
+	assert.Contains(t, stdout, "\n  \"nested\": {")
+	assert.Empty(t, stderr)
+	assert.Equal(t, filepath.Join(workingDirectory, ".r42"), runtime.stateDirectory)
+}
+
+func TestCommandOutputRejectsArguments(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := execute(t, new(fakeRuntime), "output", "answer")
+
+	require.Error(t, err)
+	assert.Equal(t, cli.ExitUsage, cli.ExitCode(err))
+}
+
+func TestCommandOutputReportsMissingSavedOutputs(t *testing.T) {
+	t.Parallel()
+
+	runtime := &fakeRuntime{readOutputsErr: errors.New("no saved outputs for the current configuration; run r42 apply")}
+	stdout, _, err := execute(t, runtime, "output")
+
+	require.Error(t, err)
+	assert.Empty(t, stdout)
+	assert.ErrorContains(t, err, "run r42 apply")
+}
+
 //nolint:paralleltest // t.Chdir verifies module installation relative to the CLI working directory.
 func TestCommandInitMakesModulesAvailableToDirectoryApply(t *testing.T) {
 	workingDirectory := t.TempDir()
@@ -150,6 +209,12 @@ output "root_module" { value = path.module }
 	assert.Contains(t, stdout, `"42"`)
 	assert.Contains(t, stdout, filepath.ToSlash(filepath.Join(workingDirectory, ".r42", "config")))
 	assert.NoDirExists(t, filepath.Join(root, ".r42"))
+	assert.FileExists(t, filepath.Join(workingDirectory, ".r42", "state.json"))
+	stored, outputStderr, err := execute(t, runtime, "output")
+	require.NoError(t, err)
+	assert.Empty(t, outputStderr)
+	assert.Contains(t, stored, `"answer": "42"`)
+	assert.Contains(t, stored, `"root_module":`)
 }
 
 func (f *fakeRuntime) ConfigFromPlan(
@@ -481,8 +546,8 @@ func TestCommandApplySupportsSavedPlanAndInitializedConfiguration(t *testing.T) 
 			assert.True(t, runtime.configOptions.Debug)
 			assert.True(t, runtime.applyDeadline)
 			assert.Contains(t, stdout, `"nodes"`)
-			assert.Contains(t, stdout, `"answer":"42"`)
-			assert.Less(t, strings.Index(stdout, `"nodes"`), strings.Index(stdout, `"answer":"42"`))
+			assert.Contains(t, stdout, `"answer": "42"`)
+			assert.Less(t, strings.Index(stdout, `"nodes"`), strings.Index(stdout, `"answer": "42"`))
 			assert.NotContains(t, stdout, "close session failed")
 			assert.Contains(t, stderr, "close session failed")
 			assert.Contains(t, stderr, "sensitive")
@@ -513,6 +578,62 @@ func TestCommandApplyPrintsPlanBeforeExecution(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, wantPlan+wantOutputs, stdout.String())
 	assert.Contains(t, stderr.String(), "Research tasks: 0")
+}
+
+//nolint:paralleltest // t.Chdir verifies the Apply state path contract.
+func TestCommandApplyPersistsOutputsBeforePrettyPrinting(t *testing.T) {
+	workingDirectory := t.TempDir()
+	t.Chdir(workingDirectory)
+	runDirectory := filepath.Join(workingDirectory, ".r42", "runs", "run-test")
+	planned, err := plan.NewForRun(t.TempDir(), runDirectory, nil, nil, nil, nil)
+	require.NoError(t, err)
+	runtime := &fakeRuntime{
+		planned: planned,
+		outputs: map[string]cty.Value{
+			"answer": cty.StringVal("42"),
+		},
+	}
+
+	stdout, _, err := execute(t, runtime, "apply")
+
+	require.NoError(t, err)
+	wantPlan, err := plan.Display(planned)
+	require.NoError(t, err)
+	assert.Equal(t, wantPlan+"{\n  \"answer\": \"42\"\n}\n", stdout)
+	assert.Equal(t, filepath.Join(workingDirectory, ".r42"), runtime.stateDirectory)
+	assert.Equal(t, runDirectory, runtime.savedRun)
+	assert.Equal(t, cty.StringVal("42"), runtime.savedOutputs["answer"])
+	assert.Equal(t, 1, runtime.saveOutputsCalls)
+}
+
+func TestCommandApplyDoesNotPersistOutputsAfterFailure(t *testing.T) {
+	t.Parallel()
+
+	runtime := &fakeRuntime{planned: mustPlan(t), applyErr: assert.AnError}
+
+	_, _, err := execute(t, runtime, "apply")
+
+	require.ErrorIs(t, err, assert.AnError)
+	assert.Zero(t, runtime.saveOutputsCalls)
+}
+
+func TestCommandApplyReportsOutputPersistenceFailureBeforeDisplayingOutputs(t *testing.T) {
+	t.Parallel()
+
+	planned := mustPlan(t)
+	wantPlan, err := plan.Display(planned)
+	require.NoError(t, err)
+	runtime := &fakeRuntime{
+		planned:        planned,
+		outputs:        map[string]cty.Value{"answer": cty.StringVal("42")},
+		saveOutputsErr: errors.New("state is read-only"),
+	}
+
+	stdout, _, err := execute(t, runtime, "apply")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "save apply outputs")
+	assert.Equal(t, wantPlan, stdout)
 }
 
 func TestCommandApplyREPLShowsDAGAndLiveProgressOnStderr(t *testing.T) {
@@ -781,6 +902,14 @@ func (*blockingPlanRuntime) OpenProject(stateDirectory string) (string, string, 
 	return filepath.Join(stateDirectory, "config"), filepath.Join(stateDirectory, "modules"), nil
 }
 
+func (*blockingPlanRuntime) SaveProjectOutputs(string, string, map[string]cty.Value) error {
+	return nil
+}
+
+func (*blockingPlanRuntime) ReadProjectOutputs(string) ([]byte, error) {
+	return []byte(`{}`), nil
+}
+
 func (*blockingPlanRuntime) Config(
 	_ string,
 	options executor.ResearchConfigOptions,
@@ -811,6 +940,14 @@ type runtimeFunc struct {
 
 func (runtimeFunc) OpenProject(stateDirectory string) (string, string, error) {
 	return filepath.Join(stateDirectory, "config"), filepath.Join(stateDirectory, "modules"), nil
+}
+
+func (runtimeFunc) SaveProjectOutputs(string, string, map[string]cty.Value) error {
+	return nil
+}
+
+func (runtimeFunc) ReadProjectOutputs(string) ([]byte, error) {
+	return []byte(`{}`), nil
 }
 
 func (r runtimeFunc) Config(

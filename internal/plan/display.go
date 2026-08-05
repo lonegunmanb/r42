@@ -41,6 +41,7 @@ func DisplayValues(values map[string]cty.Value) (string, error) {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(view); err != nil {
 		// note: untested because displayValue returns only JSON-compatible values.
 		return "", fmt.Errorf("encode values display: %w", err)

@@ -19,7 +19,8 @@ var (
 
 type DynamicResearchBlock struct {
 	*golden.BaseBlock
-	Tasks cty.Value `hcl:"tasks"`
+	Serial bool      `hcl:"serial,optional"`
+	Tasks  cty.Value `hcl:"tasks"`
 
 	plannedTasks cty.Value
 }

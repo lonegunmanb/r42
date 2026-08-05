@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -211,11 +212,141 @@ research "dynamic" "followups" {
 	require.ErrorContains(t, err, "forced task failure")
 }
 
+func TestProductionRuntimeRunsDynamicTasksSeriallyWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	directory := writeDynamicConcurrencyFixture(t, true)
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	opener := &dynamicTestOpener{
+		started: make(chan string, 2), blockPrompt: "alpha", release: release,
+	}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() {
+		_, applyErr := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 2})
+		done <- applyErr
+	}()
+
+	assert.Equal(t, "alpha", receiveDynamicTaskStart(t, opener.started))
+	select {
+	case prompt := <-opener.started:
+		require.Failf(t, "second task started early", "started %q before alpha completed", prompt)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	assert.Equal(t, "beta", receiveDynamicTaskStart(t, opener.started))
+	require.NoError(t, <-done)
+}
+
+func TestProductionRuntimeRunsDynamicTasksConcurrentlyByDefault(t *testing.T) {
+	t.Parallel()
+
+	directory := writeDynamicConcurrencyFixture(t, false)
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	opener := &dynamicTestOpener{
+		started: make(chan string, 2), blockPrompt: "alpha", release: release,
+	}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	done := make(chan error, 1)
+	go func() {
+		_, applyErr := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 2})
+		done <- applyErr
+	}()
+
+	started := []string{
+		receiveDynamicTaskStart(t, opener.started),
+		receiveDynamicTaskStart(t, opener.started),
+	}
+	assert.ElementsMatch(t, []string{"alpha", "beta"}, started)
+	close(release)
+	require.NoError(t, <-done)
+}
+
+func TestProductionRuntimeStopsSerialDynamicTasksAfterFailure(t *testing.T) {
+	t.Parallel()
+
+	directory := writeDynamicConcurrencyFixture(t, true)
+	opener := &dynamicTestOpener{started: make(chan string, 2), failPrompt: "alpha"}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 2})
+
+	require.ErrorContains(t, err, "forced task failure")
+	assert.Equal(t, "alpha", receiveDynamicTaskStart(t, opener.started))
+	select {
+	case prompt := <-opener.started:
+		require.Failf(t, "task started after failure", "started %q after alpha failed", prompt)
+	default:
+	}
+}
+
+func writeDynamicConcurrencyFixture(t *testing.T, serial bool) string {
+	t.Helper()
+
+	serialAttribute := ""
+	if serial {
+		serialAttribute = "serial = true"
+	}
+	directory := t.TempDir()
+	source := fmt.Sprintf(`
+research "dynamic" "followups" {
+  %s
+  tasks = [for topic in ["alpha", "beta"] : {
+    model         = "test-model"
+    system_prompt = "Research the assigned topic."
+    prompt        = topic
+    artifacts     = []
+    retry         = null
+    qc            = null
+  }]
+}
+`, serialAttribute)
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(source), 0o600))
+	return directory
+}
+
+func receiveDynamicTaskStart(t *testing.T, started <-chan string) string {
+	t.Helper()
+
+	select {
+	case prompt := <-started:
+		return prompt
+	case <-time.After(time.Second):
+		require.FailNow(t, "dynamic task did not start")
+		return ""
+	}
+}
+
 type dynamicTestOpener struct {
-	mu         sync.Mutex
-	topics     []string
-	prompts    []string
-	failPrompt string
+	mu          sync.Mutex
+	topics      []string
+	prompts     []string
+	failPrompt  string
+	started     chan string
+	blockPrompt string
+	release     <-chan struct{}
 }
 
 func (o *dynamicTestOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
@@ -234,8 +365,14 @@ type dynamicTestSession struct {
 }
 
 func (s *dynamicTestSession) SendAndWait(_ context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if s.opener.started != nil {
+		s.opener.started <- options.Prompt
+	}
 	if options.Prompt == s.opener.failPrompt {
 		return nil, errors.New("forced task failure")
+	}
+	if s.opener.release != nil && options.Prompt == s.opener.blockPrompt {
+		<-s.opener.release
 	}
 	if len(s.config.Tools) > 0 {
 		tool := s.config.Tools[0]

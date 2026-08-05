@@ -185,7 +185,10 @@ func TestPlanAndApplyRunInDifferentProcesses(t *testing.T) {
 	assert.FileExists(t, planPath)
 
 	applyOutput := runE2ECLIProcess(t, workingDirectory, "apply", planPath, "--parallelism", "1")
-	assert.Contains(t, applyOutput, `"summary":"research complete"`)
+	assert.Contains(t, applyOutput, `"summary": "research complete"`)
+	output := runE2ECLIProcess(t, workingDirectory, "output")
+	assert.Contains(t, output, `"summary": "research complete"`)
+	assert.NotContains(t, output, `"nodes"`)
 }
 
 func fixtureDirectory(t *testing.T, name string) string {

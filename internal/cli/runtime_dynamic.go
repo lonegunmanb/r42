@@ -53,7 +53,7 @@ func (f *runtimeFactory) newDynamicResearchBlock(
 	}
 	return &dynamicResearchApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address,
-		factory: f, scope: scope, plans: resolved, tasks: taskValues,
+		factory: f, scope: scope, plans: resolved, tasks: taskValues, serial: planned.Serial,
 	}, nil
 }
 
@@ -113,6 +113,7 @@ type dynamicResearchApplyBlock struct {
 	scope   *r42concurrency.Scope
 	plans   []modulespec.ResearchPlan
 	tasks   []cty.Value
+	serial  bool
 
 	mu       sync.Mutex
 	warnings []error
@@ -146,17 +147,27 @@ func (b *dynamicResearchApplyBlock) Apply() error {
 	}
 
 	results := make([]cty.Value, len(b.plans))
-	group, ctx := errgroup.WithContext(b.ctx)
-	group.SetLimit(b.scope.Limit())
-	for index := range b.plans {
-		group.Go(func() error {
-			return b.scope.WithResearch(ctx, func(taskContext context.Context) error {
+	if b.serial {
+		for index := range b.plans {
+			if err := b.scope.WithResearch(b.ctx, func(taskContext context.Context) error {
 				return b.applyTask(taskContext, addresses[index], index, &results[index])
+			}); err != nil {
+				return err
+			}
+		}
+	} else {
+		group, ctx := errgroup.WithContext(b.ctx)
+		group.SetLimit(b.scope.Limit())
+		for index := range b.plans {
+			group.Go(func() error {
+				return b.scope.WithResearch(ctx, func(taskContext context.Context) error {
+					return b.applyTask(taskContext, addresses[index], index, &results[index])
+				})
 			})
-		})
-	}
-	if err := group.Wait(); err != nil {
-		return err
+		}
+		if err := group.Wait(); err != nil {
+			return err
+		}
 	}
 	for index := range results {
 		results[index] = researchspec.AppliedDynamicTaskValue(b.tasks[index], results[index])

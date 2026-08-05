@@ -4,12 +4,14 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,6 +41,213 @@ output "answer" { value = module.child.answer }
 	assert.NoDirExists(t, filepath.Join(configDirectory, ".git"))
 	assert.NoDirExists(t, filepath.Join(configDirectory, ".r42"))
 	assert.FileExists(t, filepath.Join(modulesDirectory, "child", "main.r42.hcl"))
+}
+
+func TestInitWritesProjectStateForLocalSource(t *testing.T) {
+	t.Parallel()
+
+	source := t.TempDir()
+	stateDirectory := filepath.Join(t.TempDir(), ".r42")
+	writeProjectFile(t, source, "main.r42.hcl", `output "answer" { value = "42" }`)
+
+	require.NoError(t, Init(t.Context(), source, stateDirectory, InitOptions{}))
+
+	encoded, err := os.ReadFile(filepath.Join(stateDirectory, StateFileName))
+	require.NoError(t, err)
+	var state State
+	require.NoError(t, json.Unmarshal(encoded, &state))
+	assert.Equal(t, StateFormatVersion, state.FormatVersion)
+	assert.Equal(t, filepath.ToSlash(source), state.Configuration.Source)
+	assert.Equal(t, filepath.Join(stateDirectory, "config"), state.Configuration.Directory)
+	assert.NotEmpty(t, state.Configuration.SourceKey)
+	assert.False(t, state.Configuration.InitializedAt.IsZero())
+	assert.Nil(t, state.Outputs)
+}
+
+func TestInitWritesRedactedRemoteSourceToProjectState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		source   string
+		expected string
+	}{
+		{
+			name:     "URL credentials and non-ref query are removed",
+			source:   "git::https://user:secret@example.invalid/research.git//r42?ref=v1&token=sensitive",
+			expected: "git::https://example.invalid/research.git//r42?ref=v1",
+		},
+		{
+			name:     "GitHub shorthand preserves ref only",
+			source:   "github.com/acme/research//r42?ref=v2&token=sensitive",
+			expected: "github.com/acme/research//r42?ref=v2",
+		},
+		{
+			name:     "SSH shorthand identity is redacted",
+			source:   "git@github.com:acme/research.git",
+			expected: "<redacted-remote-source>",
+		},
+		{
+			name:     "GitHub shorthand without query is preserved",
+			source:   "github.com/acme/research//r42",
+			expected: "github.com/acme/research//r42",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stateDirectory := filepath.Join(t.TempDir(), ".r42")
+			fetch := func(_ context.Context, _, destination, _ string) error {
+				writeProjectFile(t, destination, "main.r42.hcl", `output "answer" { value = "42" }`)
+				return nil
+			}
+
+			require.NoError(t, Init(t.Context(), tt.source, stateDirectory, InitOptions{Fetch: fetch}))
+
+			encoded, err := os.ReadFile(filepath.Join(stateDirectory, StateFileName))
+			require.NoError(t, err)
+			assert.NotContains(t, string(encoded), "secret")
+			assert.NotContains(t, string(encoded), "sensitive")
+			var state State
+			require.NoError(t, json.Unmarshal(encoded, &state))
+			assert.Equal(t, tt.expected, state.Configuration.Source)
+		})
+	}
+}
+
+func TestProjectStatePersistsOutputsUntilNextInit(t *testing.T) {
+	t.Parallel()
+
+	source := t.TempDir()
+	stateDirectory := filepath.Join(t.TempDir(), ".r42")
+	runDirectory := filepath.Join(stateDirectory, "runs", "run-test")
+	writeProjectFile(t, source, "main.r42.hcl", `output "answer" { value = "42" }`)
+	require.NoError(t, Init(t.Context(), source, stateDirectory, InitOptions{}))
+
+	require.NoError(t, SaveOutputs(stateDirectory, runDirectory, []byte(`{"answer":"42"}`)))
+	outputs, err := ReadOutputs(stateDirectory)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"answer":"42"}`, string(outputs))
+	encoded, err := os.ReadFile(filepath.Join(stateDirectory, StateFileName))
+	require.NoError(t, err)
+	var state State
+	require.NoError(t, json.Unmarshal(encoded, &state))
+	require.NotNil(t, state.Outputs)
+	assert.Equal(t, runDirectory, state.Outputs.RunDirectory)
+	assert.False(t, state.Outputs.AppliedAt.IsZero())
+
+	require.NoError(t, Init(t.Context(), source, stateDirectory, InitOptions{}))
+	_, err = ReadOutputs(stateDirectory)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "no saved outputs for the current configuration")
+}
+
+func TestProjectStateRejectsNonObjectOutputs(t *testing.T) {
+	t.Parallel()
+
+	source := t.TempDir()
+	stateDirectory := filepath.Join(t.TempDir(), ".r42")
+	writeProjectFile(t, source, "main.r42.hcl", `output "answer" { value = "42" }`)
+	require.NoError(t, Init(t.Context(), source, stateDirectory, InitOptions{}))
+
+	tests := []struct {
+		name    string
+		outputs string
+	}{
+		{name: "array", outputs: `[]`},
+		{name: "null", outputs: `null`},
+		{name: "invalid JSON", outputs: `{`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := SaveOutputs(stateDirectory, "run-test", []byte(tt.outputs))
+
+			require.Error(t, err)
+			assert.ErrorContains(t, err, "JSON object")
+		})
+	}
+}
+
+func TestReadOutputsRejectsMissingAndCorruptState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		setup func(*testing.T, string)
+		want  string
+	}{
+		{
+			name: "missing state",
+			want: "run r42 init",
+		},
+		{
+			name: "non-object saved outputs",
+			setup: func(t *testing.T, stateDirectory string) {
+				t.Helper()
+				source := t.TempDir()
+				writeProjectFile(t, source, "main.r42.hcl", `output "answer" { value = "42" }`)
+				require.NoError(t, Init(t.Context(), source, stateDirectory, InitOptions{}))
+				state, statePath, err := readState(stateDirectory)
+				require.NoError(t, err)
+				state.Outputs = &StateOutputs{Values: json.RawMessage(`[]`)}
+				require.NoError(t, writeState(statePath, state))
+			},
+			want: "saved outputs in project state must be a JSON object",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stateDirectory := filepath.Join(t.TempDir(), ".r42")
+			if tt.setup != nil {
+				tt.setup(t, stateDirectory)
+			}
+
+			_, err := ReadOutputs(stateDirectory)
+
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+func TestOpenRejectsStateFromDifferentInitialization(t *testing.T) {
+	t.Parallel()
+
+	source := t.TempDir()
+	stateDirectory := filepath.Join(t.TempDir(), ".r42")
+	writeProjectFile(t, source, "main.r42.hcl", `output "answer" { value = "42" }`)
+	require.NoError(t, Init(t.Context(), source, stateDirectory, InitOptions{}))
+	state, statePath, err := readState(stateDirectory)
+	require.NoError(t, err)
+	state.Configuration.InitializedAt = state.Configuration.InitializedAt.Add(time.Second)
+	require.NoError(t, writeState(statePath, state))
+
+	_, _, err = Open(stateDirectory)
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "project state does not match initialized configuration")
+}
+
+func TestReadOutputsRejectsStateFromDifferentInitialization(t *testing.T) {
+	t.Parallel()
+
+	source := t.TempDir()
+	stateDirectory := filepath.Join(t.TempDir(), ".r42")
+	writeProjectFile(t, source, "main.r42.hcl", `output "answer" { value = "42" }`)
+	require.NoError(t, Init(t.Context(), source, stateDirectory, InitOptions{}))
+	require.NoError(t, SaveOutputs(stateDirectory, "run-test", []byte(`{"answer":"42"}`)))
+	state, statePath, err := readState(stateDirectory)
+	require.NoError(t, err)
+	state.Configuration.InitializedAt = state.Configuration.InitializedAt.Add(time.Second)
+	require.NoError(t, writeState(statePath, state))
+
+	_, err = ReadOutputs(stateDirectory)
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "project state does not match initialized configuration")
 }
 
 func TestInitFetchesRemoteConfigurationSource(t *testing.T) {

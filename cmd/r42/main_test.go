@@ -146,6 +146,14 @@ func (stubRuntime) OpenProject(stateDirectory string) (string, string, error) {
 	return stateDirectory + "/config", stateDirectory + "/modules", nil
 }
 
+func (stubRuntime) SaveProjectOutputs(string, string, map[string]cty.Value) error {
+	return nil
+}
+
+func (stubRuntime) ReadProjectOutputs(string) ([]byte, error) {
+	return []byte(`{}`), nil
+}
+
 func (r stubRuntime) Config(
 	_ string,
 	options executor.ResearchConfigOptions,

@@ -42,6 +42,7 @@ func Init(ctx context.Context, sourceLocation, stateDirectory string, options In
 		return fmt.Errorf("resolve r42 state directory: %w", err)
 	}
 	state = filepath.Clean(state)
+	localSource := localConfigurationSource(sourceLocation)
 	source, sourceKey, cleanupSource, err := resolveConfigurationSource(ctx, sourceLocation, options.Fetch)
 	if err != nil {
 		return err
@@ -88,8 +89,9 @@ func Init(ctx context.Context, sourceLocation, stateDirectory string, options In
 	if err = copyConfiguration(ctx, source, staging); err != nil {
 		return err
 	}
+	initializedAt := time.Now().UTC()
 	encoded, err := json.MarshalIndent(marker{
-		FormatVersion: markerFormatVersion, SourceKey: sourceKey, InitializedAt: time.Now().UTC(),
+		FormatVersion: markerFormatVersion, SourceKey: sourceKey, InitializedAt: initializedAt,
 	}, "", "  ")
 	if err != nil {
 		// note: untested because marker contains only JSON-supported scalar fields.
@@ -101,45 +103,69 @@ func Init(ctx context.Context, sourceLocation, stateDirectory string, options In
 	if err = activateConfiguration(staging, filepath.Join(state, configDirectoryName)); err != nil {
 		return err
 	}
+	stateSource := sourceLocation
+	if localSource {
+		stateSource = source
+	}
+	projectState := newState(state, stateSource, sourceKey, initializedAt, localSource)
+	if err = writeState(filepath.Join(state, StateFileName), projectState); err != nil {
+		return fmt.Errorf("write initialized project state: %w", err)
+	}
 	return removeTransaction(transaction)
 }
 
 func Open(stateDirectory string) (string, string, error) {
+	config, modules, _, err := openProject(stateDirectory)
+	return config, modules, err
+}
+
+func openProject(stateDirectory string) (string, string, State, error) {
 	state, err := filepath.Abs(stateDirectory)
 	if err != nil {
 		// note: untested because filepath.Abs fails only when the process working directory is unavailable.
-		return "", "", fmt.Errorf("resolve r42 state directory: %w", err)
+		return "", "", State{}, fmt.Errorf("resolve r42 state directory: %w", err)
 	}
 	config := filepath.Join(state, configDirectoryName)
 	modules := filepath.Join(state, modulesDirectoryName)
 	interrupted, err := pathExists(filepath.Join(state, transactionFileName))
 	if err != nil {
-		return "", "", notInitializedError(state, fmt.Errorf("inspect initialization transaction: %w", err))
+		return "", "", State{}, notInitializedError(state, fmt.Errorf("inspect initialization transaction: %w", err))
 	}
 	if interrupted {
-		return "", "", fmt.Errorf(
+		return "", "", State{}, fmt.Errorf(
 			"working directory initialization was interrupted at %q; run r42 init <source>", state,
 		)
 	}
 	encoded, err := os.ReadFile(filepath.Join(config, markerFileName))
 	if err != nil {
-		return "", "", notInitializedError(state, err)
+		return "", "", State{}, notInitializedError(state, err)
 	}
 	var initialized marker
 	if err = json.Unmarshal(encoded, &initialized); err != nil {
-		return "", "", notInitializedError(state, err)
+		return "", "", State{}, notInitializedError(state, err)
 	}
 	if initialized.FormatVersion != markerFormatVersion || strings.TrimSpace(initialized.SourceKey) == "" {
-		return "", "", notInitializedError(state, fmt.Errorf("invalid initialization marker"))
+		return "", "", State{}, notInitializedError(state, fmt.Errorf("invalid initialization marker"))
+	}
+	projectState, _, err := readState(state)
+	if err != nil {
+		return "", "", State{}, notInitializedError(state, err)
+	}
+	if projectState.Configuration.SourceKey != initialized.SourceKey ||
+		!projectState.Configuration.InitializedAt.Equal(initialized.InitializedAt) ||
+		filepath.Clean(projectState.Configuration.Directory) != filepath.Clean(config) {
+		return "", "", State{}, notInitializedError(
+			state, fmt.Errorf("project state does not match initialized configuration"),
+		)
 	}
 	info, err := os.Stat(modules)
 	if err != nil || !info.IsDir() {
 		if err == nil {
 			err = fmt.Errorf("modules path is not a directory")
 		}
-		return "", "", notInitializedError(state, err)
+		return "", "", State{}, notInitializedError(state, err)
 	}
-	return config, modules, nil
+	return config, modules, projectState, nil
 }
 
 func copyConfiguration(ctx context.Context, source, destination string) error {

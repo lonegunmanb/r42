@@ -15,11 +15,13 @@ import (
 type DynamicResearchPlan struct {
 	Expression string
 	Providers  map[string]*provider.Config
+	Serial     bool
 }
 
 type dynamicResearchSnapshot struct {
 	Expression string                       `json:"expression"`
 	Providers  map[string]*providerSnapshot `json:"providers,omitempty"`
+	Serial     bool                         `json:"serial,omitempty"`
 }
 
 func EncodeDynamicResearchPlan(
@@ -54,7 +56,9 @@ func EncodeDynamicResearchPlan(
 			}
 		}
 	}
-	encoded, err := json.Marshal(dynamicResearchSnapshot{Expression: expression, Providers: providers})
+	encoded, err := json.Marshal(dynamicResearchSnapshot{
+		Expression: expression, Providers: providers, Serial: block.Serial,
+	})
 	if err != nil {
 		return cty.NilVal, fmt.Errorf("encode dynamic research plan: %w", err)
 	}
@@ -88,6 +92,7 @@ func DecodeDynamicResearchPlan(value cty.Value) (DynamicResearchPlan, error) {
 	return DynamicResearchPlan{
 		Expression: snapshot.Expression,
 		Providers:  restoreProviders(snapshot.Providers),
+		Serial:     snapshot.Serial,
 	}, nil
 }
 

@@ -80,6 +80,22 @@ func (*Engine) OpenProject(stateDirectory string) (string, string, error) {
 	return project.Open(stateDirectory)
 }
 
+func (*Engine) SaveProjectOutputs(
+	stateDirectory string,
+	runDirectory string,
+	outputs map[string]cty.Value,
+) error {
+	display, err := plan.DisplayValues(outputs)
+	if err != nil {
+		return fmt.Errorf("encode project outputs: %w", err)
+	}
+	return project.SaveOutputs(stateDirectory, runDirectory, []byte(display))
+}
+
+func (*Engine) ReadProjectOutputs(stateDirectory string) ([]byte, error) {
+	return project.ReadOutputs(stateDirectory)
+}
+
 func (e *Engine) Config(
 	directory string,
 	options executor.ResearchConfigOptions,

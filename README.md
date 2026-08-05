@@ -187,6 +187,9 @@ r42 apply research.r42plan
 
 # Or plan and apply the initialized snapshot directly
 r42 apply
+
+# Read the outputs saved by the latest successful Apply
+r42 output
 ```
 
 `r42 apply` is the convenience form that plans `<cwd>/.r42/config`, prints the
@@ -216,8 +219,11 @@ following. Press `q` twice to cancel a run. The REPL renderer prints the initial
 DAG, research activity, tool transitions, and parent or nested module
 `START`/`DONE`/`FAILED` transitions.
 
-Plan JSON and final outputs remain on stdout. Both progress renderers write to
-stderr, so piping stdout remains machine-safe. Use `--ui=repl` to force stable
+Apply prints the pretty Plan JSON before execution and pretty outputs JSON after
+success. These are two consecutive JSON documents intended for immediate human
+inspection. Both progress renderers write to stderr. For a single JSON document
+that is safe to pipe, use `r42 output`; for example,
+`r42 output | jq -r '.report_path'`. Use `--ui=repl` to force stable
 line-oriented progress or `--ui=tui` to require an interactive terminal.
 
 ## Variables, locals, and outputs
@@ -229,8 +235,9 @@ values during Plan. A variable without a default must be supplied by the caller.
 
 `locals` gives names to expressions derived inside the configuration. Local
 values are read as `local.<name>` and are not caller-settable inputs. An `output`
-publishes a value after Apply. Root outputs are printed by the CLI; module
-outputs form the module's public interface and are read by its caller as
+publishes a value after Apply. Root outputs are printed after Apply and saved in
+`<cwd>/.r42/state.json`; `r42 output` prints the saved values as one JSON object.
+Module outputs form the module's public interface and are read by its caller as
 `module.<module_name>.<output_name>`.
 
 ```hcl
@@ -343,6 +350,12 @@ must be wholly known when the block starts Apply. Empty tasks succeed
 immediately. Materialized tasks run concurrently under the same global and
 module parallelism budgets as static research; one exhausted task failure fails
 the dynamic block.
+
+Set the optional block-level `serial = true` attribute to run the materialized
+tasks one at a time in their original list order. Its default is `false`. This
+setting prevents tasks within that dynamic block from overlapping; it does not
+serialize the whole DAG, so other ready research blocks may still run under the
+shared parallelism budget.
 
 All task objects remain available through `research.dynamic.<name>.tasks` and
 retain their declared fields plus resolved `artifacts` and, when a terminate
@@ -765,8 +778,12 @@ concrete go-getter locator.
 The same source rules apply to each module's literal `source` attribute. Modules
 are installed under `<cwd>/.r42/modules`. Remote root sources are fetched into a
 private staging directory before activation, so a failed download leaves the
-current initialized project available. Initialization metadata stores only a
-SHA-256 source identity, not the potentially credential-bearing source URL.
+current initialized project available. `<cwd>/.r42/state.json` records the
+active local source path or a sanitized remote locator, the active snapshot
+directory, and the outputs from the latest successful Apply. Its source identity
+is always a SHA-256 value; URL credentials, fragments, and query parameters
+other than `ref` are not persisted. A successful Init replaces this state and
+invalidates outputs from the previous configuration.
 Plan and unsaved-plan Apply accept no configuration directory and read only the
 initialized snapshot. Root `path.module` is therefore `<cwd>/.r42/config`;
 module blocks use their canonical installed directories. `cwd()` remains the

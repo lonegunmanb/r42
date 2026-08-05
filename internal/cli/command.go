@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,6 +31,8 @@ const (
 type Runtime interface {
 	Config(string, executor.ResearchConfigOptions) (*executor.ResearchConfig, error)
 	ConfigFromPlan(*plan.Plan, executor.ResearchConfigOptions) (*executor.ResearchConfig, error)
+	SaveProjectOutputs(string, string, map[string]cty.Value) error
+	ReadProjectOutputs(string) ([]byte, error)
 }
 
 type projectInitializer interface {
@@ -68,7 +72,7 @@ func NewCommand(runtime Runtime) *cobra.Command {
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return &usageError{err: err}
 	})
-	root.AddCommand(newInitCommand(runtime), newPlanCommand(runtime), newApplyCommand(runtime))
+	root.AddCommand(newInitCommand(runtime), newPlanCommand(runtime), newApplyCommand(runtime), newOutputCommand(runtime))
 	return root
 }
 
@@ -275,7 +279,17 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 			if closeErr != nil {
 				return closeErr
 			}
-			return writeOutputs(command.OutOrStdout(), config.Outputs())
+			outputs := config.Outputs()
+			stateDirectory, stateErr := workingStateDirectory()
+			if stateErr != nil {
+				return stateErr
+			}
+			if stateErr = runtime.SaveProjectOutputs(
+				stateDirectory, planned.SavedPlan().RunDirectory(), outputs,
+			); stateErr != nil {
+				return fmt.Errorf("save apply outputs: %w", stateErr)
+			}
+			return writeOutputs(command.OutOrStdout(), outputs)
 		},
 	}
 	command.Flags().IntVar(&parallelism, "parallelism", parallelism, "maximum concurrent research blocks")
@@ -285,6 +299,28 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 	command.Flags().StringArrayVar(&variableFiles, "var-file", nil, "load Golden input variables from a file")
 	command.Flags().StringVar(&uiMode, "ui", uiMode, "run progress UI: auto, tui, or repl")
 	return command
+}
+
+func newOutputCommand(runtime Runtime) *cobra.Command {
+	return &cobra.Command{
+		Use:   "output",
+		Short: "Print the saved outputs from the latest successful apply",
+		Args:  usageArgs(cobra.NoArgs),
+		RunE: func(command *cobra.Command, _ []string) error {
+			if runtime == nil {
+				return fmt.Errorf("runtime is required")
+			}
+			stateDirectory, err := workingStateDirectory()
+			if err != nil {
+				return err
+			}
+			outputs, err := runtime.ReadProjectOutputs(stateDirectory)
+			if err != nil {
+				return fmt.Errorf("read saved outputs: %w", err)
+			}
+			return writePrettyJSON(command.OutOrStdout(), outputs)
+		},
+	}
 }
 
 func terminalCapabilities(input io.Reader, output io.Writer) runui.Terminal {
@@ -452,4 +488,26 @@ func writeOutputs(writer io.Writer, outputs map[string]cty.Value) error {
 	}
 	_, err = io.WriteString(writer, display)
 	return err
+}
+
+func writePrettyJSON(writer io.Writer, encoded []byte) error {
+	encoded = bytes.TrimSpace(encoded)
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return fmt.Errorf("decode saved outputs: %w", err)
+	}
+	var display bytes.Buffer
+	encoder := json.NewEncoder(&display)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(value); err != nil {
+		// note: untested because decoded JSON contains only JSON-supported values.
+		return fmt.Errorf("encode saved outputs: %w", err)
+	}
+	if _, err := writer.Write(display.Bytes()); err != nil {
+		return fmt.Errorf("write saved outputs: %w", err)
+	}
+	return nil
 }
