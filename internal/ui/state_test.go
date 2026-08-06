@@ -12,12 +12,13 @@ import (
 
 func TestProjectorBuildsExpandedResearchDAGAndTracksActivity(t *testing.T) {
 	t.Parallel()
+	runDirectory := testRunDirectory(t, "run-42")
 
 	child, err := plan.NewWithContextAndLocals("child", []plan.NodeSpec{
 		{Address: "research.static.collect", Kind: "research"},
 	}, nil, nil, nil)
 	require.NoError(t, err)
-	planned, err := plan.NewForRun("root", "D:/run-42", []plan.NodeSpec{
+	planned, err := plan.NewForRun("root", runDirectory, []plan.NodeSpec{
 		{Address: "research.static.frame", Kind: "research"},
 		{
 			Address: "module.sources", Kind: "module",
@@ -43,7 +44,7 @@ func TestProjectorBuildsExpandedResearchDAGAndTracksActivity(t *testing.T) {
 	})
 
 	snapshot := projector.Snapshot()
-	assert.Equal(t, "D:/run-42", snapshot.RunDirectory)
+	assert.Equal(t, runDirectory, snapshot.RunDirectory)
 	assert.Equal(t, 3, snapshot.Research.Total)
 	assert.Equal(t, 1, snapshot.Research.Running)
 	node, ok := snapshot.Node("module.sources.research.static.collect")

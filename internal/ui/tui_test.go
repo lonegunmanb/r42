@@ -19,7 +19,13 @@ import (
 func TestTUIModelShowsRunDAGCurrentActivityAndTokenTotal(t *testing.T) {
 	t.Parallel()
 
-	projector := newTUIProjector(t)
+	runDirectory := testRunDirectory(t, "run-42")
+	planned, err := plan.NewForRun("root", runDirectory, []plan.NodeSpec{
+		{Address: "research.static.collect", Kind: "research"},
+		{Address: "research.static.summary", Kind: "research", Dependencies: []string{"research.static.collect"}},
+	}, nil, nil, nil)
+	require.NoError(t, err)
+	projector := ui.NewProjector(planned)
 	projector.Observe(debuglog.Event{
 		Kind: debuglog.EventLifecycle, Action: "block.apply", Status: debuglog.StatusStarted,
 		BlockAddress: "research.static.collect", BlockType: "research", Sequence: 1,
@@ -38,7 +44,7 @@ func TestTUIModelShowsRunDAGCurrentActivityAndTokenTotal(t *testing.T) {
 
 	view := model.View()
 
-	assert.Contains(t, view, "Run: D:/run-42")
+	assert.Contains(t, view, "Run: "+runDirectory)
 	assert.Contains(t, view, "Tasks: 0/2 done")
 	assert.Contains(t, view, "Tokens: 125")
 	assert.Contains(t, view, "DAG *")
@@ -49,8 +55,9 @@ func TestTUIModelShowsRunDAGCurrentActivityAndTokenTotal(t *testing.T) {
 
 func TestTUIModelAdjustsResearchTotalForMaterializedDynamicTasks(t *testing.T) {
 	t.Parallel()
+	runDirectory := testRunDirectory(t, "run-42")
 
-	planned, err := plan.NewForRun("root", "D:/run-42", []plan.NodeSpec{
+	planned, err := plan.NewForRun("root", runDirectory, []plan.NodeSpec{
 		{Address: "research.dynamic.followups", Kind: "research"},
 		{Address: "research.static.summary", Kind: "research"},
 	}, nil, nil, nil)
@@ -127,12 +134,13 @@ func TestTUIModelWrapsStreamingContentWithinDetailPanel(t *testing.T) {
 
 func TestTUIModelCollapsesModuleAndConfirmsCancellation(t *testing.T) {
 	t.Parallel()
+	runDirectory := testRunDirectory(t, "run-module")
 
 	child, err := plan.NewWithContextAndLocals("child", []plan.NodeSpec{
 		{Address: "research.static.child", Kind: "research"},
 	}, nil, nil, nil)
 	require.NoError(t, err)
-	planned, err := plan.NewForRun("root", "D:/run-module", []plan.NodeSpec{
+	planned, err := plan.NewForRun("root", runDirectory, []plan.NodeSpec{
 		{Address: "module.sources", Kind: "module", Module: &plan.ModuleSpec{Plan: child}},
 		{Address: "research.static.summary", Kind: "research", Dependencies: []string{"module.sources"}},
 	}, nil, nil, nil)
@@ -194,6 +202,7 @@ func TestRunTUIExecutesApplyAndExitsWhenTheRunCompletes(t *testing.T) {
 
 func TestTUIModelKeepsSelectedNodeVisibleInLongDAG(t *testing.T) {
 	t.Parallel()
+	runDirectory := testRunDirectory(t, "run-long")
 
 	nodes := make([]plan.NodeSpec, 20)
 	for index := range nodes {
@@ -201,7 +210,7 @@ func TestTUIModelKeepsSelectedNodeVisibleInLongDAG(t *testing.T) {
 			Address: fmt.Sprintf("research.static.task_%02d", index+1), Kind: "research",
 		}
 	}
-	planned, err := plan.NewForRun("root", "D:/run-long", nodes, nil, nil, nil)
+	planned, err := plan.NewForRun("root", runDirectory, nodes, nil, nil, nil)
 	require.NoError(t, err)
 	model := resizeTUI(t, ui.NewTUIModel(ui.NewProjector(planned), nil), 70, 12)
 
@@ -315,12 +324,13 @@ func TestTUIModelRewrapsDetailAfterWindowResize(t *testing.T) {
 
 func TestTUIModelReportsModuleFailureInOverallStatus(t *testing.T) {
 	t.Parallel()
+	runDirectory := testRunDirectory(t, "run-module")
 
 	child, err := plan.NewWithContextAndLocals("child", []plan.NodeSpec{
 		{Address: "research.static.child", Kind: "research"},
 	}, nil, nil, nil)
 	require.NoError(t, err)
-	planned, err := plan.NewForRun("root", "D:/run-module", []plan.NodeSpec{
+	planned, err := plan.NewForRun("root", runDirectory, []plan.NodeSpec{
 		{Address: "module.sources", Kind: "module", Module: &plan.ModuleSpec{Plan: child}},
 	}, nil, nil, nil)
 	require.NoError(t, err)
@@ -339,7 +349,8 @@ func TestTUIModelReportsModuleFailureInOverallStatus(t *testing.T) {
 
 func newTUIProjector(t *testing.T) *ui.Projector {
 	t.Helper()
-	planned, err := plan.NewForRun("root", "D:/run-42", []plan.NodeSpec{
+	runDirectory := testRunDirectory(t, "run-42")
+	planned, err := plan.NewForRun("root", runDirectory, []plan.NodeSpec{
 		{Address: "research.static.collect", Kind: "research"},
 		{Address: "research.static.summary", Kind: "research", Dependencies: []string{"research.static.collect"}},
 	}, nil, nil, nil)

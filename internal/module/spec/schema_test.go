@@ -201,7 +201,7 @@ output "topic" { value = module.child.topic }
 
 func TestResearchConfigDelegatesRootVariablesToGolden(t *testing.T) {
 	registerSchemas()
-	t.Setenv("R42_VAR_TOPIC", "from-env")
+	t.Setenv("R42_VAR_topic", "from-env")
 	root := t.TempDir()
 	writeR42(t, root, "main.r42.hcl", `
 variable "topic" {
@@ -217,7 +217,7 @@ output "topic" { value = var.topic }
 
 func TestChildVariableDefaultIsIsolatedFromGoldenRootSources(t *testing.T) {
 	registerSchemas()
-	t.Setenv("R42_VAR_TOPIC", "from-env")
+	t.Setenv("R42_VAR_topic", "from-env")
 	root := t.TempDir()
 	child := filepath.Join(root, "child")
 	require.NoError(t, os.Mkdir(child, 0o755))

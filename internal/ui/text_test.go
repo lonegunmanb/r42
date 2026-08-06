@@ -13,8 +13,9 @@ import (
 
 func TestTextRendererShowsRunDAGAndMeaningfulTransitions(t *testing.T) {
 	t.Parallel()
+	runDirectory := testRunDirectory(t, "run-42")
 
-	planned, err := plan.NewForRun("root", "D:/run-42", []plan.NodeSpec{
+	planned, err := plan.NewForRun("root", runDirectory, []plan.NodeSpec{
 		{Address: "research.static.collect", Kind: "research"},
 		{Address: "research.static.summary", Kind: "research", Dependencies: []string{"research.static.collect"}},
 	}, nil, nil, nil)
@@ -44,7 +45,7 @@ func TestTextRendererShowsRunDAGAndMeaningfulTransitions(t *testing.T) {
 	})
 
 	text := output.String()
-	assert.Contains(t, text, "Run: D:/run-42")
+	assert.Contains(t, text, "Run: "+runDirectory)
 	assert.Contains(t, text, "Research tasks: 2")
 	assert.Contains(t, text, "research.static.collect -> research.static.summary")
 	assert.Contains(t, text, "[1/2] START research.static.collect")
@@ -55,8 +56,9 @@ func TestTextRendererShowsRunDAGAndMeaningfulTransitions(t *testing.T) {
 
 func TestTextRendererShowsMaterializedDynamicTasksWithoutZeroOrdinal(t *testing.T) {
 	t.Parallel()
+	runDirectory := testRunDirectory(t, "run-42")
 
-	planned, err := plan.NewForRun("root", "D:/run-42", []plan.NodeSpec{
+	planned, err := plan.NewForRun("root", runDirectory, []plan.NodeSpec{
 		{Address: "research.dynamic.followups", Kind: "research"},
 	}, nil, nil, nil)
 	require.NoError(t, err)
@@ -88,8 +90,9 @@ func TestTextRendererShowsMaterializedDynamicTasksWithoutZeroOrdinal(t *testing.
 
 func TestTextRendererRemovesTerminalControlSequencesFromModelContent(t *testing.T) {
 	t.Parallel()
+	runDirectory := testRunDirectory(t, "run-42")
 
-	planned, err := plan.NewForRun("root", "D:/run-42", []plan.NodeSpec{
+	planned, err := plan.NewForRun("root", runDirectory, []plan.NodeSpec{
 		{Address: "research.static.collect", Kind: "research"},
 	}, nil, nil, nil)
 	require.NoError(t, err)
@@ -113,6 +116,7 @@ func TestTextRendererRemovesTerminalControlSequencesFromModelContent(t *testing.
 
 func TestTextRendererShowsNestedModuleLifecycleTransitions(t *testing.T) {
 	t.Parallel()
+	runDirectory := testRunDirectory(t, "run-module")
 
 	grandchild, err := plan.NewWithContextAndLocals("grandchild", []plan.NodeSpec{
 		{Address: "research.static.fetch", Kind: "research"},
@@ -122,7 +126,7 @@ func TestTextRendererShowsNestedModuleLifecycleTransitions(t *testing.T) {
 		{Address: "module.fetchers", Kind: "module", Module: &plan.ModuleSpec{Plan: grandchild}},
 	}, nil, nil, nil)
 	require.NoError(t, err)
-	planned, err := plan.NewForRun("root", "D:/run-module", []plan.NodeSpec{
+	planned, err := plan.NewForRun("root", runDirectory, []plan.NodeSpec{
 		{Address: "module.sources", Kind: "module", Module: &plan.ModuleSpec{Plan: child}},
 	}, nil, nil, nil)
 	require.NoError(t, err)
