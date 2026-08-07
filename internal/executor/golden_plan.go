@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
+	defaults "github.com/lonegunmanb/go-defaults"
 	"github.com/lonegunmanb/golden"
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
 	"github.com/lonegunmanb/r42/internal/config"
@@ -352,6 +353,8 @@ var registerNativeResearchBlocks sync.Once
 
 func registerResearchBlocks() {
 	registerNativeResearchBlocks.Do(func() {
+		// go-defaults v1.4.0 lazily initializes its shared filler without synchronization.
+		defaults.SetDefaults(&struct{}{})
 		golden.RegisterBlock(new(provider.ModelProviderBlock))
 		golden.RegisterBlock(new(toolspec.GoToolBlock))
 		golden.RegisterBlock(new(toolspec.ExternalToolBlock))

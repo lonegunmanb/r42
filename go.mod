@@ -10,6 +10,7 @@ require (
 	github.com/github/copilot-sdk/go v1.0.8
 	github.com/hashicorp/go-getter/v2 v2.2.3
 	github.com/hashicorp/hcl/v2 v2.24.0
+	github.com/lonegunmanb/go-defaults v1.4.0
 	github.com/lonegunmanb/golden v0.0.0-20260804110449-b79b3b09385c
 	github.com/lonegunmanb/hclfuncs v0.12.0
 	github.com/spf13/cobra v1.10.1
@@ -76,7 +77,6 @@ require (
 	github.com/jmespath/go-jmespath v0.4.0 // indirect
 	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
-	github.com/lonegunmanb/go-defaults v1.4.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
