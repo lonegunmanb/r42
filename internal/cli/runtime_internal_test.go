@@ -3,12 +3,15 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	sdk "github.com/github/copilot-sdk/go"
 	"github.com/lonegunmanb/r42/internal/copilot"
@@ -17,6 +20,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/qc"
 	researchruntime "github.com/lonegunmanb/r42/internal/research/runtime"
+	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
@@ -590,6 +594,258 @@ func TestRecordingSessionWaitStateIsScopedToEachSend(t *testing.T) {
 	assert.Empty(t, waits[1].LastEvent)
 }
 
+func TestRecordingSessionAbortsMissingIdleAndKeepsRecoveredSession(t *testing.T) {
+	t.Parallel()
+
+	terminal := researchruntime.NewTerminalRecorder()
+	session := newRecoveringInternalSession(func(handler sdk.SessionEventHandler) error {
+		if err := terminal.Record(corespec.ToolResponse[string]{Accepted: true}); err != nil {
+			return err
+		}
+		handler(sdk.SessionEvent{ID: "tool-start", Data: &sdk.ToolExecutionStartData{
+			ToolCallID: "finish-1", ToolName: "finish",
+		}})
+		handler(sdk.SessionEvent{ID: "tool-complete", Data: &sdk.ToolExecutionCompleteData{
+			ToolCallID: "finish-1", Success: true,
+		}})
+		handler(sdk.SessionEvent{ID: "subagent-start", Data: &sdk.SubagentStartedData{
+			ToolCallID: "agent-1", AgentName: "reviewer",
+		}})
+		handler(sdk.SessionEvent{ID: "subagent-complete", Data: &sdk.SubagentCompletedData{
+			ToolCallID: "agent-1", AgentName: "reviewer",
+		}})
+		handler(sdk.SessionEvent{ID: "assistant-idle", Data: &sdk.AssistantIdleData{}})
+		return nil
+	})
+	session.idleOnAbort = true
+	recorder, err := debuglog.NewRecorder(t.TempDir(), false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+	recorded := &recordingSession{
+		Session: session, recorder: recorder, address: "research.static.source", kind: debuglog.SessionResearch,
+		completion: terminal, idleGrace: 5 * time.Millisecond, abortGrace: 20 * time.Millisecond,
+	}
+
+	_, err = recorded.SendAndWait(t.Context(), sdk.MessageOptions{Prompt: "research"})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, session.abortCalls)
+	assert.Zero(t, session.resumeCalls)
+}
+
+func TestRecordingSessionResumesSameConversationWhenAbortDoesNotRestoreIdle(t *testing.T) {
+	t.Parallel()
+
+	terminal := researchruntime.NewTerminalRecorder()
+	session := newRecoveringInternalSession(func(handler sdk.SessionEventHandler) error {
+		if err := terminal.Record(corespec.ToolResponse[string]{Accepted: true}); err != nil {
+			return err
+		}
+		handler(sdk.SessionEvent{ID: "assistant-message", Data: &sdk.AssistantMessageData{Content: "complete"}})
+		handler(sdk.SessionEvent{ID: "assistant-idle", Data: &sdk.AssistantIdleData{}})
+		return nil
+	})
+	recorder, err := debuglog.NewRecorder(t.TempDir(), false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+	recorded := &recordingSession{
+		Session: session, recorder: recorder, address: "research.static.source", kind: debuglog.SessionResearch,
+		completion: terminal, idleGrace: 5 * time.Millisecond, abortGrace: 5 * time.Millisecond,
+	}
+
+	result, err := recorded.SendAndWait(t.Context(), sdk.MessageOptions{Prompt: "research"})
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "assistant-message", result.ID)
+	assert.Equal(t, 1, session.abortCalls)
+	assert.Equal(t, 1, session.resumeCalls)
+}
+
+func TestRecordingSessionFailsWhenMissingIdleCannotBeResumed(t *testing.T) {
+	t.Parallel()
+
+	resumeErr := errors.New("resume rejected")
+	terminal := researchruntime.NewTerminalRecorder()
+	session := newRecoveringInternalSession(func(handler sdk.SessionEventHandler) error {
+		if err := terminal.Record(corespec.ToolResponse[string]{Accepted: true}); err != nil {
+			return err
+		}
+		handler(sdk.SessionEvent{ID: "subagent-start", Data: &sdk.SubagentStartedData{
+			ToolCallID: "agent-1", AgentName: "reviewer",
+		}})
+		handler(sdk.SessionEvent{ID: "subagent-failed", Data: &sdk.SubagentFailedData{
+			ToolCallID: "agent-1", AgentName: "reviewer", Error: "review failed",
+		}})
+		handler(sdk.SessionEvent{ID: "assistant-idle", Data: &sdk.AssistantIdleData{}})
+		return nil
+	})
+	session.resumeErr = resumeErr
+	recorder, err := debuglog.NewRecorder(t.TempDir(), false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+	recorded := &recordingSession{
+		Session: session, recorder: recorder, address: "research.static.source", kind: debuglog.SessionResearch,
+		completion: terminal, idleGrace: 5 * time.Millisecond, abortGrace: 5 * time.Millisecond,
+	}
+
+	_, err = recorded.SendAndWait(t.Context(), sdk.MessageOptions{Prompt: "research"})
+
+	require.ErrorIs(t, err, resumeErr)
+	require.ErrorContains(t, err, "resume session after missing session.idle")
+	assert.Equal(t, 1, session.abortCalls)
+	assert.Equal(t, 1, session.resumeCalls)
+}
+
+func TestRecordingSessionResumesWhenAbortFails(t *testing.T) {
+	t.Parallel()
+
+	abortErr := errors.New("abort rejected")
+	terminal := researchruntime.NewTerminalRecorder()
+	session := newRecoveringInternalSession(func(handler sdk.SessionEventHandler) error {
+		if err := terminal.Record(corespec.ToolResponse[string]{Accepted: true}); err != nil {
+			return err
+		}
+		handler(sdk.SessionEvent{ID: "assistant-idle", Data: &sdk.AssistantIdleData{}})
+		return nil
+	})
+	session.abortErr = abortErr
+	recorder, err := debuglog.NewRecorder(t.TempDir(), false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+	recorded := &recordingSession{
+		Session: session, recorder: recorder, address: "research.static.source", kind: debuglog.SessionResearch,
+		completion: terminal, idleGrace: 5 * time.Millisecond, abortGrace: 5 * time.Millisecond,
+	}
+
+	_, err = recorded.SendAndWait(t.Context(), sdk.MessageOptions{Prompt: "research"})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, session.abortCalls)
+	assert.Equal(t, 1, session.resumeCalls)
+}
+
+func TestRecordingSessionResumesWhenAbandonedWaiterIgnoresCancellation(t *testing.T) {
+	t.Parallel()
+
+	terminal := researchruntime.NewTerminalRecorder()
+	session := newRecoveringInternalSession(func(handler sdk.SessionEventHandler) error {
+		if err := terminal.Record(corespec.ToolResponse[string]{Accepted: true}); err != nil {
+			return err
+		}
+		handler(sdk.SessionEvent{ID: "assistant-message", Data: &sdk.AssistantMessageData{Content: "complete"}})
+		handler(sdk.SessionEvent{ID: "assistant-idle", Data: &sdk.AssistantIdleData{}})
+		return nil
+	})
+	session.ignoreCancellation = true
+	recorder, err := debuglog.NewRecorder(t.TempDir(), false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+	recorded := &recordingSession{
+		Session: session, recorder: recorder, address: "research.static.source", kind: debuglog.SessionResearch,
+		completion: terminal, idleGrace: 5 * time.Millisecond, abortGrace: 5 * time.Millisecond,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, sendErr := recorded.SendAndWait(t.Context(), sdk.MessageOptions{Prompt: "research"})
+		done <- sendErr
+	}()
+
+	select {
+	case <-session.resumed:
+	case <-time.After(250 * time.Millisecond):
+		session.releaseSend()
+		require.FailNow(t, "resume was not attempted while the old waiter ignored cancellation")
+	}
+	require.NoError(t, <-done)
+	assert.Equal(t, 1, session.abortCalls)
+	assert.Equal(t, 1, session.resumeCalls)
+}
+
+func TestRecordingSessionDoesNotRecoverBeforeProtocolSettlement(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		settle bool
+		events []sdk.SessionEvent
+	}{
+		{
+			name:   "protocol result missing",
+			events: []sdk.SessionEvent{{ID: "assistant-idle", Data: &sdk.AssistantIdleData{}}},
+		},
+		{
+			name:   "tool remains active",
+			settle: true,
+			events: []sdk.SessionEvent{
+				{ID: "tool-start", Data: &sdk.ToolExecutionStartData{ToolCallID: "tool-1", ToolName: "fetch"}},
+				{ID: "assistant-idle", Data: &sdk.AssistantIdleData{}},
+			},
+		},
+		{
+			name:   "subagent remains active",
+			settle: true,
+			events: []sdk.SessionEvent{
+				{ID: "subagent-start", Data: &sdk.SubagentStartedData{ToolCallID: "agent-1", AgentName: "researcher"}},
+				{ID: "assistant-idle", Data: &sdk.AssistantIdleData{}},
+			},
+		},
+		{
+			name:   "one of repeated subagents remains active",
+			settle: true,
+			events: []sdk.SessionEvent{
+				{ID: "subagent-start-1", Data: &sdk.SubagentStartedData{ToolCallID: "agent-1", AgentName: "researcher"}},
+				{ID: "subagent-start-2", Data: &sdk.SubagentStartedData{ToolCallID: "agent-1", AgentName: "researcher"}},
+				{ID: "subagent-complete", Data: &sdk.SubagentCompletedData{ToolCallID: "agent-1", AgentName: "researcher"}},
+				{ID: "assistant-idle", Data: &sdk.AssistantIdleData{}},
+			},
+		},
+		{
+			name:   "session idle was observed",
+			settle: true,
+			events: []sdk.SessionEvent{
+				{ID: "assistant-idle", Data: &sdk.AssistantIdleData{}},
+				{ID: "session-idle", Data: &sdk.SessionIdleData{}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			terminal := researchruntime.NewTerminalRecorder()
+			session := newRecoveringInternalSession(func(handler sdk.SessionEventHandler) error {
+				if tt.settle {
+					if err := terminal.Record(corespec.ToolResponse[string]{Accepted: true}); err != nil {
+						return err
+					}
+				}
+				for _, event := range tt.events {
+					handler(event)
+				}
+				return nil
+			})
+			recorder, err := debuglog.NewRecorder(t.TempDir(), false)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+			recorded := &recordingSession{
+				Session: session, recorder: recorder, address: "research.static.source", kind: debuglog.SessionResearch,
+				completion: terminal, idleGrace: time.Millisecond, abortGrace: time.Millisecond,
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+			defer cancel()
+
+			_, err = recorded.SendAndWait(ctx, sdk.MessageOptions{Prompt: "research"})
+
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+			assert.Zero(t, session.abortCalls)
+			assert.Zero(t, session.resumeCalls)
+		})
+	}
+}
+
 func TestRecordingSessionPublishesNormalizedStreamingAndUsageEvents(t *testing.T) {
 	t.Parallel()
 
@@ -859,6 +1115,78 @@ type fakeInternalSession struct {
 	beforeEvents     func()
 	unsubscribeCalls int
 }
+
+type recoveringInternalSession struct {
+	onSend             func(sdk.SessionEventHandler) error
+	handler            sdk.SessionEventHandler
+	release            chan struct{}
+	releaseOnce        sync.Once
+	resumed            chan struct{}
+	resumeOnce         sync.Once
+	abortCalls         int
+	resumeCalls        int
+	idleOnAbort        bool
+	ignoreCancellation bool
+	abortErr           error
+	resumeErr          error
+}
+
+func newRecoveringInternalSession(onSend func(sdk.SessionEventHandler) error) *recoveringInternalSession {
+	return &recoveringInternalSession{
+		onSend: onSend, release: make(chan struct{}), resumed: make(chan struct{}),
+	}
+}
+
+func (s *recoveringInternalSession) SendAndWait(
+	ctx context.Context,
+	_ sdk.MessageOptions,
+) (*sdk.SessionEvent, error) {
+	if s.onSend != nil {
+		if err := s.onSend(s.handler); err != nil {
+			return nil, err
+		}
+	}
+	select {
+	case <-s.release:
+		return &sdk.SessionEvent{ID: "assistant-final", Data: &sdk.AssistantMessageData{Content: "complete"}}, nil
+	case <-ctx.Done():
+		if s.ignoreCancellation {
+			<-s.release
+			return &sdk.SessionEvent{ID: "assistant-final", Data: &sdk.AssistantMessageData{Content: "complete"}}, nil
+		}
+		return nil, fmt.Errorf("waiting for session.idle: %w", ctx.Err())
+	}
+}
+
+func (s *recoveringInternalSession) On(handler sdk.SessionEventHandler) func() {
+	s.handler = handler
+	return func() {}
+}
+
+func (s *recoveringInternalSession) Abort(context.Context) error {
+	s.abortCalls++
+	if s.abortErr != nil {
+		return s.abortErr
+	}
+	if s.idleOnAbort {
+		s.handler(sdk.SessionEvent{ID: "session-idle", Data: &sdk.SessionIdleData{}})
+		s.releaseSend()
+	}
+	return nil
+}
+
+func (s *recoveringInternalSession) Resume(context.Context) error {
+	s.resumeCalls++
+	s.resumeOnce.Do(func() { close(s.resumed) })
+	s.releaseSend()
+	return s.resumeErr
+}
+
+func (s *recoveringInternalSession) releaseSend() {
+	s.releaseOnce.Do(func() { close(s.release) })
+}
+
+func (*recoveringInternalSession) Close(context.Context) error { return nil }
 
 func (s *fakeInternalSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
 	if s.beforeEvents != nil {

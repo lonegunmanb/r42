@@ -40,7 +40,12 @@ import (
 	ctyjson "github.com/zclconf/go-cty/cty/json"
 )
 
-const researchSystemProtocol = "You are executing an unattended r42 research DAG block. Follow the configured tool and completion protocol."
+const (
+	researchSystemProtocol = "You are executing an unattended r42 research DAG block. Follow the configured tool and completion protocol."
+	sessionIdleGrace       = 3 * time.Second
+	sessionAbortGrace      = 3 * time.Second
+	sessionRecoveryTimeout = 10 * time.Second
+)
 
 type Session interface {
 	SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error)
@@ -432,6 +437,9 @@ func (f *runtimeFactory) newResearchBlock(
 	recordedSession := &recordingSession{
 		Session: session, recorder: f.recorder, address: executionAddress, kind: debuglog.SessionResearch,
 	}
+	if terminalRecorder != nil {
+		recordedSession.completion = terminalRecorder
+	}
 	runner := researchruntime.NewRunner(recordedSession, terminalRecorder)
 	var qcRunner *qc.Runner
 	var qcConfig qc.Config
@@ -491,6 +499,7 @@ func (f *runtimeFactory) newResearchBlock(
 		}
 		qcSession = &recordingSession{
 			Session: qcSession, recorder: f.recorder, address: executionAddress, kind: debuglog.SessionQC,
+			completion: verdicts,
 		}
 		qcRunner = qc.NewRunner(&phasedResearch{research: runner, session: recordedSession}, qcSession, verdicts)
 		qcConfig = qc.Config{
@@ -1398,14 +1407,114 @@ func (b *researchApplyBlock) Cleanup(ctx context.Context) error {
 
 type recordingSession struct {
 	Session
-	recorder  *debuglog.Recorder
-	address   string
-	kind      debuglog.SessionKind
-	eventMu   sync.Mutex
-	kindMu    sync.RWMutex
-	seen      map[string]struct{}
-	toolName  map[string]string
-	lastEvent string
+	recorder   *debuglog.Recorder
+	address    string
+	kind       debuglog.SessionKind
+	completion completionVersion
+	idleGrace  time.Duration
+	abortGrace time.Duration
+	eventMu    sync.Mutex
+	kindMu     sync.RWMutex
+	seen       map[string]struct{}
+	toolName   map[string]string
+	lastEvent  string
+}
+
+type completionVersion interface {
+	CompletionVersion() uint64
+}
+
+type recoverableSession interface {
+	Abort(context.Context) error
+	Resume(context.Context) error
+}
+
+type sessionSendResult struct {
+	event *sdk.SessionEvent
+	err   error
+}
+
+type sendSettlement struct {
+	mu             sync.Mutex
+	completion     completionVersion
+	baseline       uint64
+	activeTools    map[string]struct{}
+	activeAgents   map[string]int
+	assistantIdle  bool
+	sessionIdle    bool
+	lastActivity   time.Time
+	lastAssistant  *sdk.SessionEvent
+	activitySignal chan struct{}
+}
+
+func newSendSettlement(completion completionVersion) *sendSettlement {
+	return &sendSettlement{
+		completion: completion, baseline: completion.CompletionVersion(),
+		activeTools: make(map[string]struct{}), activeAgents: make(map[string]int),
+		lastActivity: time.Now(), activitySignal: make(chan struct{}, 1),
+	}
+}
+
+func (s *sendSettlement) observe(event sdk.SessionEvent) {
+	s.mu.Lock()
+	s.lastActivity = time.Now()
+	switch data := event.Data.(type) {
+	case *sdk.ToolExecutionStartData:
+		s.activeTools[data.ToolCallID] = struct{}{}
+	case *sdk.ToolExecutionCompleteData:
+		delete(s.activeTools, data.ToolCallID)
+	case *sdk.SubagentStartedData:
+		s.activeAgents[subagentKey(data.ToolCallID, data.AgentName)]++
+	case *sdk.SubagentCompletedData:
+		s.completeSubagent(data.ToolCallID, data.AgentName)
+	case *sdk.SubagentFailedData:
+		s.completeSubagent(data.ToolCallID, data.AgentName)
+	case *sdk.AssistantIdleData:
+		s.assistantIdle = true
+	case *sdk.SessionIdleData:
+		s.sessionIdle = true
+	case *sdk.AssistantMessageData:
+		cloned := event
+		s.lastAssistant = &cloned
+	}
+	s.mu.Unlock()
+	select {
+	case s.activitySignal <- struct{}{}:
+	default:
+	}
+}
+
+func (s *sendSettlement) completeSubagent(toolCallID, agentName string) {
+	key := subagentKey(toolCallID, agentName)
+	remaining := s.activeAgents[key] - 1
+	if remaining <= 0 {
+		delete(s.activeAgents, key)
+		return
+	}
+	s.activeAgents[key] = remaining
+}
+
+func subagentKey(toolCallID, agentName string) string {
+	return toolCallID + "\x00" + agentName
+}
+
+func (s *sendSettlement) snapshot() (bool, time.Time) {
+	version := s.completion.CompletionVersion()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ready := version > s.baseline && s.assistantIdle && !s.sessionIdle &&
+		len(s.activeTools) == 0 && len(s.activeAgents) == 0
+	return ready, s.lastActivity
+}
+
+func (s *sendSettlement) assistantResult() *sdk.SessionEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastAssistant == nil {
+		return nil
+	}
+	cloned := *s.lastAssistant
+	return &cloned
 }
 
 func (s *recordingSession) setKind(kind debuglog.SessionKind) {
@@ -1460,6 +1569,11 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 	}
 	var eventErr error
 	var eventErrMu sync.Mutex
+	var settlement *sendSettlement
+	recovery, canRecover := s.Session.(recoverableSession)
+	if s.completion != nil && canRecover {
+		settlement = newSendSettlement(s.completion)
+	}
 	unsubscribe := func() {}
 	if source, ok := s.Session.(sessionEventSource); ok {
 		unsubscribe = source.On(func(event sdk.SessionEvent) {
@@ -1467,6 +1581,9 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 				return
 			}
 			s.setLastEvent(event.Type())
+			if settlement != nil {
+				settlement.observe(event)
+			}
 			var err error
 			switch {
 			case strings.HasPrefix(string(event.Type()), "session."):
@@ -1475,7 +1592,8 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 				event.Type() == sdk.SessionEventTypeAssistantMessageDelta ||
 				event.Type() == sdk.SessionEventTypeAssistantReasoning ||
 				event.Type() == sdk.SessionEventTypeAssistantReasoningDelta ||
-				event.Type() == sdk.SessionEventTypeAssistantUsage:
+				event.Type() == sdk.SessionEventTypeAssistantUsage ||
+				event.Type() == sdk.SessionEventTypeAssistantIdle:
 				err = s.recordAssistantEvent(&event)
 			case event.Type() == sdk.SessionEventTypeAssistantToolCallDelta ||
 				event.Type() == sdk.SessionEventTypeToolSearchActivated ||
@@ -1508,7 +1626,13 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 		unsubscribe()
 		return nil, err
 	}
-	event, operationErr := s.Session.SendAndWait(ctx, options)
+	var event *sdk.SessionEvent
+	var operationErr error
+	if settlement == nil {
+		event, operationErr = s.Session.SendAndWait(ctx, options)
+	} else {
+		event, operationErr = s.sendWithIdleRecovery(ctx, options, recovery, settlement, kind)
+	}
 	unsubscribe()
 	waitEvent.LastEvent = s.lastSDKEvent()
 	waitLogErr := debuglog.CompleteLifecycle(ctx, "session.wait", waitStarted, operationErr, waitEvent)
@@ -1524,6 +1648,159 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 		return nil, errors.Join(operationErr, logErr)
 	}
 	return event, nil
+}
+
+func (s *recordingSession) sendWithIdleRecovery(
+	ctx context.Context,
+	options sdk.MessageOptions,
+	recovery recoverableSession,
+	settlement *sendSettlement,
+	kind debuglog.SessionKind,
+) (*sdk.SessionEvent, error) {
+	sendCtx, cancelSend := context.WithCancel(ctx)
+	defer cancelSend()
+	completed := make(chan sessionSendResult, 1)
+	go func() {
+		event, err := s.Session.SendAndWait(sendCtx, options)
+		completed <- sessionSendResult{event: event, err: err}
+	}()
+
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	stopTimer := func() {
+		if timer == nil {
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timerC = nil
+	}
+	defer stopTimer()
+	resetTimer := func() {
+		ready, lastActivity := settlement.snapshot()
+		if !ready {
+			stopTimer()
+			return
+		}
+		delay := max(time.Duration(0), s.effectiveIdleGrace()-time.Since(lastActivity))
+		if timer == nil {
+			timer = time.NewTimer(delay)
+		} else {
+			stopTimer()
+			timer.Reset(delay)
+		}
+		timerC = timer.C
+	}
+
+	for {
+		resetTimer()
+		select {
+		case result := <-completed:
+			return result.event, result.err
+		case <-settlement.activitySignal:
+			continue
+		case <-timerC:
+			ready, _ := settlement.snapshot()
+			if !ready {
+				continue
+			}
+			return s.recoverMissingIdle(ctx, cancelSend, completed, recovery, settlement, kind)
+		case <-ctx.Done():
+			cancelSend()
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func (s *recordingSession) recoverMissingIdle(
+	ctx context.Context,
+	cancelSend context.CancelFunc,
+	completed <-chan sessionSendResult,
+	recovery recoverableSession,
+	settlement *sendSettlement,
+	kind debuglog.SessionKind,
+) (*sdk.SessionEvent, error) {
+	event := debuglog.Event{
+		BlockAddress: s.address, Session: kind,
+		WaitFor: string(sdk.SessionEventTypeSessionIdle), LastEvent: s.lastSDKEvent(),
+	}
+	if err := debuglog.Lifecycle(
+		ctx,
+		"session.idle_missing_fallback",
+		debuglog.StatusCompleted,
+		event,
+	); err != nil {
+		cancelSend()
+		return nil, err
+	}
+	abortStarted := time.Now()
+	if err := debuglog.Lifecycle(ctx, "session.abort", debuglog.StatusStarted, event); err != nil {
+		cancelSend()
+		return nil, err
+	}
+	abortCtx, cancelAbort := context.WithTimeout(ctx, sessionRecoveryTimeout)
+	abortErr := recovery.Abort(abortCtx)
+	cancelAbort()
+	if logErr := debuglog.CompleteLifecycle(ctx, "session.abort", abortStarted, abortErr, event); logErr != nil {
+		cancelSend()
+		return nil, errors.Join(abortErr, logErr)
+	}
+
+	sendFinished := false
+	if abortErr == nil {
+		abortTimer := time.NewTimer(s.effectiveAbortGrace())
+		defer abortTimer.Stop()
+		select {
+		case result := <-completed:
+			if result.err == nil {
+				return result.event, nil
+			}
+			sendFinished = true
+		case <-abortTimer.C:
+		case <-ctx.Done():
+			cancelSend()
+			return nil, ctx.Err()
+		}
+	}
+
+	if !sendFinished {
+		cancelSend()
+	}
+	resumeStarted := time.Now()
+	if err := debuglog.Lifecycle(ctx, "session.resume", debuglog.StatusStarted, event); err != nil {
+		return nil, err
+	}
+	resumeCtx, cancelResume := context.WithTimeout(ctx, sessionRecoveryTimeout)
+	resumeErr := recovery.Resume(resumeCtx)
+	cancelResume()
+	if logErr := debuglog.CompleteLifecycle(ctx, "session.resume", resumeStarted, resumeErr, event); logErr != nil {
+		return nil, errors.Join(resumeErr, logErr)
+	}
+	if resumeErr != nil {
+		return nil, fmt.Errorf(
+			"resume session after missing session.idle: %w",
+			errors.Join(abortErr, resumeErr),
+		)
+	}
+	return settlement.assistantResult(), nil
+}
+
+func (s *recordingSession) effectiveIdleGrace() time.Duration {
+	if s.idleGrace > 0 {
+		return s.idleGrace
+	}
+	return sessionIdleGrace
+}
+
+func (s *recordingSession) effectiveAbortGrace() time.Duration {
+	if s.abortGrace > 0 {
+		return s.abortGrace
+	}
+	return sessionAbortGrace
 }
 
 func (s *recordingSession) markEvent(id string) bool {

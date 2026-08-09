@@ -63,10 +63,13 @@ func (f *Factory) Open(ctx context.Context, config SessionConfig) (*Session, err
 		session, err = f.client.CreateSession(ctx, sdkConfig)
 		if err == nil {
 			return &Session{
-				sdk:    session,
-				retry:  config.Retry,
-				delay:  f.delay,
-				random: f.random,
+				sdk:          session,
+				factory:      f,
+				sessionID:    sdkConfig.SessionID,
+				resumeConfig: resumeSessionConfig(sdkConfig),
+				retry:        config.Retry,
+				delay:        f.delay,
+				random:       f.random,
 			}, nil
 		}
 		if attempt >= config.Retry.LifecycleRetries || !config.Retry.IsTransient(err) {
@@ -74,6 +77,26 @@ func (f *Factory) Open(ctx context.Context, config SessionConfig) (*Session, err
 		}
 		if delayErr := f.delay(ctx, config.Retry.Backoff(attempt, f.random())); delayErr != nil {
 			return nil, fmt.Errorf("create copilot session retry: %w", delayErr)
+		}
+	}
+}
+
+func (f *Factory) resume(
+	ctx context.Context,
+	sessionID string,
+	config *sdk.ResumeSessionConfig,
+	retry provider.RetryPolicy,
+) (sdkSession, error) {
+	for attempt := 0; ; attempt++ {
+		session, err := f.client.ResumeSession(ctx, sessionID, cloneResumeSessionConfig(config))
+		if err == nil {
+			return session, nil
+		}
+		if attempt >= retry.LifecycleRetries || !retry.IsTransient(err) {
+			return nil, fmt.Errorf("resume copilot session: %w", err)
+		}
+		if delayErr := f.delay(ctx, retry.Backoff(attempt, f.random())); delayErr != nil {
+			return nil, fmt.Errorf("resume copilot session retry: %w", delayErr)
 		}
 	}
 }
@@ -118,6 +141,39 @@ func (f *Factory) sessionConfig(config SessionConfig) (*sdk.SessionConfig, error
 	return result, nil
 }
 
+func resumeSessionConfig(config *sdk.SessionConfig) *sdk.ResumeSessionConfig {
+	return &sdk.ResumeSessionConfig{
+		Model:               config.Model,
+		Tools:               slices.Clone(config.Tools),
+		SystemMessage:       config.SystemMessage,
+		AvailableTools:      slices.Clone(config.AvailableTools),
+		ExcludedTools:       slices.Clone(config.ExcludedTools),
+		Provider:            config.Provider,
+		ReasoningEffort:     config.ReasoningEffort,
+		OnPermissionRequest: config.OnPermissionRequest,
+		Hooks:               config.Hooks,
+		WorkingDirectory:    config.WorkingDirectory,
+		EnableSkills:        config.EnableSkills,
+		Streaming:           config.Streaming,
+		CustomAgents:        slices.Clone(config.CustomAgents),
+		Agent:               config.Agent,
+		SkillDirectories:    slices.Clone(config.SkillDirectories),
+		DisabledSkills:      slices.Clone(config.DisabledSkills),
+		ContinuePendingWork: sdk.Bool(false),
+	}
+}
+
+func cloneResumeSessionConfig(config *sdk.ResumeSessionConfig) *sdk.ResumeSessionConfig {
+	clone := *config
+	clone.Tools = slices.Clone(config.Tools)
+	clone.AvailableTools = slices.Clone(config.AvailableTools)
+	clone.ExcludedTools = slices.Clone(config.ExcludedTools)
+	clone.CustomAgents = slices.Clone(config.CustomAgents)
+	clone.SkillDirectories = slices.Clone(config.SkillDirectories)
+	clone.DisabledSkills = slices.Clone(config.DisabledSkills)
+	return &clone
+}
+
 func (f *Factory) providerConfig(config *provider.Config, profile, model string) (*sdk.ProviderConfig, error) {
 	if config == nil {
 		return nil, nil
@@ -149,15 +205,23 @@ func (f *Factory) providerConfig(config *provider.Config, profile, model string)
 }
 
 type Session struct {
-	sdk    sdkSession
-	retry  provider.RetryPolicy
-	delay  func(context.Context, time.Duration) error
-	random func() float64
+	mu           sync.RWMutex
+	sdk          sdkSession
+	factory      *Factory
+	sessionID    string
+	resumeConfig *sdk.ResumeSessionConfig
+	retry        provider.RetryPolicy
+	delay        func(context.Context, time.Duration) error
+	random       func() float64
 }
 
 func (s *Session) SendAndWait(ctx context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	current := s.current()
+	if current == nil {
+		return nil, fmt.Errorf("send copilot message: session is unavailable")
+	}
 	for attempt := 0; ; attempt++ {
-		event, err := s.sdk.SendAndWait(ctx, options)
+		event, err := current.SendAndWait(ctx, options)
 		if err == nil {
 			return event, nil
 		}
@@ -171,22 +235,91 @@ func (s *Session) SendAndWait(ctx context.Context, options sdk.MessageOptions) (
 }
 
 func (s *Session) On(handler sdk.SessionEventHandler) func() {
-	return s.sdk.On(handler)
+	current := s.current()
+	if current == nil {
+		return func() {}
+	}
+	return current.On(handler)
+}
+
+func (s *Session) Abort(ctx context.Context) error {
+	current := s.current()
+	if current == nil {
+		return fmt.Errorf("abort copilot session: session is unavailable")
+	}
+	abortable, ok := current.(interface{ Abort(context.Context) error })
+	if !ok {
+		return fmt.Errorf("abort copilot session: SDK session does not support abort")
+	}
+	if err := abortable.Abort(ctx); err != nil {
+		return fmt.Errorf("abort copilot session: %w", err)
+	}
+	return nil
+}
+
+func (s *Session) Resume(ctx context.Context) error {
+	current := s.current()
+	if current == nil {
+		return fmt.Errorf("resume copilot session: session is unavailable")
+	}
+	if _, err := s.disconnect(ctx, current); err != nil {
+		return fmt.Errorf("disconnect copilot session before resume: %w", err)
+	}
+	s.clear(current)
+	resumed, err := s.factory.resume(ctx, s.sessionID, s.resumeConfig, s.retry)
+	if err != nil {
+		return err
+	}
+	s.replace(resumed)
+	return nil
 }
 
 func (s *Session) Close(ctx context.Context) error {
+	current := s.current()
+	if current == nil {
+		return nil
+	}
+	attempts, err := s.disconnect(ctx, current)
+	if err == nil {
+		s.clear(current)
+		return nil
+	}
+	return &CleanupWarning{Attempts: attempts, Err: err}
+}
+
+func (s *Session) disconnect(ctx context.Context, current sdkSession) (int, error) {
 	for attempt := 0; ; attempt++ {
-		err := s.sdk.Disconnect()
+		err := current.Disconnect()
 		if err == nil {
-			return nil
+			return attempt + 1, nil
 		}
 		if attempt >= s.retry.LifecycleRetries || !s.retry.IsTransient(err) {
-			return &CleanupWarning{Attempts: attempt + 1, Err: err}
+			return attempt + 1, err
 		}
 		if delayErr := s.delay(ctx, s.retry.Backoff(attempt, s.random())); delayErr != nil {
-			return &CleanupWarning{Attempts: attempt + 1, Err: delayErr}
+			return attempt + 1, delayErr
 		}
 	}
+}
+
+func (s *Session) current() sdkSession {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.sdk
+}
+
+func (s *Session) clear(current sdkSession) {
+	s.mu.Lock()
+	if s.sdk == current {
+		s.sdk = nil
+	}
+	s.mu.Unlock()
+}
+
+func (s *Session) replace(session sdkSession) {
+	s.mu.Lock()
+	s.sdk = session
+	s.mu.Unlock()
 }
 
 type CleanupWarning struct {
@@ -208,6 +341,7 @@ func (w *CleanupWarning) Unwrap() error {
 
 type sdkClient interface {
 	CreateSession(context.Context, *sdk.SessionConfig) (sdkSession, error)
+	ResumeSession(context.Context, string, *sdk.ResumeSessionConfig) (sdkSession, error)
 }
 
 type sdkSession interface {
@@ -222,6 +356,18 @@ type officialClient struct {
 
 func (c officialClient) CreateSession(ctx context.Context, config *sdk.SessionConfig) (sdkSession, error) {
 	session, err := c.client.CreateSession(ctx, config)
+	if err != nil {
+		return nil, err
+	}
+	return newOfficialSession(session), nil
+}
+
+func (c officialClient) ResumeSession(
+	ctx context.Context,
+	sessionID string,
+	config *sdk.ResumeSessionConfig,
+) (sdkSession, error) {
+	session, err := c.client.ResumeSession(ctx, sessionID, config)
 	if err != nil {
 		return nil, err
 	}
@@ -274,6 +420,14 @@ func (s *officialSession) SendAndWait(
 
 func (s *officialSession) Disconnect() error {
 	return s.sdk.Disconnect()
+}
+
+func (s *officialSession) Abort(ctx context.Context) error {
+	abortable, ok := s.sdk.(interface{ Abort(context.Context) error })
+	if !ok {
+		return fmt.Errorf("SDK session does not support abort")
+	}
+	return abortable.Abort(ctx)
 }
 
 func (s *officialSession) On(handler sdk.SessionEventHandler) func() {

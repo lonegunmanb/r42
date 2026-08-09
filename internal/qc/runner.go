@@ -158,9 +158,10 @@ func (r *Runner) review(
 }
 
 type VerdictRecorder struct {
-	mu       sync.Mutex
-	verdicts []Verdict
-	failure  error
+	mu                sync.Mutex
+	verdicts          []Verdict
+	failure           error
+	completionVersion uint64
 }
 
 func NewVerdictRecorder() *VerdictRecorder {
@@ -176,6 +177,7 @@ func (r *VerdictRecorder) Record(verdict Verdict) error {
 	verdict.Issues = cloneIssues(verdict.Issues)
 	r.mu.Lock()
 	r.verdicts = append(r.verdicts, verdict)
+	r.completionVersion++
 	r.mu.Unlock()
 	return nil
 }
@@ -187,8 +189,16 @@ func (r *VerdictRecorder) RecordError(err error) {
 	r.mu.Lock()
 	if r.failure == nil {
 		r.failure = err
+		r.completionVersion++
 	}
 	r.mu.Unlock()
+}
+
+// CompletionVersion identifies the most recent QC outcome recorded for a session.
+func (r *VerdictRecorder) CompletionVersion() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.completionVersion
 }
 
 func (r *VerdictRecorder) drain() ([]Verdict, error) {

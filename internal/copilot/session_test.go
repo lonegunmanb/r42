@@ -234,6 +234,142 @@ func TestSessionSendAndWaitRetriesSameSession(t *testing.T) {
 	assert.Len(t, client.configs, 1, "model retry must not replace the session")
 }
 
+func TestSessionAbortForwardsToCurrentSDKSession(t *testing.T) {
+	t.Parallel()
+
+	underlying := &fakeSession{}
+	factory := newFactory(&fakeClient{session: underlying}, nil, noDelay, fixedRandom)
+	session, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 0, 0)})
+	require.NoError(t, err)
+
+	err = session.Abort(t.Context())
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, underlying.abortCalls)
+}
+
+func TestSessionResumeDisconnectsAndRestoresSameConversation(t *testing.T) {
+	t.Parallel()
+
+	original := &fakeSession{}
+	resumed := &fakeSession{event: &sdk.SessionEvent{ID: "resumed-result"}}
+	client := &fakeClient{session: original, resumedSession: resumed}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+	hooks := &sdk.SessionHooks{}
+	bearerToken := "provider-secret"
+	session, err := factory.Open(t.Context(), SessionConfig{
+		Provider: &provider.Config{
+			Type: provider.TypeAnthropic, Endpoint: "https://models.example.test", BearerToken: &bearerToken,
+		},
+		Retry:            retryPolicy(t, 0, 0),
+		Model:            "research-model",
+		Profile:          "research-profile",
+		ReasoningEffort:  "high",
+		SystemPrompt:     "research carefully",
+		WorkingDirectory: "D:/work",
+		Tools:            []sdk.Tool{{Name: "finish"}},
+		AvailableTools:   []string{"finish"},
+		SkillDirectories: []string{"D:/skills"},
+		Skills:           []string{"citation"},
+		DisabledSkills:   []string{"unused"},
+		Hooks:            hooks,
+	})
+	require.NoError(t, err)
+	require.Len(t, client.configs, 1)
+
+	err = session.Resume(t.Context())
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, original.disconnectCalls)
+	require.Len(t, client.resumeIDs, 1)
+	assert.Equal(t, client.configs[0].SessionID, client.resumeIDs[0])
+	require.Len(t, client.resumeConfigs, 1)
+	resume := client.resumeConfigs[0]
+	require.NotNil(t, resume.ContinuePendingWork)
+	assert.False(t, *resume.ContinuePendingWork)
+	assert.Equal(t, "research-model", resume.Model)
+	assert.Equal(t, "high", resume.ReasoningEffort)
+	require.NotNil(t, resume.Provider)
+	assert.Equal(t, "research-profile", resume.Provider.ModelID)
+	assert.Equal(t, "research-model", resume.Provider.WireModel)
+	assert.Equal(t, "provider-secret", resume.Provider.BearerToken)
+	assert.Equal(t, "D:/work", resume.WorkingDirectory)
+	assert.Equal(t, []string{"finish"}, resume.AvailableTools)
+	assert.Equal(t, []string{"D:/skills"}, resume.SkillDirectories)
+	assert.Equal(t, []string{"unused"}, resume.DisabledSkills)
+	assert.Equal(t, researchAgentName, resume.Agent)
+	require.Len(t, resume.CustomAgents, 1)
+	assert.Equal(t, []string{"citation"}, resume.CustomAgents[0].Skills)
+	assert.Same(t, hooks, resume.Hooks)
+	require.Len(t, resume.Tools, 1)
+	assert.Equal(t, "finish", resume.Tools[0].Name)
+
+	result, err := session.SendAndWait(t.Context(), sdk.MessageOptions{Prompt: "continue"})
+	require.NoError(t, err)
+	assert.Equal(t, "resumed-result", result.ID)
+	assert.Empty(t, original.messages)
+	assert.Len(t, resumed.messages, 1)
+}
+
+func TestSessionResumeFailsBeforeReplacementWhenDisconnectFails(t *testing.T) {
+	t.Parallel()
+
+	original := &fakeSession{disconnectErrors: []error{permanentError{Err: errors.New("destroy rejected")}}}
+	client := &fakeClient{session: original, resumedSession: &fakeSession{}}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+	session, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 0, 0)})
+	require.NoError(t, err)
+
+	err = session.Resume(t.Context())
+
+	require.ErrorContains(t, err, "disconnect copilot session before resume")
+	assert.Empty(t, client.resumeIDs)
+}
+
+func TestSessionResumeFailsFastWhenSDKResumeFails(t *testing.T) {
+	t.Parallel()
+
+	resumeErr := errors.New("saved session unavailable")
+	client := &fakeClient{
+		session:      &fakeSession{},
+		resumeErrors: []error{resumeErr},
+	}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+	session, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 0, 0)})
+	require.NoError(t, err)
+
+	err = session.Resume(t.Context())
+
+	require.ErrorIs(t, err, resumeErr)
+	require.ErrorContains(t, err, "resume copilot session")
+}
+
+func TestSessionResumeRetriesTransientLifecycleFailure(t *testing.T) {
+	t.Parallel()
+
+	original := &fakeSession{}
+	resumed := &fakeSession{}
+	client := &fakeClient{
+		session:        original,
+		resumedSession: resumed,
+		resumeErrors:   []error{transientError{Err: errors.New("runtime unavailable")}},
+	}
+	var delays []time.Duration
+	factory := newFactory(client, nil, func(_ context.Context, delay time.Duration) error {
+		delays = append(delays, delay)
+		return nil
+	}, fixedRandom)
+	session, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 1, 0)})
+	require.NoError(t, err)
+
+	err = session.Resume(t.Context())
+
+	require.NoError(t, err)
+	require.Len(t, client.resumeIDs, 2)
+	assert.Equal(t, client.resumeIDs[0], client.resumeIDs[1])
+	assert.Len(t, delays, 1)
+}
+
 func TestSessionOnForwardsSDKEventsAndUnsubscribe(t *testing.T) {
 	t.Parallel()
 
@@ -364,6 +500,18 @@ func TestOfficialSessionPassesThroughNonModelResults(t *testing.T) {
 			assert.Equal(t, 1, underlying.disconnectCalls)
 		})
 	}
+}
+
+func TestOfficialSessionForwardsAbort(t *testing.T) {
+	t.Parallel()
+
+	underlying := &fakeEventSession{}
+	session := newOfficialSession(underlying)
+
+	err := session.Abort(t.Context())
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, underlying.abortCalls)
 }
 
 func TestRetryDelayFailureStopsCurrentOperation(t *testing.T) {
@@ -508,9 +656,13 @@ func TestSessionCloseSuccessReturnsNilError(t *testing.T) {
 }
 
 type fakeClient struct {
-	configs      []*sdk.SessionConfig
-	createErrors []error
-	session      sdkSession
+	configs        []*sdk.SessionConfig
+	createErrors   []error
+	session        sdkSession
+	resumeIDs      []string
+	resumeConfigs  []*sdk.ResumeSessionConfig
+	resumeErrors   []error
+	resumedSession sdkSession
 }
 
 func (c *fakeClient) CreateSession(ctx context.Context, config *sdk.SessionConfig) (sdkSession, error) {
@@ -528,10 +680,32 @@ func (c *fakeClient) CreateSession(ctx context.Context, config *sdk.SessionConfi
 	return c.session, nil
 }
 
+func (c *fakeClient) ResumeSession(
+	ctx context.Context,
+	sessionID string,
+	config *sdk.ResumeSessionConfig,
+) (sdkSession, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.resumeIDs = append(c.resumeIDs, sessionID)
+	c.resumeConfigs = append(c.resumeConfigs, config)
+	index := len(c.resumeIDs) - 1
+	if index < len(c.resumeErrors) {
+		return nil, c.resumeErrors[index]
+	}
+	if c.resumedSession == nil {
+		c.resumedSession = &fakeSession{}
+	}
+	return c.resumedSession, nil
+}
+
 type fakeSession struct {
 	messages         []sdk.MessageOptions
 	sendErrors       []error
 	event            *sdk.SessionEvent
+	abortErrors      []error
+	abortCalls       int
 	disconnectErrors []error
 	disconnectCalls  int
 }
@@ -547,6 +721,7 @@ type fakeEventSession struct {
 	err              error
 	unsubscribeCalls int
 	disconnectCalls  int
+	abortCalls       int
 }
 
 func (s *fakeEventSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
@@ -563,6 +738,11 @@ func (s *fakeEventSession) On(handler sdk.SessionEventHandler) func() {
 
 func (s *fakeEventSession) Disconnect() error {
 	s.disconnectCalls++
+	return nil
+}
+
+func (s *fakeEventSession) Abort(context.Context) error {
+	s.abortCalls++
 	return nil
 }
 
@@ -583,6 +763,18 @@ func (s *fakeSession) Disconnect() error {
 	index := s.disconnectCalls - 1
 	if index < len(s.disconnectErrors) {
 		return s.disconnectErrors[index]
+	}
+	return nil
+}
+
+func (s *fakeSession) Abort(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.abortCalls++
+	index := s.abortCalls - 1
+	if index < len(s.abortErrors) {
+		return s.abortErrors[index]
 	}
 	return nil
 }

@@ -458,6 +458,19 @@ func TestTerminalRecorderRejectsInvalidResponse(t *testing.T) {
 	require.ErrorContains(t, err, "record terminal response")
 }
 
+func TestTerminalRecorderCompletionVersionOnlyAdvancesForNewOutcomes(t *testing.T) {
+	t.Parallel()
+
+	recorder := researchruntime.NewTerminalRecorder()
+	assert.Zero(t, recorder.CompletionVersion())
+	require.NoError(t, recorder.Record(corespec.ToolResponse[string]{Accepted: true}))
+	assert.Equal(t, uint64(1), recorder.CompletionVersion())
+	recorder.RecordError(errors.New("handler failed"))
+	assert.Equal(t, uint64(2), recorder.CompletionVersion())
+	recorder.RecordError(errors.New("duplicate failure"))
+	assert.Equal(t, uint64(2), recorder.CompletionVersion())
+}
+
 func durationPointer(value time.Duration) *time.Duration {
 	return &value
 }

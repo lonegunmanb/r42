@@ -122,9 +122,10 @@ func (r *Runner) Run(ctx context.Context, config Config) (Result, error) {
 }
 
 type TerminalRecorder struct {
-	mu      sync.Mutex
-	calls   []corespec.ToolResponse[string]
-	failure error
+	mu                sync.Mutex
+	calls             []corespec.ToolResponse[string]
+	failure           error
+	completionVersion uint64
 }
 
 func NewTerminalRecorder() *TerminalRecorder {
@@ -141,6 +142,7 @@ func (r *TerminalRecorder) Record(response corespec.ToolResponse[string]) error 
 	response.Issues = cloneIssues(response.Issues)
 	r.mu.Lock()
 	r.calls = append(r.calls, response)
+	r.completionVersion++
 	r.mu.Unlock()
 	return nil
 }
@@ -152,8 +154,16 @@ func (r *TerminalRecorder) RecordError(err error) {
 	r.mu.Lock()
 	if r.failure == nil {
 		r.failure = err
+		r.completionVersion++
 	}
 	r.mu.Unlock()
+}
+
+// CompletionVersion identifies the most recent terminal outcome recorded for a session.
+func (r *TerminalRecorder) CompletionVersion() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.completionVersion
 }
 
 func (r *TerminalRecorder) drain() ([]corespec.ToolResponse[string], error) {

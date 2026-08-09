@@ -343,6 +343,19 @@ func TestRunnerIncludesCompleteIssueDetailsInRevision(t *testing.T) {
 	assert.Contains(t, research.configs[1].InitialPrompt, "(path: report.md) Repair: add a citation\n- [accuracy]")
 }
 
+func TestVerdictRecorderCompletionVersionOnlyAdvancesForNewOutcomes(t *testing.T) {
+	t.Parallel()
+
+	recorder := qc.NewVerdictRecorder()
+	assert.Zero(t, recorder.CompletionVersion())
+	require.NoError(t, recorder.Record(qc.Verdict{Pass: true}))
+	assert.Equal(t, uint64(1), recorder.CompletionVersion())
+	recorder.RecordError(errors.New("handler failed"))
+	assert.Equal(t, uint64(2), recorder.CompletionVersion())
+	recorder.RecordError(errors.New("duplicate failure"))
+	assert.Equal(t, uint64(2), recorder.CompletionVersion())
+}
+
 type fakeResearch struct {
 	results         []researchruntime.Result
 	configs         []researchruntime.Config
