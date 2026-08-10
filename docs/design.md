@@ -676,6 +676,13 @@ Research blocks and modules may set `timeout` using Go duration strings such as
 timeouts have no default. The effective deadline is the earliest of the overall
 deadline, all ancestor module deadlines, and the research block deadline.
 
+Every active research or QC session also has one inactivity timer. It defaults
+to `15m` and is configurable for the complete root-and-module Apply with
+`--session-stall-timeout`. Each SDK event, including reasoning/message deltas
+and tool progress, moves the deadline forward. Starting or finishing a local
+typed-tool handler does the same. This is an inactivity limit, not a maximum
+model-turn duration.
+
 ## 13. Cancellation and Session Cleanup
 
 Fail-fast cancellation follows this order:
@@ -688,8 +695,29 @@ Fail-fast cancellation follows this order:
 
 The original error remains primary; cleanup errors are additional diagnostics.
 After a session has been created, lifecycle retry repeats the current operation
-on that same session. r42 never silently replaces it. A lost or unrecoverable
-session fails the block.
+on that same logical session.
+
+If the inactivity deadline expires, r42 uses the following recovery sequence:
+
+1. Abort the current turn.
+2. Cancel its send context and wait for `SendAndWait`, SDK-observed tool or
+   subagent work, and locally executing typed-tool handlers to stop.
+3. Reuse the SDK session only when Abort restored `session.idle`; otherwise
+   disconnect and resume the same session ID with no pending-event replay.
+4. Subscribe to the recovered SDK session and send one continuation prompt that
+   tells the model to inspect existing artifacts before repeating work.
+
+Abort, termination, and any required resume share a fixed 10-second bounded
+recovery window. If that window expires, the session is tainted: r42 does not
+resume it or issue a concurrent close, and the block fails so the CLI can exit.
+The continuation uses the same inactivity timer. If that continuation also
+stalls, it is aborted and cleaned up but is not recovered again; it fails the
+block. Ordinary parent context cancellation never sends a continuation. It
+first aborts native agent work, then cancels the waiter and gives the same
+termination barrier at most 10 seconds. Session Close is also bounded by 10
+seconds. The final shared-client `Stop()` has the same bound and falls back to
+the SDK's `ForceStop()` when graceful shutdown does not return, so a stuck
+`Disconnect()` cannot keep the CLI alive indefinitely.
 
 Only an exhausted `Session.Disconnect()` failure receives special treatment: it
 is recorded as a cleanup warning and does not turn an otherwise successful
@@ -836,6 +864,7 @@ The CLI also exposes:
 
 - `--parallelism`, default 10.
 - Overall `--timeout`, default `1h`.
+- Per-session inactivity `--session-stall-timeout`, default `15m`.
 - `--debug`, disabled by default.
 - `--ui`, default `auto`; accepted values are `auto`, `tui`, and `repl`.
 - Golden's existing root-variable input mechanisms without an r42-specific

@@ -536,6 +536,7 @@ func TestCommandApplySupportsSavedPlanAndInitializedConfiguration(t *testing.T) 
 			arguments = append(arguments,
 				"--parallelism", "3",
 				"--timeout", "2s",
+				"--session-stall-timeout", "45s",
 				"--debug",
 			)
 			stdout, stderr, executeErr := execute(t, runtime, arguments...)
@@ -543,6 +544,7 @@ func TestCommandApplySupportsSavedPlanAndInitializedConfiguration(t *testing.T) 
 			require.NoError(t, executeErr)
 			assert.Equal(t, test.wantPlanCalls, runtime.plannedDirectory != "")
 			assert.Equal(t, 3, runtime.configOptions.Parallelism)
+			assert.Equal(t, 45*time.Second, runtime.configOptions.SessionStallTimeout)
 			assert.True(t, runtime.configOptions.Debug)
 			assert.True(t, runtime.applyDeadline)
 			assert.Contains(t, stdout, `"nodes"`)
@@ -839,6 +841,36 @@ func TestApplyDefaultTimeout(t *testing.T) {
 	_, _, err := execute(t, runtime, "apply")
 	require.NoError(t, err)
 	assert.WithinDuration(t, time.Now().Add(time.Hour), runtime.applyDeadlineAt, time.Second)
+}
+
+func TestApplyDefaultSessionStallTimeout(t *testing.T) {
+	t.Parallel()
+
+	runtime := &fakeRuntime{planned: mustPlan(t)}
+	_, _, err := execute(t, runtime, "apply")
+	require.NoError(t, err)
+	assert.Equal(t, 15*time.Minute, runtime.configOptions.SessionStallTimeout)
+}
+
+func TestApplySessionStallTimeoutValidation(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{"0s", "-1s"} {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+
+			_, _, err := execute(
+				t,
+				&fakeRuntime{planned: mustPlan(t)},
+				"apply",
+				"--session-stall-timeout",
+				value,
+			)
+			require.Error(t, err)
+			assert.Equal(t, cli.ExitUsage, cli.ExitCode(err))
+			require.ErrorContains(t, err, "session stall timeout must be positive")
+		})
+	}
 }
 
 func TestApplyRedactsSensitiveOutputFromStdout(t *testing.T) {

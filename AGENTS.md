@@ -266,6 +266,10 @@ $ golangci-lint run
 - 日志 / 错误：使用 `log/slog` + `samber/oops`，见 [.agents/skills/golang-error-handling/SKILL.md](.agents/skills/golang-error-handling/SKILL.md)、[.agents/skills/golang-samber-oops/SKILL.md](.agents/skills/golang-samber-oops/SKILL.md)。
 - 项目布局与命名：见 [.agents/skills/golang-project-layout/SKILL.md](.agents/skills/golang-project-layout/SKILL.md)、[.agents/skills/golang-naming/SKILL.md](.agents/skills/golang-naming/SKILL.md)。
 - 安全：见 [.agents/skills/golang-security/SKILL.md](.agents/skills/golang-security/SKILL.md)。
+- 证据校验 typed tool：比较自然语言证据字符串时，默认先规范化 Unicode 空白，忽略首尾空白、连续空格、换行和 Tab 等纯排版差异；不得借此忽略文字、标点、顺序等实质差异，也不得放宽 ID、URL、枚举或证据状态等结构化字段的精确校验。
+- Researcher / QC 职责边界：schema、必填字段、枚举、ID 唯一性、引用存在性、路径、状态流转、图约束、精确或规范化文本匹配等可由代码确定的机械性检查，**必须**在 researcher session 提交阶段使用的 typed tool（尤其 terminate / finalize tool）中完成。工具应一次返回全部已发现的问题，让 researcher 在结束本阶段前修正；不得把这些检查推迟给 QC，也不得让 QC 用 grep、PowerShell、shell 或临时脚本重复实现第二套 validator。
+- QC 只做语义检查：QC 仅判断代码无法可靠决定的语义问题，例如证据是否真正蕴含结论、推论是否越界、是否混淆相关概念、不同 variant / 时期是否被错误合并，以及不确定性是否表达审慎。QC 必须把 researcher typed tool 已通过的机械校验视为权威结果。
+- 大体积 QC 数据访问：当 QC 需要检查大型 JSON、ledger、快照集合或跨文件关系时，必须为其配置专用的**只读** typed tool，按 ID 或检查对象投影最小必要数据。该工具只负责读取和筛选，不修改候选制品、不输出 QC pass/fail、不复制机械校验逻辑；配置完成后应禁用 QC 的 PowerShell、Bash 和通用 shell 工具，避免任意脚本、上下文浪费和被质检数据被修改。
 - 评审视角清单（实现 agent 自查也建议读）：见 [.agents/skills/code-review-excellence/SKILL.md](.agents/skills/code-review-excellence/SKILL.md)。
 
 ## 5. 不要做的事

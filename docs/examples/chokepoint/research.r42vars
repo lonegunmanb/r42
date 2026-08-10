@@ -1,11 +1,13 @@
-topic  = "Advanced semiconductor packaging for AI accelerators"
-market = "global"
+topic  = "长鑫生产的 ddr5 内存，最终报告使用中文撰写"
+market = "a-share"
+as_of_date = "2026-08-09"
 
 max_candidates_per_chokepoint = 3
 use_pplx                       = true
+pplx_tool_call_quota = 20
 
 model            = "deepseek-v4-flash"
-reasoning_effort = "low"
+reasoning_effort = "medium"
 model_provider = {
   endpoint    = "https://api.deepseek.com"
   wire_api    = "responses"

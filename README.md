@@ -195,7 +195,16 @@ r42 output
 `r42 apply` is the convenience form that plans `<cwd>/.r42/config`, prints the
 plan as JSON, and immediately applies it. Source changes do not affect the
 active snapshot until `r42 init` is run again. The overall Apply timeout
-defaults to one hour and can be changed with `--timeout`.
+defaults to one hour and can be changed with `--timeout`. Each active Copilot
+session also has a 15-minute inactivity watchdog, configurable with
+`--session-stall-timeout`. Every SDK event and typed-tool handler start or finish
+resets that one per-session deadline. If it expires, r42 aborts the stalled turn,
+waits up to 10 seconds for the old send and all tracked tool, handler, or
+subagent work to stop, resumes the same logical session when needed, and sends
+one continuation message. If that continuation also stalls, or if an Abort or
+termination barrier exceeds the bounded cleanup window, r42 fails the research
+block instead of starting overlapping work. Session Close is bounded separately
+so a stuck SDK disconnect cannot prevent the CLI from exiting.
 
 Apply selects its progress UI with `--ui=auto|tui|repl` (default `auto`). An
 interactive terminal at least 50 columns by 12 rows uses the Bubble Tea TUI;

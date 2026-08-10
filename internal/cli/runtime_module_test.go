@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/github/copilot-sdk/go"
 	"github.com/lonegunmanb/r42/internal/cli"
@@ -61,6 +63,28 @@ output "status" { value = module.child.status }
 	))
 	require.NoError(t, err)
 	assert.Equal(t, "module.child.research.static.inside", string(address))
+}
+
+func TestProductionRuntimePropagatesSessionStallTimeoutToChildSession(t *testing.T) {
+	t.Parallel()
+	root := writeModuleFixture(t, "")
+	opener := &moduleRecoveringOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), root, nil)
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+
+	result, err := applyRuntime(runtime, ctx, planned, executor.ResearchConfigOptions{
+		Parallelism: 2, SessionStallTimeout: 5 * time.Millisecond,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, cty.StringVal("child-done"), result.Outputs["status"])
+	sendCalls, abortCalls, resumeCalls := opener.session.counts()
+	assert.Equal(t, 2, sendCalls)
+	assert.Equal(t, 1, abortCalls)
+	assert.Equal(t, 1, resumeCalls)
 }
 
 func TestProductionRuntimePropagatesModuleTimeoutToChildSession(t *testing.T) {
@@ -130,4 +154,54 @@ func (s *moduleBlockingSession) SendAndWait(ctx context.Context, _ sdk.MessageOp
 	s.mu.Unlock()
 	<-ctx.Done()
 	return nil, ctx.Err()
+}
+
+type moduleRecoveringOpener struct{ session moduleRecoveringSession }
+
+func (o *moduleRecoveringOpener) Open(context.Context, copilot.SessionConfig) (cli.Session, error) {
+	return &o.session, nil
+}
+
+type moduleRecoveringSession struct {
+	mu          sync.Mutex
+	sendCalls   int
+	abortCalls  int
+	resumeCalls int
+}
+
+func (s *moduleRecoveringSession) SendAndWait(
+	ctx context.Context,
+	_ sdk.MessageOptions,
+) (*sdk.SessionEvent, error) {
+	s.mu.Lock()
+	s.sendCalls++
+	call := s.sendCalls
+	s.mu.Unlock()
+	if call > 1 {
+		return &sdk.SessionEvent{ID: "assistant-final", Data: &sdk.AssistantMessageData{Content: "done"}}, nil
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (s *moduleRecoveringSession) Abort(context.Context) error {
+	s.mu.Lock()
+	s.abortCalls++
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *moduleRecoveringSession) Resume(context.Context) error {
+	s.mu.Lock()
+	s.resumeCalls++
+	s.mu.Unlock()
+	return nil
+}
+
+func (*moduleRecoveringSession) Close(context.Context) error { return nil }
+
+func (s *moduleRecoveringSession) counts() (int, int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sendCalls, s.abortCalls, s.resumeCalls
 }

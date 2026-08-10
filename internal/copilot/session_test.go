@@ -370,6 +370,57 @@ func TestSessionResumeRetriesTransientLifecycleFailure(t *testing.T) {
 	assert.Len(t, delays, 1)
 }
 
+func TestSessionResumeDoesNotDisconnectWithCanceledContext(t *testing.T) {
+	t.Parallel()
+
+	original := &fakeSession{}
+	client := &fakeClient{session: original, resumedSession: &fakeSession{}}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+	session, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 0, 0)})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err = session.Resume(ctx)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, original.disconnectCalls)
+	assert.Empty(t, client.resumeIDs)
+}
+
+func TestSessionResumeDiscardsHandleReturnedAfterContextCancellation(t *testing.T) {
+	t.Parallel()
+
+	original := &fakeSession{}
+	resumed := &fakeSession{disconnectDone: make(chan struct{})}
+	client := &blockingResumeClient{
+		original: original,
+		resumed:  resumed,
+		started:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+	session, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 0, 0)})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		done <- session.Resume(ctx)
+	}()
+	<-client.started
+	cancel()
+	close(client.release)
+
+	resumeErr := <-done
+	<-resumed.disconnectDone
+
+	require.ErrorIs(t, resumeErr, context.Canceled)
+	assert.Equal(t, 1, original.disconnectCalls)
+	assert.Equal(t, 1, resumed.disconnectCalls)
+	_, sendErr := session.SendAndWait(t.Context(), sdk.MessageOptions{Prompt: "must not use late handle"})
+	require.ErrorContains(t, sendErr, "session is unavailable")
+}
+
 func TestSessionOnForwardsSDKEventsAndUnsubscribe(t *testing.T) {
 	t.Parallel()
 
@@ -665,6 +716,27 @@ type fakeClient struct {
 	resumedSession sdkSession
 }
 
+type blockingResumeClient struct {
+	original sdkSession
+	resumed  sdkSession
+	started  chan struct{}
+	release  chan struct{}
+}
+
+func (c *blockingResumeClient) CreateSession(context.Context, *sdk.SessionConfig) (sdkSession, error) {
+	return c.original, nil
+}
+
+func (c *blockingResumeClient) ResumeSession(
+	context.Context,
+	string,
+	*sdk.ResumeSessionConfig,
+) (sdkSession, error) {
+	close(c.started)
+	<-c.release
+	return c.resumed, nil
+}
+
 func (c *fakeClient) CreateSession(ctx context.Context, config *sdk.SessionConfig) (sdkSession, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -708,6 +780,7 @@ type fakeSession struct {
 	abortCalls       int
 	disconnectErrors []error
 	disconnectCalls  int
+	disconnectDone   chan struct{}
 }
 
 func (*fakeSession) On(sdk.SessionEventHandler) func() {
@@ -760,6 +833,9 @@ func (s *fakeSession) SendAndWait(ctx context.Context, options sdk.MessageOption
 
 func (s *fakeSession) Disconnect() error {
 	s.disconnectCalls++
+	if s.disconnectDone != nil {
+		close(s.disconnectDone)
+	}
 	index := s.disconnectCalls - 1
 	if index < len(s.disconnectErrors) {
 		return s.disconnectErrors[index]

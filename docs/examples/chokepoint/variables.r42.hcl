@@ -8,6 +8,16 @@ variable "topic" {
   }
 }
 
+variable "as_of_date" {
+  type        = string
+  description = "Fixed YYYY-MM-DD evidence cutoff for the complete run. Sources published after this date are rejected."
+
+  validation {
+    condition     = can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", var.as_of_date))
+    error_message = "as_of_date must use YYYY-MM-DD."
+  }
+}
+
 variable "market" {
   type        = string
   description = "Public market universe used when discovering candidate companies."
@@ -34,10 +44,38 @@ variable "max_candidates_per_chokepoint" {
   }
 }
 
+variable "max_qc_rounds" {
+  type        = number
+  description = "Maximum QC review and research-revision rounds allowed for each QC-enabled research session."
+  default     = 10
+
+  validation {
+    condition = (
+      var.max_qc_rounds >= 1 &&
+      floor(var.max_qc_rounds) == var.max_qc_rounds
+    )
+    error_message = "max_qc_rounds must be a positive integer."
+  }
+}
+
 variable "use_pplx" {
   type        = bool
   description = "Use the optional Perplexity search and fetch typed tools instead of the built-in web tools."
   default     = false
+}
+
+variable "pplx_tool_call_quota" {
+  type        = number
+  description = "Maximum successful Perplexity fetch calls allowed per research session when use_pplx is true."
+  default     = 10
+
+  validation {
+    condition = (
+      var.pplx_tool_call_quota >= 1 &&
+      floor(var.pplx_tool_call_quota) == var.pplx_tool_call_quota
+    )
+    error_message = "pplx_tool_call_quota must be a positive integer."
+  }
 }
 
 variable "model_provider" {
@@ -66,6 +104,18 @@ variable "model" {
   type        = string
   description = "Model used by all research and QC sessions."
   default     = "openai/gpt-5.5"
+}
+
+variable "high_impact_model" {
+  type        = string
+  description = "Optional stronger model for scope, reconciliation, chokepoint selection, and synthesis. Empty uses model."
+  default     = ""
+}
+
+variable "qc_model" {
+  type        = string
+  description = "Optional independent model for QC sessions. Empty uses high_impact_model, then model."
+  default     = ""
 }
 
 variable "reasoning_effort" {

@@ -41,10 +41,10 @@ import (
 )
 
 const (
-	researchSystemProtocol = "You are executing an unattended r42 research DAG block. Follow the configured tool and completion protocol."
-	sessionIdleGrace       = 3 * time.Second
-	sessionAbortGrace      = 3 * time.Second
-	sessionRecoveryTimeout = 10 * time.Second
+	researchSystemProtocol         = "You are executing an unattended r42 research DAG block. Follow the configured tool and completion protocol."
+	sessionRecoveryTimeout         = 10 * time.Second
+	maxSessionStallRecoveries      = 1
+	sessionStallContinuationPrompt = "The previous model turn stalled and was aborted. Continue the current task from the existing session and artifacts. Before retrying a tool call, check whether it already completed. Do not repeat successful work."
 )
 
 type Session interface {
@@ -208,6 +208,7 @@ func (e *Engine) apply(
 		results: make(map[string]cty.Value), run: activeRun, sessions: sessions, recorder: recorder,
 		state: new(runtimeState), tools: planned.Tools(), directory: planned.Directory(),
 		contextValues: planned.Context(), localExpressions: planned.LocalExpressions(),
+		sessionStallTimeout: effectiveSessionStallTimeout(options.SessionStallTimeout),
 	}
 	runner := executor.New(factory, nil)
 	outputs, applyErr := runner.Apply(ctx, planned, options.Parallelism)
@@ -276,17 +277,18 @@ func recordLifecycleCompletion(
 }
 
 type runtimeFactory struct {
-	mu               sync.Mutex
-	results          map[string]cty.Value
-	run              *run.Run
-	sessions         SessionOpener
-	recorder         *debuglog.Recorder
-	state            *runtimeState
-	prefix           string
-	tools            map[string]plan.ToolSpec
-	directory        string
-	contextValues    map[string]cty.Value
-	localExpressions map[string]string
+	mu                  sync.Mutex
+	results             map[string]cty.Value
+	run                 *run.Run
+	sessions            SessionOpener
+	recorder            *debuglog.Recorder
+	state               *runtimeState
+	prefix              string
+	tools               map[string]plan.ToolSpec
+	directory           string
+	contextValues       map[string]cty.Value
+	localExpressions    map[string]string
+	sessionStallTimeout time.Duration
 }
 
 type runtimeState struct {
@@ -398,6 +400,8 @@ func (f *runtimeFactory) newResearchBlock(
 	if err != nil {
 		return nil, err
 	}
+	researchToolActivity := newTypedToolActivity()
+	trackTypedToolActivity(tools, researchToolActivity)
 	resolved := researchspec.ResolvedTools{}
 	terminateName := ""
 	if planned.Config.TerminateToolID != nil {
@@ -436,9 +440,7 @@ func (f *runtimeFactory) newResearchBlock(
 	}
 	recordedSession := &recordingSession{
 		Session: session, recorder: f.recorder, address: executionAddress, kind: debuglog.SessionResearch,
-	}
-	if terminalRecorder != nil {
-		recordedSession.completion = terminalRecorder
+		stallTimeout: f.sessionStallTimeout, typedToolActivity: researchToolActivity,
 	}
 	runner := researchruntime.NewRunner(recordedSession, terminalRecorder)
 	var qcRunner *qc.Runner
@@ -473,6 +475,8 @@ func (f *runtimeFactory) newResearchBlock(
 		}
 		verdicts := qc.NewVerdictRecorder()
 		qcTools = append(qcTools, qcVerdictTool(executionAddress, f.recorder, verdicts))
+		qcToolActivity := newTypedToolActivity()
+		trackTypedToolActivity(qcTools, qcToolActivity)
 		qcReasoning := ""
 		if effective.ReasoningEffort != nil {
 			qcReasoning = *effective.ReasoningEffort
@@ -499,7 +503,7 @@ func (f *runtimeFactory) newResearchBlock(
 		}
 		qcSession = &recordingSession{
 			Session: qcSession, recorder: f.recorder, address: executionAddress, kind: debuglog.SessionQC,
-			completion: verdicts,
+			stallTimeout: f.sessionStallTimeout, typedToolActivity: qcToolActivity,
 		}
 		qcRunner = qc.NewRunner(&phasedResearch{research: runner, session: recordedSession}, qcSession, verdicts)
 		qcConfig = qc.Config{
@@ -582,7 +586,8 @@ func (f *runtimeFactory) newModuleBlock(
 		results: make(map[string]cty.Value), run: f.run, sessions: f.sessions,
 		recorder: f.recorder, state: f.state, prefix: executionAddress, tools: node.Module.Plan.Tools(),
 		directory: node.Module.Plan.Directory(), contextValues: node.Module.Plan.Context(),
-		localExpressions: node.Module.Plan.LocalExpressions(),
+		localExpressions:    node.Module.Plan.LocalExpressions(),
+		sessionStallTimeout: f.sessionStallTimeout,
 	}
 	return &moduleApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address,
@@ -1407,21 +1412,19 @@ func (b *researchApplyBlock) Cleanup(ctx context.Context) error {
 
 type recordingSession struct {
 	Session
-	recorder   *debuglog.Recorder
-	address    string
-	kind       debuglog.SessionKind
-	completion completionVersion
-	idleGrace  time.Duration
-	abortGrace time.Duration
-	eventMu    sync.Mutex
-	kindMu     sync.RWMutex
-	seen       map[string]struct{}
-	toolName   map[string]string
-	lastEvent  string
-}
-
-type completionVersion interface {
-	CompletionVersion() uint64
+	recorder           *debuglog.Recorder
+	address            string
+	kind               debuglog.SessionKind
+	stallTimeout       time.Duration
+	terminationTimeout time.Duration
+	typedToolActivity  *typedToolActivity
+	sendMu             sync.Mutex
+	eventMu            sync.Mutex
+	kindMu             sync.RWMutex
+	seen               map[string]struct{}
+	toolName           map[string]string
+	lastEvent          string
+	tainted            bool
 }
 
 type recoverableSession interface {
@@ -1434,87 +1437,207 @@ type sessionSendResult struct {
 	err   error
 }
 
-type sendSettlement struct {
+type sessionProgress struct {
+	mu              sync.Mutex
+	activeTools     map[string]struct{}
+	activeAgents    map[string]int
+	callbacks       int
+	acceptCallbacks bool
+	sessionIdle     bool
+	lastActivity    time.Time
+	activitySignal  chan struct{}
+}
+
+type typedToolActivity struct {
 	mu             sync.Mutex
-	completion     completionVersion
-	baseline       uint64
-	activeTools    map[string]struct{}
-	activeAgents   map[string]int
-	assistantIdle  bool
-	sessionIdle    bool
+	active         int
+	recovering     bool
 	lastActivity   time.Time
-	lastAssistant  *sdk.SessionEvent
 	activitySignal chan struct{}
 }
 
-func newSendSettlement(completion completionVersion) *sendSettlement {
-	return &sendSettlement{
-		completion: completion, baseline: completion.CompletionVersion(),
+func newSessionProgress() *sessionProgress {
+	return &sessionProgress{
 		activeTools: make(map[string]struct{}), activeAgents: make(map[string]int),
-		lastActivity: time.Now(), activitySignal: make(chan struct{}, 1),
+		acceptCallbacks: true, lastActivity: time.Now(), activitySignal: make(chan struct{}, 1),
 	}
 }
 
-func (s *sendSettlement) observe(event sdk.SessionEvent) {
-	s.mu.Lock()
-	s.lastActivity = time.Now()
-	switch data := event.Data.(type) {
-	case *sdk.ToolExecutionStartData:
-		s.activeTools[data.ToolCallID] = struct{}{}
-	case *sdk.ToolExecutionCompleteData:
-		delete(s.activeTools, data.ToolCallID)
-	case *sdk.SubagentStartedData:
-		s.activeAgents[subagentKey(data.ToolCallID, data.AgentName)]++
-	case *sdk.SubagentCompletedData:
-		s.completeSubagent(data.ToolCallID, data.AgentName)
-	case *sdk.SubagentFailedData:
-		s.completeSubagent(data.ToolCallID, data.AgentName)
-	case *sdk.AssistantIdleData:
-		s.assistantIdle = true
-	case *sdk.SessionIdleData:
-		s.sessionIdle = true
-	case *sdk.AssistantMessageData:
-		cloned := event
-		s.lastAssistant = &cloned
+func newTypedToolActivity() *typedToolActivity {
+	return &typedToolActivity{activitySignal: make(chan struct{}, 1)}
+}
+
+func trackTypedToolActivity(tools []sdk.Tool, activity *typedToolActivity) {
+	for index := range tools {
+		tools[index].Handler = trackedToolHandler(tools[index].Handler, activity)
 	}
-	s.mu.Unlock()
+}
+
+func trackedToolHandler(handler sdk.ToolHandler, activity *typedToolActivity) sdk.ToolHandler {
+	return func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+		if !activity.begin() {
+			return sdk.ToolResult{}, fmt.Errorf(
+				"typed tool invocation rejected because session recovery is in progress",
+			)
+		}
+		defer activity.finish()
+		return handler(invocation)
+	}
+}
+
+func (a *typedToolActivity) begin() bool {
+	a.mu.Lock()
+	if a.recovering {
+		a.mu.Unlock()
+		return false
+	}
+	a.active++
+	a.lastActivity = time.Now()
+	a.mu.Unlock()
+	a.signalActivity()
+	return true
+}
+
+func (a *typedToolActivity) finish() {
+	a.mu.Lock()
+	a.active--
+	a.lastActivity = time.Now()
+	a.mu.Unlock()
+	a.signalActivity()
+}
+
+func (a *typedToolActivity) state() (time.Time, bool) {
+	if a == nil {
+		return time.Time{}, true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastActivity, a.active == 0
+}
+
+func (a *typedToolActivity) signalActivity() {
 	select {
-	case s.activitySignal <- struct{}{}:
+	case a.activitySignal <- struct{}{}:
 	default:
 	}
 }
 
-func (s *sendSettlement) completeSubagent(toolCallID, agentName string) {
-	key := subagentKey(toolCallID, agentName)
-	remaining := s.activeAgents[key] - 1
-	if remaining <= 0 {
-		delete(s.activeAgents, key)
+func (a *typedToolActivity) signal() <-chan struct{} {
+	if a == nil {
+		return nil
+	}
+	return a.activitySignal
+}
+
+func (a *typedToolActivity) beginRecovery() {
+	if a == nil {
 		return
 	}
-	s.activeAgents[key] = remaining
+	a.mu.Lock()
+	a.recovering = true
+	a.mu.Unlock()
+}
+
+func (a *typedToolActivity) endRecovery() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.recovering = false
+	a.lastActivity = time.Now()
+	a.mu.Unlock()
+	a.signalActivity()
+}
+
+func (p *sessionProgress) beginCallback() bool {
+	p.mu.Lock()
+	if !p.acceptCallbacks {
+		p.mu.Unlock()
+		return false
+	}
+	p.callbacks++
+	p.lastActivity = time.Now()
+	p.mu.Unlock()
+	p.signalActivity()
+	return true
+}
+
+func (p *sessionProgress) finishCallback() {
+	p.mu.Lock()
+	p.callbacks--
+	p.mu.Unlock()
+	p.signalActivity()
+}
+
+func (p *sessionProgress) track(event sdk.SessionEvent) {
+	p.mu.Lock()
+	switch data := event.Data.(type) {
+	case *sdk.ToolExecutionStartData:
+		p.activeTools[data.ToolCallID] = struct{}{}
+	case *sdk.ToolExecutionCompleteData:
+		delete(p.activeTools, data.ToolCallID)
+	case *sdk.SubagentStartedData:
+		p.activeAgents[subagentKey(data.ToolCallID, data.AgentName)]++
+	case *sdk.SubagentCompletedData:
+		p.completeSubagent(data.ToolCallID, data.AgentName)
+	case *sdk.SubagentFailedData:
+		p.completeSubagent(data.ToolCallID, data.AgentName)
+	case *sdk.SessionIdleData:
+		p.sessionIdle = true
+	}
+	p.mu.Unlock()
+	p.signalActivity()
+}
+
+func (p *sessionProgress) signalActivity() {
+	select {
+	case p.activitySignal <- struct{}{}:
+	default:
+	}
+}
+
+func (p *sessionProgress) completeSubagent(toolCallID, agentName string) {
+	key := subagentKey(toolCallID, agentName)
+	remaining := p.activeAgents[key] - 1
+	if remaining <= 0 {
+		delete(p.activeAgents, key)
+		return
+	}
+	p.activeAgents[key] = remaining
 }
 
 func subagentKey(toolCallID, agentName string) string {
 	return toolCallID + "\x00" + agentName
 }
 
-func (s *sendSettlement) snapshot() (bool, time.Time) {
-	version := s.completion.CompletionVersion()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ready := version > s.baseline && s.assistantIdle && !s.sessionIdle &&
-		len(s.activeTools) == 0 && len(s.activeAgents) == 0
-	return ready, s.lastActivity
+func (p *sessionProgress) activity() time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastActivity
 }
 
-func (s *sendSettlement) assistantResult() *sdk.SessionEvent {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.lastAssistant == nil {
-		return nil
+func (p *sessionProgress) tryCloseCallbackAdmission() (bool, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	inactive := p.callbacks == 0 && len(p.activeTools) == 0 && len(p.activeAgents) == 0
+	if !inactive {
+		return p.sessionIdle, false
 	}
-	cloned := *s.lastAssistant
-	return &cloned
+	p.acceptCallbacks = false
+	return p.sessionIdle, true
+}
+
+func (p *sessionProgress) beginRecovery() {
+	p.mu.Lock()
+	p.sessionIdle = false
+	p.mu.Unlock()
+}
+
+func (p *sessionProgress) closeCallbackAdmission() {
+	p.mu.Lock()
+	p.acceptCallbacks = false
+	p.mu.Unlock()
+	p.signalActivity()
 }
 
 func (s *recordingSession) setKind(kind debuglog.SessionKind) {
@@ -1554,11 +1677,11 @@ type sessionEventSource interface {
 }
 
 func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+
 	kind := s.currentKind()
-	if err := s.recorder.Record(debuglog.Event{
-		Kind: debuglog.EventMessage, BlockAddress: s.address, Session: kind,
-		Role: debuglog.RoleUser, Content: options.Prompt,
-	}); err != nil {
+	if err := s.recordUserMessage(kind, options.Prompt); err != nil {
 		return nil, err
 	}
 	ctx = debuglog.WithRecorder(ctx, s.recorder)
@@ -1569,51 +1692,36 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 	}
 	var eventErr error
 	var eventErrMu sync.Mutex
-	var settlement *sendSettlement
-	recovery, canRecover := s.Session.(recoverableSession)
-	if s.completion != nil && canRecover {
-		settlement = newSendSettlement(s.completion)
-	}
-	unsubscribe := func() {}
-	if source, ok := s.Session.(sessionEventSource); ok {
-		unsubscribe = source.On(func(event sdk.SessionEvent) {
-			if !s.markEvent(event.ID) {
-				return
+	handleEvent := func(event sdk.SessionEvent) {
+		var err error
+		switch {
+		case strings.HasPrefix(string(event.Type()), "session."):
+			err = s.recordSessionEvent(&event)
+		case event.Type() == sdk.SessionEventTypeAssistantMessage ||
+			event.Type() == sdk.SessionEventTypeAssistantMessageDelta ||
+			event.Type() == sdk.SessionEventTypeAssistantReasoning ||
+			event.Type() == sdk.SessionEventTypeAssistantReasoningDelta ||
+			event.Type() == sdk.SessionEventTypeAssistantUsage ||
+			event.Type() == sdk.SessionEventTypeAssistantIdle:
+			err = s.recordAssistantEvent(&event)
+		case event.Type() == sdk.SessionEventTypeAssistantToolCallDelta ||
+			event.Type() == sdk.SessionEventTypeToolSearchActivated ||
+			event.Type() == sdk.SessionEventTypeToolUserRequested ||
+			event.Type() == sdk.SessionEventTypeToolExecutionStart ||
+			event.Type() == sdk.SessionEventTypeToolExecutionProgress ||
+			event.Type() == sdk.SessionEventTypeToolExecutionPartialResult ||
+			event.Type() == sdk.SessionEventTypeToolExecutionComplete:
+			err = s.recordToolEvent(&event)
+		default:
+			return
+		}
+		if err != nil {
+			eventErrMu.Lock()
+			if eventErr == nil {
+				eventErr = err
 			}
-			s.setLastEvent(event.Type())
-			if settlement != nil {
-				settlement.observe(event)
-			}
-			var err error
-			switch {
-			case strings.HasPrefix(string(event.Type()), "session."):
-				err = s.recordSessionEvent(&event)
-			case event.Type() == sdk.SessionEventTypeAssistantMessage ||
-				event.Type() == sdk.SessionEventTypeAssistantMessageDelta ||
-				event.Type() == sdk.SessionEventTypeAssistantReasoning ||
-				event.Type() == sdk.SessionEventTypeAssistantReasoningDelta ||
-				event.Type() == sdk.SessionEventTypeAssistantUsage ||
-				event.Type() == sdk.SessionEventTypeAssistantIdle:
-				err = s.recordAssistantEvent(&event)
-			case event.Type() == sdk.SessionEventTypeAssistantToolCallDelta ||
-				event.Type() == sdk.SessionEventTypeToolSearchActivated ||
-				event.Type() == sdk.SessionEventTypeToolUserRequested ||
-				event.Type() == sdk.SessionEventTypeToolExecutionStart ||
-				event.Type() == sdk.SessionEventTypeToolExecutionProgress ||
-				event.Type() == sdk.SessionEventTypeToolExecutionPartialResult ||
-				event.Type() == sdk.SessionEventTypeToolExecutionComplete:
-				err = s.recordToolEvent(&event)
-			default:
-				return
-			}
-			if err != nil {
-				eventErrMu.Lock()
-				if eventErr == nil {
-					eventErr = err
-				}
-				eventErrMu.Unlock()
-			}
-		})
+			eventErrMu.Unlock()
+		}
 	}
 	waitEvent := debuglog.Event{
 		BlockAddress: s.address,
@@ -1623,17 +1731,13 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 	s.resetLastEvent()
 	waitStarted := time.Now()
 	if err := debuglog.Lifecycle(ctx, "session.wait", debuglog.StatusStarted, waitEvent); err != nil {
-		unsubscribe()
 		return nil, err
 	}
-	var event *sdk.SessionEvent
-	var operationErr error
-	if settlement == nil {
-		event, operationErr = s.Session.SendAndWait(ctx, options)
-	} else {
-		event, operationErr = s.sendWithIdleRecovery(ctx, options, recovery, settlement, kind)
+	var recovery recoverableSession
+	if recoverable, ok := s.Session.(recoverableSession); ok {
+		recovery = recoverable
 	}
-	unsubscribe()
+	event, operationErr := s.sendWithStallWatchdog(ctx, options, recovery, kind, handleEvent)
 	waitEvent.LastEvent = s.lastSDKEvent()
 	waitLogErr := debuglog.CompleteLifecycle(ctx, "session.wait", waitStarted, operationErr, waitEvent)
 	operationErr = errors.Join(operationErr, waitLogErr)
@@ -1650,157 +1754,395 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 	return event, nil
 }
 
-func (s *recordingSession) sendWithIdleRecovery(
+func (s *recordingSession) recordUserMessage(kind debuglog.SessionKind, prompt string) error {
+	return s.recorder.Record(debuglog.Event{
+		Kind: debuglog.EventMessage, BlockAddress: s.address, Session: kind,
+		Role: debuglog.RoleUser, Content: prompt,
+	})
+}
+
+func (s *recordingSession) sendWithStallWatchdog(
 	ctx context.Context,
 	options sdk.MessageOptions,
 	recovery recoverableSession,
-	settlement *sendSettlement,
 	kind debuglog.SessionKind,
+	handleEvent func(sdk.SessionEvent),
 ) (*sdk.SessionEvent, error) {
-	sendCtx, cancelSend := context.WithCancel(ctx)
-	defer cancelSend()
-	completed := make(chan sessionSendResult, 1)
-	go func() {
-		event, err := s.Session.SendAndWait(sendCtx, options)
-		completed <- sessionSendResult{event: event, err: err}
-	}()
-
-	var timer *time.Timer
-	var timerC <-chan time.Time
-	stopTimer := func() {
-		if timer == nil {
-			return
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timerC = nil
-	}
-	defer stopTimer()
-	resetTimer := func() {
-		ready, lastActivity := settlement.snapshot()
-		if !ready {
-			stopTimer()
-			return
-		}
-		delay := max(time.Duration(0), s.effectiveIdleGrace()-time.Since(lastActivity))
-		if timer == nil {
-			timer = time.NewTimer(delay)
-		} else {
-			stopTimer()
-			timer.Reset(delay)
-		}
-		timerC = timer.C
-	}
+	timer := time.NewTimer(s.effectiveStallTimeout())
+	stopTimer(timer)
+	defer stopTimer(timer)
+	prompt := options
+	recoveries := 0
 
 	for {
-		resetTimer()
-		select {
-		case result := <-completed:
-			return result.event, result.err
-		case <-settlement.activitySignal:
-			continue
-		case <-timerC:
-			ready, _ := settlement.snapshot()
-			if !ready {
-				continue
+		progress := newSessionProgress()
+		stopObserving := s.subscribeToAttempt(progress, handleEvent)
+		sendCtx, cancelSend := context.WithCancel(ctx)
+		completed := make(chan sessionSendResult, 1)
+		go func(message sdk.MessageOptions) {
+			event, err := s.Session.SendAndWait(sendCtx, message)
+			completed <- sessionSendResult{event: event, err: err}
+		}(prompt)
+		resetTimer(timer, s.effectiveStallTimeout(), s.lastActivity(progress))
+
+		attemptComplete := false
+		for !attemptComplete {
+			select {
+			case result := <-completed:
+				cancelSend()
+				if err := ctx.Err(); err != nil {
+					settled := make(chan sessionSendResult, 1)
+					settled <- result
+					cancelErr := s.stopCanceledAttempt(
+						ctx, cancelSend, settled, recovery, progress, stopObserving,
+					)
+					return nil, errors.Join(err, result.err, cancelErr)
+				}
+				stopObserving()
+				return result.event, result.err
+			case <-progress.activitySignal:
+				resetTimer(timer, s.effectiveStallTimeout(), s.lastActivity(progress))
+			case <-s.typedToolActivity.signal():
+				resetTimer(timer, s.effectiveStallTimeout(), s.lastActivity(progress))
+			case <-timer.C:
+				remaining := s.effectiveStallTimeout() - time.Since(s.lastActivity(progress))
+				if remaining > 0 {
+					resetTimer(timer, remaining, time.Now())
+					continue
+				}
+				stopTimer(timer)
+				event := debuglog.Event{
+					BlockAddress: s.address, Session: kind,
+					WaitFor: "session activity", LastEvent: s.lastSDKEvent(),
+				}
+				if err := debuglog.Lifecycle(ctx, "session.stall_detected", debuglog.StatusCompleted, event); err != nil {
+					cancelErr := s.stopCanceledAttempt(
+						ctx, cancelSend, completed, recovery, progress, stopObserving,
+					)
+					return nil, errors.Join(err, cancelErr)
+				}
+				allowResume := recoveries < maxSessionStallRecoveries
+				if err := s.recoverStalledAttempt(
+					ctx, cancelSend, completed, recovery, progress, kind, allowResume, stopObserving,
+				); err != nil {
+					return nil, err
+				}
+				if !allowResume {
+					return nil, fmt.Errorf("session stalled again after recovery")
+				}
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				s.typedToolActivity.endRecovery()
+				recoveries++
+				prompt = sdk.MessageOptions{Prompt: sessionStallContinuationPrompt}
+				if err := s.recordUserMessage(kind, prompt.Prompt); err != nil {
+					return nil, err
+				}
+				attemptComplete = true
+			case <-ctx.Done():
+				stopTimer(timer)
+				cancelErr := s.stopCanceledAttempt(
+					ctx, cancelSend, completed, recovery, progress, stopObserving,
+				)
+				return nil, errors.Join(ctx.Err(), cancelErr)
 			}
-			return s.recoverMissingIdle(ctx, cancelSend, completed, recovery, settlement, kind)
-		case <-ctx.Done():
-			cancelSend()
-			return nil, ctx.Err()
 		}
 	}
 }
 
-func (s *recordingSession) recoverMissingIdle(
+func effectiveSessionStallTimeout(timeout time.Duration) time.Duration {
+	if timeout > 0 {
+		return timeout
+	}
+	return defaultSessionStallTimeout
+}
+
+func (s *recordingSession) effectiveStallTimeout() time.Duration {
+	return effectiveSessionStallTimeout(s.stallTimeout)
+}
+
+func (s *recordingSession) effectiveTerminationTimeout() time.Duration {
+	if s.terminationTimeout > 0 {
+		return s.terminationTimeout
+	}
+	return sessionRecoveryTimeout
+}
+
+func (s *recordingSession) lastActivity(progress *sessionProgress) time.Time {
+	lastActivity := progress.activity()
+	typedToolActivity, _ := s.typedToolActivity.state()
+	if typedToolActivity.After(lastActivity) {
+		return typedToolActivity
+	}
+	return lastActivity
+}
+
+func stopTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+}
+
+func resetTimer(timer *time.Timer, timeout time.Duration, lastActivity time.Time) {
+	stopTimer(timer)
+	timer.Reset(max(time.Duration(0), timeout-time.Since(lastActivity)))
+}
+
+func (s *recordingSession) subscribeToAttempt(
+	progress *sessionProgress,
+	handleEvent func(sdk.SessionEvent),
+) func() {
+	unsubscribe := func() {}
+	source, ok := s.Session.(sessionEventSource)
+	if ok {
+		unsubscribe = source.On(func(event sdk.SessionEvent) {
+			if !progress.beginCallback() {
+				return
+			}
+			defer progress.finishCallback()
+			s.setLastEvent(event.Type())
+			if !s.markEvent(event.ID) {
+				return
+			}
+			progress.track(event)
+			handleEvent(event)
+		})
+	}
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			progress.closeCallbackAdmission()
+			unsubscribe()
+		})
+	}
+}
+
+func (s *recordingSession) recoverStalledAttempt(
 	ctx context.Context,
 	cancelSend context.CancelFunc,
 	completed <-chan sessionSendResult,
 	recovery recoverableSession,
-	settlement *sendSettlement,
+	progress *sessionProgress,
 	kind debuglog.SessionKind,
-) (*sdk.SessionEvent, error) {
+	allowResume bool,
+	stopObserving func(),
+) error {
+	defer stopObserving()
+	s.typedToolActivity.beginRecovery()
+	recoveryCtx, cancelRecovery := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		s.effectiveTerminationTimeout(),
+	)
+	defer cancelRecovery()
 	event := debuglog.Event{
 		BlockAddress: s.address, Session: kind,
-		WaitFor: string(sdk.SessionEventTypeSessionIdle), LastEvent: s.lastSDKEvent(),
-	}
-	if err := debuglog.Lifecycle(
-		ctx,
-		"session.idle_missing_fallback",
-		debuglog.StatusCompleted,
-		event,
-	); err != nil {
-		cancelSend()
-		return nil, err
-	}
-	abortStarted := time.Now()
-	if err := debuglog.Lifecycle(ctx, "session.abort", debuglog.StatusStarted, event); err != nil {
-		cancelSend()
-		return nil, err
-	}
-	abortCtx, cancelAbort := context.WithTimeout(ctx, sessionRecoveryTimeout)
-	abortErr := recovery.Abort(abortCtx)
-	cancelAbort()
-	if logErr := debuglog.CompleteLifecycle(ctx, "session.abort", abortStarted, abortErr, event); logErr != nil {
-		cancelSend()
-		return nil, errors.Join(abortErr, logErr)
+		WaitFor: "session activity", LastEvent: s.lastSDKEvent(),
 	}
 
-	sendFinished := false
-	if abortErr == nil {
-		abortTimer := time.NewTimer(s.effectiveAbortGrace())
-		defer abortTimer.Stop()
-		select {
-		case result := <-completed:
-			if result.err == nil {
-				return result.event, nil
-			}
-			sendFinished = true
-		case <-abortTimer.C:
-		case <-ctx.Done():
+	var abortErr error
+	if recovery != nil {
+		abortStarted := time.Now()
+		if err := debuglog.Lifecycle(recoveryCtx, "session.abort", debuglog.StatusStarted, event); err != nil {
 			cancelSend()
-			return nil, ctx.Err()
+			_, stopErr := waitForSessionAttemptStop(
+				recoveryCtx, completed, progress, s.typedToolActivity,
+			)
+			stopObserving()
+			if stopErr != nil {
+				s.markTainted()
+				stopErr = fmt.Errorf("timed out waiting for stalled session work to stop: %w", stopErr)
+			}
+			return errors.Join(err, stopErr)
+		}
+		progress.beginRecovery()
+		abortErr = runBoundedSessionOperation(recoveryCtx, recovery.Abort)
+		logErr := debuglog.CompleteLifecycle(
+			recoveryCtx, "session.abort", abortStarted, abortErr, event,
+		)
+		if errors.Is(abortErr, context.DeadlineExceeded) {
+			cancelSend()
+			stopObserving()
+			s.markTainted()
+			return errors.Join(
+				fmt.Errorf("timed out aborting stalled session: %w", abortErr),
+				logErr,
+			)
+		}
+		if logErr != nil {
+			cancelSend()
+			_, stopErr := waitForSessionAttemptStop(
+				recoveryCtx, completed, progress, s.typedToolActivity,
+			)
+			stopObserving()
+			if stopErr != nil {
+				s.markTainted()
+				stopErr = fmt.Errorf("timed out waiting for stalled session work to stop: %w", stopErr)
+			}
+			return errors.Join(abortErr, logErr, stopErr)
 		}
 	}
 
-	if !sendFinished {
-		cancelSend()
+	cancelSend()
+	// SDK typed tools can outlive sendCtx, so Resume requires both barriers.
+	sessionIdle, err := waitForSessionAttemptStop(
+		recoveryCtx, completed, progress, s.typedToolActivity,
+	)
+	stopObserving()
+	if err != nil {
+		s.markTainted()
+		return fmt.Errorf("timed out waiting for stalled session work to stop: %w", err)
 	}
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	if abortErr != nil && !sessionIdle {
+		s.markTainted()
+		return fmt.Errorf("abort stalled session: %w", abortErr)
+	}
+	if !allowResume {
+		if !sessionIdle {
+			s.markTainted()
+		}
+		return nil
+	}
+	if recovery == nil {
+		s.markTainted()
+		return fmt.Errorf("stalled session does not support abort and resume")
+	}
+	if sessionIdle {
+		return nil
+	}
+
 	resumeStarted := time.Now()
-	if err := debuglog.Lifecycle(ctx, "session.resume", debuglog.StatusStarted, event); err != nil {
-		return nil, err
+	if err = debuglog.Lifecycle(recoveryCtx, "session.resume", debuglog.StatusStarted, event); err != nil {
+		s.markTainted()
+		return err
 	}
-	resumeCtx, cancelResume := context.WithTimeout(ctx, sessionRecoveryTimeout)
-	resumeErr := recovery.Resume(resumeCtx)
+	resumeDeadline, _ := recoveryCtx.Deadline()
+	resumeCtx, cancelResume := context.WithDeadline(ctx, resumeDeadline)
+	resumeErr := runBoundedSessionOperation(resumeCtx, recovery.Resume)
 	cancelResume()
-	if logErr := debuglog.CompleteLifecycle(ctx, "session.resume", resumeStarted, resumeErr, event); logErr != nil {
-		return nil, errors.Join(resumeErr, logErr)
+	logErr := debuglog.CompleteLifecycle(
+		recoveryCtx, "session.resume", resumeStarted, resumeErr, event,
+	)
+	if err = ctx.Err(); err != nil {
+		s.markTainted()
+		return errors.Join(err, abortErr, resumeErr, logErr)
 	}
-	if resumeErr != nil {
-		return nil, fmt.Errorf(
-			"resume session after missing session.idle: %w",
-			errors.Join(abortErr, resumeErr),
+	if errors.Is(resumeErr, context.DeadlineExceeded) {
+		s.markTainted()
+		return errors.Join(
+			fmt.Errorf("timed out resuming stalled session: %w", resumeErr),
+			logErr,
 		)
 	}
-	return settlement.assistantResult(), nil
+	if resumeErr != nil || logErr != nil {
+		s.markTainted()
+		return fmt.Errorf("resume stalled session: %w", errors.Join(abortErr, resumeErr, logErr))
+	}
+	return nil
 }
 
-func (s *recordingSession) effectiveIdleGrace() time.Duration {
-	if s.idleGrace > 0 {
-		return s.idleGrace
+func runBoundedSessionOperation(
+	ctx context.Context,
+	operation func(context.Context) error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	return sessionIdleGrace
+	completed := make(chan error, 1)
+	go func() {
+		completed <- operation(ctx)
+	}()
+	select {
+	case err := <-completed:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
-func (s *recordingSession) effectiveAbortGrace() time.Duration {
-	if s.abortGrace > 0 {
-		return s.abortGrace
+func waitForSessionAttemptStop(
+	ctx context.Context,
+	completed <-chan sessionSendResult,
+	progress *sessionProgress,
+	typedTools *typedToolActivity,
+) (bool, error) {
+	sendStopped := false
+	completedSignal := completed
+	for {
+		_, typedToolsInactive := typedTools.state()
+		if sendStopped && typedToolsInactive {
+			if sessionIdle, closed := progress.tryCloseCallbackAdmission(); closed {
+				return sessionIdle, nil
+			}
+		}
+		select {
+		case <-completedSignal:
+			sendStopped = true
+			completedSignal = nil
+		case <-progress.activitySignal:
+		case <-typedTools.signal():
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
 	}
-	return sessionAbortGrace
+}
+
+func (s *recordingSession) stopCanceledAttempt(
+	ctx context.Context,
+	cancelSend context.CancelFunc,
+	completed <-chan sessionSendResult,
+	recovery recoverableSession,
+	progress *sessionProgress,
+	stopObserving func(),
+) error {
+	defer stopObserving()
+	s.typedToolActivity.beginRecovery()
+	terminationCtx, cancelTermination := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		s.effectiveTerminationTimeout(),
+	)
+	defer cancelTermination()
+	var abortErr error
+	if recovery != nil {
+		progress.beginRecovery()
+		abortErr = runBoundedSessionOperation(terminationCtx, recovery.Abort)
+	}
+	cancelSend()
+	_, stopErr := waitForSessionAttemptStop(
+		terminationCtx, completed, progress, s.typedToolActivity,
+	)
+	stopObserving()
+	if abortErr != nil {
+		s.markTainted()
+		if errors.Is(abortErr, context.DeadlineExceeded) {
+			abortErr = fmt.Errorf("timed out aborting canceled session: %w", abortErr)
+		} else {
+			abortErr = fmt.Errorf("abort canceled session: %w", abortErr)
+		}
+	}
+	if stopErr != nil {
+		s.markTainted()
+		stopErr = fmt.Errorf("timed out waiting for canceled session work to stop: %w", stopErr)
+	}
+	return errors.Join(abortErr, stopErr)
+}
+
+func (s *recordingSession) markTainted() {
+	s.eventMu.Lock()
+	s.tainted = true
+	s.eventMu.Unlock()
+}
+
+func (s *recordingSession) isTainted() bool {
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	return s.tainted
 }
 
 func (s *recordingSession) markEvent(id string) bool {
@@ -1978,15 +2320,30 @@ func int64Value(value *int64) int64 {
 }
 
 func (s *recordingSession) Close(ctx context.Context) error {
-	ctx = debuglog.WithRecorder(ctx, s.recorder)
+	if s.isTainted() {
+		return nil
+	}
+	terminationCtx, cancelTermination := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		s.effectiveTerminationTimeout(),
+	)
+	defer cancelTermination()
+	terminationCtx = debuglog.WithRecorder(terminationCtx, s.recorder)
 	event := debuglog.Event{BlockAddress: s.address, Session: s.currentKind()}
 	started := time.Now()
-	startLogErr := debuglog.Lifecycle(ctx, "session.close", debuglog.StatusStarted, event)
-	closeErr := s.Session.Close(ctx)
+	startLogErr := debuglog.Lifecycle(terminationCtx, "session.close", debuglog.StatusStarted, event)
+	closeErr := runBoundedSessionOperation(terminationCtx, s.Session.Close)
+	if errors.Is(closeErr, context.DeadlineExceeded) {
+		s.markTainted()
+		closeErr = fmt.Errorf("timed out closing session: %w", closeErr)
+	}
 	if startLogErr != nil {
 		return errors.Join(closeErr, startLogErr)
 	}
-	return errors.Join(closeErr, debuglog.CompleteLifecycle(ctx, "session.close", started, closeErr, event))
+	return errors.Join(
+		closeErr,
+		debuglog.CompleteLifecycle(terminationCtx, "session.close", started, closeErr, event),
+	)
 }
 
 func researchRetry(configValue *provider.Config, override provider.RetryOverride) (provider.RetryPolicy, error) {
@@ -2014,6 +2371,11 @@ type officialSessionOpener struct {
 	factory *copilot.Factory
 }
 
+type stoppableCopilotClient interface {
+	Stop() error
+	ForceStop()
+}
+
 func newOfficialSessionOpener() *officialSessionOpener {
 	return &officialSessionOpener{}
 }
@@ -2038,12 +2400,26 @@ func (o *officialSessionOpener) Open(ctx context.Context, config copilot.Session
 
 func (o *officialSessionOpener) Close() error {
 	o.mu.Lock()
-	defer o.mu.Unlock()
 	if o.client == nil {
+		o.mu.Unlock()
 		return nil
 	}
-	err := o.client.Stop()
+	client := o.client
 	o.client = nil
 	o.factory = nil
-	return err
+	o.mu.Unlock()
+	return stopCopilotClient(client, sessionRecoveryTimeout)
+}
+
+func stopCopilotClient(client stoppableCopilotClient, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	stopErr := runBoundedSessionOperation(ctx, func(context.Context) error {
+		return client.Stop()
+	})
+	if !errors.Is(stopErr, context.DeadlineExceeded) {
+		return stopErr
+	}
+	go client.ForceStop()
+	return fmt.Errorf("timed out stopping copilot client: %w", stopErr)
 }

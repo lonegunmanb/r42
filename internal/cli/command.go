@@ -23,9 +23,10 @@ import (
 )
 
 const (
-	ExitSuccess = 0
-	ExitFailure = 1
-	ExitUsage   = 2
+	ExitSuccess                = 0
+	ExitFailure                = 1
+	ExitUsage                  = 2
+	defaultSessionStallTimeout = 15 * time.Minute
 )
 
 type Runtime interface {
@@ -176,6 +177,7 @@ func newPlanCommand(runtime Runtime) *cobra.Command {
 func newApplyCommand(runtime Runtime) *cobra.Command {
 	parallelism := 10
 	var timeout time.Duration
+	sessionStallTimeout := defaultSessionStallTimeout
 	var debug bool
 	var variables []string
 	var variableFiles []string
@@ -190,6 +192,9 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 			}
 			if command.Flags().Changed("timeout") && timeout <= 0 {
 				return &usageError{err: fmt.Errorf("timeout must be positive")}
+			}
+			if sessionStallTimeout <= 0 {
+				return &usageError{err: fmt.Errorf("session stall timeout must be positive")}
 			}
 			return nil
 		},
@@ -219,7 +224,7 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 			options := executor.ResearchConfigOptions{
 				Context: ctx, Variables: goldenVariables(variables, variableFiles),
 				RunDirectory: ".", ModuleDirectory: modulesDirectory,
-				Parallelism: parallelism, Debug: debug,
+				Parallelism: parallelism, SessionStallTimeout: sessionStallTimeout, Debug: debug,
 			}
 			displayPath := directory
 			var config *executor.ResearchConfig
@@ -292,6 +297,12 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 	}
 	command.Flags().IntVar(&parallelism, "parallelism", parallelism, "maximum concurrent research blocks")
 	command.Flags().DurationVar(&timeout, "timeout", time.Hour, "overall apply timeout")
+	command.Flags().DurationVar(
+		&sessionStallTimeout,
+		"session-stall-timeout",
+		defaultSessionStallTimeout,
+		"maximum session inactivity before recovery",
+	)
 	command.Flags().BoolVar(&debug, "debug", false, "persist sensitive debug events")
 	command.Flags().StringArrayVar(&variables, "var", nil, "set a Golden input variable (name=value)")
 	command.Flags().StringArrayVar(&variableFiles, "var-file", nil, "load Golden input variables from a file")

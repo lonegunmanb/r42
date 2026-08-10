@@ -34,6 +34,7 @@ type ResearchConfigOptions struct {
 	ReservedRunDirectory string
 	ModuleDirectory      string
 	Parallelism          int
+	SessionStallTimeout  time.Duration
 	Debug                bool
 	Apply                func(*internalplan.Plan) (map[string]cty.Value, []error, error)
 }

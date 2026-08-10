@@ -258,6 +258,9 @@ func (s *Session) Abort(ctx context.Context) error {
 }
 
 func (s *Session) Resume(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("resume copilot session: %w", err)
+	}
 	current := s.current()
 	if current == nil {
 		return fmt.Errorf("resume copilot session: session is unavailable")
@@ -266,12 +269,52 @@ func (s *Session) Resume(ctx context.Context) error {
 		return fmt.Errorf("disconnect copilot session before resume: %w", err)
 	}
 	s.clear(current)
-	resumed, err := s.factory.resume(ctx, s.sessionID, s.resumeConfig, s.retry)
-	if err != nil {
-		return err
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("resume copilot session: %w", err)
 	}
-	s.replace(resumed)
-	return nil
+	return s.resumeWithinContext(ctx)
+}
+
+func (s *Session) resumeWithinContext(ctx context.Context) error {
+	type result struct {
+		session sdkSession
+		err     error
+	}
+	completed := make(chan result)
+	go func() {
+		resumed, err := s.factory.resume(ctx, s.sessionID, s.resumeConfig, s.retry)
+		select {
+		case completed <- result{session: resumed, err: err}:
+		case <-ctx.Done():
+			if resumed != nil {
+				_ = resumed.Disconnect()
+			}
+		}
+	}()
+
+	select {
+	case resumed := <-completed:
+		if err := ctx.Err(); err != nil {
+			if resumed.session != nil {
+				_ = resumed.session.Disconnect()
+			}
+			return fmt.Errorf("resume copilot session: %w", err)
+		}
+		if resumed.err != nil {
+			return resumed.err
+		}
+		s.replace(resumed.session)
+		if err := ctx.Err(); err != nil {
+			s.clear(resumed.session)
+			if resumed.session != nil {
+				_ = resumed.session.Disconnect()
+			}
+			return fmt.Errorf("resume copilot session: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("resume copilot session: %w", ctx.Err())
+	}
 }
 
 func (s *Session) Close(ctx context.Context) error {
