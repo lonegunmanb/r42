@@ -23,13 +23,6 @@ locals {
     local.offline_disallowed_tools,
     ["powershell", "bash", "shell", "edit", "task"],
   ))
-  evidence_tool_ids = [
-    go_tool.register_evidence_source.id,
-    go_tool.stage_evidence_claims.id,
-    go_tool.stage_claim_freshness_checks.id,
-    go_tool.stage_evidence_gaps.id,
-    go_tool.finalize_evidence_ledger.id,
-  ]
   source_tool_guidance = var.use_pplx ? join("\n", [
     "Use ${module.pplx_tools.pplx_pro_search_tool_id} to discover current sources",
     "and ${module.pplx_tools.pplx_fetch_tool_id} to fetch every source retained",
@@ -39,28 +32,6 @@ locals {
     "Use the built-in web_search tool to discover current sources and web_fetch",
     "to read every source retained as evidence.",
   ])
-  evidence_registration_guidance = <<-GUIDANCE
-    Register every retained snapshot with ${go_tool.register_evidence_source.id}.
-    Set url to the fetched page and canonical_url to the original publication URL;
-    they may be identical. Classify sources broadly rather than repeatedly guessing
-    at marginal categories: authoritative_primary/official_filing/official_product/
-    official_statement/regulator; qualified_media/credible_media/named_media/
-    peer_reviewed/industry_research; other_published; or lead_only/self_media/
-    forum/aggregator. An unfamiliar source_type is valid and is conservatively
-    normalized to unknown. Use reporting_basis public_document, named_source,
-    anonymous_sources, direct_observation, published_methodology, or unspecified,
-    and provenance original, syndication, aggregation, or unknown.
-
-    When staging a claim, set authority_for_claim on each evidence edge only when
-    that source is authoritative for that exact assertion. One direct qualified
-    media origin with a named, document-backed, observed, or published-methodology
-    basis may confirm a claim; anonymous reporting requires two independent
-    qualified-media origins. Syndications and aggregations are not independent.
-    Self-media, forums, and aggregators are discovery leads only and must not
-    directly support a substantive final claim. Record explicit inference in the
-    claim's inference field; inference remains inferred regardless of source rank.
-  GUIDANCE
-
   graph_tracks = {
     product_structure = {
       title = "Product structure and BOM"

@@ -7,71 +7,56 @@ research "static" "primary_source_baseline" {
   model            = local.high_impact_model
   reasoning_effort = var.reasoning_effort
   system_prompt = <<-PROMPT
-    You establish the first-party evidence baseline for a supply-chain study.
-    Retain current official filings, regulator records, official product
-    documentation, and official statements before broader industry research.
-    Do not infer unnamed counterparties or silently combine product generations.
-    The evidence cutoff is fixed; never use a source published after it.
+    You establish the authoritative primary-source baseline for a supply-chain
+    study. Keep each claim atomic and time bounded. Confirm only what an official
+    filing, regulator record, official product document, or official statement
+    directly says. Never infer an unnamed counterparty.
 
     Never use PowerShell, a shell, curl, wget, scripts, or command-line programs
-    to search or download content. Only configured source tools may access remote
-    sources. Stop searching once the current official corpus is adequately
-    represented and remaining official-source gaps are explicit.
+    to search or download content. Stop searching when the newest relevant
+    primary corpus is represented and remaining gaps are explicit.
   PROMPT
   prompt = <<-PROMPT
     Topic: ${var.topic}
     Evidence cutoff: ${var.as_of_date}
-
     ${local.source_tool_guidance}
-    ${local.evidence_registration_guidance}
     ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
-    Task workspace_dir: "${block_wd()}"
-    Pass this exact workspace_dir to every configured evidence typed tool.
-    The tools create workspace_dir if it does not exist.
+    Workspace: "${block_wd()}"
 
-    Find the current official corpus most likely to govern this study: issuer
-    filings and prospectuses, official product specifications, regulator pages,
-    official contract or customer disclosures, and applicable export-control or
-    qualification rules. Save every retained source as a Markdown snapshot.
+    Find the newest official filings, regulator records, product specifications,
+    customer or contract disclosures, and applicable rules available by the
+    cutoff. Save every retained source as a Markdown snapshot. Register each
+    source with ${go_tool.register_evidence_source.id}, using workspace_dir
+    "${block_wd()}" and ledger_path "${block_wd()}/evidence-ledger.json".
 
-    For each retained snapshot, call ${go_tool.register_evidence_source.id}
-    once with workspace_dir "${block_wd()}" and ledger_path
-    "${block_wd()}/evidence-ledger.json".
+    Submit atomic cards in batches of at most five with
+    ${go_tool.submit_claim_cards.id}. Use confirmed only when an authoritative
+    primary source directly states the claim. Use reported for direct published
+    reporting. Use inferred only for a conclusion derived from existing card IDs;
+    inferred cards use derived_from and no source_id, quote, or locator. Do not
+    submit unknown as a claim card.
 
-    Submit atomic baseline claims in batches of at most five with
-    ${go_tool.stage_evidence_claims.id}. Use claim_type
-    organization_relationship, supplier_maturity, quantitative, technical,
-    regulatory, product_structure, process, or other. Quantitative claims must
-    provide unit, period, and derivation in qualifiers. Do not submit confidence:
-    r42 separately derives evidence_status as confirmed, reported, inferred, or
-    unknown and dispute_status as clean, challenged, or disputed.
-
-    Finish by calling ${go_tool.finalize_evidence_ledger.id} with:
-    - workspace_dir: "${block_wd()}"
-    - ledger_path: "${block_wd()}/evidence-ledger.json"
-    - source_registry_path: "${block_wd()}/source-registry.json"
-    - mode: "baseline"
-    - topic: the exact topic above
-    - as_of_date: "${var.as_of_date}"
-    - scope_artifact and track: empty strings
+    Finish with ${go_tool.finalize_claim_cards.id}:
+    workspace_dir "${block_wd()}", claims_path "${block_wd()}/claims.json",
+    source_registry_path "${block_wd()}/source-registry.json", as_of_date
+    "${var.as_of_date}", and allow_empty false.
   PROMPT
   tool_ids = concat(local.pplx_tool_ids, [
     go_tool.register_evidence_source.id,
-    go_tool.stage_evidence_claims.id,
-    go_tool.finalize_evidence_ledger.id,
+    go_tool.submit_claim_cards.id,
+    go_tool.finalize_claim_cards.id,
   ])
   tool_call_quota   = local.pplx_tool_call_quota
-  terminate_tool_id = go_tool.finalize_evidence_ledger.id
+  terminate_tool_id = go_tool.finalize_claim_cards.id
   disallowed_tools  = local.research_disallowed_tools
   permission        = "approve_all"
 
-  artifact "evidence_ledger" {
+  artifact "claims" {
     type      = "file"
-    path      = "${block_wd()}/evidence-ledger.json"
+    path      = "${block_wd()}/claims.json"
     required  = true
     non_empty = true
   }
-
   artifact "source_registry" {
     type      = "file"
     path      = "${block_wd()}/source-registry.json"
@@ -81,17 +66,16 @@ research "static" "primary_source_baseline" {
 
   qc {
     criteria = {
-      corpus = "Verify the retained sources include the newest available first-party filings, regulator records, and official product documentation relevant to the topic as of the fixed cutoff. Return every material omission in one verdict."
-      classification = "Judge whether each broad source classification, reporting basis, provenance, and authority-for-claim decision honestly describes the source. Anonymous reporting must not be presented as named or document-backed, and lead-only material must not substantively support a claim."
-      claim_atomicity = "Judge whether each claim expresses one independently auditable, time-bounded assertion and whether the cited passage semantically entails that assertion without hidden extrapolation."
-      lifecycle = "Judge whether supplier maturity is semantically calibrated to the evidence and never promotes research or validation into an order, delivery, production, or primary-supplier relationship."
+      primary_coverage = "Judge whether the newest material primary documents available by the cutoff were retained. Identify every omission that could change the study."
+      entailment = "Judge whether every confirmed card is directly entailed by its authoritative source, including named parties, product variant, period, and qualifiers. Treat typed-tool path, URL, date, and quotation matching as authoritative."
+      atomicity = "Judge whether each card makes one independently auditable assertion rather than bundling several facts behind one citation."
     }
-    model_provider    = model_provider.primary
-    model             = local.qc_model
-    reasoning_effort  = var.reasoning_effort
-    max_qc_rounds     = var.max_qc_rounds
-    disallowed_tools  = local.semantic_qc_disallowed_tools
-    permission        = "approve_all"
+    model_provider   = model_provider.primary
+    model            = local.qc_model
+    reasoning_effort = var.reasoning_effort
+    max_qc_rounds    = var.max_qc_rounds
+    disallowed_tools = local.semantic_qc_disallowed_tools
+    permission       = "approve_all"
   }
 }
 
@@ -100,68 +84,38 @@ research "static" "brainstorm" {
   model            = local.high_impact_model
   reasoning_effort = var.reasoning_effort
   system_prompt = <<-PROMPT
-    You facilitate an exploratory product and supply-chain brainstorm. Define
-    a coverage-complete reference chain before selecting chokepoints. Keep the
-    generic product architecture separate from facts specifically confirmed
-    for the organization or product named by the topic. Never silently combine
-    materially different product generations or form factors.
+    Define a coverage-complete product and supply-chain scope before judging any
+    risk. Keep generic architecture separate from facts about the named target.
+    Do not select companies or chokepoints.
 
-    Never use PowerShell, a shell, curl, wget, or scripts and command-line
-    programs to search the web or download remote content. Do not use them as
-    a workaround when a search or source-reading tool reaches its call quota
-    or returns an error. Only the search and source-reading tools configured
-    for this task may access remote sources. When their quotas are exhausted,
-    continue with the evidence already collected.
+    Never use PowerShell, a shell, curl, wget, scripts, or command-line programs
+    to search or download content. Only configured source tools may access the web.
   PROMPT
   prompt = <<-PROMPT
     Topic: ${var.topic}
     Evidence cutoff: ${var.as_of_date}
-    Market universe: ${var.market}
-    Primary-source baseline: ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "evidence_ledger"])}
-    Primary-source registry: ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "source_registry"])}
-
+    Primary claims: ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "claims"])}
+    Primary source registry: ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "source_registry"])}
     ${local.source_tool_guidance}
     ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
 
-    Read both baseline artifacts before defining scope. Test the most important
-    hypotheses and preserve the most decision-relevant sources. Write
-    ${block_wd()}/brainstorm.md with:
+    Read both baseline artifacts. Write "${block_wd()}/brainstorm.md" with the
+    focal boundary, product variants, layered components, transformation stages,
+    manufacturing, packaging, testing, module integration, downstream system
+    qualification, competing dependency hypotheses, and open questions for the
+    five tracks.
 
-    - the focal system boundary;
-    - a layered product and component decomposition;
-    - stages from product definition through manufacturing, packaging, testing,
-      module integration, and downstream system qualification;
-    - competing hypotheses about equipment, materials, and qualification lock-in;
-    - an explicit distinction between reference-chain facts and target facts that
-      are confirmed, reported, inferred, or unknown, with challenges or disputes
-      represented separately;
-    - possible convergence points and substitution mechanisms;
-    - disputed assumptions and explicit research questions for the five tracks;
-    - every fetched snapshot path next to the claim it informs.
-
-    Stop upstream decomposition at production equipment and input materials:
-    do not decompose equipment into subassemblies or trace materials to their
-    raw extraction origin. Continue downstream through module components and
-    system qualification. This is ideation, not final selection. Do not create
-    company nodes.
-
+    Stop upstream decomposition at production equipment and input materials.
+    Continue downstream through module components and system qualification.
     Then call ${go_tool.submit_supply_chain_scope.id} with artifact_path
-    "${block_wd()}/scope.json". Declare focal_product, distinct product_variants,
-    expected_components, expected_stages, both research boundaries, and a
-    coverage_items inventory. Every coverage item must name one or more declared
-    components and stages and exactly one track from product_structure,
-    manufacturing_testing, equipment, materials_chemicals, or
-    qualification_integration. Together the items must cover every expected
-    component and stage. Record ambiguity as open_questions instead of silently
-    merging variants.
+    "${block_wd()}/scope.json". Every expected component and stage must be
+    assigned to one or more coverage items and exactly one of the five tracks.
   PROMPT
-  tool_ids = concat(local.pplx_tool_ids, [
-    go_tool.submit_supply_chain_scope.id,
-  ])
-  tool_call_quota       = local.pplx_tool_call_quota
-  terminate_tool_id     = go_tool.submit_supply_chain_scope.id
-  disallowed_tools      = local.research_disallowed_tools
-  permission            = "approve_all"
+  tool_ids = concat(local.pplx_tool_ids, [go_tool.submit_supply_chain_scope.id])
+  tool_call_quota   = local.pplx_tool_call_quota
+  terminate_tool_id = go_tool.submit_supply_chain_scope.id
+  disallowed_tools  = local.research_disallowed_tools
+  permission        = "approve_all"
 
   artifact "brainstorm" {
     type      = "file"
@@ -169,7 +123,6 @@ research "static" "brainstorm" {
     required  = true
     non_empty = true
   }
-
   artifact "scope" {
     type      = "file"
     path      = "${block_wd()}/scope.json"
@@ -179,12 +132,9 @@ research "static" "brainstorm" {
 
   qc {
     criteria = {
-      scope_challenge = "Act as an independent scope challenger, not a checker of the author's own inventory. Read the official baseline, source registry, brainstorm.md, and scope.json. Identify every material component, stage, purchase category, equipment or service dependency, module branch, and qualification step missing from scope. Return all omissions in one verdict."
-      boundary = "Verify one bounded focal product is defined, upstream decomposition stops at production equipment and input materials, and downstream coverage continues through module components and system qualification."
-      coverage_design = "Judge whether the five-track partition meaningfully covers the declared product and process without hiding overlaps, omitting important dependencies, or silently merging materially different variants."
-      target_mapping = "Verify reference-chain knowledge is distinguished from target facts that are confirmed, reported, inferred, or unknown, with challenges and disputes represented separately; company names must not become graph nodes."
-      evidence = "Judge whether source-backed statements are semantically supported and whether hypotheses that exceed the evidence remain explicitly unverified. Treat typed-tool path and reference validation as authoritative."
-      uncertainty = "Verify competing explanations and material unknowns are preserved rather than silently collapsed into one story."
+      scope = "Judge whether every decision-relevant product branch, component, stage, equipment or material boundary, service dependency, and qualification step is represented."
+      separation = "Judge whether generic architecture is clearly separated from target-specific facts and materially different variants are not silently merged."
+      uncertainty = "Judge whether competing explanations and material open questions remain explicit."
     }
     model_provider   = model_provider.primary
     model            = local.qc_model
@@ -207,56 +157,45 @@ research "static" "graph_track" {
     Evidence cutoff: ${var.as_of_date}
     Track: ${each.value.title}
     Assigned question: ${each.value.question}
-    Brainstorm artifact: ${one([for item in research.static.brainstorm.artifact : item.path if item.name == "brainstorm"])}
-    Scope artifact: ${one([for item in research.static.brainstorm.artifact : item.path if item.name == "scope"])}
-
-    Read both artifacts, then research only this track. Address every scope
-    coverage item assigned to "${each.key}". Preserve the distinction between
-    the generic reference chain and target facts that are confirmed, reported,
-    inferred, or unknown, with challenge or dispute represented independently.
-    Keep materially different product variants separate.
+    Brainstorm: ${one([for item in research.static.brainstorm.artifact : item.path if item.name == "brainstorm"])}
+    Scope: ${one([for item in research.static.brainstorm.artifact : item.path if item.name == "scope"])}
     ${local.source_tool_guidance}
-    ${local.evidence_registration_guidance}
     ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
-    Task workspace_dir: "${block_wd()}"
-    Pass this exact workspace_dir to every configured evidence typed tool.
-    The tools create workspace_dir if it does not exist.
+    Workspace: "${block_wd()}"
 
-    For every retained source, call ${go_tool.register_evidence_source.id}
-    with workspace_dir "${block_wd()}" and ledger_path
-    "${block_wd()}/evidence-ledger.json". Submit atomic claims
-    in batches of at most five with ${go_tool.stage_evidence_claims.id}.
-    Claim IDs must begin with "${each.key}-" and every claim must reference its
-    assigned coverage_item_ids. Register exact quotes as evidence edges; do not
-    submit a confidence value because the host derives evidence status.
+    Research only this track and address every assigned coverage item. Preserve
+    product variants and distinguish generic-chain facts from target facts.
+    Save every retained source under the snapshots/sources directory and register
+    it with ${go_tool.register_evidence_source.id}, using ledger_path
+    "${block_wd()}/evidence-ledger.json".
 
-    If retained public evidence cannot resolve an assigned item, call
-    ${go_tool.stage_evidence_gaps.id} with its coverage_item_id, reason,
-    research_attempt, and impact. Do not name or rank candidate companies.
+    Submit one independently auditable claim per card with
+    ${go_tool.submit_claim_cards.id}, in batches of at most five. Prefix IDs
+    with "${each.key}-". Use confirmed, reported, and inferred exactly as
+    described by the tool; record unresolved questions in the track narrative,
+    not as fake claims.
 
-    Finish by calling ${go_tool.finalize_evidence_ledger.id} with:
-    - workspace_dir: "${block_wd()}"
-    - ledger_path: "${block_wd()}/evidence-ledger.json"
-    - source_registry_path: "${block_wd()}/source-registry.json"
-    - mode: "track"
-    - topic: the exact topic above
-    - as_of_date: "${var.as_of_date}"
-    - scope_artifact: the absolute scope path above
-    - track: "${each.key}"
+    Finish with ${go_tool.finalize_claim_cards.id}: workspace_dir
+    "${block_wd()}", claims_path "${block_wd()}/claims.json",
+    source_registry_path "${block_wd()}/source-registry.json", as_of_date
+    "${var.as_of_date}", and allow_empty false.
   PROMPT
-  tool_ids = concat(local.pplx_tool_ids, local.evidence_tool_ids)
-  tool_call_quota  = local.pplx_tool_call_quota
-  terminate_tool_id = go_tool.finalize_evidence_ledger.id
+  tool_ids = concat(local.pplx_tool_ids, [
+    go_tool.register_evidence_source.id,
+    go_tool.submit_claim_cards.id,
+    go_tool.finalize_claim_cards.id,
+  ])
+  tool_call_quota   = local.pplx_tool_call_quota
+  terminate_tool_id = go_tool.finalize_claim_cards.id
   disallowed_tools  = local.research_disallowed_tools
   permission        = "approve_all"
 
-  artifact "evidence_ledger" {
+  artifact "claims" {
     type      = "file"
-    path      = "${block_wd()}/evidence-ledger.json"
+    path      = "${block_wd()}/claims.json"
     required  = true
     non_empty = true
   }
-
   artifact "source_registry" {
     type      = "file"
     path      = "${block_wd()}/source-registry.json"
@@ -266,11 +205,9 @@ research "static" "graph_track" {
 
   qc {
     criteria = {
-      track_scope = "Judge whether the claims and explicit gaps answer this track's assigned questions without drifting into company selection or leaving a materially important part of the assigned domain unexplained."
-      source_policy = "Judge whether broad source class, reporting basis, provenance, directness, and authority-for-claim choices are semantically honest. Named or document-backed high-quality media may confirm; anonymous reporting requires genuinely independent qualified-media origins; lead-only material cannot substantively support a claim."
-      evidence_entailment = "Judge whether each cited passage semantically entails its atomic claim, including its period, product variant, and named parties. Accept the finalizer's whitespace-tolerant text matching and do not repeat it."
-      status_calibration = "Judge whether inference, evidence strength, and challenge or dispute are communicated as separate concepts, without upgrading an analytical inference or hiding contrary evidence. Treat host-derived statuses as authoritative once source semantics are accepted."
-      decision_value = "Verify each proposed node, edge, stopping boundary, or uncertainty could affect bottleneck, substitution, qualification, capacity, yield, or recovery-time analysis."
+      track_scope = "Judge whether the cards answer this track's assigned questions and preserve material unknowns without drifting into company selection."
+      entailment = "Judge whether each source actually entails its atomic claim with the stated party, period, product branch, and qualifier. Treat typed-tool schema, path, URL, date, and quote matching as authoritative."
+      inference = "Judge whether inferred cards follow from their premise cards without silently upgrading correlation, supplier marketing, or general industry structure into a target-specific fact."
     }
     model_provider   = model_provider.primary
     model            = local.qc_model
@@ -281,143 +218,37 @@ research "static" "graph_track" {
   }
 }
 
-research "static" "reconcile_chain_evidence" {
+research "static" "build_supply_chain" {
   model_provider   = model_provider.primary
   model            = local.high_impact_model
   reasoning_effort = var.reasoning_effort
   system_prompt = <<-PROMPT
-    You are the evidence reconciliation chair. Resolve contradictions only from
-    accepted ledgers. Never search for new facts, suppress a conflicting value,
-    or treat source authority as a substitute for checking time and directness.
+    Build a readable reference supply-chain map from accepted scope and atomic
+    claim cards. Do not score, rank, or pre-declare chokepoints. Select only a
+    short list of nodes whose continuity risk genuinely warrants assessment.
+    Companies are not supply-chain nodes.
   PROMPT
   prompt = <<-PROMPT
     Topic: ${var.topic}
-    Evidence cutoff: ${var.as_of_date}
-    Baseline ledger: ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "evidence_ledger"])}
+    Scope: ${one([for item in research.static.brainstorm.artifact : item.path if item.name == "scope"])}
+    Baseline claims: ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "claims"])}
+    Track claims:
+    ${join("\n", [for item in research.static.graph_track : "- ${one([for artifact in item.artifact : artifact.path if artifact.name == "claims"])}"])}
 
-    Track ledgers:
-    ${join("\n", [for item in research.static.graph_track : "- ${one([for artifact in item.artifact : artifact.path if artifact.name == "evidence_ledger"])}"])}
+    Read every artifact. Call ${go_tool.submit_supply_chain_map.id} once with
+    workspace_dir "${block_wd()}", artifact_path
+    "${block_wd()}/supply-chain.json", the exact topic and scope_path, and
+    claim_paths containing the baseline plus all five track claim files.
 
-    Call ${go_tool.prepare_evidence_reconciliation.id} once with
-    artifact_path "${block_wd()}/evidence-resolution.json" and ledger_paths
-    containing the baseline ledger followed by all five track ledgers, plus
-    assessment_paths = []. Read the returned draft_path. For every conflict ID, call
-    ${go_tool.resolve_evidence_conflict.id} exactly once. Use prefer only
-    when a named, direct, temporally applicable source justifies it; use
-    preserve_both when values apply to different variants or periods; otherwise
-    use unresolved. Finish with
-    ${go_tool.finalize_evidence_reconciliation.id} and only artifact_path.
+    Map ordinary nodes and edges across the full declared product boundary.
+    Keep each node's stages and product branches explicit. Attach only claim IDs
+    that substantively support the node or edge. Put evidence gaps in unknowns.
+    assessment_targets is not a chokepoint list: include only nodes for which the
+    next stage should separately test actual target dependency, alternatives,
+    switching versus buffer time, applicable scenario, and falsification.
   PROMPT
-  tool_ids = [
-    go_tool.prepare_evidence_reconciliation.id,
-    go_tool.resolve_evidence_conflict.id,
-    go_tool.finalize_evidence_reconciliation.id,
-  ]
-  terminate_tool_id = go_tool.finalize_evidence_reconciliation.id
-  disallowed_tools  = local.offline_disallowed_tools
-  permission        = "approve_all"
-
-  artifact "evidence_resolution" {
-    type      = "file"
-    path      = "${block_wd()}/evidence-resolution.json"
-    required  = true
-    non_empty = true
-  }
-
-  qc {
-    criteria = {
-      conflict_reasoning = "Judge whether each reconciliation decision resolves claims that really concern the same fact, or correctly preserves both when product variant, period, organization, or qualifier differs. Treat the typed tool's conflict inventory and decision coverage as authoritative."
-      authority = "Verify prefer decisions respect source authority, directness, named parties, product variant, and period. Newer or official is not automatically decisive when it addresses a different fact."
-      uncertainty = "Verify unresolved and preserve_both decisions retain the competing values and explain their downstream effect instead of manufacturing consensus."
-    }
-    model_provider   = model_provider.primary
-    model            = local.qc_model
-    reasoning_effort = var.reasoning_effort
-    max_qc_rounds    = var.max_qc_rounds
-    disallowed_tools = local.semantic_qc_disallowed_tools
-    permission       = "approve_all"
-  }
-}
-
-research "static" "select_chokepoints" {
-  model_provider   = model_provider.primary
-  model            = local.high_impact_model
-  reasoning_effort = var.reasoning_effort
-  system_prompt = <<-PROMPT
-    You are the supply-chain graph chair. Reconcile five independently checked
-    evidence tracks into a coverage-complete reference graph, then select only
-    genuine structural chokepoints. Preserve ordinary non-chokepoint nodes and
-    explicit unknowns. A required input is not automatically a chokepoint.
-
-    This is an offline reconciliation stage. Never search for or fetch new
-    evidence, and never use PowerShell, a shell, curl, wget, scripts, or other
-    command-line programs to do so. Work only from the accepted scope,
-    reconciled evidence, and validated track ledgers supplied in the prompt.
-  PROMPT
-  prompt = <<-PROMPT
-    Topic: ${var.topic}
-    Evidence cutoff: ${var.as_of_date}
-    Brainstorm: ${one([for item in research.static.brainstorm.artifact : item.path if item.name == "brainstorm"])}
-    Scope artifact: ${one([for item in research.static.brainstorm.artifact : item.path if item.name == "scope"])}
-    Reconciled evidence: ${one(research.static.reconcile_chain_evidence.artifact).path}
-
-    Validated track ledgers:
-    ${join("\n", [for item in research.static.graph_track : "- ${one([for artifact in item.artifact : artifact.path if artifact.name == "evidence_ledger"])}"])}
-
-    Read every artifact. Do not perform new research. If evidence remains
-    insufficient, preserve the gap and exclude the affected claim from formal
-    chokepoint selection.
-
-    Build the graph in small calls to
-    ${go_tool.stage_supply_chain.id}. Each call must contain section, batch_id,
-    and exactly one matching payload:
-    - metadata: use batch_id "main" and provide topic, focal_node_id,
-      scope_artifact, reconciled_artifact set to the absolute reconciled
-      evidence path above, all five reviewed_artifacts, and conclusion;
-    - nodes: submit 1-10 nodes per batch;
-    - edges: submit at most 15 edges per batch;
-    - coverage: submit 1-10 coverage resolutions per batch;
-    - chokepoints: submit at most 10 per batch, using an explicit empty list
-      when no genuine chokepoint exists.
-
-    Give every batch a short stable ID. Reusing section plus batch_id replaces
-    only that batch, so repair a rejected batch without resending the complete
-    graph. After every section is staged, call
-    ${go_tool.finalize_supply_chain.id} with only artifact_path
-    "${block_wd()}/supply-chain.json". If finalization reports a cross-batch
-    issue, replace only the affected batches and call finalize again.
-
-    Resolve every scope coverage item exactly once as covered, unknown,
-    not_applicable, or out_of_scope. Unknown items require an explanation,
-    research_attempt, and impact. Build the complete product hierarchy and
-    process flow before selecting chokepoints. Nodes may belong to multiple
-    declared stages. Node and edge status must be exactly "supported" or
-    "unknown". Supported nodes and edges must cite claim IDs from the five
-    track ledgers; unknown nodes and edges require an explicit reason.
-    Use only contains, supplies, transformed_into, assembled_into, processed_by,
-    tested_by, qualified_by, or used_by as edge relations. Keep all nodes in one
-    connected graph around the focal product. Mark equipment, materials, and
-    downstream system qualification as explicit terminal boundaries where
-    applicable; do not decompose them beyond scope.
-
-    Select a node as a chokepoint only when confirmed, undisputed claim IDs
-    support delivery impact, technical irreplaceability, qualification or
-    switching cost, concentration, convergence, or capacity/yield constraints.
-    Do not assign a composite score or rank. For each chokepoint separately set:
-    - delivery_impact: limited, material, or production_stop;
-    - substitutability: qualified_alternatives, lengthy_requalification,
-      no_known_substitute, or unknown;
-    - supplier_concentration: diversified, concentrated, single_source, or unknown;
-    - non-negative min/max day ranges for switching and recovery.
-    Keep company identities out of nodes and preserve generic reference-chain
-    facts separately from target-specific evidence strength (confirmed, reported,
-    inferred, or unknown) and dispute state (clean, challenged, or disputed).
-  PROMPT
-  tool_ids = [
-    go_tool.stage_supply_chain.id,
-    go_tool.finalize_supply_chain.id,
-  ]
-  terminate_tool_id = go_tool.finalize_supply_chain.id
+  tool_ids         = [go_tool.submit_supply_chain_map.id]
+  terminate_tool_id = go_tool.submit_supply_chain_map.id
   disallowed_tools  = local.offline_disallowed_tools
   permission        = "approve_all"
 
@@ -430,108 +261,69 @@ research "static" "select_chokepoints" {
 
   qc {
     criteria = {
-      evidence_meaning = "Treat finalize_supply_chain as authoritative for schema, references, evidence levels, conflict decisions, coverage, and graph integrity. Read supply-chain.json, then call the configured read-only evidence tool once with all claim IDs cited by its chokepoints. Judge only whether the returned evidence semantically supports each stated mechanism, delivery impact, substitution constraint, concentration claim, and switching or recovery estimate."
-      chokepoint_distinction = "Judge whether each selected node is a genuine structural chokepoint rather than merely a required input, a supplier commercial moat, demand growth, investment popularity, or an important but readily substitutable component."
-      variant_scope = "Judge whether materially different product generations, form factors, periods, and qualification contexts remain meaningfully separated, and whether generic reference-chain facts are improperly presented as confirmed facts about the named target."
-      uncertainty = "Judge whether conclusions remain calibrated to the evidence, competing explanations and material unknowns are preserved, and no recommendation or false precision is introduced. Do not repeat deterministic validation already enforced by the typed finalizer."
+      completeness = "Judge whether the map covers the decision-relevant product branches and stages defined by scope without becoming an encyclopedia."
+      target_selection = "Judge whether every assessment target could plausibly affect continuity and whether important candidates were omitted. A required input or commercially attractive supplier is not automatically a risk node."
+      evidence = "Judge whether cited claims semantically support the mapped relationship and target rationale. Treat typed-tool graph references as authoritative."
     }
     model_provider   = model_provider.primary
     model            = local.qc_model
     reasoning_effort = var.reasoning_effort
     max_qc_rounds    = var.max_qc_rounds
-    tool_ids         = [go_tool.read_chokepoint_evidence.id]
     disallowed_tools = local.semantic_qc_disallowed_tools
     permission       = "approve_all"
   }
 }
 
-research "dynamic" "discover_candidates" {
+research "dynamic" "assess_nodes" {
   tasks = [
-    for index, chokepoint in jsondecode(research.static.select_chokepoints.result).chokepoints : {
+    for index, target in jsondecode(research.static.build_supply_chain.result).assessment_targets : {
       model_provider   = model_provider.primary
       model            = var.model
       reasoning_effort = var.reasoning_effort
-      system_prompt    = var.research_system_prompt
+      system_prompt = <<-PROMPT
+        Assess one supply-chain node as a falsifiable buyer continuity-risk
+        question. Scope and proof strength are independent dimensions. Do not
+        search, score companies, or turn uncertainty into a conclusion.
+      PROMPT
       prompt = <<-PROMPT
         Topic: ${var.topic}
         Evidence cutoff: ${var.as_of_date}
-        Market universe: ${var.market}
-        Audited chokepoint: ${jsonencode(chokepoint)}
-        Complete chain artifact: ${one(research.static.select_chokepoints.artifact).path}
+        Assessment target: ${jsonencode(target)}
+        Supply-chain map: ${one(research.static.build_supply_chain.artifact).path}
+        Claim files:
+        - ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "claims"])}
+        ${join("\n", [for item in research.static.graph_track : "- ${one([for artifact in item.artifact : artifact.path if artifact.name == "claims"])}"])}
 
-        Discover at most ${var.max_candidates_per_chokepoint} publicly traded
-        companies that directly control or critically supply this exact node.
-        Exclude generic beneficiaries, downstream customers, funds, and firms
-        linked only to adjacent nodes.
-        ${local.source_tool_guidance}
-        ${local.evidence_registration_guidance}
-        ${var.use_pplx ? format("Perplexity snapshot_dir: %s/%03d/sources", block_wd(), index + 1) : ""}
-        Task workspace_dir:
-        "${block_wd()}/${format("%03d", index + 1)}"
-        block_wd() is the shared dynamic-block directory, not this task's
-        directory. Write every task-owned file beneath the task workspace_dir
-        above. Pass that exact workspace_dir to every configured evidence and
-        submission typed tool; the tools create it if it does not exist.
+        Read the map and relevant cards. Answer five questions: which scenario is
+        affected (current production, expansion/upgrade, or a product branch);
+        whether the named target actually depends on this node; which alternatives
+        are already qualified and have usable capacity; whether switching and
+        recovery exceed known buffers; and what evidence would falsify the view.
 
-        Register every retained source with
-        ${go_tool.register_evidence_source.id}, using the task workspace_dir and ledger_path
-        "${block_wd()}/${format("%03d", index + 1)}/evidence-ledger.json".
-        Submit atomic organization_relationship claims in batches of at most
-        five with ${go_tool.stage_evidence_claims.id}. Claim IDs must begin
-        with "candidate-${format("%03d", index + 1)}-". Finish the candidate
-        ledger with ${go_tool.finalize_evidence_ledger.id}, mode
-        "candidate", topic and as_of_date above, and empty scope_artifact and
-        track. Its source_registry_path is
-        "${block_wd()}/${format("%03d", index + 1)}/source-registry.json".
-        If no candidate survives, stage one evidence gap whose
-        coverage_item_id is the assigned chokepoint node_id and whose research
-        attempt explains the searches performed; candidate mode permits that
-        explicit gap even when no source was retained.
-
-        Finally call ${go_tool.submit_candidates.id} with artifact_path
-        "${block_wd()}/${format("%03d", index + 1)}/candidates.json", ledger_path
-        "${block_wd()}/${format("%03d", index + 1)}/evidence-ledger.json", the
-        task workspace_dir above, exact chokepoint node_id, max_candidates
-        ${var.max_candidates_per_chokepoint}, and candidate evidence_claim_ids.
-        An empty candidate list is valid when conclusion explains the gap.
+        Call ${go_tool.submit_node_assessment.id} with task workspace_dir
+        "${block_wd()}/${format("%03d", index + 1)}", artifact_path
+        "${block_wd()}/${format("%03d", index + 1)}/node-assessment.json",
+        all claim_paths above, and the target node. risk_scope is global or
+        branch; conclusion is independently confirmed, candidate, or not_proven.
+        Keep unknowns and falsification_conditions explicit.
       PROMPT
-      tool_ids = concat(local.pplx_tool_ids, local.evidence_tool_ids, [
-        go_tool.submit_candidates.id,
-      ])
-      tool_call_quota  = local.pplx_tool_call_quota
-      terminate_tool_id = go_tool.submit_candidates.id
-      disallowed_tools  = local.research_disallowed_tools
+      tool_ids          = [go_tool.submit_node_assessment.id]
+      terminate_tool_id = go_tool.submit_node_assessment.id
+      disallowed_tools  = local.offline_disallowed_tools
       permission        = "approve_all"
-      artifacts = [
-        {
-          name      = "evidence_ledger"
-          type      = "file"
-          path      = "${block_wd()}/${format("%03d", index + 1)}/evidence-ledger.json"
-          required  = true
-          non_empty = true
-        },
-        {
-          name      = "source_registry"
-          type      = "file"
-          path      = "${block_wd()}/${format("%03d", index + 1)}/source-registry.json"
-          required  = true
-          non_empty = true
-        },
-        {
-          name      = "candidates"
-          type      = "file"
-          path      = "${block_wd()}/${format("%03d", index + 1)}/candidates.json"
-          required  = true
-          non_empty = true
-        },
-      ]
+      artifacts = [{
+        name      = "node_assessment"
+        type      = "file"
+        path      = "${block_wd()}/${format("%03d", index + 1)}/node-assessment.json"
+        required  = true
+        non_empty = true
+      }]
       retry = null
       qc = {
         criteria = {
-          node_binding = "Judge whether each candidate directly controls or critically supplies the assigned node rather than merely participating in an adjacent node or downstream market."
-          identity = "Judge whether the evidence identifies the same legal entity and publicly traded security claimed by the candidate, without conflating subsidiaries, parents, brands, or similarly named firms."
-          relationship_support = "Judge whether the cited evidence semantically supports the exact-node relationship and whether indirect, inferred, challenged, or disputed evidence is described with appropriate caution."
-          exclusions = "Reject funds, private entities presented as public, generic beneficiaries, and customers without evidence of control or critical supply. Treat the submission tool's candidate-count and reference checks as authoritative."
+          dependency = "Judge whether public evidence actually establishes the target's dependency rather than only an industry-wide possibility."
+          alternatives = "Judge whether qualified alternatives, available capacity, switching constraints, and buffers are treated separately and honestly."
+          conclusion = "Judge whether confirmed, candidate, or not_proven follows from the evidence for the stated scenario and branch. Not proven means insufficient public evidence, not no risk."
         }
         model_provider   = model_provider.primary
         model            = local.qc_model
@@ -544,189 +336,105 @@ research "dynamic" "discover_candidates" {
   ]
 }
 
-research "dynamic" "assess_candidates" {
-  tasks = flatten([
-    for discovery_index, discovery in research.dynamic.discover_candidates.tasks : [
-      for candidate_index, candidate in jsondecode(discovery.result).candidates : {
-        model_provider   = model_provider.primary
-        model            = var.model
-        reasoning_effort = var.reasoning_effort
-        system_prompt    = var.research_system_prompt
-        prompt = <<-PROMPT
-          Topic: ${var.topic}
-          Evidence cutoff: ${var.as_of_date}
-          Candidate hypothesis: ${jsonencode(candidate)}
-          Audited chain: ${one(research.static.select_chokepoints.artifact).path}
-          Candidate-discovery artifact: ${one([for artifact in discovery.artifacts : artifact.path if artifact.name == "candidates"])}
+research "dynamic" "prioritize_companies" {
+  tasks = [
+    for index, assessment in research.dynamic.assess_nodes.tasks : {
+      model_provider   = model_provider.primary
+      model            = var.model
+      reasoning_effort = var.reasoning_effort
+      system_prompt    = var.research_system_prompt
+      prompt = <<-PROMPT
+        Topic: ${var.topic}
+        Evidence cutoff: ${var.as_of_date}
+        Market: ${var.market}
+        Node assessment: ${one([for artifact in assessment.artifacts : artifact.path if artifact.name == "node_assessment"])}
+        Existing claim files:
+        - ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "claims"])}
+        ${join("\n", [for item in research.static.graph_track : "- ${one([for artifact in item.artifact : artifact.path if artifact.name == "claims"])}"])}
+        Task workspace: "${block_wd()}/${format("%03d", index + 1)}"
+        ${local.source_tool_guidance}
+        ${var.use_pplx ? format("Perplexity snapshot_dir: %s/%03d/sources", block_wd(), index + 1) : ""}
 
-          Independently verify the company's relationship to the exact node.
-          Investigate control mechanism, supplier maturity, qualification status,
-          peer alternatives, switching constraints, and concrete falsification
-          conditions. This is a buyer continuity-risk assessment, not an
-          investment score or recommendation.
-          ${local.source_tool_guidance}
-          ${local.evidence_registration_guidance}
-          ${var.use_pplx ? format("Perplexity snapshot_dir: %s/%03d-%03d/sources", block_wd(), discovery_index + 1, candidate_index + 1) : ""}
-          Task workspace_dir:
-          "${block_wd()}/${format("%03d", discovery_index + 1)}-${format("%03d", candidate_index + 1)}"
-          block_wd() is the shared dynamic-block directory, not this task's
-          directory. Write every task-owned file beneath the task workspace_dir
-          above. Pass that exact workspace_dir to every configured evidence and
-          submission typed tool; the tools create it if it does not exist.
+        This single stage asks whether any public company deserves more research
+        because of this exact assessed node. Investigate at most
+        ${var.max_candidates_per_chokepoint} companies. For each, distinguish an
+        existing supplier, qualified alternative, related-product-only company,
+        or unverified lead. Verify the exact legal entity and security.
 
-          Register retained sources and stage atomic claims with the evidence
-          tools, using the task workspace_dir and ledger_path
-          "${block_wd()}/${format("%03d", discovery_index + 1)}-${format("%03d", candidate_index + 1)}/evidence-ledger.json".
-          Claim IDs must begin with
-          "assessment-${format("%03d", discovery_index + 1)}-${format("%03d", candidate_index + 1)}-".
-          A supplier_maturity claim must use exactly research, validation,
-          order_received, batch_delivery, mass_production, primary_supplier, or
-          unknown.
+        Register retained sources with ${go_tool.register_evidence_source.id}
+        using workspace_dir above and ledger_path
+        "${block_wd()}/${format("%03d", index + 1)}/evidence-ledger.json".
+        Submit atomic relationship and economic-exposure cards with
+        ${go_tool.submit_claim_cards.id}. Never claim that a related product
+        proves adoption, qualification, market share, revenue, or profit impact.
 
-          Identify the small set of key claim IDs that materially determines the
-          candidate's legal identity and listing status, exact-node relationship,
-          control mechanism, or supplier maturity. Also include any contract,
-          market-share, capacity, or date claim used in the conclusion. Before
-          finalizing the ledger, check the current official channels relevant to
-          each key claim and call
-          ${go_tool.stage_claim_freshness_checks.id} in batches of at most five.
-          Use checked_at "${var.as_of_date}". Use verified_primary only when
-          latest_primary_source_ids names registered authoritative primary sources
-          already attached to that claim as direct supports with authority_for_claim;
-          use checked_no_primary when the named official_channels were checked but
-          no current primary source was found; otherwise use not_verified with a
-          concise gap. Ambiguous outcomes are intentionally accepted and normalized
-          to not_verified. Never fabricate a freshness result to avoid downgrade.
+        Finalize cards with ${go_tool.finalize_claim_cards.id}, claims_path
+        "${block_wd()}/${format("%03d", index + 1)}/claims.json",
+        source_registry_path
+        "${block_wd()}/${format("%03d", index + 1)}/source-registry.json",
+        cutoff above, and allow_empty true.
 
-          Finalize the ledger in candidate mode with source_registry_path
-          "${block_wd()}/${format("%03d", discovery_index + 1)}-${format("%03d", candidate_index + 1)}/source-registry.json",
-          the topic and cutoff above, and empty scope_artifact and track.
+        Then call ${go_tool.submit_company_priorities.id} with artifact_path
+        "${block_wd()}/${format("%03d", index + 1)}/company-priorities.json",
+        the node assessment path, and claim_paths containing the baseline, all
+        five track files, and this task's claims.json.
 
-          Then call ${go_tool.submit_candidate_assessment.id} with artifact_path
-          "${block_wd()}/${format("%03d", discovery_index + 1)}-${format("%03d", candidate_index + 1)}/assessment.json",
-          the task workspace_dir above, ledger path, controlled
-          relationship_maturity, evidence_claim_ids, the key_claim_ids checked
-          above,
-          peer alternatives, switching constraints, falsification conditions,
-          and conclusion. A missing or incomplete current-source check must not
-          cause repeated research: the typed tool keeps the candidate visible but
-          downgrades its effective relationship and maturity. Keep weak, disputed,
-          pending, and rejected relationships visible.
-        PROMPT
-        tool_ids = concat(local.pplx_tool_ids, local.evidence_tool_ids, [
-          go_tool.submit_candidate_assessment.id,
-        ])
-        tool_call_quota  = local.pplx_tool_call_quota
-        terminate_tool_id = go_tool.submit_candidate_assessment.id
-        disallowed_tools  = local.research_disallowed_tools
-        permission        = "approve_all"
-        artifacts = [
-          {
-            name      = "evidence_ledger"
-            type      = "file"
-            path      = "${block_wd()}/${format("%03d", discovery_index + 1)}-${format("%03d", candidate_index + 1)}/evidence-ledger.json"
-            required  = true
-            non_empty = true
-          },
-          {
-            name      = "source_registry"
-            type      = "file"
-            path      = "${block_wd()}/${format("%03d", discovery_index + 1)}-${format("%03d", candidate_index + 1)}/source-registry.json"
-            required  = true
-            non_empty = true
-          },
-          {
-            name      = "assessment"
-            type      = "file"
-            path      = "${block_wd()}/${format("%03d", discovery_index + 1)}-${format("%03d", candidate_index + 1)}/assessment.json"
-            required  = true
-            non_empty = true
-          },
-        ]
-        retry = null
-        qc = {
-          criteria = {
-            chain_fit = "Judge whether the assessed company really controls or critically supplies the discovery node, rather than an adjacent process, customer, or generic market exposure."
-            maturity = "Judge whether relationship maturity matches what the evidence actually establishes and never promotes validation into an order, delivery, production, or primary-supplier relationship."
-            evidence_entailment = "Judge whether the cited claims semantically support the control mechanism, exact-node relationship, and conclusion, while preserving challenges, disputes, and analytical inference."
-            freshness = "Judge whether the current-source check examined the official channels that a reasonable analyst would use for the key company claims. A pending or incomplete check may remain visible but must not be promoted into a verified relationship or maturity conclusion."
-            alternatives = "Verify peer alternatives, switching constraints, and falsification conditions are concrete rather than generic caveats."
-            methodology = "Verify there is no investment score, aggregate score, demand-inflection factor, catalyst timing, or stock recommendation."
-          }
-          model_provider   = model_provider.primary
-          model            = local.qc_model
-          reasoning_effort = var.reasoning_effort
-          max_qc_rounds    = var.max_qc_rounds
-          disallowed_tools = local.semantic_qc_disallowed_tools
-          permission       = "approve_all"
+        A means the node matters, the exact company role and relationship are
+        confirmed, and economic impact still needs research. B means the node
+        matters but relationship, qualification, or benefit mechanism is
+        incomplete. C is only an industry or related-product lead.
+        do_not_research means the node or company link is too weak. These are
+        research priorities, never investment ratings. An empty list is valid.
+      PROMPT
+      tool_ids = concat(local.pplx_tool_ids, [
+        go_tool.register_evidence_source.id,
+        go_tool.submit_claim_cards.id,
+        go_tool.finalize_claim_cards.id,
+        go_tool.submit_company_priorities.id,
+      ])
+      tool_call_quota   = local.pplx_tool_call_quota
+      terminate_tool_id = go_tool.submit_company_priorities.id
+      disallowed_tools  = local.research_disallowed_tools
+      permission        = "approve_all"
+      artifacts = [
+        {
+          name      = "claims"
+          type      = "file"
+          path      = "${block_wd()}/${format("%03d", index + 1)}/claims.json"
+          required  = true
+          non_empty = true
+        },
+        {
+          name      = "source_registry"
+          type      = "file"
+          path      = "${block_wd()}/${format("%03d", index + 1)}/source-registry.json"
+          required  = true
+          non_empty = true
+        },
+        {
+          name      = "company_priorities"
+          type      = "file"
+          path      = "${block_wd()}/${format("%03d", index + 1)}/company-priorities.json"
+          required  = true
+          non_empty = true
+        },
+      ]
+      retry = null
+      qc = {
+        criteria = {
+          company_gate = "Judge whether each priority follows from the assessed node and the exact company's proven role. Industry relevance alone is C at most."
+          relationship = "Judge whether claims distinguish product availability, validation, orders, delivery, production use, and primary-supplier status without upgrading one into another."
+          economic_boundary = "Judge whether revenue, profit, order, capacity, and competitive significance remain unknown unless directly supported. A/B/C are follow-up priorities, not investment recommendations."
         }
+        model_provider   = model_provider.primary
+        model            = local.qc_model
+        reasoning_effort = var.reasoning_effort
+        max_qc_rounds    = var.max_qc_rounds
+        disallowed_tools = local.semantic_qc_disallowed_tools
+        permission       = "approve_all"
       }
-    ]
-  ])
-}
-
-research "static" "reconcile_report_evidence" {
-  model_provider   = model_provider.primary
-  model            = local.high_impact_model
-  reasoning_effort = var.reasoning_effort
-  system_prompt = <<-PROMPT
-    You are the final evidence reconciliation chair. Reconcile accepted chain,
-    candidate-discovery, and candidate-assessment claims before report writing.
-    Never search for new evidence or erase an unresolved contradiction.
-  PROMPT
-  prompt = <<-PROMPT
-    Topic: ${var.topic}
-    Evidence cutoff: ${var.as_of_date}
-    Reconciled chain evidence: ${one(research.static.reconcile_chain_evidence.artifact).path}
-
-    Candidate-discovery ledgers:
-    ${join("\n", [for task in research.dynamic.discover_candidates.tasks : "- ${one([for artifact in task.artifacts : artifact.path if artifact.name == "evidence_ledger"])}"])}
-
-    Candidate-assessment ledgers:
-    ${join("\n", [for task in research.dynamic.assess_candidates.tasks : "- ${one([for artifact in task.artifacts : artifact.path if artifact.name == "evidence_ledger"])}"])}
-
-    Candidate-assessment artifacts:
-    ${join("\n", [for task in research.dynamic.assess_candidates.tasks : "- ${one([for artifact in task.artifacts : artifact.path if artifact.name == "assessment"])}"])}
-
-    Call ${go_tool.prepare_evidence_reconciliation.id} with artifact_path
-    "${block_wd()}/evidence-resolution.json" and ledger_paths containing the
-    reconciled chain evidence followed by every discovery and assessment ledger,
-    plus assessment_paths containing every candidate-assessment artifact above.
-    Read its draft and resolve every returned conflict ID one at a time with
-    ${go_tool.resolve_evidence_conflict.id}. Prefer only directly supported,
-    temporally applicable claims; preserve both when period or variant differs;
-    otherwise leave the conflict unresolved. Finish with
-    ${go_tool.finalize_evidence_reconciliation.id}.
-  PROMPT
-  tool_ids = [
-    go_tool.prepare_evidence_reconciliation.id,
-    go_tool.resolve_evidence_conflict.id,
-    go_tool.finalize_evidence_reconciliation.id,
-  ]
-  terminate_tool_id = go_tool.finalize_evidence_reconciliation.id
-  disallowed_tools  = local.offline_disallowed_tools
-  permission        = "approve_all"
-
-  artifact "evidence_resolution" {
-    type      = "file"
-    path      = "${block_wd()}/evidence-resolution.json"
-    required  = true
-    non_empty = true
-  }
-
-  qc {
-    criteria = {
-      integration = "Judge whether reconciliation preserves all materially distinct company, relationship, period, and product-variant evidence needed for the final report. Treat ledger inclusion and conflict-decision coverage enforced by the typed tools as authoritative."
-      semantics = "Verify selected claims really address the same product variant, period, organization, and relationship; do not resolve apparent conflicts created by different qualifiers."
-      preservation = "Verify disputed and unresolved claims remain visible for synthesis and no lower-authority claim is silently upgraded."
     }
-    model_provider   = model_provider.primary
-    model            = local.qc_model
-    reasoning_effort = var.reasoning_effort
-    max_qc_rounds    = var.max_qc_rounds
-    disallowed_tools = local.semantic_qc_disallowed_tools
-    permission       = "approve_all"
-  }
+  ]
 }
 
 research "static" "synthesize" {
@@ -734,81 +442,48 @@ research "static" "synthesize" {
   model            = local.high_impact_model
   reasoning_effort = var.reasoning_effort
   system_prompt = <<-PROMPT
-    You are the senior chokepoint editor. Produce a buyer continuity-risk report that
-    first explains the complete declared product and supply-chain structure,
-    then separates structural chokepoint conclusions from company hypotheses.
-    Distinguish generic reference-chain knowledge from facts confirmed, reported,
-    inferred, or unknown for the target named by the topic. Keep that evidence
-    strength separate from whether a claim is clean, challenged, or disputed.
-    Preserve rejected candidates, unresolved coverage, variant differences, and
-    every material uncertainty.
-    Do not recommend stocks, identify best investments, or infer investment
-    attractiveness from supplier relationships. Candidate companies are included
-    only to explain control, supply, alternatives, and relationship maturity.
-
-    Never perform new research. Use only accepted artifacts and the final
-    reconciled evidence ledger. Preserve gaps instead of filling them from memory.
+    Write a concise, company-first research-priority report. Every substantive
+    clause must cite one original atomic claim ID. Do not create report-level
+    claims, scores, investment ratings, or recommendations. Do not research new
+    facts. Preserve not-proven nodes, rejected companies, and unknowns.
   PROMPT
   prompt = <<-PROMPT
     Topic: ${var.topic}
     Evidence cutoff: ${var.as_of_date}
-    Brainstorm: ${one([for item in research.static.brainstorm.artifact : item.path if item.name == "brainstorm"])}
     Scope: ${one([for item in research.static.brainstorm.artifact : item.path if item.name == "scope"])}
-    Audited supply chain: ${one(research.static.select_chokepoints.artifact).path}
-    Final reconciled evidence: ${one(research.static.reconcile_report_evidence.artifact).path}
+    Supply chain: ${one(research.static.build_supply_chain.artifact).path}
+    Node assessments:
+    ${join("\n", [for task in research.dynamic.assess_nodes.tasks : "- ${one([for artifact in task.artifacts : artifact.path if artifact.name == "node_assessment"])}"])}
+    Company priorities:
+    ${join("\n", [for task in research.dynamic.prioritize_companies.tasks : "- ${one([for artifact in task.artifacts : artifact.path if artifact.name == "company_priorities"])}"])}
+    Claim files:
+    - ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "claims"])}
+    ${join("\n", [for item in research.static.graph_track : "- ${one([for artifact in item.artifact : artifact.path if artifact.name == "claims"])}"])}
+    ${join("\n", [for task in research.dynamic.prioritize_companies.tasks : "- ${one([for artifact in task.artifacts : artifact.path if artifact.name == "claims"])}"])}
 
-    Candidate discovery artifacts:
-    ${join("\n", [for task in research.dynamic.discover_candidates.tasks : "- ${one([for artifact in task.artifacts : artifact.path if artifact.name == "candidates"])}"])}
+    Read every artifact and write "${block_wd()}/report.md" in this order:
+    1. companies worth further research, showing A/B/C/do-not-research, exact
+       node and role, strongest evidence, largest unknown, and next check;
+    2. confirmed and candidate global or branch-specific risk nodes;
+    3. separate views for current production, expansion/upgrade, and product
+       branches;
+    4. concise node assessments and falsification conditions;
+    5. not-proven nodes and unresolved questions;
+    6. the decision-relevant supply-chain map and scope limitations.
 
-    Candidate assessment artifacts:
-    ${join("\n", [for task in research.dynamic.assess_candidates.tasks : "- ${one([for artifact in task.artifacts : artifact.path if artifact.name == "assessment"])}"])}
+    A/B/C are research priorities, never investment ratings. Put
+    [[claim:CLAIM-ID]] immediately after every substantive atomic clause. If one
+    sentence contains several facts, split it or cite each clause separately.
+    Do not cite internal artifact counts or methodology statements as external
+    facts. Do not write a URL table or RPT IDs.
 
-    Read every artifact.
-    Write ${block_wd()}/report.md. Begin with scope, product variants, and the
-    complete declared reference chain: layered components, manufacturing and
-    assembly stages, equipment and material boundaries, and downstream system
-    qualification. Explain how inputs are transformed, assembled, tested, and
-    qualified. Include ordinary nodes, explicit unknowns, and coverage status;
-    do not reduce the chain to selected chokepoints.
-
-    Then map what is confirmed, reported, inferred, or unknown for the named
-    target, and separately identify claims that are challenged or disputed,
-    followed by the critical paths, why each selected node is a chokepoint,
-    candidates grouped by node, controlled supplier maturity, alternatives,
-    rejected or unverified relationships, falsification conditions, and
-    limitations. Show delivery impact, substitutability, supplier
-    concentration, switching-time range, recovery-time range, and evidence status
-    separately. Do not calculate an aggregate score or rank unknown-heavy items.
-
-    Atomize every material factual or analytical conclusion into independently
-    auditable clauses, each with its own stable report claim ID. A readable
-    sentence may contain several clauses, but each substantive clause must have
-    its own immediately adjacent [^REPORT-ID] marker. Do not hide several factual
-    assertions behind one marker.
-
-    Stage those clauses in batches of at most five with
-    ${go_tool.stage_report_claims.id}, manifest_path
-    "${block_wd()}/report-manifest.json". Set claim_kind to fact or inference.
-    Each staged statement must appear text-equivalently in report.md immediately
-    followed, allowing only whitespace, by [^REPORT_CLAIM_ID], and its
-    supporting_claim_ids must exist in the final reconciled evidence artifact.
-    Never cite a claim whose reconciliation_availability is excluded or
-    unresolved. If a key-claim review is pending or has a downgraded effective
-    evidence status, keep the company in a clearly unverified section and do
-    not use it in a formal relationship, ranking, or recommendation-like claim.
-    Finish by calling ${go_tool.finalize_report_manifest.id} with report_path,
-    manifest_path, and evidence_paths containing exactly the one final reconciled
-    evidence-resolution.json above.
-    Do not hand-maintain a separate URL table or footnote block. The finalizer
-    resolves every supporting and contradicting claim to deduplicated canonical
-    URLs and writes the authoritative footnote definitions into report.md. Thus
-    every substantive report claim remains directly traceable to its URLs.
+    Finish with ${go_tool.finalize_research_report.id}, report_path
+    "${block_wd()}/report.md", and claim_paths containing every claim file above.
+    The tool replaces claim markers with original URLs and appends the referenced
+    evidence cards.
   PROMPT
-  tool_ids = [
-    go_tool.stage_report_claims.id,
-    go_tool.finalize_report_manifest.id,
-  ]
-  terminate_tool_id = go_tool.finalize_report_manifest.id
+  tool_ids          = [go_tool.finalize_research_report.id]
+  terminate_tool_id = go_tool.finalize_research_report.id
   disallowed_tools  = local.offline_disallowed_tools
   permission        = "approve_all"
 
@@ -819,34 +494,25 @@ research "static" "synthesize" {
     non_empty = true
   }
 
-  artifact "report_manifest" {
-    type      = "file"
-    path      = "${block_wd()}/report-manifest.json"
-    required  = true
-    non_empty = true
-  }
-
   qc {
     criteria = {
-      coverage_and_structure = "Judge whether the report gives a decision-useful explanation of every materially distinct product branch, transformation stage, ordinary dependency, chokepoint, and candidate, including important unknowns, rather than merely reproducing an inventory."
-      target_mapping = "Judge whether generic reference-chain knowledge is separated from target-specific evidence, materially different product variants are kept distinct, and structural chokepoints are not confused with company-specific supply relationships."
-      claim_semantics = "Use ${go_tool.read_report_claim_evidence.id} with report_manifest_path ${block_wd()}/report-manifest.json and batches of at most ten report claim IDs to inspect only the evidence needed for each clause. Judge whether every substantive clause is genuinely atomic and whether its upstream claims logically entail the complete clause without extrapolation, concept substitution, or silent qualifier loss. Do not redo marker, ID, path, URL, or exact-text validation already enforced by the typed finalizer."
-      source_and_freshness = "Judge whether source classifications are semantically credible, inference remains inference, independent reporting is genuinely independent, and final-company claims with incomplete current-source checks remain pending rather than entering formal ranking or recommendation-like conclusions."
-      methodology = "Verify the report is strictly a buyer continuity-risk analysis: no aggregate score, unknown-heavy ranking, best-investment conclusion, demand-inflection score, catalyst timing, valuation claim, or stock recommendation is allowed."
-      uncertainty = "Judge whether challenges, disputes, rejected relationships, freshness gaps, and unresolved reconciliation outcomes remain visible and calibrated instead of being collapsed into false certainty."
+      decision_usefulness = "Judge whether the first page gives a defensible company research-priority list with the exact node, role, strongest evidence, largest unknown, and next check."
+      entailment = "Judge whether each cited atomic claim semantically supports the adjacent report clause without concept, party, period, product-branch, or qualifier substitution. Treat marker, ID, path, URL, and quotation checks as authoritative."
+      risk_scope = "Judge whether global versus branch scope and current production versus expansion/upgrade scenarios are separated from proof strength."
+      restraint = "Reject investment recommendations, composite scores, false precision, and any company promotion based only on industry relevance or a related product."
+      uncertainty = "Judge whether not-proven nodes, rejected companies, missing economic exposure, alternatives, buffers, and falsification conditions remain visible."
     }
     model_provider   = model_provider.primary
     model            = local.qc_model
     reasoning_effort = var.reasoning_effort
     max_qc_rounds    = var.max_qc_rounds
-    tool_ids         = [go_tool.read_report_claim_evidence.id]
     disallowed_tools = local.semantic_qc_disallowed_tools
     permission       = "approve_all"
   }
 }
 
 output "report_path" {
-  description = "Final Markdown chokepoint report."
+  description = "Final company-first research-priority report with direct source URLs."
   value       = one([for item in research.static.synthesize.artifact : item.path if item.name == "report"])
 }
 
@@ -856,16 +522,16 @@ output "scope_path" {
 }
 
 output "supply_chain_path" {
-  description = "Machine-readable evidence-backed supply-chain graph and selected chokepoints."
-  value       = one(research.static.select_chokepoints.artifact).path
+  description = "Machine-readable reference supply chain and node-assessment targets."
+  value       = one(research.static.build_supply_chain.artifact).path
 }
 
-output "report_manifest_path" {
-  description = "Machine-readable report claims and their upstream evidence claim IDs."
-  value       = one([for item in research.static.synthesize.artifact : item.path if item.name == "report_manifest"])
+output "node_assessment_paths" {
+  description = "Node assessments with independent risk scope and evidence conclusion."
+  value       = [for task in research.dynamic.assess_nodes.tasks : one(task.artifacts).path]
 }
 
-output "evidence_resolution_path" {
-  description = "Final merged claim ledger with explicit conflict resolutions."
-  value       = one(research.static.reconcile_report_evidence.artifact).path
+output "company_priority_paths" {
+  description = "Company follow-up research priorities by assessed node."
+  value       = [for task in research.dynamic.prioritize_companies.tasks : one([for artifact in task.artifacts : artifact.path if artifact.name == "company_priorities"])]
 }

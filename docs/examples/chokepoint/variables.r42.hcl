@@ -31,7 +31,7 @@ variable "market" {
 
 variable "max_candidates_per_chokepoint" {
   type        = number
-  description = "Maximum number of company hypotheses retained for each audited chokepoint."
+  description = "Maximum number of public companies screened for each assessed supply-chain node. The legacy name is retained for variable-file compatibility."
   default     = 3
 
   validation {
@@ -108,7 +108,7 @@ variable "model" {
 
 variable "high_impact_model" {
   type        = string
-  description = "Optional stronger model for scope, reconciliation, chokepoint selection, and synthesis. Empty uses model."
+  description = "Optional stronger model for the primary baseline, scope, supply-chain map, and synthesis. Empty uses model."
   default     = ""
 }
 
