@@ -99,9 +99,10 @@ session then reads each claim, quote, snapshot, and artifact independently;
 failed QC returns issues to the same research session for repair up to
 `max_qc_rounds`.
 
-Each materialized deep-dive task has its own `web_fetch = 20` entry in
-`tool_call_quota`. The limit is twenty successful built-in fetch calls for that
-task's research session; failed fetches do not consume it.
+Each materialized deep-dive task has its own `web_fetch` entry in
+`tool_call_quota`. The `web_fetch_tool_call_quota` input variable controls the
+number of successful built-in fetch calls allowed for each task's research
+session and defaults to 20; failed fetches do not consume it.
 
 The conflict resolver reads all knowledge artifacts from all three dynamic
 groups, records resolved and unresolved contradictions in `resolution.json`,

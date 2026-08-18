@@ -22,6 +22,20 @@ variable "research_plan" {
   }
 }
 
+variable "web_fetch_tool_call_quota" {
+  type        = number
+  description = "Maximum successful built-in web_fetch calls allowed per deep-dive research session."
+  default     = 20
+
+  validation {
+    condition = (
+      var.web_fetch_tool_call_quota >= 1 &&
+      floor(var.web_fetch_tool_call_quota) == var.web_fetch_tool_call_quota
+    )
+    error_message = "web_fetch_tool_call_quota must be a positive integer."
+  }
+}
+
 variable "system_prompt" {
   type        = string
   description = "System prompt shared by every independent deep-research task."

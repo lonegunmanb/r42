@@ -28,7 +28,7 @@ locals {
   PROMPT
 
   deep_dive_tool_call_quota = {
-    web_fetch = 20
+    web_fetch = var.web_fetch_tool_call_quota
   }
 }
 
@@ -379,6 +379,22 @@ research "static" "synthesize" {
     material factual statement must cite the source URL and quote ID that
     supports it. Clearly label unresolved conflicts and limitations.
 
+    The validated knowledge artifacts and conflict-resolution record are the
+    report's only permitted factual basis. Derive every finding, comparison,
+    explanation, and conclusion only from claims and quotes present in those
+    artifacts. Do not add information from model training, memory, general
+    background knowledge, assumptions, or personal opinions, even when the
+    artifacts are incomplete or a source could not be fetched. If the evidence
+    does not establish an answer, say that the available evidence is
+    insufficient and leave the point unresolved; do not fill the gap with an
+    inference presented as fact.
+
+    Do not output a "信源限制说明" or any equivalent disclaimer that says the
+    report is based on training data, gives a knowledge cutoff, attributes
+    conclusions to model synthesis, or explains paywalls or exhausted web
+    quotas. Evidence limitations may be mentioned only when they are stated
+    in the validated artifacts and are relevant to the supported conclusion.
+
     Never use PowerShell, a shell, curl, wget, or scripts and command-line
     programs to search the web or download remote content. Do not use them as
     a workaround when a search or source-reading tool reaches its call quota
@@ -405,7 +421,11 @@ research "static" "synthesize" {
     the final report to ${block_wd()}/report.md. Include
     an executive summary, findings organized around the planner-produced task groups,
     resolved and unresolved contradictions, limitations, and a source table
-    mapping each cited quote ID to its URL. Do not merely concatenate the files.
+    mapping each cited quote ID to its URL. Before writing, remove every
+    statement that cannot be traced to a validated knowledge claim, its quote,
+    or an explicit conflict-resolution decision. Do not merely concatenate the
+    files, and do not use pretrained knowledge or opinion to make the report
+    sound complete.
   PROMPT
   disallowed_tools = ["ask_user", "web_search", "web_fetch"]
   permission       = "approve_all"
@@ -421,9 +441,10 @@ research "static" "synthesize" {
     criteria = {
       mechanical_audit = "Call ${external_tool.audit_synthesis.id} exactly once in each QC round before judging the current report revision. Pass report_path as the declared report artifact, knowledge_paths as the complete Validated knowledge artifacts list from the task, and resolution_path as the Conflict-resolution artifact. Treat its quote-ID, source-URL, unused-reference, snapshot-existence, and text-equivalence checks as authoritative. Preserve every reported mechanical issue in the QC verdict, but do not repeat those checks with grep or view."
       plan_coverage = "Read the report and the knowledge.json artifacts, but not their snapshots, and verify the report answers every planner-produced subquestion."
-      factual_fidelity = "Use each knowledge item's claim, confidence, quote_ids, and exact_quote fields to judge whether every material report statement is logically supported without extrapolation. This is a semantic judgment; do not repeat the typed tool's text matching."
+      factual_fidelity = "Use each knowledge item's claim, confidence, quote_ids, and exact_quote fields to judge whether every material report statement and conclusion is logically supported without extrapolation. Reject any statement that appears to come from model training, memory, general background knowledge, assumption, or opinion rather than the validated artifacts. This is a semantic judgment; do not repeat the typed tool's text matching."
       conflict_handling = "Read resolution.json and verify all resolved and unresolved conflicts are represented exactly as decided, without hiding residual uncertainty."
       citation_semantics = "For citations that mechanically pass, decide whether the cited exact quote actually supports the surrounding report claim. Do not reopen snapshots unless the mechanical audit itself reports an unreadable or unmatched quote."
+      provenance_guard = "Reject a report that includes a 信源限制说明 or equivalent training-data/knowledge-cutoff/paywall/quota disclaimer, or that uses such limitations as a reason to introduce uncited model opinion. Require unsupported conclusions to be removed or explicitly marked as insufficient evidence."
     }
     reasoning_effort = var.reasoning_effort
     max_qc_rounds    = 10
