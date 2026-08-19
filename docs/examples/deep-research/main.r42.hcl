@@ -53,10 +53,8 @@ research "static" "plan" {
       ask researchers to compare, audit, or extend those upstream artifacts,
       but final tasks cannot depend on results from earlier tasks in their own
       group because all task prompts are materialized together. When a task
-      needs an upstream artifact, say so explicitly in its instructions and
-      tell the researcher to inspect the supplied absolute paths with built-in
-      file-reading tools such as grep before drawing conclusions; never assume
-      an artifact's contents from its filename alone.
+      needs upstream knowledge, say so explicitly in its instructions; r42 will
+      inject validated typed-tool JSON results into the task prompt.
 
     Any individual group may be empty. Across all groups, use globally unique
     lowercase task IDs that are safe as directory names. For every task, write
@@ -124,9 +122,7 @@ research "dynamic" "parallel_deep_dive" {
         Task-specific instructions:
         ${task.instructions}
 
-        If this task reads an artifact produced by an earlier task, use the
-        available file/search tools (for example grep) to locate and inspect
-        the exact upstream file before relying on it.
+        Any permitted upstream knowledge is included directly in this prompt.
         Save the complete material returned by every source read as Markdown
         under "${block_wd()}/snapshots/" before citing it. Call
         ${go_tool.save_snapshot.id} with that path and the complete Markdown
@@ -139,7 +135,8 @@ research "dynamic" "parallel_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      tool_ids          = [go_tool.save_snapshot.id, go_tool.submit_knowledge.id]
+      collection_tool_ids = [go_tool.save_snapshot.id]
+      tool_ids            = [go_tool.submit_knowledge.id]
       tool_call_quota   = local.deep_dive_tool_call_quota
       terminate_tool_id = go_tool.submit_knowledge.id
       permission        = "approve_all"
@@ -188,9 +185,8 @@ research "dynamic" "independent_serial_deep_dive" {
         Task-specific instructions:
         ${task.instructions}
 
-        If this task reads an artifact produced by an earlier task, use the
-        available file/search tools (for example grep) to locate and inspect
-        the exact upstream file before relying on it. This group runs one task
+        Any permitted upstream knowledge is included directly in this prompt.
+        This group runs one task
         at a time but does not wait for the parallel
         group. Research independently without assuming access to another task's
         result. Save the complete material returned by every source read as
@@ -204,7 +200,8 @@ research "dynamic" "independent_serial_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      tool_ids          = [go_tool.save_snapshot.id, go_tool.submit_knowledge.id]
+      collection_tool_ids = [go_tool.save_snapshot.id]
+      tool_ids            = [go_tool.submit_knowledge.id]
       tool_call_quota   = local.deep_dive_tool_call_quota
       terminate_tool_id = go_tool.submit_knowledge.id
       permission        = "approve_all"
@@ -257,10 +254,15 @@ research "dynamic" "final_serial_deep_dive" {
         Task-specific instructions:
         ${task.instructions}
 
-        Read all validated upstream knowledge artifacts before researching.
-        Use available file/search tools (for example grep) to locate and
-        inspect each exact path; do not assume that a path string alone means
-        the artifact was read:
+        Validated upstream knowledge JSON is included below. Use its claims and
+        quotes as context before researching:
+        ${join("\n", concat(
+          [for item in research.dynamic.parallel_deep_dive.tasks : item.result],
+          [for item in research.dynamic.independent_serial_deep_dive.tasks : item.result],
+        ))}
+
+        The corresponding artifact paths, used only when submitting the final
+        reviewed_artifacts field, are:
         ${join("\n", concat(
           [for item in research.dynamic.parallel_deep_dive.tasks : "- ${one(item.artifacts).path}"],
           [for item in research.dynamic.independent_serial_deep_dive.tasks : "- ${one(item.artifacts).path}"],
@@ -277,7 +279,8 @@ research "dynamic" "final_serial_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      tool_ids          = [go_tool.save_snapshot.id, go_tool.submit_knowledge.id]
+      collection_tool_ids = [go_tool.save_snapshot.id]
+      tool_ids            = [go_tool.submit_knowledge.id]
       tool_call_quota   = local.deep_dive_tool_call_quota
       terminate_tool_id = go_tool.submit_knowledge.id
       permission        = "approve_all"
@@ -328,16 +331,22 @@ research "static" "resolve_conflicts" {
     Overall topic:
     ${var.topic}
 
-    Read every validated knowledge artifact:
+    Validated knowledge JSON:
+    ${join("\n", concat(
+      [for item in research.dynamic.parallel_deep_dive.tasks : item.result],
+      [for item in research.dynamic.independent_serial_deep_dive.tasks : item.result],
+      [for item in research.dynamic.final_serial_deep_dive.tasks : item.result],
+    ))}
+
+    The corresponding artifact paths, used only for the typed tool's
+    reviewed_artifacts field, are:
     ${join("\n", concat(
       [for item in research.dynamic.parallel_deep_dive.tasks : "- ${one(item.artifacts).path}"],
       [for item in research.dynamic.independent_serial_deep_dive.tasks : "- ${one(item.artifacts).path}"],
       [for item in research.dynamic.final_serial_deep_dive.tasks : "- ${one(item.artifacts).path}"],
     ))}
 
-    Use available file/search tools (for example grep) to locate and inspect
-    every listed artifact before comparing its knowledge items and quote
-    records. Call
+    Compare every included knowledge item and quote record. Call
     ${go_tool.submit_conflict_resolution.id} with artifact_path exactly
     "${block_wd()}/resolution.json", reviewed_artifacts containing every path
     above, all detected conflicts and decisions, and synthesis_guidance for the
@@ -406,18 +415,27 @@ research "static" "synthesize" {
     Answer this overall topic:
     ${var.topic}
 
-    Validated knowledge artifacts:
+    Validated knowledge JSON:
+    ${join("\n", concat(
+      [for item in research.dynamic.parallel_deep_dive.tasks : item.result],
+      [for item in research.dynamic.independent_serial_deep_dive.tasks : item.result],
+      [for item in research.dynamic.final_serial_deep_dive.tasks : item.result],
+    ))}
+
+    Validated knowledge artifact paths for Final QC's typed audit:
     ${join("\n", concat(
       [for item in research.dynamic.parallel_deep_dive.tasks : "- ${one(item.artifacts).path}"],
       [for item in research.dynamic.independent_serial_deep_dive.tasks : "- ${one(item.artifacts).path}"],
       [for item in research.dynamic.final_serial_deep_dive.tasks : "- ${one(item.artifacts).path}"],
     ))}
 
-    Conflict-resolution artifact:
+    Conflict-resolution JSON:
+    ${research.static.resolve_conflicts.result}
+
+    Conflict-resolution artifact path for Final QC's typed audit:
     ${one(research.static.resolve_conflicts.artifact).path}
 
-    Use available file/search tools (for example grep) to locate and inspect
-    every listed artifact and the resolution file. Read all files, then write
+    Use only the included validated JSON and registered snapshots, then write
     the final report to ${block_wd()}/report.md. Include
     an executive summary, findings organized around the planner-produced task groups,
     resolved and unresolved contradictions, limitations, and a source table

@@ -77,9 +77,9 @@ func TestResearchWithoutTerminalCompletesHermetically(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Empty(t, result.Outputs)
-	assert.Equal(t, 1, opener.opens)
+	assert.Equal(t, 3, opener.opens)
 	assert.Equal(t, 1, opener.session.sends)
-	assert.Equal(t, 1, opener.session.closes)
+	assert.Equal(t, 3, opener.session.closes)
 }
 
 func TestDocumentedBasicExamplePlans(t *testing.T) {
@@ -128,7 +128,7 @@ func TestRejectedTerminalArgumentsAreRepairedInSameSession(t *testing.T) {
 	assert.Equal(t, cty.StringVal("repaired"), result.Outputs["summary"])
 	assert.Contains(t, opener.firstResult, `"accepted":false`)
 	assert.Equal(t, 2, opener.sends)
-	assert.Equal(t, 1, opener.opens)
+	assert.Equal(t, 3, opener.opens)
 }
 
 func TestQCIssuesTriggerRevisionAndPassInPersistentSessions(t *testing.T) {
@@ -142,7 +142,7 @@ func TestQCIssuesTriggerRevisionAndPassInPersistentSessions(t *testing.T) {
 	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
-	assert.Equal(t, 2, opener.opens)
+	assert.Equal(t, 4, opener.opens)
 	assert.Equal(t, 2, opener.research.sends)
 	assert.Equal(t, 2, opener.qc.sends)
 	require.Len(t, opener.research.prompts, 2)
@@ -269,7 +269,7 @@ func TestCancellationStopsSessionAndExternalChildProcess(t *testing.T) {
 	slowErr := state.slowErr
 	state.mu.Unlock()
 	require.ErrorIs(t, slowErr, context.Canceled)
-	assert.Equal(t, 1, state.closedSessions)
+	assert.Equal(t, 3, state.closedSessions)
 }
 
 func renderFailFastFixture(t *testing.T, startedFile string) string {
@@ -307,6 +307,9 @@ type slowExternalSession struct {
 }
 
 func (s *slowExternalSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if handled, err := handleWorkflowProtocol(s.config); handled {
+		return &sdk.SessionEvent{}, err
+	}
 	_, err := findTool(s.config.Tools, "external_tool_blocker").Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
 	s.state.mu.Lock()
 	s.state.slowErr = err
@@ -351,6 +354,9 @@ func (*terminalArtifactOpener) Open(_ context.Context, config copilot.SessionCon
 type terminalArtifactSession struct{ config copilot.SessionConfig }
 
 func (s *terminalArtifactSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if handled, err := handleWorkflowProtocol(s.config); handled {
+		return &sdk.SessionEvent{}, err
+	}
 	if err := os.WriteFile(filepath.Join(s.config.WorkingDirectory, "report.md"), []byte("report"), 0o600); err != nil {
 		return nil, err
 	}
@@ -386,6 +392,9 @@ type repairSession struct {
 }
 
 func (s *repairSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if handled, err := handleWorkflowProtocol(s.config); handled {
+		return &sdk.SessionEvent{}, err
+	}
 	s.opener.mu.Lock()
 	s.opener.sends++
 	call := s.opener.sends
@@ -404,14 +413,21 @@ func (s *repairSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.S
 func (*repairSession) Close(context.Context) error { return nil }
 
 type qcScenarioOpener struct {
-	opens    int
-	research promptScenarioSession
-	qc       qcScenarioSession
+	opens        int
+	collection   scenarioSession
+	collectionQC scenarioSession
+	research     promptScenarioSession
+	qc           qcScenarioSession
 }
 
 func (o *qcScenarioOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
 	o.opens++
-	if findTool(config.Tools, "r42_qc_verdict").Name == "" {
+	switch workflowSessionKind(config) {
+	case "collection":
+		return &protocolScenarioSession{config: config, session: &o.collection}, nil
+	case "collection_qc":
+		return &protocolScenarioSession{config: config, session: &o.collectionQC}, nil
+	case "research":
 		return &o.research, nil
 	}
 	o.qc.config = config
@@ -438,11 +454,11 @@ type qcScenarioSession struct {
 
 func (s *qcScenarioSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
 	s.sends++
-	arguments := map[string]any{"pass": true}
+	arguments := map[string]any{"decision": "pass"}
 	if s.sends == 1 {
 		arguments = map[string]any{
-			"pass":   false,
-			"issues": []any{map[string]any{"code": "missing_source", "message": "add a citation"}},
+			"decision": "revise_research",
+			"issues":   []any{map[string]any{"code": "missing_source", "message": "add a citation"}},
 		}
 	}
 	_, err := findTool(s.config.Tools, "r42_qc_verdict").Handler(sdk.ToolInvocation{Arguments: arguments})
@@ -458,13 +474,19 @@ type parallelTracker struct {
 
 type parallelOpener struct{ tracker *parallelTracker }
 
-func (o *parallelOpener) Open(context.Context, copilot.SessionConfig) (cli.Session, error) {
-	return &parallelSession{tracker: o.tracker}, nil
+func (o *parallelOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
+	return &parallelSession{tracker: o.tracker, config: config}, nil
 }
 
-type parallelSession struct{ tracker *parallelTracker }
+type parallelSession struct {
+	tracker *parallelTracker
+	config  copilot.SessionConfig
+}
 
 func (s *parallelSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if handled, err := handleWorkflowProtocol(s.config); handled {
+		return &sdk.SessionEvent{}, err
+	}
 	s.tracker.mu.Lock()
 	s.tracker.active++
 	if s.tracker.active > s.tracker.maximum {
@@ -493,11 +515,11 @@ type scenarioOpener struct {
 	session scenarioSession
 }
 
-func (o *scenarioOpener) Open(_ context.Context, _ copilot.SessionConfig) (cli.Session, error) {
+func (o *scenarioOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
 	o.mu.Lock()
 	o.opens++
 	o.mu.Unlock()
-	return &o.session, nil
+	return &protocolScenarioSession{config: config, session: &o.session}, nil
 }
 
 type scenarioSession struct {
@@ -517,4 +539,49 @@ func (s *scenarioSession) Close(context.Context) error {
 	s.closes++
 	s.mu.Unlock()
 	return nil
+}
+
+type protocolScenarioSession struct {
+	config  copilot.SessionConfig
+	session cli.Session
+}
+
+func (s *protocolScenarioSession) SendAndWait(ctx context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if handled, err := handleWorkflowProtocol(s.config); handled {
+		return &sdk.SessionEvent{}, err
+	}
+	return s.session.SendAndWait(ctx, options)
+}
+
+func (s *protocolScenarioSession) Close(ctx context.Context) error { return s.session.Close(ctx) }
+
+func handleWorkflowProtocol(config copilot.SessionConfig) (bool, error) {
+	for _, tool := range config.Tools {
+		switch tool.Name {
+		case "r42_collection_checkpoint":
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"empty_reason": "fixture has no acquisition work"}})
+			return true, err
+		case "r42_collection_qc_verdict":
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "sufficient"}})
+			return true, err
+		case "r42_qc_verdict":
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "pass"}})
+			return true, err
+		}
+	}
+	return false, nil
+}
+
+func workflowSessionKind(config copilot.SessionConfig) string {
+	for _, tool := range config.Tools {
+		switch tool.Name {
+		case "r42_collection_checkpoint":
+			return "collection"
+		case "r42_collection_qc_verdict":
+			return "collection_qc"
+		case "r42_qc_verdict":
+			return "final_qc"
+		}
+	}
+	return "research"
 }

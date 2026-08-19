@@ -166,9 +166,6 @@ func (h *CheckpointHandler) Submit(args CheckpointArgs) corespec.ToolResponse[Ch
 		if err := h.context.State.Checkpoint(); err != nil {
 			return rejection[CheckpointOutput]("checkpoint_failed", err.Error())
 		}
-		for _, id := range pending {
-			h.context.Registry.MarkReviewed(id)
-		}
 	}
 	output := CheckpointOutput{SnapshotIDs: pending}
 	return corespec.ToolResponse[CheckpointOutput]{Accepted: true, Output: &output}

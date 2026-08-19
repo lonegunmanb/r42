@@ -160,10 +160,15 @@ The report order is:
 
 ## Source tools
 
-By default, researchers use the built-in web_search and web_fetch tools. Set
+By default, Collection uses the built-in web_search and web_fetch tools. Set
 use_pplx to true to use the pplx_pro_search and pplx_fetch Go tools from the
-local module. In that mode the built-in web tools are disabled for research
-sessions and pplx_tool_call_quota limits successful fetches per session.
+local module. In that mode the built-in web tools are disabled for Collection
+and pplx_tool_call_quota limits successful fetches per Collection session.
+
+Every block uses the default `collection_batch_size = 10`. The examples omit
+`max_collection_rounds`, so Collection may reopen without a round limit. Search
+and fetch tools appear only in `collection_tool_ids`; closed Research receives
+registered snapshots and validated upstream typed-tool JSON.
 
 All prompts prohibit PowerShell, shell commands, curl, wget, and scripts as a
 way to bypass source-tool policy or quotas. Every retained source is saved as a

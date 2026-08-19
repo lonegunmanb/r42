@@ -10,8 +10,9 @@ example disagree, the explicit rules in this document win.
 
 r42 is a high-level HCL DSL and execution engine for research DAGs. Azure/golden
 provides configuration evaluation, implicit dependency discovery, Plan hooks,
-and the Apply block protocol. A leaf `research` block owns exactly one GitHub
-Copilot SDK research session and, when configured, exactly one QC session.
+and the Apply block protocol. A leaf `research` block owns persistent Collection,
+Collection QC, and closed Research sessions and, when configured, one persistent
+Final QC session.
 
 The Go implementation must use the official upstream
 `github.com/github/copilot-sdk/go` module directly. It must not introduce a
@@ -21,7 +22,7 @@ third-party fork or adapter.
 
 - Describe static research DAGs with typed inputs, outputs, tools, and artifacts.
 - Produce an immutable Plan before Apply starts.
-- Keep research and QC sessions persistent for the lifetime of one block.
+- Keep every workflow phase session persistent for the lifetime of one block.
 - Support reusable, statically planned modules with Terraform-like variables and
   outputs.
 - Run independent research blocks concurrently within global and module limits.
@@ -88,7 +89,8 @@ The first version has these root-level declarations:
 - `model_provider`: model API transport and retry policy, but not a model name.
 - `go_tool`: a typed tool implemented by inline Go source.
 - `external_tool`: a typed tool implemented by a child process.
-- `research`: a research session and an optional nested QC session.
+- `research`: a Collection -> Collection QC -> closed Research workflow with an
+  optional nested Final QC session.
 - `module`: a statically planned child directory.
 - `variable`: a module input.
 - `locals`: Plan-time names for derived expressions.
@@ -164,7 +166,7 @@ research "static" "market" {
   prompt          = "Research ${var.topic}."
   timeout         = "2h"
 
-  tool_ids = [
+  collection_tool_ids = [
     external_tool.search_catalog.id,
   ]
   terminate_tool_id = go_tool.finish.id
@@ -299,9 +301,12 @@ All retry delays respect the active context deadline.
 
 ## 6. Session Configuration
 
-Every `research` block is exactly one logical research session. A nested `qc`
-block adds exactly one logical QC session. Each session is created once and
-reused through all of its turns.
+Every `research` block is one workflow with three mandatory logical sessions:
+Collection, Collection QC, and closed Research. A nested `qc` block adds Final
+QC. Each session is created once and reused whenever the state machine returns
+to that phase. Static and dynamic research use the same coordinator; every
+dynamic member owns isolated sessions, snapshot registry, cursor, quotas, and
+round state.
 
 Research session fields include:
 
@@ -315,38 +320,50 @@ Research session fields include:
 - `reasoning_effort`: an arbitrary non-empty string passed through unchanged.
 - `system_prompt`: required.
 - `prompt`: optional.
-- `tool_ids`: typed tool IDs, normally selected through a tool block's read-only `id` attribute.
-- `tool_call_quota`: optional per-session call limits. Keys matching the r42
-  tool-ID format limit configured typed tools; all other keys name Copilot
-  built-in tools.
+- `collection_tool_ids`: typed acquisition or snapshot-producing tool IDs used
+  only by Collection.
+- `tool_ids`: trusted typed tool IDs used only by closed Research.
+- `tool_call_quota`: optional call limits. Keys may name configured Collection
+  or Research typed tools, the terminate tool, or Copilot built-ins. Collection
+  and Research maintain separate counters.
 - `terminate_tool_id`: optional typed tool ID.
 - `allowed_tools` and `disallowed_tools`: SDK tool-name strings.
-- `skill_directories`, `skills`, and `disabled_skills`.
+- `collection_skill_directories`, `collection_skills`, and
+  `collection_disabled_skills`, used only by Collection.
+- `skill_directories`, `skills`, and `disabled_skills`, used only by Research.
+- `collection_batch_size`, defaulting to 10.
+- `max_collection_rounds`; omission means unlimited.
+- zero or one `collection_qc` block. Collection QC is still mandatory when the
+  block is absent; the block only overrides criteria, provider/model/reasoning,
+  retry, and permission.
 - `permission`, defaulting to `approve_all`.
 - `max_protocol_attempts`, defaulting to 10.
 - `timeout`, with no default.
 - retry overrides.
 
-r42 prepends its fixed protocol system prompt and appends the author's
-`system_prompt`. The optional `prompt` is the starting user message. When it is
-absent, r42 sends a fixed start message. r42 does not validate whether a model
-supports a given reasoning effort; unsupported parameters are surfaced by the
-provider, with HTTP 400 failing immediately.
+r42 shares the author's task instructions between Collection and Research while
+prepending a phase-specific fixed protocol. The optional `prompt` starts both
+the initial Collection turn and the initial Research turn. When it is absent,
+r42 sends a fixed start message. r42 does not validate whether a model supports
+a given reasoning effort; unsupported parameters are surfaced by the provider,
+with HTTP 400 failing immediately.
 
 ### Tool policy
 
 There is no default allowlist. When present, `allowed_tools` first narrows the
-available set. `disallowed_tools` is then applied and always wins. `ask_user` is
-disabled by default because DAG execution is unattended.
+available set. `disallowed_tools` is then applied and always wins. Collection is
+the only open-world phase. Research always adds a fixed denylist for obvious
+network, shell, generic file, edit, task/sub-agent, and user-input built-ins.
+Explicit custom typed tools remain an author trust boundary.
 
 `approve_all` automatically approves every otherwise valid tool call.
-Terminate and QC verdict tools are protocol tools: r42 always registers them and
-configuration cannot exclude them.
+Registration, checkpoint, terminate, and both verdict tools are protocol tools:
+r42 always registers the applicable tools and configuration cannot exclude them.
 
 Each typed tool receives a deterministic, SDK-safe ID from its canonical block
-address. Research and QC snapshots store only those IDs; the Plan stores the
-complete ID-to-definition registry used during Apply. String-only SDK filter
-fields can use the `id` attribute directly or the compatibility function:
+address. Workflow snapshots store only those IDs; the Plan stores the complete
+ID-to-definition registry used during Apply. String-only SDK filter fields can
+use the `id` attribute directly or the compatibility function:
 
 ```hcl
 go_tool.finish.id
@@ -354,13 +371,17 @@ tool_name(go_tool.finish) # same generated tool_go_tool_finish_<uuid> value
 ```
 
 Tools declared in a module remain private unless the module exposes the tool ID
-as a direct string output. A parent can pass that output to `tool_ids`; Plan then
-imports only the corresponding exported definition into the parent registry.
+as a direct string output. A parent can pass that output to
+`collection_tool_ids` or `tool_ids`; Plan then imports only the corresponding
+exported definition into the parent registry.
 
-Research and QC configure typed-tool quotas independently. A successful call
-consumes one unit only after its arguments pass schema validation and the tool
-returns an accepted response. Execution errors and `accepted = false` responses
-roll back the reservation. A zero quota disables that tool for the session.
+Collection, Research, and Final QC configure typed-tool quotas independently. A
+successful call consumes one unit only after its arguments pass schema
+validation and the tool returns an accepted response. Execution errors and
+`accepted = false` responses roll back the reservation. A zero quota disables
+that tool for the session. Collection rounds are a separate control: only
+entering the initial acquisition phase or reopening it consumes a round; an
+empty checkpoint does not consume an extra round.
 
 `one(collection)` follows Terraform's zero-or-one convention: an empty list,
 set, or tuple returns null, one element returns that element, and more than one
@@ -514,42 +535,78 @@ consumes one protocol attempt. `max_protocol_attempts` defaults to 10.
 Required artifact failures are also repairable issues returned to the research
 session. A new QC revision round resets the protocol-attempt budget.
 
-## 9. QC Protocol
-
-The optional QC session receives only:
-
-- The original task, including the research `system_prompt` and optional
-  `prompt`.
-- `criteria`, declared as `cty.Map(cty.String)` and containing at least one item.
-- The candidate optional result string.
-- Declared artifact metadata and paths.
-
-It does not receive the research transcript. It reuses one QC session across all
-rounds. Criteria keys are stable identifiers suggested as issue codes, but r42
-does not require `Issue.code` to equal a criterion key.
-
-QC inherits only the effective provider, model, reasoning effort, retry policy,
-and permission policy. It does not inherit research tools, skills, allowlist, or
-denylist. QC configuration may explicitly customize its own policy, subject to
-the mandatory rules below.
-
-r42 injects a mandatory typed verdict tool. QC must call it with either pass or
-one or more issues. The executor trusts pass. Issues are returned to the research
-session for revision. `max_qc_rounds` defaults to 10 and can be overridden.
-
-By default QC disables shell execution, file writes, sub-agents, and `ask_user`;
-web search/fetch and read-only artifact inspection remain available. Authors may
-relax the denylist, but can never enable `ask_user` or disable the verdict tool.
+## 9. Research Workflow and QC Protocols
 
 The state machine is:
 
 ```text
-R1 -> validate protocol/artifacts -> Q1
-       ^                              |
-       |--------- issues -------------|
-
-R2 -> validate protocol/artifacts -> Q2 -> ... -> pass
+Collection --checkpoint--> Collection QC --sufficient--> Research
+    ^                            |                           |
+    |--------- needs_more -------|                           | candidate
+                                                             v
+                                      complete <---pass--- Final QC
+                                                        /       \
+                                         revise_research         reopen_collection
+                                               |                         |
+                                               +----> Research           +----> Collection
 ```
+
+Collection is the only open-world phase. It uses only
+`collection_tool_ids`, Collection skills, the shared built-in policy, and the
+mandatory `r42_register_snapshot` and `r42_collection_checkpoint` tools. A
+configured typed acquisition result is retained by tool-call ID so registration
+can materialize it as a managed file; a tool that already wrote a file can
+register that workspace path instead. Registration validates source exclusivity,
+existence, non-empty content, and ownership, and deduplicates identical content.
+Path-based source immutability is not guaranteed.
+
+A checkpoint includes every newly registered snapshot. An empty checkpoint is
+valid only with a non-empty `empty_reason`. Reaching `collection_batch_size`
+sets `checkpoint_pending`: new acquisition calls are rejected, but already
+in-flight work may finish and registration/checkpoint remain callable. The
+default batch size is 10.
+
+Collection QC is mandatory even when no `collection_qc` block is declared. It
+uses a persistent session with fixed read-only snapshot/artifact projections and
+the mandatory `r42_collection_qc_verdict` tool. It performs semantic sufficiency
+review only; the registration and checkpoint tools are authoritative for
+mechanical validation. A `sufficient` verdict has no issues. `needs_more`
+requires concrete issues and reopens Collection when its round budget permits.
+Malformed verdicts do not advance the reviewed cursor; valid verdicts do.
+
+`max_collection_rounds` counts actual entries into Collection, including the
+initial phase and later reopens. Omission means unlimited. When Collection QC
+requests more after the configured limit is exhausted, Research proceeds with
+the unresolved issues and existing snapshots. Merely revising Research or
+retrying a verdict does not consume a Collection round.
+
+Research is closed-world synthesis. It can read all registered snapshots by ID,
+read declared candidate artifacts, write only declared Markdown file artifacts,
+use explicitly configured trusted `tool_ids`, and call its optional termination
+tool. Obvious network, shell, generic file, edit, task/sub-agent, and user-input
+built-ins are always denied. Protocol and artifact failures are repairable in
+the same persistent Research session.
+
+Final QC exists only when `qc` is configured. It receives the original task,
+non-empty `criteria`, candidate result, declared artifact metadata, and read-only
+snapshot/artifact projections, but not the Research transcript. Its mandatory
+`r42_qc_verdict` decision is one of:
+
+- `pass`, with no issues, completes the workflow;
+- `revise_research`, with one or more issues, returns to closed Research;
+- `reopen_collection`, with one or more evidence gaps, returns to Collection.
+
+Before accepting `reopen_collection`, the verdict tool checks the shared round
+state. If the budget is exhausted, it returns a repairable
+`collection_round_budget_exhausted` response, keeps Final QC active, and asks it
+to choose `revise_research` or `pass` from existing snapshots. The rejected
+request consumes no Collection round. `max_qc_rounds` defaults to 10; a non-pass
+decision on the last review fails without starting work that cannot be reviewed.
+
+Final QC inherits only effective provider/model/reasoning/retry/permission
+values. Its tools, skills, quotas, allowlist, and denylist are explicitly scoped
+to `qc`; custom typed tools remain an author trust boundary. Fixed r42 evidence
+readers are read-only, and the mandatory verdict tool cannot be filtered out.
 
 ## 10. Artifacts and Paths
 
@@ -655,7 +712,7 @@ Failure, cancellation, or timeout publishes no partial outputs.
 
 CLI `--parallelism` defaults to 10. It counts only running `research` blocks;
 module orchestration nodes consume no permit. A research block acquires its
-permit before Apply begins and holds it until research and QC sessions have been
+permit before Apply begins and holds it until all workflow phase sessions have been
 closed or close retries have been exhausted.
 
 A module may set `parallelism`. A leaf research block must acquire the global
@@ -676,7 +733,7 @@ Research blocks and modules may set `timeout` using Go duration strings such as
 timeouts have no default. The effective deadline is the earliest of the overall
 deadline, all ancestor module deadlines, and the research block deadline.
 
-Every active research or QC session also has one inactivity timer. It defaults
+Every active workflow phase session also has one inactivity timer. It defaults
 to `15m` and is configurable for the complete root-and-module Apply with
 `--session-stall-timeout`. Each SDK event, including reasoning/message deltas
 and tool progress, moves the deadline forward. Starting or finishing a local
@@ -690,7 +747,7 @@ Fail-fast cancellation follows this order:
 1. Cancel the root context and stop scheduling new research blocks.
 2. Propagate cancellation through nested module executors.
 3. Terminate active tool child-process trees.
-4. Close research and QC sessions.
+4. Close Collection, Collection QC, Research, and Final QC sessions.
 5. Release parallelism permits and flush debug files.
 
 The original error remains primary; cleanup errors are additional diagnostics.
@@ -738,13 +795,13 @@ The first version never cleans old runs automatically. Inline Go compilation
 artifacts live in process-temporary storage and are deleted best-effort on r42
 exit.
 
-By default r42 does not persist complete research/QC transcripts, prompts, tool
+By default r42 does not persist complete workflow transcripts, prompts, tool
 arguments, or tool results. With CLI `--debug`, files in the run directory
 contain:
 
 - Complete r42 and user system prompts.
 - Every user and assistant message.
-- Complete research and QC transcripts.
+- Complete Collection, Collection QC, Research, and Final QC transcripts.
 - Tool arguments, results, stdout, and stderr.
 
 Raw SDK payloads and complete tool arguments/results are written to files only.
@@ -840,7 +897,7 @@ Both renderers consume the same in-memory event stream used by the debug
 recorder. The stream exists even without `--debug`; that flag controls sensitive
 event persistence, not live state production. The projector builds its initial
 state from the fully expanded saved Plan, including module child Plans, then
-tracks block lifecycle, research/QC phase, assistant reasoning/message deltas,
+tracks block lifecycle, workflow phase, assistant reasoning/message deltas,
 tool execution, and usage. Usage is deduplicated by provider API-call ID and the
 displayed total is input plus output tokens; reasoning tokens are shown as a
 breakdown and are not counted twice.

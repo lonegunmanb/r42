@@ -41,11 +41,12 @@ research "static" "primary_source_baseline" {
     source_registry_path "${block_wd()}/source-registry.json", as_of_date
     "${var.as_of_date}", and allow_empty false.
   PROMPT
-  tool_ids = concat(local.pplx_tool_ids, [
+  collection_tool_ids = local.pplx_tool_ids
+  tool_ids = [
     go_tool.register_evidence_source.id,
     go_tool.submit_claim_cards.id,
     go_tool.finalize_claim_cards.id,
-  ])
+  ]
   tool_call_quota   = local.pplx_tool_call_quota
   terminate_tool_id = go_tool.finalize_claim_cards.id
   disallowed_tools  = local.research_disallowed_tools
@@ -94,12 +95,13 @@ research "static" "brainstorm" {
   prompt = <<-PROMPT
     Topic: ${var.topic}
     Evidence cutoff: ${var.as_of_date}
-    Primary claims: ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "claims"])}
-    Primary source registry: ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "source_registry"])}
+    Validated primary-source baseline JSON:
+    ${research.static.primary_source_baseline.result}
     ${local.source_tool_guidance}
     ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
 
-    Read both baseline artifacts. Write "${block_wd()}/brainstorm.md" with the
+    Use the validated baseline and this workflow's registered snapshots. Write
+    "${block_wd()}/brainstorm.md" with the
     focal boundary, product variants, layered components, transformation stages,
     manufacturing, packaging, testing, module integration, downstream system
     qualification, competing dependency hypotheses, and open questions for the
@@ -111,7 +113,8 @@ research "static" "brainstorm" {
     "${block_wd()}/scope.json". Every expected component and stage must be
     assigned to one or more coverage items and exactly one of the five tracks.
   PROMPT
-  tool_ids = concat(local.pplx_tool_ids, [go_tool.submit_supply_chain_scope.id])
+  collection_tool_ids = local.pplx_tool_ids
+  tool_ids            = [go_tool.submit_supply_chain_scope.id]
   tool_call_quota   = local.pplx_tool_call_quota
   terminate_tool_id = go_tool.submit_supply_chain_scope.id
   disallowed_tools  = local.research_disallowed_tools
@@ -157,8 +160,10 @@ research "static" "graph_track" {
     Evidence cutoff: ${var.as_of_date}
     Track: ${each.value.title}
     Assigned question: ${each.value.question}
-    Brainstorm: ${one([for item in research.static.brainstorm.artifact : item.path if item.name == "brainstorm"])}
-    Scope: ${one([for item in research.static.brainstorm.artifact : item.path if item.name == "scope"])}
+    Validated scope JSON:
+    ${research.static.brainstorm.result}
+    Validated primary-source baseline JSON:
+    ${research.static.primary_source_baseline.result}
     ${local.source_tool_guidance}
     ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
     Workspace: "${block_wd()}"
@@ -180,11 +185,12 @@ research "static" "graph_track" {
     source_registry_path "${block_wd()}/source-registry.json", as_of_date
     "${var.as_of_date}", and allow_empty false.
   PROMPT
-  tool_ids = concat(local.pplx_tool_ids, [
+  collection_tool_ids = local.pplx_tool_ids
+  tool_ids = [
     go_tool.register_evidence_source.id,
     go_tool.submit_claim_cards.id,
     go_tool.finalize_claim_cards.id,
-  ])
+  ]
   tool_call_quota   = local.pplx_tool_call_quota
   terminate_tool_id = go_tool.finalize_claim_cards.id
   disallowed_tools  = local.research_disallowed_tools
@@ -230,12 +236,13 @@ research "static" "build_supply_chain" {
   PROMPT
   prompt = <<-PROMPT
     Topic: ${var.topic}
-    Scope: ${one([for item in research.static.brainstorm.artifact : item.path if item.name == "scope"])}
-    Baseline claims: ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "claims"])}
-    Track claims:
-    ${join("\n", [for item in research.static.graph_track : "- ${one([for artifact in item.artifact : artifact.path if artifact.name == "claims"])}"])}
+    Validated scope JSON:
+    ${research.static.brainstorm.result}
+    Validated baseline and track claim JSON:
+    ${research.static.primary_source_baseline.result}
+    ${join("\n", [for item in research.static.graph_track : item.result])}
 
-    Read every artifact. Call ${go_tool.submit_supply_chain_map.id} once with
+    Use only the validated JSON above. Call ${go_tool.submit_supply_chain_map.id} once with
     workspace_dir "${block_wd()}", artifact_path
     "${block_wd()}/supply-chain.json", the exact topic and scope_path, and
     claim_paths containing the baseline plus all five track claim files.
@@ -289,12 +296,13 @@ research "dynamic" "assess_nodes" {
         Topic: ${var.topic}
         Evidence cutoff: ${var.as_of_date}
         Assessment target: ${jsonencode(target)}
-        Supply-chain map: ${one(research.static.build_supply_chain.artifact).path}
-        Claim files:
-        - ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "claims"])}
-        ${join("\n", [for item in research.static.graph_track : "- ${one([for artifact in item.artifact : artifact.path if artifact.name == "claims"])}"])}
+        Validated supply-chain map JSON:
+        ${research.static.build_supply_chain.result}
+        Validated claim JSON:
+        ${research.static.primary_source_baseline.result}
+        ${join("\n", [for item in research.static.graph_track : item.result])}
 
-        Read the map and relevant cards. Answer five questions: which scenario is
+        Use the included map and claims. Answer five questions: which scenario is
         affected (current production, expansion/upgrade, or a product branch);
         whether the named target actually depends on this node; which alternatives
         are already qualified and have usable capacity; whether switching and
@@ -347,10 +355,11 @@ research "dynamic" "prioritize_companies" {
         Topic: ${var.topic}
         Evidence cutoff: ${var.as_of_date}
         Market: ${var.market}
-        Node assessment: ${one([for artifact in assessment.artifacts : artifact.path if artifact.name == "node_assessment"])}
-        Existing claim files:
-        - ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "claims"])}
-        ${join("\n", [for item in research.static.graph_track : "- ${one([for artifact in item.artifact : artifact.path if artifact.name == "claims"])}"])}
+        Validated node assessment JSON:
+        ${assessment.result}
+        Validated existing claim JSON:
+        ${research.static.primary_source_baseline.result}
+        ${join("\n", [for item in research.static.graph_track : item.result])}
         Task workspace: "${block_wd()}/${format("%03d", index + 1)}"
         ${local.source_tool_guidance}
         ${var.use_pplx ? format("Perplexity snapshot_dir: %s/%03d/sources", block_wd(), index + 1) : ""}
@@ -386,12 +395,13 @@ research "dynamic" "prioritize_companies" {
         do_not_research means the node or company link is too weak. These are
         research priorities, never investment ratings. An empty list is valid.
       PROMPT
-      tool_ids = concat(local.pplx_tool_ids, [
+      collection_tool_ids = local.pplx_tool_ids
+      tool_ids = [
         go_tool.register_evidence_source.id,
         go_tool.submit_claim_cards.id,
         go_tool.finalize_claim_cards.id,
         go_tool.submit_company_priorities.id,
-      ])
+      ]
       tool_call_quota   = local.pplx_tool_call_quota
       terminate_tool_id = go_tool.submit_company_priorities.id
       disallowed_tools  = local.research_disallowed_tools
@@ -450,18 +460,18 @@ research "static" "synthesize" {
   prompt = <<-PROMPT
     Topic: ${var.topic}
     Evidence cutoff: ${var.as_of_date}
-    Scope: ${one([for item in research.static.brainstorm.artifact : item.path if item.name == "scope"])}
-    Supply chain: ${one(research.static.build_supply_chain.artifact).path}
-    Node assessments:
-    ${join("\n", [for task in research.dynamic.assess_nodes.tasks : "- ${one([for artifact in task.artifacts : artifact.path if artifact.name == "node_assessment"])}"])}
-    Company priorities:
-    ${join("\n", [for task in research.dynamic.prioritize_companies.tasks : "- ${one([for artifact in task.artifacts : artifact.path if artifact.name == "company_priorities"])}"])}
-    Claim files:
-    - ${one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "claims"])}
-    ${join("\n", [for item in research.static.graph_track : "- ${one([for artifact in item.artifact : artifact.path if artifact.name == "claims"])}"])}
-    ${join("\n", [for task in research.dynamic.prioritize_companies.tasks : "- ${one([for artifact in task.artifacts : artifact.path if artifact.name == "claims"])}"])}
+    Validated scope and supply-chain JSON:
+    ${research.static.brainstorm.result}
+    ${research.static.build_supply_chain.result}
+    Validated node assessments:
+    ${join("\n", [for task in research.dynamic.assess_nodes.tasks : task.result])}
+    Validated company priorities:
+    ${join("\n", [for task in research.dynamic.prioritize_companies.tasks : task.result])}
+    Validated baseline and track claims:
+    ${research.static.primary_source_baseline.result}
+    ${join("\n", [for item in research.static.graph_track : item.result])}
 
-    Read every artifact and write "${block_wd()}/report.md" in this order:
+    Use only the validated JSON above and write "${block_wd()}/report.md" in this order:
     1. companies worth further research, showing A/B/C/do-not-research, exact
        node and role, strongest evidence, largest unknown, and next check;
     2. confirmed and candidate global or branch-specific risk nodes;

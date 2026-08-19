@@ -6,6 +6,7 @@ package workflow
 import (
 	"errors"
 	"fmt"
+	"sync"
 )
 
 // Phase is one state in the research workflow state machine.
@@ -25,14 +26,15 @@ func (p Phase) String() string { return string(p) }
 type Event string
 
 const (
-	EventCollectionCheckpoint     Event = "checkpoint"
-	EventSufficient               Event = "sufficient"
-	EventNeedsMore                Event = "needs_more"
-	EventCollectionLimitExhausted Event = "collection_limit_exhausted"
-	EventResearchComplete         Event = "research_complete"
-	EventReviseResearch           Event = "revise_research"
-	EventReopenCollection         Event = "reopen_collection"
-	EventPass                     Event = "pass"
+	EventCollectionCheckpoint      Event = "checkpoint"
+	EventSufficient                Event = "sufficient"
+	EventNeedsMore                 Event = "needs_more"
+	EventCollectionLimitExhausted  Event = "collection_limit_exhausted"
+	EventResearchComplete          Event = "research_complete"
+	EventResearchCompleteWithoutQC Event = "research_complete_without_qc"
+	EventReviseResearch            Event = "revise_research"
+	EventReopenCollection          Event = "reopen_collection"
+	EventPass                      Event = "pass"
 )
 
 func (e Event) String() string { return string(e) }
@@ -51,6 +53,7 @@ const DefaultBatchSize = 10
 // dynamic research member owns an isolated State instance. State is not safe
 // for concurrent use.
 type State struct {
+	mu     sync.RWMutex
 	config Config
 
 	phase                  Phase
@@ -95,6 +98,9 @@ func (e *BudgetExhaustedError) Error() string {
 
 // Begin starts the workflow in the initial Collection phase (round 1).
 func (s *State) Begin() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.config.MaxCollectionRounds != nil && *s.config.MaxCollectionRounds <= 0 {
 		return errors.New("max collection rounds must be positive")
 	}
@@ -112,6 +118,9 @@ func (s *State) Begin() error {
 
 // Phase returns the current phase, or an empty string before Begin.
 func (s *State) Phase() Phase {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	if !s.begun {
 		return ""
 	}
@@ -120,23 +129,55 @@ func (s *State) Phase() Phase {
 
 // CollectionRoundsUsed returns the number of acquisition rounds consumed,
 // including the initial Collection phase.
-func (s *State) CollectionRoundsUsed() int { return s.collectionRoundsUsed }
+func (s *State) CollectionRoundsUsed() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.collectionRoundsUsed
+}
+
+// MaxCollectionRounds returns a defensive copy of the configured limit. Nil
+// means Collection rounds are unlimited.
+func (s *State) MaxCollectionRounds() *int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.config.MaxCollectionRounds == nil {
+		return nil
+	}
+	maximum := *s.config.MaxCollectionRounds
+	return &maximum
+}
 
 // Cursor returns the number of snapshots that have received a valid
 // Collection-QC verdict. It advances only on valid verdicts.
-func (s *State) Cursor() int { return s.cursor }
+func (s *State) Cursor() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cursor
+}
 
 // UnreviewedSnapshotCount returns snapshots registered since the last
 // checkpoint.
-func (s *State) UnreviewedSnapshotCount() int { return s.unreviewedCount }
+func (s *State) UnreviewedSnapshotCount() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.unreviewedCount
+}
 
 // CheckpointPending reports whether the unreviewed snapshot count reached the
 // configured batch size.
-func (s *State) CheckpointPending() bool { return s.checkpointPending }
+func (s *State) CheckpointPending() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.checkpointPending
+}
 
 // CollectionLimitExhausted reports whether the configured round budget prevents
 // another acquisition phase.
 func (s *State) CollectionLimitExhausted() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	if s.config.MaxCollectionRounds == nil {
 		return false
 	}
@@ -148,6 +189,9 @@ func (s *State) CollectionLimitExhausted() bool {
 // calls are rejected while in-flight completion, registration, and checkpoint
 // remain available.
 func (s *State) RegisterSnapshot() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if !s.begun {
 		return errors.New("workflow must begin before registering snapshots")
 	}
@@ -164,6 +208,9 @@ func (s *State) RegisterSnapshot() error {
 // Checkpoint submits every unreviewed snapshot for review and clears the
 // pending batch state. An empty checkpoint requires a non-empty reason.
 func (s *State) Checkpoint() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if !s.begun {
 		return errors.New("workflow must begin before checkpointing")
 	}
@@ -178,6 +225,9 @@ func (s *State) Checkpoint() error {
 // AcquireGate enforces the checkpoint_pending acquisition gate. It rejects new
 // acquisition while allowing registration and checkpoint to proceed.
 func (s *State) AcquireGate() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	if !s.begun {
 		return errors.New("workflow must begin before acquiring")
 	}
@@ -190,6 +240,9 @@ func (s *State) AcquireGate() error {
 // Advance applies one event to the state machine. Invalid transitions return a
 // deterministic *TransitionError and leave the state unchanged.
 func (s *State) Advance(event Event) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if !s.begun {
 		return errors.New("workflow must begin before advancing")
 	}
@@ -215,8 +268,12 @@ func (s *State) Advance(event Event) error {
 			return nil
 		}
 	case PhaseResearch:
-		if event == EventResearchComplete {
+		switch event {
+		case EventResearchComplete:
 			s.phase = PhaseFinalQC
+			return nil
+		case EventResearchCompleteWithoutQC:
+			s.phase = PhaseComplete
 			return nil
 		}
 	case PhaseFinalQC:
@@ -243,11 +300,15 @@ func (s *State) Advance(event Event) error {
 // SetLastCollectionQCIssues records the most recent Collection-QC verdict
 // issues for context handed to later phases.
 func (s *State) SetLastCollectionQCIssues(issues []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.lastCollectionQCIssues = append([]string(nil), issues...)
 }
 
 // LastCollectionQCIssues returns a copy of the most recent Collection-QC
 // verdict issues.
 func (s *State) LastCollectionQCIssues() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return append([]string(nil), s.lastCollectionQCIssues...)
 }

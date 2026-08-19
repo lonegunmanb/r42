@@ -24,7 +24,7 @@ variable "research_plan" {
 
 variable "web_fetch_tool_call_quota" {
   type        = number
-  description = "Maximum successful built-in web_fetch calls allowed per deep-dive research session."
+  description = "Maximum successful built-in web_fetch calls allowed per deep-dive Collection session."
   default     = 20
 
   validation {

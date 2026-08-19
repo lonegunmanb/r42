@@ -142,8 +142,11 @@ output "status" { value = module.child.status }
 
 type moduleBlockingOpener struct{ session moduleBlockingSession }
 
-func (o *moduleBlockingOpener) Open(context.Context, copilot.SessionConfig) (cli.Session, error) {
-	return &o.session, nil
+func (o *moduleBlockingOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
+	if workflowSessionKind(config) == "research" {
+		return &o.session, nil
+	}
+	return &protocolFixtureSession{config: config, session: &fakeSession{}}, nil
 }
 
 type moduleBlockingSession struct{ fakeSession }
@@ -158,8 +161,11 @@ func (s *moduleBlockingSession) SendAndWait(ctx context.Context, _ sdk.MessageOp
 
 type moduleRecoveringOpener struct{ session moduleRecoveringSession }
 
-func (o *moduleRecoveringOpener) Open(context.Context, copilot.SessionConfig) (cli.Session, error) {
-	return &o.session, nil
+func (o *moduleRecoveringOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
+	if workflowSessionKind(config) == "research" {
+		return &o.session, nil
+	}
+	return &protocolFixtureSession{config: config, session: &fakeSession{}}, nil
 }
 
 type moduleRecoveringSession struct {

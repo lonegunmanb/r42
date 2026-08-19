@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -189,6 +190,30 @@ func TestFinalQCReturnPaths(t *testing.T) {
 	})
 }
 
+func TestResearchCompletesWithoutFinalQC(t *testing.T) {
+	t.Parallel()
+
+	state := New(Config{})
+	require.NoError(t, state.Begin())
+	require.NoError(t, state.Advance(EventCollectionCheckpoint))
+	require.NoError(t, state.Advance(EventSufficient))
+	require.NoError(t, state.Advance(EventResearchCompleteWithoutQC))
+	assert.Equal(t, PhaseComplete, state.Phase())
+}
+
+func TestMaxCollectionRoundsReturnsDefensiveCopy(t *testing.T) {
+	t.Parallel()
+
+	maximum := 3
+	state := New(Config{MaxCollectionRounds: &maximum})
+	first := state.MaxCollectionRounds()
+	require.NotNil(t, first)
+	*first = 99
+
+	assert.Equal(t, 3, *state.MaxCollectionRounds())
+	assert.Nil(t, New(Config{}).MaxCollectionRounds())
+}
+
 func TestCollectionRoundsUsedCountsOnlyAcquisitionTransitions(t *testing.T) {
 	t.Parallel()
 
@@ -333,6 +358,26 @@ func TestBeginValidatesConfig(t *testing.T) {
 	state := New(Config{MaxCollectionRounds: intPointer(0)})
 	require.Error(t, state.Begin())
 	require.ErrorContains(t, state.Advance(EventCollectionCheckpoint), "must begin")
+}
+
+func TestStateConcurrentRegistration(t *testing.T) {
+	t.Parallel()
+
+	state := New(Config{BatchSize: 100})
+	require.NoError(t, state.Begin())
+	var group sync.WaitGroup
+	errors := make(chan error, 100)
+	for range 100 {
+		group.Go(func() { errors <- state.RegisterSnapshot() })
+	}
+	group.Wait()
+	close(errors)
+	for err := range errors {
+		require.NoError(t, err)
+	}
+
+	assert.Equal(t, 100, state.UnreviewedSnapshotCount())
+	assert.True(t, state.CheckpointPending())
 }
 
 func TestInvalidConfig(t *testing.T) {

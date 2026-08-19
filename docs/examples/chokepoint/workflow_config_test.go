@@ -1,6 +1,8 @@
 package chokepoint_test
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/hcl/v2/hclparse"
@@ -8,6 +10,24 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestClosedResearchReceivesValidatedUpstreamResults(t *testing.T) {
+	t.Parallel()
+
+	payload, err := os.ReadFile("main.r42.hcl")
+	require.NoError(t, err)
+	configuration := string(payload)
+
+	for _, staleInstruction := range []string{
+		"Read both baseline artifacts",
+		"Read every artifact",
+		"Read the map and relevant cards",
+	} {
+		assert.NotContains(t, configuration, staleInstruction)
+	}
+	assert.GreaterOrEqual(t, strings.Count(configuration, ".result"), 10,
+		"closed Research prompts must receive validated upstream data, not only artifact paths")
+}
 
 func TestDecisionWorkflowReplacesReconciliationAndReportManifest(t *testing.T) {
 	t.Parallel()

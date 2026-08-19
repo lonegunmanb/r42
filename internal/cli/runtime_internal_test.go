@@ -55,7 +55,7 @@ func TestQCVerdictToolSchemaDescribesIssueFields(t *testing.T) {
 	assert.JSONEq(t, `{
 		"type": "object",
 		"properties": {
-			"pass": {"type": "boolean"},
+			"decision": {"type": "string", "enum": ["pass", "revise_research", "reopen_collection"]},
 			"issues": {
 				"type": "array",
 				"items": {
@@ -71,9 +71,37 @@ func TestQCVerdictToolSchemaDescribesIssueFields(t *testing.T) {
 				}
 			}
 		},
-		"required": ["pass"],
+		"required": ["decision"],
 		"additionalProperties": false
 	}`, string(schema))
+}
+
+func TestQCVerdictToolReturnsRepairableCollectionBudgetRejection(t *testing.T) {
+	t.Parallel()
+
+	recorder, err := debuglog.NewRecorder(t.TempDir(), false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+	verdicts := qc.NewVerdictRecorder()
+	maximum := 2
+	verdicts.SetCollectionBudget(qc.CollectionBudget{RoundsUsed: 2, MaxRounds: &maximum})
+	tool := qcVerdictTool("research.static.test", recorder, verdicts)
+
+	result, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"decision": "reopen_collection",
+		"issues":   []any{map[string]any{"code": "coverage", "message": "find another source"}},
+	}})
+
+	require.NoError(t, err)
+	assert.Equal(t, "success", result.ResultType)
+	assert.JSONEq(t, `{
+		"accepted": false,
+		"issues": [{
+			"code": "collection_round_budget_exhausted",
+			"message": "cannot reopen collection: all 2 collection rounds have been used",
+			"repair_hint": "Choose revise_research or pass using existing snapshots."
+		}]
+	}`, result.TextResultForLLM)
 }
 
 type phaseCapturingResearch struct {

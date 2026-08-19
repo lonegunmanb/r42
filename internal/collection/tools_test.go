@@ -152,6 +152,7 @@ func TestCheckpointToolHandler(t *testing.T) {
 		require.NotNil(t, response.Output)
 		assert.ElementsMatch(t, ids, response.Output.SnapshotIDs)
 		assert.Equal(t, 0, handler.Context().State.UnreviewedSnapshotCount())
+		assert.Empty(t, handler.Context().Registry.ReviewedSnapshotIDs())
 	})
 
 	t.Run("empty checkpoint requires reason", func(t *testing.T) {

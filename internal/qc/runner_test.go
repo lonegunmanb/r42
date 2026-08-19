@@ -26,7 +26,7 @@ func TestRunnerPassesCandidateWithIsolatedQCContext(t *testing.T) {
 	}}}
 	verdicts := qc.NewVerdictRecorder()
 	session := &fakeSession{onSend: func(_ int, _ string) error {
-		return verdicts.Record(qc.Verdict{Pass: true})
+		return verdicts.Record(qc.Verdict{Decision: qc.DecisionPass})
 	}}
 	prompt := "investigate demand"
 	runner := qc.NewRunner(research, session, verdicts)
@@ -66,11 +66,11 @@ func TestRunnerReturnsQCIssuesToResearchThenPassesRevision(t *testing.T) {
 	verdicts := qc.NewVerdictRecorder()
 	session := &fakeSession{onSend: func(call int, _ string) error {
 		if call == 1 {
-			return verdicts.Record(qc.Verdict{Issues: []corespec.Issue{{
+			return verdicts.Record(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{{
 				Code: "accuracy", Message: "correct the total",
 			}}})
 		}
-		return verdicts.Record(qc.Verdict{Pass: true})
+		return verdicts.Record(qc.Verdict{Decision: qc.DecisionPass})
 	}}
 	runner := qc.NewRunner(research, session, verdicts)
 
@@ -95,9 +95,9 @@ func TestRunnerResetsVerdictProtocolBudgetForEachRevision(t *testing.T) {
 	session := &fakeSession{onSend: func(call int, _ string) error {
 		switch call {
 		case 2:
-			return verdicts.Record(qc.Verdict{Issues: []corespec.Issue{{Code: "source", Message: "add source"}}})
+			return verdicts.Record(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{{Code: "source", Message: "add source"}}})
 		case 4:
-			return verdicts.Record(qc.Verdict{Pass: true})
+			return verdicts.Record(qc.Verdict{Decision: qc.DecisionPass})
 		default:
 			return nil
 		}
@@ -134,7 +134,7 @@ func TestRunnerStopsAtQCRoundLimit(t *testing.T) {
 
 	verdicts := qc.NewVerdictRecorder()
 	session := &fakeSession{onSend: func(_ int, _ string) error {
-		return verdicts.Record(qc.Verdict{Issues: []corespec.Issue{{Code: "accuracy", Message: "still wrong"}}})
+		return verdicts.Record(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{{Code: "accuracy", Message: "still wrong"}}})
 	}}
 	research := &fakeResearch{results: []researchruntime.Result{{}}}
 	runner := qc.NewRunner(research, session, verdicts)
@@ -155,7 +155,7 @@ func TestRunnerPropagatesResearchRevisionFailure(t *testing.T) {
 	research := &fakeResearch{results: []researchruntime.Result{{}}, errAfterResults: revisionErr}
 	verdicts := qc.NewVerdictRecorder()
 	session := &fakeSession{onSend: func(_ int, _ string) error {
-		return verdicts.Record(qc.Verdict{Issues: []corespec.Issue{{Code: "accuracy", Message: "revise"}}})
+		return verdicts.Record(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{{Code: "accuracy", Message: "revise"}}})
 	}}
 	runner := qc.NewRunner(research, session, verdicts)
 
@@ -255,11 +255,11 @@ func TestVerdictValidate(t *testing.T) {
 		verdict       qc.Verdict
 		expectedError string
 	}{
-		{name: "pass", verdict: qc.Verdict{Pass: true}},
-		{name: "issues", verdict: qc.Verdict{Issues: []corespec.Issue{{Code: "accuracy", Message: "wrong"}}}},
-		{name: "pass with issues", verdict: qc.Verdict{Pass: true, Issues: []corespec.Issue{{Code: "accuracy", Message: "wrong"}}}, expectedError: "passing verdict must not contain issues"},
-		{name: "failure without issues", verdict: qc.Verdict{}, expectedError: "failing verdict must contain at least one issue"},
-		{name: "invalid issue", verdict: qc.Verdict{Issues: []corespec.Issue{{Message: "missing code"}}}, expectedError: "issue 0: issue code is required"},
+		{name: "pass", verdict: qc.Verdict{Decision: qc.DecisionPass}},
+		{name: "issues", verdict: qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{{Code: "accuracy", Message: "wrong"}}}},
+		{name: "pass with issues", verdict: qc.Verdict{Decision: qc.DecisionPass, Issues: []corespec.Issue{{Code: "accuracy", Message: "wrong"}}}, expectedError: "pass verdict must not contain issues"},
+		{name: "failure without issues", verdict: qc.Verdict{Decision: qc.DecisionReviseResearch}, expectedError: "revise_research verdict must contain at least one issue"},
+		{name: "invalid issue", verdict: qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{{Message: "missing code"}}}, expectedError: "issue 0: issue code is required"},
 	}
 
 	for _, tt := range tests {
@@ -275,20 +275,35 @@ func TestVerdictValidate(t *testing.T) {
 	}
 }
 
-func TestVerdictRecorderRejectsInvalidVerdictAndPreservesFirstFailure(t *testing.T) {
+func TestVerdictRecorderPreservesExplicitHandlerFailure(t *testing.T) {
 	t.Parallel()
 
 	recorder := qc.NewVerdictRecorder()
 	recorder.RecordError(nil)
-	invalidErr := recorder.Record(qc.Verdict{})
+	handlerErr := errors.New("verdict handler failed")
+	recorder.RecordError(handlerErr)
 	recorder.RecordError(errors.New("later failure"))
 	runner := qc.NewRunner(&fakeResearch{results: []researchruntime.Result{{}}}, &fakeSession{}, recorder)
 
 	_, err := runner.Run(t.Context(), validConfig())
 
-	require.Error(t, invalidErr)
-	require.ErrorIs(t, err, invalidErr)
+	require.ErrorIs(t, err, handlerErr)
 	assert.NotContains(t, err.Error(), "later failure")
+}
+
+func TestRunnerAcceptsRepairAfterInvalidFinalVerdictInSameTurn(t *testing.T) {
+	t.Parallel()
+
+	recorder := qc.NewVerdictRecorder()
+	require.Error(t, recorder.Record(qc.Verdict{Decision: qc.DecisionReviseResearch}))
+	require.NoError(t, recorder.Record(qc.Verdict{Decision: qc.DecisionPass}))
+	runner := qc.NewRunner(nil, &fakeSession{}, recorder)
+	config := validConfig()
+
+	verdict, err := runner.Review(t.Context(), config, researchruntime.Result{})
+
+	require.NoError(t, err)
+	assert.Equal(t, qc.DecisionPass, verdict.Decision)
 }
 
 func TestRunnerRejectsInvalidCriteriaShapes(t *testing.T) {
@@ -327,12 +342,12 @@ func TestRunnerIncludesCompleteIssueDetailsInRevision(t *testing.T) {
 	verdicts := qc.NewVerdictRecorder()
 	session := &fakeSession{onSend: func(call int, _ string) error {
 		if call == 1 {
-			return verdicts.Record(qc.Verdict{Issues: []corespec.Issue{
+			return verdicts.Record(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{
 				{Code: "source", Message: "missing source", Path: &path, RepairHint: &hint},
 				{Code: "accuracy", Message: "wrong total"},
 			}})
 		}
-		return verdicts.Record(qc.Verdict{Pass: true})
+		return verdicts.Record(qc.Verdict{Decision: qc.DecisionPass})
 	}}
 	runner := qc.NewRunner(research, session, verdicts)
 
@@ -348,7 +363,7 @@ func TestVerdictRecorderCompletionVersionOnlyAdvancesForNewOutcomes(t *testing.T
 
 	recorder := qc.NewVerdictRecorder()
 	assert.Zero(t, recorder.CompletionVersion())
-	require.NoError(t, recorder.Record(qc.Verdict{Pass: true}))
+	require.NoError(t, recorder.Record(qc.Verdict{Decision: qc.DecisionPass}))
 	assert.Equal(t, uint64(1), recorder.CompletionVersion())
 	recorder.RecordError(errors.New("handler failed"))
 	assert.Equal(t, uint64(2), recorder.CompletionVersion())

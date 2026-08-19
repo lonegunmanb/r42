@@ -36,14 +36,16 @@ research "static" "source" {
 	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
-	require.Len(t, opener.configs, 2)
+	require.Len(t, opener.configs, 4)
 	assert.Equal(t, "gpt-5.4", opener.configs[0].Profile)
-	assert.Equal(t, "gpt-5.4", opener.configs[1].Profile)
-	assert.Empty(t, opener.configs[0].Tools)
-	require.Len(t, opener.configs[1].Tools, 1)
-	assert.Equal(t, "r42_qc_verdict", opener.configs[1].Tools[0].Name)
+	assert.Equal(t, "gpt-5.4", opener.configs[3].Profile)
+	assert.Contains(t, toolNamesFromConfig(opener.configs[0]), "r42_collection_checkpoint")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[1]), "r42_collection_qc_verdict")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_verdict")
 	assert.Equal(t, 1, opener.research.sendCalls)
 	assert.Equal(t, 1, opener.qc.sendCalls)
+	assert.Equal(t, 1, opener.collection.closeCalls)
+	assert.Equal(t, 1, opener.collectionQC.closeCalls)
 	assert.Equal(t, 1, opener.research.closeCalls)
 	assert.Equal(t, 1, opener.qc.closeCalls)
 }
@@ -144,18 +146,24 @@ research "static" "source" {
 }
 
 type qcOpener struct {
-	mu       sync.Mutex
-	configs  []copilot.SessionConfig
-	research countingSession
-	qc       qcSession
+	mu           sync.Mutex
+	configs      []copilot.SessionConfig
+	collection   countingSession
+	collectionQC countingSession
+	research     countingSession
+	qc           qcSession
 }
 
 func (o *qcOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
 	o.mu.Lock()
 	o.configs = append(o.configs, config)
-	index := len(o.configs)
 	o.mu.Unlock()
-	if index == 1 {
+	switch workflowSessionKind(config) {
+	case "collection":
+		return &protocolFixtureSession{config: config, session: &o.collection}, nil
+	case "collection_qc":
+		return &protocolFixtureSession{config: config, session: &o.collectionQC}, nil
+	case "research":
 		return &o.research, nil
 	}
 	o.qc.config = config
@@ -188,8 +196,10 @@ type qcSession struct {
 }
 
 type blockingQCOpener struct {
-	research countingSession
-	qc       blockingSession
+	collection   countingSession
+	collectionQC countingSession
+	research     countingSession
+	qc           blockingSession
 }
 
 type blockingQCOpenOpener struct {
@@ -210,7 +220,12 @@ func (o *blockingQCOpenOpener) Open(ctx context.Context, _ copilot.SessionConfig
 }
 
 func (o *blockingQCOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
-	if len(config.Tools) == 0 {
+	switch workflowSessionKind(config) {
+	case "collection":
+		return &protocolFixtureSession{config: config, session: &o.collection}, nil
+	case "collection_qc":
+		return &protocolFixtureSession{config: config, session: &o.collectionQC}, nil
+	case "research":
 		return &o.research, nil
 	}
 	return &o.qc, nil
@@ -237,16 +252,31 @@ type failingQCOpener struct {
 }
 
 type revisionQCOpener struct {
-	research promptSession
-	qc       revisionQCSession
+	collection   countingSession
+	collectionQC countingSession
+	research     promptSession
+	qc           revisionQCSession
 }
 
 func (o *revisionQCOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
-	if len(config.Tools) == 0 {
+	switch workflowSessionKind(config) {
+	case "collection":
+		return &protocolFixtureSession{config: config, session: &o.collection}, nil
+	case "collection_qc":
+		return &protocolFixtureSession{config: config, session: &o.collectionQC}, nil
+	case "research":
 		return &o.research, nil
 	}
 	o.qc.config = config
 	return &o.qc, nil
+}
+
+func toolNamesFromConfig(config copilot.SessionConfig) []string {
+	names := make([]string, len(config.Tools))
+	for index := range config.Tools {
+		names[index] = config.Tools[index].Name
+	}
+	return names
 }
 
 type promptSession struct {
@@ -272,11 +302,11 @@ func (s *revisionQCSession) SendAndWait(context.Context, sdk.MessageOptions) (*s
 	s.sendCalls++
 	call := s.sendCalls
 	s.mu.Unlock()
-	arguments := map[string]any{"pass": true}
+	arguments := map[string]any{"decision": "pass"}
 	if call == 1 {
 		arguments = map[string]any{
-			"pass":   false,
-			"issues": []any{map[string]any{"code": "missing_source", "message": "add a citation"}},
+			"decision": "revise_research",
+			"issues":   []any{map[string]any{"code": "missing_source", "message": "add a citation"}},
 		}
 	}
 	for _, tool := range s.config.Tools {
@@ -302,7 +332,7 @@ func (s *qcSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.Sessi
 	s.mu.Unlock()
 	for _, tool := range s.config.Tools {
 		if tool.Name == "r42_qc_verdict" {
-			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"pass": true}})
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "pass"}})
 			return &sdk.SessionEvent{}, err
 		}
 	}

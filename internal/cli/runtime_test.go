@@ -136,12 +136,12 @@ research "static" "source" {
 
 	_, err = applyRuntime(runtime, t.Context(), saved, executor.ResearchConfigOptions{Parallelism: 1})
 	require.NoError(t, err)
-	require.Len(t, opener.configs, 1)
-	workingDirectory := opener.configs[0].WorkingDirectory
+	require.Len(t, opener.configs, 3)
+	workingDirectory := opener.configs[2].WorkingDirectory
 
 	assert.Equal(t, plannedWorkingDirectory, filepath.ToSlash(workingDirectory))
 	assert.DirExists(t, workingDirectory)
-	assert.True(t, strings.HasSuffix(opener.configs[0].SystemPrompt, plannedWorkingDirectory))
+	assert.True(t, strings.HasSuffix(opener.configs[2].SystemPrompt, plannedWorkingDirectory))
 }
 
 func TestProductionRuntimeUsesPlanKnownFunctionOutputWithoutReevaluation(t *testing.T) {
@@ -196,12 +196,12 @@ output "report_path" { value = local.report_with_retries }
 	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
-	require.Len(t, opener.configs, 1)
-	assert.Equal(t, "test-model", opener.configs[0].Model)
-	assert.Contains(t, opener.configs[0].SystemPrompt, "Collect evidence.")
-	assert.True(t, strings.HasPrefix(opener.configs[0].SystemPrompt, "You are executing"))
+	require.Len(t, opener.configs, 3)
+	assert.Equal(t, "test-model", opener.configs[2].Model)
+	assert.Contains(t, opener.configs[2].SystemPrompt, "Collect evidence.")
+	assert.True(t, strings.HasPrefix(opener.configs[2].SystemPrompt, "You are the closed Research synthesis phase"))
 	assert.Equal(t, 1, opener.session.sendCalls)
-	assert.Equal(t, 1, opener.session.closeCalls)
+	assert.Equal(t, 3, opener.session.closeCalls)
 	path, retries, ok := strings.Cut(result.Outputs["report_path"].AsString(), "|")
 	require.True(t, ok)
 	assert.True(t, filepath.IsAbs(path))
@@ -380,6 +380,9 @@ func (*failingGoToolOpener) Open(_ context.Context, config copilot.SessionConfig
 type failingGoToolSession struct{ config copilot.SessionConfig }
 
 func (s *failingGoToolSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if handled, err := handleDefaultWorkflowProtocol(s.config); handled {
+		return &sdk.SessionEvent{}, err
+	}
 	for _, tool := range s.config.Tools {
 		if strings.HasPrefix(tool.Name, "tool_go_tool_lookup_") {
 			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Query": "facts"}})
@@ -437,6 +440,9 @@ type repairingToolSession struct {
 }
 
 func (s *repairingToolSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if handled, err := handleDefaultWorkflowProtocol(s.config); handled {
+		return &sdk.SessionEvent{}, err
+	}
 	s.opener.sendCalls++
 	for _, tool := range s.config.Tools {
 		if !strings.HasPrefix(tool.Name, "tool_go_tool_finish_") {
@@ -469,8 +475,22 @@ func (o *fakeSessionOpener) Open(_ context.Context, config copilot.SessionConfig
 	o.mu.Lock()
 	o.configs = append(o.configs, config)
 	o.mu.Unlock()
-	return &o.session, nil
+	return &protocolFixtureSession{config: config, session: &o.session}, nil
 }
+
+type protocolFixtureSession struct {
+	config  copilot.SessionConfig
+	session cli.Session
+}
+
+func (s *protocolFixtureSession) SendAndWait(ctx context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if handled, err := handleDefaultWorkflowProtocol(s.config); handled {
+		return &sdk.SessionEvent{}, err
+	}
+	return s.session.SendAndWait(ctx, options)
+}
+
+func (s *protocolFixtureSession) Close(ctx context.Context) error { return s.session.Close(ctx) }
 
 type fakeSession struct {
 	mu                    sync.Mutex
@@ -504,6 +524,9 @@ type toolCallingSession struct {
 }
 
 func (s *toolCallingSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if handled, err := handleDefaultWorkflowProtocol(s.config); handled {
+		return &sdk.SessionEvent{}, err
+	}
 	for _, tool := range s.config.Tools {
 		if strings.HasPrefix(tool.Name, "tool_go_tool_finish_") {
 			s.opener.calledTool = tool.Name
@@ -512,6 +535,37 @@ func (s *toolCallingSession) SendAndWait(context.Context, sdk.MessageOptions) (*
 		}
 	}
 	return nil, assert.AnError
+}
+
+func handleDefaultWorkflowProtocol(config copilot.SessionConfig) (bool, error) {
+	for _, tool := range config.Tools {
+		switch tool.Name {
+		case "r42_collection_checkpoint":
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"empty_reason": "test fixture has no acquisition work"}})
+			return true, err
+		case "r42_collection_qc_verdict":
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "sufficient"}})
+			return true, err
+		case "r42_qc_verdict":
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "pass"}})
+			return true, err
+		}
+	}
+	return false, nil
+}
+
+func workflowSessionKind(config copilot.SessionConfig) string {
+	for _, tool := range config.Tools {
+		switch tool.Name {
+		case "r42_collection_checkpoint":
+			return "collection"
+		case "r42_collection_qc_verdict":
+			return "collection_qc"
+		case "r42_qc_verdict":
+			return "final_qc"
+		}
+	}
+	return "research"
 }
 
 func (*toolCallingSession) Close(context.Context) error { return nil }

@@ -1,7 +1,7 @@
 # Planner-driven deep research
 
 This example answers one topic through a planner-created research matrix. The
-caller normally supplies only `topic`; a static planner research session
+caller normally supplies only `topic`; a static planner research workflow
 decomposes it into three task groups and submits the plan through a typed Go
 tool. An optional `research_plan = list(string)` can bypass that planner when
 the caller already has the subquestions: every supplied subquestion is sent to
@@ -25,7 +25,7 @@ static planner
 
 The three dynamic blocks are still single nodes in the planned Golden DAG.
 When Apply reaches one of them, r42 evaluates its `tasks` list, materializes
-one research session per element, and gives those sessions the same global
+one isolated research workflow per element, and gives those workflows the same global
 parallelism budget as every other research block. `serial = true` only changes
 the scheduling inside that dynamic block. An empty group succeeds immediately.
 If one materialized task fails after retries and QC repair, its whole dynamic
@@ -72,9 +72,9 @@ empty value keeps the planner-driven three-group flow. When the planner is
 used, it decides how many tasks belong to each group. It must use globally
 unique, filesystem-safe task IDs and provide a subquestion plus concrete
 instructions for every task. If a later task needs an earlier artifact, the
-planner must say so in that task's instructions. The researcher is explicitly
-told to locate and inspect the exact upstream file with available search/file
-tools such as `grep` before relying on it.
+planner must say so in that task's instructions. Validated typed-tool JSON
+results are injected directly into downstream prompts; closed Research never
+uses general file or shell tools to inspect upstream paths.
 
 ## Evidence pipeline
 
@@ -94,14 +94,14 @@ source URLs, existing Markdown snapshot paths, and confidence
 values before writing `knowledge.json` under that task's workspace. Before
 submitting knowledge, the researcher must call `save_snapshot` for every
 source it uses, storing the complete fetched material under
-`<block_wd>/snapshots/`; each quote records its exact `snapshot_path`. Its QC
-session then reads each claim, quote, snapshot, and artifact independently;
-failed QC returns issues to the same research session for repair up to
-`max_qc_rounds`.
+`<block_wd>/snapshots/`; each quote records its exact `snapshot_path`. Collection
+QC reviews registered snapshots before closed Research submits knowledge. Final
+QC then reviews each claim, quote, snapshot, and artifact; failed QC returns a
+revision or Collection-reopen decision up to `max_qc_rounds`.
 
 Each materialized deep-dive task has its own `web_fetch` entry in
 `tool_call_quota`. The `web_fetch_tool_call_quota` input variable controls the
-number of successful built-in fetch calls allowed for each task's research
+number of successful built-in fetch calls allowed for each task's Collection
 session and defaults to 20; failed fetches do not consume it.
 
 The conflict resolver reads all knowledge artifacts from all three dynamic

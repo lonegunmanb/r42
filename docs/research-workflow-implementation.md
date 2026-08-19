@@ -1,0 +1,52 @@
+# Research Workflow Implementation Plan
+
+Status: approved task sequence
+
+This plan decomposes the Collection, Collection QC, closed Research, and Final
+QC design in [design.md](design.md) into single-purpose pull requests. Each task
+must follow the repository TDD, local-check, CI-coverage, and independent-review
+requirements in `AGENTS.md`.
+
+## Delivery Rules
+
+- Implement tasks in dependency order. Tasks with satisfied dependencies may be
+  developed independently, but do not duplicate the shared workflow runner.
+- A task is complete only when its acceptance tests cover static and dynamic
+  configuration where the public schema is involved.
+- Use the official `github.com/github/copilot-sdk/go` package directly.
+- Keep mechanical validation in runtime or researcher-facing typed tools. QC
+  tests cover semantic verdict flow, not duplicate filesystem/schema validators.
+- Do not add MCP configuration or immutable snapshot storage in this plan.
+- Every task is one PR and uses branch `task/P1-T##-<slug>`, for example
+  `task/P1-T01-collection-schema`.
+- Before implementation starts, create or assign the repository issue for the
+  selected row so the PR and independent-review hand-off can include its URL.
+
+## Tasks
+
+| ID | Deliverable | In scope | Depends on | Required Red test / evidence | Acceptance criteria |
+| --- | --- | --- | --- | --- | --- |
+| P1-T01 | Collection configuration schema | Add `collection_tool_ids`, Collection skill fields, `collection_batch_size`, optional `max_collection_rounds`, and zero-or-one `collection_qc`; make its `criteria` optional; set batch default to 10; validate positive configured limits and phase-specific quotas. | None | Static HCL/config tests fail because the new attributes and block are absent. | Static configuration decodes, validates, exposes, and clones all new fields; omitted batch is 10; omitted round limit is unlimited; omitted `collection_qc` still represents default mandatory Collection QC behavior. |
+| P1-T02 | Plan snapshot and dynamic schema parity | Serialize and restore all P1-T01 fields; extend dynamic task expression/type conversion; preserve author-provided dynamic member index/key data without exposing snapshot sequence. | P1-T01 | Saved-plan and dynamic materialization tests lose new fields or reject `collection_qc`. | Plan round trips preserve exact configuration; static and dynamic members produce equivalent workflow configs; old plans/configs without new optional fields receive defaults. |
+| P1-T03 | Pure workflow state machine | Add phase enum and transition logic for Collection, Collection QC, Research, Final QC, completion, round limits, QC-round limits, cursor advancement, and `checkpoint_pending`; keep it independent of SDK sessions. | P1-T01 | Table tests fail for forbidden transitions, exhausted collection rounds, and Final-QC return paths. | Every transition in design section 9 is covered; only acquisition/reopen transitions consume collection rounds; `revise_research` does not; unlimited rounds use an absent limit; invalid transitions return deterministic errors. |
+| P1-T04 | Acquisition-result retention and snapshot registry | Retain successful Collection tool results by tool-call ID; register an existing workspace file or materialize a retained textual/JSON result into a managed file; validate source exclusivity, existence, non-empty content, ownership, and deduplicate registered content; return snapshot ID and absolute path. | P1-T03 | Registry tests fail for `path`, `source_tool_call_id`, invalid sources, and duplicate content. | Both registration forms end in readable file paths; duplicate content does not increase the unique pending count; registry state is isolated per workflow; path-based content immutability is explicitly not implemented. |
+| P1-T05 | Registration, checkpoint, and acquisition gate tools | Expose mandatory Collection registration and checkpoint typed tools; checkpoint automatically includes every unreviewed registration; require `empty_reason` for an empty checkpoint; enforce batch size and `checkpoint_pending`; reject new acquisition while allowing in-flight completion, registration, and checkpoint. | P1-T03, P1-T04 | Tool-handler tests fail for missing checkpoint, selective omission, empty reason, and the tenth-registration gate. | Default batch 10 is enforced; early checkpoint works; protocol rejection returns all mechanical issues in `ToolResponse`; no QC code repeats these checks. |
+| P1-T06 | Restricted snapshot and artifact I/O tools | Add read-only list/read snapshot projections, read-only declared-candidate artifact access, and a Markdown writer restricted to declared file artifacts; support bounded content reads suitable for large files; expose no arbitrary path reads or writes. | P1-T04 | Security-boundary tests demonstrate traversal/arbitrary paths are currently readable or writable. | Research and QC can inspect necessary registered/candidate data by ID or artifact name; writes cannot escape declared Markdown artifacts; tools return structured repairable issues for bad IDs/ranges/targets. |
+| P1-T07 | Collection QC protocol | Add persistent Collection-QC runner/session, default criteria prompt, optional configured criteria and model overrides, fixed read-only tools, typed `sufficient`/`needs_more` verdict, concrete issue validation, and cursor advancement after every valid verdict. | P1-T03, P1-T05, P1-T06 | Runner tests fail for default config, malformed verdict, `needs_more`, and cursor behavior. | QC receives new checkpoint IDs, prior issues, all-snapshot access, and budget state; it has no acquisition/write tools; malformed verdicts do not advance the cursor; valid verdicts do. |
+| P1-T08 | Persistent Collection session runner | Open Collection with only `collection_tool_ids`, Collection skills, configured built-in allow/deny policy, quota hooks, and mandatory registration/checkpoint tools; reuse one session across rounds; carry Collection-QC issues into the next prompt. | P1-T05, P1-T07 | Runtime tests fail because Collection uses Research tools/skills or opens a new session per round. | Collection is the only open-world session; quota persists across rounds; a turn cannot finish without a checkpoint; collection rounds and checkpoint gates follow P1-T03. |
+| P1-T09 | Closed Research session | Construct Research with only `tool_ids`, termination tool, snapshot/candidate readers, and controlled Markdown writer; remove built-in network, shell, generic file, edit, task/sub-agent, and user-input capabilities; preserve artifact and terminal repair protocol. | P1-T06 | Session-config tests show forbidden built-ins or Collection tools remain visible to Research. | Research can read all snapshots and revise declared artifacts but cannot acquire sources or access arbitrary files through r42; custom typed tools remain an explicit author trust boundary. |
+| P1-T10 | Three-way Final QC protocol | Replace binary final verdict with `pass`, `revise_research`, and `reopen_collection`; restrict tools to read-only snapshot/artifact projections plus verdict; reject exhausted-budget reopen with repairable `collection_round_budget_exhausted`; enforce final-QC round availability before starting more work. | P1-T03, P1-T06 | Verdict tests fail for three decisions, issue invariants, exhausted collection budget, and last QC round. | Rejected reopen leaves Final QC active and consumes protocol attempts but no collection round; accepted revision/reopen routes exactly as designed; a non-pass last review fails without starting unreviewable work. |
+| P1-T11 | Shared research workflow coordinator | Compose P1-T07 through P1-T10 into one runner; preserve sessions across returns; carry unresolved Collection-QC gaps into Research; apply one block deadline to all phases; close every opened session on success, failure, cancellation, and setup failure. | P1-T07, P1-T08, P1-T09, P1-T10 | Coordinator tests fail for the full pass path, both Final-QC return paths, collection exhaustion, cancellation, and partial setup cleanup. | Static research executes the documented state machine; timeout is never renewed at phase boundaries; outputs publish only after completion; cleanup errors retain existing precedence rules. |
+| P1-T12 | Dynamic research workflow integration | Route every materialized dynamic member through the P1-T11 runner; isolate registry, cursor, rounds, checkpoint state, quotas, and sessions; retain current concurrency/serial behavior and author-supplied index/key identity. | P1-T02, P1-T11 | Multi-member dynamic tests expose shared snapshots/cursors or different static/dynamic behavior. | Each member behaves like static research with isolated state; no public snapshot sequence is introduced; failure and sibling cancellation retain current dynamic semantics. |
+| P1-T13 | Phase observability and UI projection | Add distinct Collection, Collection QC, Research, revision, and Final QC lifecycle/session roles; record checkpoints, verdict decisions, round usage, gates, and repairable rejections without persisting extra sensitive content; update TUI/REPL phase projection. | P1-T11, P1-T12 | Recorder/projector tests fail to distinguish collection from synthesis and QC phases. | Debug logs and both UIs show deterministic phase transitions and round counts for static/dynamic tasks; token accounting remains deduplicated; terminal text remains sanitized. |
+| P1-T14 | End-to-end migration and user documentation | Add static and dynamic E2E fixtures covering empty collection, batch checkpoint, `needs_more`, research revision, reopen, and exhausted reopen; migrate examples from acquisition `tool_ids` to `collection_tool_ids`; update README/config reference and mark the breaking tool-field semantics. | P1-T12, P1-T13 | E2E tests initially fail against the old single-session flow and old examples. | `go vet ./...`, `go test ./... -count=1`, and `golangci-lint run` pass; examples demonstrate default batch 10 and optional unlimited rounds; docs match the implemented schema and behavior. |
+
+## Out of Scope
+
+- Immutable copies or content-addressed storage for path-based snapshots.
+- MCP fields or MCP phase policy.
+- Cross-tool shared acquisition-call budgets.
+- Public snapshot sequence numbers.
+- Resume of an interrupted workflow.
+- Proving that author-configured custom typed tools cannot access the network or
+  filesystem.

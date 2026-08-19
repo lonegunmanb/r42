@@ -1,6 +1,6 @@
 # r42 examples
 
-The `basic` example is a single research session without a terminal tool. It
+The `basic` example is a single research workflow without a terminal tool. It
 uses the official GitHub Copilot SDK default provider, so Apply requires a local
 GitHub Copilot CLI installation with an authenticated account.
 
@@ -19,15 +19,16 @@ go run ./cmd/r42 apply
 ```
 
 This block has no terminal tool, so a successful Apply produces no output
-value. The session completes when the model finishes its response.
+value. After mandatory Collection and Collection QC, closed Research completes
+when the model finishes its response.
 
 ## Multi-step research
 
-The `multi-step` example demonstrates module-owned external tools. The
+The `multi-step` example demonstrates module-owned external acquisition tools. The
 `pplx_tools` child module declares a Python search process and fetch process,
-then exports their generated tool IDs as outputs. The root research block uses
-those IDs to search python.org and save a Markdown snapshot in its block
-workspace.
+then exports their generated tool IDs as outputs. The root research block exposes
+those IDs only through `collection_tool_ids`; Collection searches python.org and
+saves a Markdown snapshot before closed Research produces the result.
 
 The example provider reads `DEEPSEEK_KEY`. The Python tools read
 `PPLX_API_KEY` and require Python 3; they otherwise use only the Python standard
@@ -50,10 +51,10 @@ completes.
 
 The `deep-research` example accepts an overall topic and an arbitrary
 `list(string)` research plan through `-var-file`. It expands the plan into N
-independent subquestion research blocks. A required inline Go typed tool makes
-each block submit a structured knowledge graph of claims and exact quotes, and
-each expanded block has its own QC session that checks every claim, source URL,
-and quotation.
+independent subquestion research workflows. A required inline Go typed tool
+makes each workflow submit a structured knowledge graph of claims and exact
+quotes, and each materialized workflow has Collection QC plus optional Final QC
+to check evidence sufficiency and the submitted claims.
 
 After all subquestions pass QC, a conflict-resolution block compares the
 knowledge artifacts and records resolved or preserved contradictions. A final

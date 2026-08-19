@@ -38,9 +38,12 @@ const (
 type SessionKind string
 
 const (
-	SessionResearch SessionKind = "research"
-	SessionQC       SessionKind = "qc"
-	SessionRevision SessionKind = "revision"
+	SessionCollection   SessionKind = "collection"
+	SessionCollectionQC SessionKind = "collection_qc"
+	SessionResearch     SessionKind = "research"
+	SessionQC           SessionKind = "qc"
+	SessionFinalQC      SessionKind = "final_qc"
+	SessionRevision     SessionKind = "revision"
 )
 
 type Role string

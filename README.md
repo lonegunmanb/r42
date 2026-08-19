@@ -2,7 +2,7 @@
 
 r42 is an HCL-based configuration and execution engine for ~~the world, the universe and everything~~ reproducible AI research
 workflows. A configuration describes a directed acyclic graph (DAG) of research
-sessions, quality-control sessions, typed tools, artifacts, modules, variables,
+workflows, quality-control sessions, typed tools, artifacts, modules, variables,
 and outputs. r42 plans the complete graph before it starts any model session,
 then applies the immutable plan through the official GitHub Copilot SDK.
 
@@ -15,7 +15,7 @@ with a traceable chain from each conclusion back to its evidence and citations.
 
 Many of those stages need their own quality gate. An independent session may
 audit every claim and inference against the captured sources, return specific
-issues to the research session, and repeat that exchange through several rounds
+issues to closed Research, and repeat that exchange through several rounds
 of revision. The files produced along the way also matter: reports, snapshots,
 datasets, and other artifacts must exist, be non-empty, and satisfy the contract
 expected by downstream stages.
@@ -38,7 +38,8 @@ This design provides:
 
 - reviewable JSON plans before execution;
 - explicit and implicit dependencies between research tasks;
-- one persistent research session, plus an optional QC session, per block;
+- persistent Collection, Collection QC, and closed Research sessions, plus an
+  optional Final QC session, per block;
 - typed inline Go and external-process tools with stable IDs;
 - Terraform-style modules installed with `r42 init`;
 - isolated per-block workspaces for reports, snapshots, and other artifacts;
@@ -166,7 +167,7 @@ session-level `retry` blocks can override individual fields.
 
 `r42 init` resolves a local directory or go-getter source and copies every
 `*.r42.hcl` file plus its supporting resources into the active configuration
-snapshot. The following configuration creates one research session:
+snapshot. The following configuration creates one research workflow:
 
 ```hcl
 research "static" "summary" {
@@ -211,7 +212,7 @@ interactive terminal at least 50 columns by 12 rows uses the Bubble Tea TUI;
 redirected output, CI, and unsupported terminals use the line-oriented REPL
 renderer. The TUI header shows the run directory, expanded research-task
 counts, active and failed counts across the complete DAG, and cumulative input
-plus output tokens across research and QC sessions. A module failure therefore
+plus output tokens across all workflow phase sessions. A module failure therefore
 sets the overall status to `FAILED` even when its child research blocks never
 started.
 
@@ -319,8 +320,9 @@ already captured in that file.
 ## Research blocks
 
 Each `research "static" "name"` block defines one known unit of work in the DAG
-and owns one persistent model session for all of that unit's initial and repair
-turns. The subtype forms part of the block address. Value references create
+and owns persistent Collection, Collection QC, and closed Research sessions for
+that unit's initial and repair turns, plus Final QC when configured. The subtype
+forms part of the block address. Value references create
 implicit dependencies between blocks; `depends_on` adds an explicit dependency
 when no value is exchanged. `for_each` can expand one declaration into
 independently addressed instances such as `research.static.name["key"]`.
@@ -328,7 +330,7 @@ independently addressed instances such as `research.static.name["key"]`.
 A `research "dynamic" "name"` block is still one planned DAG node, but its
 `tasks` attribute is a list of complete research configurations materialized
 when that node begins Apply. Use it when an upstream result determines how many
-research sessions are needed:
+isolated research workflows are needed:
 
 ```hcl
 research "dynamic" "followups" {
@@ -352,7 +354,8 @@ research "dynamic" "followups" {
 ```
 
 There are no block-level defaults for dynamic tasks: each object carries the
-same session, tool, quota, artifact, retry, and QC fields needed by that task.
+same Collection, Collection QC, Research, tool, quota, artifact, retry, and
+Final-QC fields needed by that task, including all `collection_*` fields.
 Within a task, `retry` and `qc` are an object or `null`, while `artifacts` is a
 list of objects. The `tasks` expression may be unknown in the saved Plan, but it
 must be wholly known when the block starts Apply. Empty tasks succeed
@@ -456,21 +459,43 @@ that depend on its successful completion are not run.
 | `reasoning_effort` | No | Non-empty provider-specific reasoning level. r42 passes it through without restricting the allowed names. |
 | `system_prompt` | Yes | Instructions appended to r42's fixed research protocol system prompt. |
 | `prompt` | No | Initial user task. When omitted, r42 sends a fixed start message. |
-| `tool_ids` | No | IDs of typed `go_tool` or `external_tool` blocks available to this research session. |
-| `tool_call_quota` | No | `map(number)` of non-negative per-session call limits. A key matching an r42 tool ID limits that configured typed tool; any other key names a Copilot built-in tool such as `web_fetch`. The terminate tool ID may also be limited. |
+| `collection_tool_ids` | No | IDs of acquisition or snapshot-producing typed tools available only during Collection. This is where search and fetch tools belong. |
+| `tool_ids` | No | IDs of typed tools available only to the closed Research synthesis session. |
+| `tool_call_quota` | No | `map(number)` of non-negative per-session call limits. It may name configured Collection or Research typed tools, the terminate tool, or Copilot built-ins. Collection and Research keep separate counters. |
 | `terminate_tool_id` | No | Typed tool that must return an accepted response before the stage can finish. Its output must be string-compatible and becomes `research.static.<name>.result`. Without it, a normal assistant completion ends the stage. |
-| `allowed_tools` | No | SDK tool-name allowlist. When present, only listed built-in or typed tools remain available. |
-| `disallowed_tools` | No | SDK tool-name denylist, applied after `allowed_tools` and therefore taking precedence. `ask_user` is denied by default because DAG execution is unattended. |
-| `skill_directories` | No | Directories whose immediate subdirectories contain Copilot skills. r42 forwards the evaluated paths to Copilot; use `path.module` for module-owned skills. |
-| `skills` | No | Skill names eagerly loaded into the session's custom agent. Names come from `SKILL.md` frontmatter or, when omitted there, the skill directory name. |
-| `disabled_skills` | No | Skill names explicitly disabled for this session. |
+| `allowed_tools` | No | SDK tool-name allowlist shared by Collection and Research. Mandatory r42 protocol tools are added even when omitted. |
+| `disallowed_tools` | No | SDK tool-name denylist shared by Collection and Research. Research additionally blocks obvious network, shell, generic file, edit, task, and user-input built-ins. |
+| `collection_skill_directories` | No | Skill roots available only during Collection. |
+| `collection_skills` | No | Skills eagerly loaded only during Collection. |
+| `collection_disabled_skills` | No | Skills disabled only during Collection. |
+| `skill_directories` | No | Skill roots available only to closed Research; use `path.module` for module-owned skills. |
+| `skills` | No | Skills eagerly loaded only during Research. Names come from `SKILL.md` frontmatter or the skill directory name. |
+| `disabled_skills` | No | Skills disabled only during Research. |
+| `collection_batch_size` | No | Number of newly registered unique snapshots that triggers `checkpoint_pending`. Defaults to `10`. |
+| `max_collection_rounds` | No | Maximum acquisition rounds, including the initial Collection phase. Omission means unlimited. |
 | `permission` | No | Tool permission policy. The current supported value and default is `approve_all`, which approves each otherwise valid tool request. |
 | `max_protocol_attempts` | No | Maximum repair budget for rejected terminal calls or completed turns that omit the required terminal call. Defaults to `10`; a new QC revision round resets the budget. |
 | `timeout` | No | Per-block deadline expressed as a Go duration such as `30m` or `2h`. It is bounded by the CLI and ancestor-module deadlines. |
 
 Tool filters use SDK names. A typed tool's read-only `.id` is also its SDK name,
-so the same ID can appear in `tool_ids`, `allowed_tools`, or `disallowed_tools`.
-The mandatory terminal and QC verdict tools cannot be disabled.
+so the same ID can appear in `collection_tool_ids` or `tool_ids` and in the
+filters. The mandatory registration, checkpoint, terminal, and verdict tools
+cannot be disabled.
+
+Every research block now starts in Collection, even when
+`collection_tool_ids` is empty. Collection registers useful material through
+`r42_register_snapshot`, either from a workspace file path or from the retained
+result of a configured typed tool call, and ends each round through
+`r42_collection_checkpoint`. A checkpoint always contains every newly
+registered snapshot; an empty checkpoint must explain why no new evidence is
+needed. After `collection_batch_size` unique registrations, new acquisition
+calls pause until the checkpoint is submitted, while in-flight completion,
+registration, and checkpoint calls remain available.
+
+This changes the meaning of `tool_ids`: acquisition tools that previously
+appeared there must move to `collection_tool_ids`. Research uses only registered
+snapshots through r42's typed readers, its explicitly configured trusted typed
+tools, controlled Markdown output, and an optional termination tool.
 
 ### `skill_directories`
 
@@ -537,13 +562,12 @@ that r42 eagerly loads into that session's custom agent, while
 the `name` in the skill's YAML frontmatter; when `name` is absent, Copilot uses
 the skill directory name.
 
-Research and QC are independent sessions. QC does not inherit the research
-session's `skill_directories`, `skills`, or `disabled_skills`, so the example
-declares the root again and assigns `citation-checking` explicitly. r42 records
-the evaluated strings in the Plan and passes them to Copilot during Apply; it
-does not copy the skill files into the Plan or validate the directories during
-Plan. The directories and their `SKILL.md` files must therefore still be
-readable when Apply starts.
+Collection, Research, and Final QC are independent sessions. Collection uses
+the `collection_*` skill fields, Research uses the unprefixed fields, and Final
+QC uses fields nested in `qc`. Collection QC deliberately has fixed read-only
+capabilities and no skill fields. r42 records evaluated skill paths in the Plan
+but does not copy or validate their contents, so the directories and
+`SKILL.md` files must remain readable when Apply starts.
 
 ### `retry`
 
@@ -588,12 +612,35 @@ session. Artifact metadata and normalized paths are also provided to QC.
 > the model continues to ignore it, this can look like a loop until
 > `max_protocol_attempts` is exhausted and the block fails.
 
-### `qc`
+### `collection_qc`
 
-A research block accepts at most one `qc` block. It creates a second,
-independent, persistent session that reviews the candidate result and artifacts.
-The QC session returns either pass or structured issues; issues are sent to the
-research session for another revision round.
+Collection QC is mandatory and persistent. An optional `collection_qc` block
+overrides its model settings and semantic sufficiency criteria; when the block
+is absent, Collection QC inherits the Research model settings and uses r42's
+default sufficiency criterion.
+
+| Field | Required | Purpose |
+| --- | --- | --- |
+| `criteria` | No | Non-empty `map(string)` of semantic evidence-sufficiency checks. Omission uses the default criterion. |
+| `model_provider` | No | Collection-QC provider override; otherwise inherits Research. |
+| `model` | No | Collection-QC model override; otherwise inherits Research. |
+| `reasoning_effort` | No | Collection-QC reasoning override; otherwise inherits Research. |
+| `permission` | No | Permission override; otherwise inherits Research. |
+| `retry` | No | One retry block layered over the effective Research retry policy. |
+
+Collection QC can list and read registered snapshots but cannot acquire or
+modify evidence. It reviews the current checkpoint plus prior issues and calls
+`r42_collection_qc_verdict` with either `sufficient` and no issues, or
+`needs_more` and at least one concrete issue. A valid verdict advances the
+reviewed cursor. `needs_more` starts another Collection round when budget
+remains; when the configured limit is exhausted, the unresolved issues are
+carried into closed Research instead.
+
+### `qc` (Final QC)
+
+A research block accepts at most one `qc` block. It creates a persistent Final
+QC session that reviews the closed Research candidate, artifacts, and registered
+snapshots. Omitting `qc` completes the block after Research succeeds.
 
 | Field | Required | Purpose |
 | --- | --- | --- |
@@ -604,7 +651,7 @@ research session for another revision round.
 | `tool_ids` | No | Typed tools available only to QC. Research tools are not inherited. |
 | `tool_call_quota` | No | QC-only `map(number)` of non-negative call limits. Typed-tool ID keys must also appear in this QC block's `tool_ids`; ordinary keys limit Copilot built-in tools. |
 | `allowed_tools` | No | QC SDK tool allowlist. The research allowlist is not inherited. |
-| `disallowed_tools` | No | QC denylist. By default QC disables `bash`, `powershell`, `edit`, `task`, and `ask_user`; the research denylist is not inherited. |
+| `disallowed_tools` | No | Additional Final-QC denylist. Final QC always blocks obvious network, shell, generic file, edit, task, and user-input built-ins. |
 | `skill_directories` | No | Skill roots available only to QC; research skill roots are not inherited. |
 | `skills` | No | Skills selected only for QC. |
 | `disabled_skills` | No | Skills disabled only for QC. |
@@ -612,8 +659,8 @@ research session for another revision round.
 | `max_qc_rounds` | No | Maximum number of QC evaluations, including the first evaluation. Defaults to `10`; at most `max_qc_rounds - 1` QC-triggered research revisions can occur. |
 | `retry` | No | One retry block using the same fields as research. It overrides the effective research retry policy field by field. |
 
-Research and QC quotas use independent counters, even when both sessions use the
-same tool. Typed-tool calls consume quota only after their arguments pass schema
+Collection, Research, and Final QC quotas use independent counters, even when
+sessions use the same tool. Typed-tool calls consume quota only after their arguments pass schema
 validation and the tool returns an accepted response; execution errors and
 `accepted = false` responses release the reservation. Built-in calls reserve
 quota immediately before execution and release it when the SDK reports tool
@@ -639,14 +686,20 @@ below reach QC in this form:
 ```
 
 The map does not create three QC sessions or three independently executed
-checks. One QC session receives the whole map and is instructed to assess every
-entry before calling the mandatory `r42_qc_verdict` typed tool. If all criteria
-pass, it must return `{"pass":true}` with no issues. If any criterion fails, it
-must return `pass = false` and at least one issue:
+checks. One Final QC session receives the whole map and assesses every entry
+before calling the mandatory `r42_qc_verdict` typed tool. It returns one of
+three decisions:
+
+- `pass`: no issues; complete the block.
+- `revise_research`: one or more issues; revise from existing snapshots.
+- `reopen_collection`: one or more evidence gaps; acquire another snapshot
+  batch before Research runs again.
+
+For example:
 
 ```json
 {
-  "pass": false,
+  "decision": "revise_research",
   "issues": [
     {
       "code": "value",
@@ -665,32 +718,26 @@ currently a convention: r42 requires a non-empty issue `code` and `message` but
 does not enforce that the code appears in `criteria`. `path` and `repair_hint`
 are optional.
 
-#### When QC finds issues
+#### When Final QC finds issues
 
-When `r42_qc_verdict` returns `pass = false`, r42 processes the result as
-follows:
+r42 validates every non-pass verdict contains at least one issue and every
+issue has a non-empty `code` and `message`. `revise_research` sends those issues
+to the persistent closed Research session. `reopen_collection` first checks the
+shared Collection round budget. If a round remains, it returns to the persistent
+Collection session; that acquisition round alone increments the count, and the
+new checkpoint passes through Collection QC and Research before Final QC runs
+again.
 
-1. It validates that the verdict contains at least one issue and that every
-   issue has a non-empty `code` and `message`.
-2. If the current evaluation has not reached `max_qc_rounds`, it formats the
-   issues, including optional paths and repair hints, into a revision prompt and
-   sends that prompt to the original persistent research session.
-3. The research session revises its candidate and artifacts in the same block
-   workspace. Required artifacts are validated again before the revision can
-   return to QC.
-4. The same persistent QC session receives a fresh context document containing
-   the unchanged criteria, the revised candidate, and the current artifact
-   paths, then evaluates the complete criteria map again.
+If `max_collection_rounds` is exhausted, the verdict tool returns an accepted
+protocol response containing the repairable
+`collection_round_budget_exhausted` issue. Final QC stays active and must choose
+`revise_research` or `pass` using existing snapshots. A rejected reopen does not
+consume a Collection round. If a non-pass decision arrives on the
+`max_qc_rounds` evaluation, r42 starts no unreviewable follow-up work and fails
+the block with `final qc rounds exhausted`.
 
-A passing verdict completes the research block and publishes its result for
-downstream blocks. If QC rejects the candidate on the `max_qc_rounds` evaluation,
-r42 does not request another research revision: the block fails with
-`qc rounds exhausted`, and downstream blocks that depend on its successful
-result cannot proceed. The mandatory verdict tool is always registered and
-cannot be filtered out.
-
-The following example asks the research session to write an exchange-rate report
-and gives a separate QC session three explicit checks:
+The following example asks closed Research to write an exchange-rate report and
+gives Final QC three explicit checks:
 
 ```hcl
 research "static" "exchange_rate" {
@@ -705,6 +752,15 @@ research "static" "exchange_rate" {
     ${block_wd()}/report.md. Include the observation date, the rate, and source
     URLs.
   EOT
+
+  collection_batch_size = 10
+  # max_collection_rounds is omitted, so Collection may reopen without a limit.
+
+  collection_qc {
+    criteria = {
+      source_coverage = "The snapshots contain a current rate, observation date, and authoritative source URL."
+    }
+  }
 
   artifact "report" {
     type      = "file"
@@ -725,8 +781,9 @@ research "static" "exchange_rate" {
 }
 ```
 
-After the research session finishes, r42 first validates `report.md`, then gives
-the QC session the candidate response and the artifact's normalized path. With
+After Collection and Collection QC finish, closed Research writes and validates
+`report.md`, then Final QC receives the candidate, registered snapshots, and the
+artifact's normalized path. With
 `max_qc_rounds = 3`, the sequence is bounded as follows:
 
 | QC evaluation | Candidate being checked | Result when QC rejects it |
@@ -809,12 +866,14 @@ is returned to the session for repair; a process, I/O, cancellation, or protocol
 failure fails the block instead of being disguised as a model mistake.
 
 Every typed tool has a deterministic read-only `id` derived from its canonical
-block address. Research and QC blocks select tools through `tool_ids`, and a
-stage can require an accepted call to one tool before completion by setting
-`terminate_tool_id`:
+block address. Collection selects acquisition tools through
+`collection_tool_ids`; closed Research and Final QC select their trusted tools
+through `tool_ids`. Research can require an accepted call to one tool before
+completion by setting `terminate_tool_id`:
 
 ```hcl
-tool_ids = [external_tool.search.id]
+collection_tool_ids = [external_tool.search.id]
+tool_ids = [go_tool.build_report.id]
 terminate_tool_id = go_tool.submit_report.id
 ```
 

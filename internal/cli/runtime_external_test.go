@@ -176,6 +176,9 @@ type externalQuotaSession struct {
 }
 
 func (s *externalQuotaSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if handled, err := handleDefaultWorkflowProtocol(s.config); handled {
+		return &sdk.SessionEvent{}, err
+	}
 	for _, tool := range s.config.Tools {
 		if !strings.HasPrefix(tool.Name, "tool_external_tool_lookup_") {
 			continue
@@ -209,6 +212,9 @@ type externalCallingSession struct {
 }
 
 func (s *externalCallingSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if handled, err := handleDefaultWorkflowProtocol(s.config); handled {
+		return &sdk.SessionEvent{}, err
+	}
 	for _, tool := range s.config.Tools {
 		if strings.HasPrefix(tool.Name, "tool_external_tool_lookup_") {
 			result, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"query": "facts"}})

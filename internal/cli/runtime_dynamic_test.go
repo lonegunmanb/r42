@@ -365,6 +365,9 @@ type dynamicTestSession struct {
 }
 
 func (s *dynamicTestSession) SendAndWait(_ context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if handled, err := handleDefaultWorkflowProtocol(s.config); handled {
+		return &sdk.SessionEvent{}, err
+	}
 	if s.opener.started != nil {
 		s.opener.started <- options.Prompt
 	}

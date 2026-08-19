@@ -85,6 +85,14 @@ func (r *TextRenderer) Observe(event debuglog.Event) {
 	if phase == "" {
 		phase = "research"
 	}
+	if event.Action == "workflow.phase" {
+		decision := ""
+		if event.Content != "" {
+			decision = " decision=" + terminalText(event.Content)
+		}
+		_, _ = fmt.Fprintf(r.writer, "%s[%s] PHASE round=%d%s\n", prefix, phase, event.Count, decision)
+		return
+	}
 	switch event.Action {
 	case "assistant.reasoning", "assistant.reasoning_delta":
 		if r.announced[event.BlockAddress] != ActivityThinking {

@@ -36,6 +36,15 @@ func NewSnapshotAccess(workspace string) (*SnapshotAccess, error) {
 	return &SnapshotAccess{registry: snapshot.NewRegistry(workspace)}, nil
 }
 
+// NewSnapshotAccessWithRegistry creates read access over the Collection
+// registry owned by the same workflow instance.
+func NewSnapshotAccessWithRegistry(registry *snapshot.Registry) (*SnapshotAccess, error) {
+	if registry == nil {
+		return nil, errors.New("snapshot registry is required")
+	}
+	return &SnapshotAccess{registry: registry}, nil
+}
+
 // Register registers an existing workspace file as a snapshot.
 func (a *SnapshotAccess) Register(path string) (string, error) {
 	registration, err := a.registry.RegisterPath(path)

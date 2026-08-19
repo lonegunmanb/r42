@@ -42,17 +42,35 @@ type Result struct {
 	Rounds    int
 }
 
+type Decision string
+
+const (
+	DecisionPass             Decision = "pass"
+	DecisionReviseResearch   Decision = "revise_research"
+	DecisionReopenCollection Decision = "reopen_collection"
+)
+
 type Verdict struct {
-	Pass   bool             `json:"pass"`
-	Issues []corespec.Issue `json:"issues,omitempty"`
+	Decision Decision         `json:"decision"`
+	Issues   []corespec.Issue `json:"issues,omitempty"`
 }
 
 func (v Verdict) Validate() error {
-	if v.Pass && len(v.Issues) != 0 {
-		return fmt.Errorf("passing verdict must not contain issues")
-	}
-	if !v.Pass && len(v.Issues) == 0 {
-		return fmt.Errorf("failing verdict must contain at least one issue")
+	switch v.Decision {
+	case DecisionPass:
+		if len(v.Issues) != 0 {
+			return fmt.Errorf("pass verdict must not contain issues")
+		}
+	case DecisionReviseResearch:
+		if len(v.Issues) == 0 {
+			return fmt.Errorf("revise_research verdict must contain at least one issue")
+		}
+	case DecisionReopenCollection:
+		if len(v.Issues) == 0 {
+			return fmt.Errorf("reopen_collection verdict must contain at least one issue")
+		}
+	default:
+		return fmt.Errorf("unsupported final qc decision %q", v.Decision)
 	}
 	for index, issue := range v.Issues {
 		if err := issue.Validate(); err != nil {
@@ -72,6 +90,27 @@ func NewRunner(research Research, session Session, verdicts *VerdictRecorder) *R
 	return &Runner{research: research, session: session, verdicts: verdicts}
 }
 
+// Review obtains one valid Final-QC verdict for an existing candidate without
+// starting follow-up work. The workflow coordinator owns phase transitions.
+func (r *Runner) Review(ctx context.Context, config Config, candidate researchruntime.Result) (Verdict, error) {
+	if r.session == nil {
+		return Verdict{}, fmt.Errorf("qc session is required")
+	}
+	if r.verdicts == nil {
+		return Verdict{}, fmt.Errorf("qc verdict recorder is required")
+	}
+	if config.MaxProtocolAttempts < 0 {
+		return Verdict{}, fmt.Errorf("qc maximum protocol attempts must not be negative")
+	}
+	if strings.TrimSpace(config.VerdictToolName) == "" {
+		return Verdict{}, fmt.Errorf("qc verdict tool name is required")
+	}
+	if _, err := criteriaMap(config.Criteria); err != nil {
+		return Verdict{}, err
+	}
+	return r.review(ctx, config, candidate)
+}
+
 func (r *Runner) Run(ctx context.Context, config Config) (Result, error) {
 	if err := r.validate(config); err != nil {
 		return Result{}, err
@@ -85,8 +124,11 @@ func (r *Runner) Run(ctx context.Context, config Config) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		if verdict.Pass {
+		if verdict.Decision == DecisionPass {
 			return Result{Candidate: candidate, Rounds: round}, nil
+		}
+		if verdict.Decision == DecisionReopenCollection {
+			return Result{}, fmt.Errorf("reopen_collection requires the research workflow coordinator")
 		}
 		if round == config.MaxRounds {
 			return Result{}, fmt.Errorf("qc rounds exhausted after %d rounds", round)
@@ -162,6 +204,24 @@ type VerdictRecorder struct {
 	verdicts          []Verdict
 	failure           error
 	completionVersion uint64
+	collectionBudget  CollectionBudget
+}
+
+// CollectionBudget is the Final-QC view of the shared Collection round
+// budget. A nil MaxRounds means Collection may be reopened without a limit.
+type CollectionBudget struct {
+	RoundsUsed int
+	MaxRounds  *int
+}
+
+// CollectionRoundBudgetExhaustedError rejects a Final-QC reopen request while
+// leaving the verdict protocol active for a repair attempt.
+type CollectionRoundBudgetExhaustedError struct {
+	Rounds int
+}
+
+func (e *CollectionRoundBudgetExhaustedError) Error() string {
+	return fmt.Sprintf("cannot reopen collection: all %d collection rounds have been used", e.Rounds)
 }
 
 func NewVerdictRecorder() *VerdictRecorder {
@@ -170,16 +230,40 @@ func NewVerdictRecorder() *VerdictRecorder {
 
 func (r *VerdictRecorder) Record(verdict Verdict) error {
 	if err := verdict.Validate(); err != nil {
-		failure := fmt.Errorf("record qc verdict: %w", err)
-		r.RecordError(failure)
-		return failure
+		return fmt.Errorf("record qc verdict: %w", err)
+	}
+	r.mu.Lock()
+	if verdict.Decision == DecisionReopenCollection && !collectionCanReopen(r.collectionBudget) {
+		r.mu.Unlock()
+		return &CollectionRoundBudgetExhaustedError{Rounds: *r.collectionBudget.MaxRounds}
 	}
 	verdict.Issues = cloneIssues(verdict.Issues)
-	r.mu.Lock()
 	r.verdicts = append(r.verdicts, verdict)
 	r.completionVersion++
 	r.mu.Unlock()
 	return nil
+}
+
+// SetCollectionBudget updates the budget used to validate reopen decisions.
+func (r *VerdictRecorder) SetCollectionBudget(budget CollectionBudget) {
+	if budget.MaxRounds != nil {
+		maximum := *budget.MaxRounds
+		budget.MaxRounds = &maximum
+	}
+	r.mu.Lock()
+	r.collectionBudget = budget
+	r.mu.Unlock()
+}
+
+// CollectionCanReopen reports whether another Collection round is available.
+func (r *VerdictRecorder) CollectionCanReopen() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return collectionCanReopen(r.collectionBudget)
+}
+
+func collectionCanReopen(budget CollectionBudget) bool {
+	return budget.MaxRounds == nil || budget.RoundsUsed < *budget.MaxRounds
 }
 
 func (r *VerdictRecorder) RecordError(err error) {

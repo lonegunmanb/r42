@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/lonegunmanb/r42/internal/snapshot"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -98,6 +99,24 @@ func TestSnapshotAccessNoArbitraryPathReads(t *testing.T) {
 	require.NoError(t, err)
 	_, err = access.ReadSnapshot("not-an-id", 100)
 	require.ErrorContains(t, err, "unknown snapshot")
+}
+
+func TestSnapshotAccessUsesSharedRegistry(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "source.txt")
+	require.NoError(t, os.WriteFile(path, []byte("shared evidence"), 0o600))
+	registry := snapshot.NewRegistry(workspace)
+	registered, err := registry.RegisterPath(path)
+	require.NoError(t, err)
+
+	access, err := NewSnapshotAccessWithRegistry(registry)
+	require.NoError(t, err)
+	content, err := access.ReadSnapshot(registered.ID, 100)
+
+	require.NoError(t, err)
+	assert.Equal(t, "shared evidence", content)
 }
 
 func TestReadDeclaredArtifact(t *testing.T) {

@@ -90,3 +90,11 @@ func issueCodes(response gotool.Response) []string {
 	}
 	return codes
 }
+
+func toolStringOutput(t *testing.T, response gotool.Response) string {
+	t.Helper()
+	require.NotNil(t, response.Output)
+	var output string
+	require.NoError(t, json.Unmarshal(*response.Output, &output))
+	return output
+}

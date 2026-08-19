@@ -46,7 +46,7 @@ variable "max_candidates_per_chokepoint" {
 
 variable "max_qc_rounds" {
   type        = number
-  description = "Maximum QC review and research-revision rounds allowed for each QC-enabled research session."
+  description = "Maximum Final-QC evaluations allowed for each QC-enabled research workflow."
   default     = 10
 
   validation {
@@ -66,7 +66,7 @@ variable "use_pplx" {
 
 variable "pplx_tool_call_quota" {
   type        = number
-  description = "Maximum successful Perplexity fetch calls allowed per research session when use_pplx is true."
+  description = "Maximum successful Perplexity fetch calls allowed per Collection session when use_pplx is true."
   default     = 10
 
   validation {
@@ -79,7 +79,7 @@ variable "pplx_tool_call_quota" {
 }
 
 variable "model_provider" {
-  description = "BYOK model provider and retry configuration shared by every research and QC session."
+  description = "BYOK model provider and retry configuration shared by every workflow phase session."
   type = object({
     type             = optional(string, "openai")
     endpoint         = optional(string, "https://openrouter.ai/api/v1")
@@ -102,7 +102,7 @@ variable "model_provider" {
 
 variable "model" {
   type        = string
-  description = "Model used by all research and QC sessions."
+  description = "Model used by all workflow phase sessions unless overridden."
   default     = "openai/gpt-5.5"
 }
 
@@ -120,7 +120,7 @@ variable "qc_model" {
 
 variable "reasoning_effort" {
   type        = string
-  description = "Reasoning effort passed to all research and QC sessions."
+  description = "Reasoning effort passed to all workflow phase sessions."
   default     = "medium"
 }
 

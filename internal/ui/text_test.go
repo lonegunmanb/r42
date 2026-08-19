@@ -11,6 +11,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestTextRendererShowsWorkflowPhaseTransition(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{{Address: "research.static.collect", Kind: "research"}}, nil, nil, nil)
+	require.NoError(t, err)
+	var output bytes.Buffer
+	renderer := ui.NewTextRenderer(&output, ui.NewProjector(planned))
+
+	renderer.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "workflow.phase", Status: debuglog.StatusStarted,
+		BlockAddress: "research.static.collect", Session: debuglog.SessionCollection, Count: 2, Content: "needs_more",
+	})
+
+	assert.Contains(t, output.String(), "[collection] PHASE round=2 decision=needs_more")
+}
+
 func TestTextRendererShowsRunDAGAndMeaningfulTransitions(t *testing.T) {
 	t.Parallel()
 	runDirectory := testRunDirectory(t, "run-42")

@@ -2,6 +2,7 @@
 package chokepoint_test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -47,6 +48,11 @@ func TestClaimCardsKeepOneEvidenceLayer(t *testing.T) {
 	}), workspace)
 	require.NoError(t, err)
 	require.True(t, finalized.Accepted, "issues: %#v", finalized.Issues)
+	require.NotNil(t, finalized.Output)
+	var finalizedOutput map[string]any
+	require.NoError(t, json.Unmarshal([]byte(toolStringOutput(t, finalized)), &finalizedOutput))
+	assert.Contains(t, finalizedOutput, "claims")
+	assert.Contains(t, finalizedOutput, "source_registry")
 	assert.FileExists(t, claimsPath)
 	assert.FileExists(t, registryPath)
 
@@ -233,6 +239,11 @@ func TestCompanyPrioritiesRequireNodeAndRelationshipEvidence(t *testing.T) {
 
 	require.NoError(t, err)
 	require.True(t, response.Accepted, "issues: %#v", response.Issues)
+	var priorityOutput map[string]any
+	require.NoError(t, json.Unmarshal([]byte(toolStringOutput(t, response)), &priorityOutput))
+	assert.Contains(t, priorityOutput, "companies")
+	assert.Contains(t, priorityOutput, "claims")
+	assert.Equal(t, "node-osat", priorityOutput["node_id"])
 	assert.FileExists(t, artifactPath)
 
 	invalid := map[string]any{

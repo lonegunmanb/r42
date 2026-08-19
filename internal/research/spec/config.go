@@ -160,10 +160,10 @@ func (c QCConfig) Validate() error {
 	if err := validateCriteria(c.Criteria, "qc"); err != nil {
 		return err
 	}
-	if err := validateOptionalProviderReference(c.ModelProvider, "qc model_provider"); err != nil {
+	if err := validateToolIDs(c.ToolIDs, "qc tool_ids"); err != nil {
 		return err
 	}
-	if err := validateToolIDs(c.ToolIDs, "qc tool_ids"); err != nil {
+	if err := validateOptionalProviderReference(c.ModelProvider, "qc model_provider"); err != nil {
 		return err
 	}
 	if err := validateToolCallQuota(c.ToolCallQuota, c.ToolIDs, "qc"); err != nil {

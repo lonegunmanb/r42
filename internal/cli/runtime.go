@@ -351,191 +351,6 @@ func (f *runtimeFactory) New(
 	return f.newResearchBlock(ctx, node.Address, planned, f.publish)
 }
 
-func (f *runtimeFactory) newResearchBlock(
-	ctx context.Context,
-	address string,
-	planned modulespec.ResearchPlan,
-	publish func(string, cty.Value),
-) (golden.ApplyBlock, error) {
-	var blockCancel context.CancelFunc
-	if planned.Config.Timeout != nil {
-		ctx, blockCancel = context.WithTimeout(ctx, *planned.Config.Timeout)
-	}
-	keepBlockContext := false
-	defer func() {
-		if !keepBlockContext && blockCancel != nil {
-			blockCancel()
-		}
-	}()
-	executionAddress := f.CanonicalAddress(address)
-	workspace, err := f.run.Workspace(executionAddress)
-	if err != nil {
-		return nil, err
-	}
-	retry, err := researchRetry(planned.Provider, planned.Config.Retry)
-	if err != nil {
-		return nil, err
-	}
-	reasoning := ""
-	if planned.Config.ReasoningEffort != nil {
-		reasoning = *planned.Config.ReasoningEffort
-	}
-	typedQuotaLimits, builtInQuotaLimits := splitToolCallQuota(planned.Config.Policy.ToolCallQuota)
-	systemPrompt := appendBuiltInToolCallQuotaPrompt(
-		researchSystemProtocol+"\n\n"+planned.Config.SystemPrompt,
-		builtInQuotaLimits,
-	)
-	if recordErr := f.recorder.Record(debuglog.Event{
-		Kind: debuglog.EventMessage, BlockAddress: executionAddress, Session: debuglog.SessionResearch,
-		Role: debuglog.RoleSystem, Content: systemPrompt,
-	}); recordErr != nil {
-		return nil, recordErr
-	}
-	terminal := researchruntime.NewTerminalRecorder()
-	researchQuota := newToolCallQuota(typedQuotaLimits)
-	tools, terminalType, err := f.buildTools(
-		ctx, executionAddress, debuglog.SessionResearch, workspace,
-		planned.Config.Policy.ToolIDs, planned.Config.TerminateToolID, terminal, researchQuota,
-	)
-	if err != nil {
-		return nil, err
-	}
-	researchToolActivity := newTypedToolActivity()
-	trackTypedToolActivity(tools, researchToolActivity)
-	resolved := researchspec.ResolvedTools{}
-	terminateName := ""
-	if planned.Config.TerminateToolID != nil {
-		terminateName = *planned.Config.TerminateToolID
-		definition := f.tools[terminateName]
-		resolved.Terminate = &researchspec.ToolPolicyRef{
-			ID: definition.ID, Address: definition.Address, OutputType: terminalType,
-		}
-		resolved.TerminateSDKName = terminateName
-	}
-	if planned.Config.QC != nil {
-		resolved.QCVerdictSDKName = "r42_qc_verdict"
-	}
-	if err = planned.Config.ValidateResolved(resolved); err != nil {
-		return nil, err
-	}
-	session, err := f.openSession(ctx, executionAddress, debuglog.SessionResearch, copilot.SessionConfig{
-		Provider: planned.Provider, Retry: retry, Model: planned.Config.Model, Profile: planned.Config.ProfileName(),
-		ReasoningEffort: reasoning, SystemPrompt: systemPrompt, WorkingDirectory: workspace,
-		AvailableTools:   slices.Clone(planned.Config.Policy.AllowedTools),
-		ExcludedTools:    slices.Clone(planned.Config.Policy.DisallowedTools),
-		SkillDirectories: slices.Clone(planned.Config.Policy.SkillDirectories),
-		Skills:           slices.Clone(planned.Config.Policy.Skills), DisabledSkills: slices.Clone(planned.Config.Policy.DisabledSkills),
-		Tools: tools, Hooks: builtInToolCallQuotaHooks(newToolCallQuota(builtInQuotaLimits)),
-	})
-	if err != nil {
-		return nil, err
-	}
-	initialPrompt := "Begin the configured research task."
-	if planned.Config.Prompt != nil {
-		initialPrompt = *planned.Config.Prompt
-	}
-	var terminalRecorder *researchruntime.TerminalRecorder
-	if planned.Config.TerminateToolID != nil {
-		terminalRecorder = terminal
-	}
-	recordedSession := &recordingSession{
-		Session: session, recorder: f.recorder, address: executionAddress, kind: debuglog.SessionResearch,
-		stallTimeout: f.sessionStallTimeout, typedToolActivity: researchToolActivity,
-	}
-	runner := researchruntime.NewRunner(recordedSession, terminalRecorder)
-	var qcRunner *qc.Runner
-	var qcConfig qc.Config
-	var qcSession Session
-	if planned.Config.QC != nil {
-		providerRetry := provider.DefaultRetryPolicy()
-		selectedProvider := planned.Provider
-		if planned.QCProvider != nil {
-			selectedProvider = planned.QCProvider
-		}
-		if selectedProvider != nil {
-			providerRetry, err = provider.MergeRetry(providerRetry, selectedProvider.Retry)
-			if err != nil {
-				f.closeAfterSetupFailure(ctx, recordedSession)
-				return nil, err
-			}
-		}
-		effective, effectiveErr := planned.Config.EffectiveQC(providerRetry)
-		if effectiveErr != nil {
-			f.closeAfterSetupFailure(ctx, recordedSession)
-			return nil, effectiveErr
-		}
-		qcTypedQuotaLimits, qcBuiltInQuotaLimits := splitToolCallQuota(effective.ToolCallQuota)
-		qcTools, _, toolsErr := f.buildTools(
-			ctx, executionAddress, debuglog.SessionQC, workspace, effective.ToolIDs, nil,
-			researchruntime.NewTerminalRecorder(), newToolCallQuota(qcTypedQuotaLimits),
-		)
-		if toolsErr != nil {
-			f.closeAfterSetupFailure(ctx, recordedSession)
-			return nil, toolsErr
-		}
-		verdicts := qc.NewVerdictRecorder()
-		qcTools = append(qcTools, qcVerdictTool(executionAddress, f.recorder, verdicts))
-		qcToolActivity := newTypedToolActivity()
-		trackTypedToolActivity(qcTools, qcToolActivity)
-		qcReasoning := ""
-		if effective.ReasoningEffort != nil {
-			qcReasoning = *effective.ReasoningEffort
-		}
-		qcSystemPrompt := appendBuiltInToolCallQuotaPrompt(
-			"You are the independent QC session for an unattended r42 research block. Call r42_qc_verdict with pass or repair issues.",
-			qcBuiltInQuotaLimits,
-		)
-		_ = f.recorder.Record(debuglog.Event{
-			Kind: debuglog.EventMessage, BlockAddress: executionAddress, Session: debuglog.SessionQC,
-			Role: debuglog.RoleSystem, Content: qcSystemPrompt,
-		})
-		qcSession, err = f.openSession(ctx, executionAddress, debuglog.SessionQC, copilot.SessionConfig{
-			Provider: selectedProvider, Retry: effective.Retry, Model: effective.Model, Profile: effective.Profile,
-			ReasoningEffort: qcReasoning, SystemPrompt: qcSystemPrompt, WorkingDirectory: workspace,
-			Tools: qcTools, AvailableTools: slices.Clone(effective.AllowedTools), ExcludedTools: slices.Clone(effective.DisallowedTools),
-			SkillDirectories: slices.Clone(effective.SkillDirectories), Skills: slices.Clone(effective.Skills),
-			DisabledSkills: slices.Clone(effective.DisabledSkills),
-			Hooks:          builtInToolCallQuotaHooks(newToolCallQuota(qcBuiltInQuotaLimits)),
-		})
-		if err != nil {
-			f.closeAfterSetupFailure(ctx, recordedSession)
-			return nil, err
-		}
-		qcSession = &recordingSession{
-			Session: qcSession, recorder: f.recorder, address: executionAddress, kind: debuglog.SessionQC,
-			stallTimeout: f.sessionStallTimeout, typedToolActivity: qcToolActivity,
-		}
-		qcRunner = qc.NewRunner(&phasedResearch{research: runner, session: recordedSession}, qcSession, verdicts)
-		qcConfig = qc.Config{
-			Task:     qc.Task{SystemPrompt: planned.Config.SystemPrompt, Prompt: planned.Config.Prompt},
-			Criteria: effective.Criteria, Artifacts: planned.Config.Artifacts,
-			Research: researchruntime.Config{
-				InitialPrompt: initialPrompt, TerminateToolName: terminateName,
-				MaxProtocolAttempts: planned.Config.MaxProtocolAttempts, Timeout: planned.Config.Timeout,
-				Workspace: workspace, Artifacts: planned.Config.Artifacts,
-			},
-			MaxRounds: effective.MaxRounds, MaxProtocolAttempts: researchspec.DefaultMaxProtocolAttempts,
-			VerdictToolName: "r42_qc_verdict",
-		}
-	}
-	block := &researchApplyBlock{
-		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: address, session: recordedSession,
-		runner: runner, qcRunner: qcRunner, qcConfig: qcConfig, qcSession: qcSession, config: researchruntime.Config{
-			InitialPrompt: initialPrompt, MaxProtocolAttempts: planned.Config.MaxProtocolAttempts,
-			Timeout: planned.Config.Timeout, Workspace: workspace, Artifacts: planned.Config.Artifacts,
-			TerminateToolName: terminateName,
-		}, publish: publish, cancel: blockCancel,
-	}
-	keepBlockContext = true
-	return block, nil
-}
-
-func (f *runtimeFactory) closeAfterSetupFailure(ctx context.Context, session Session) {
-	if err := session.Close(context.WithoutCancel(ctx)); err != nil {
-		f.state.addWarning(fmt.Errorf("close research session after setup failure: %w", err))
-	}
-}
-
 func (f *runtimeFactory) openSession(
 	ctx context.Context,
 	address string,
@@ -1300,11 +1115,14 @@ func (f *runtimeFactory) publish(address string, value cty.Value) {
 func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.VerdictRecorder) sdk.Tool {
 	return sdk.Tool{
 		Name:        "r42_qc_verdict",
-		Description: "Pass the candidate or return concrete repair issues",
+		Description: "Pass, revise research, or reopen collection with concrete issues",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"pass": map[string]any{"type": "boolean"},
+				"decision": map[string]any{
+					"type": "string",
+					"enum": []string{"pass", "revise_research", "reopen_collection"},
+				},
 				"issues": map[string]any{
 					"type": "array",
 					"items": map[string]any{
@@ -1320,7 +1138,7 @@ func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.Ver
 					},
 				},
 			},
-			"required":             []string{"pass"},
+			"required":             []string{"decision"},
 			"additionalProperties": false,
 		},
 		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
@@ -1341,6 +1159,17 @@ func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.Ver
 				return sdk.ToolResult{TextResultForLLM: string(rejected), ResultType: "success"}, nil
 			}
 			if recordErr := verdicts.Record(verdict); recordErr != nil {
+				var exhausted *qc.CollectionRoundBudgetExhaustedError
+				if errors.As(recordErr, &exhausted) {
+					hint := "Choose revise_research or pass using existing snapshots."
+					rejected, _ := json.Marshal(corespec.ToolResponse[any]{
+						Accepted: false,
+						Issues: []corespec.Issue{{
+							Code: "collection_round_budget_exhausted", Message: exhausted.Error(), RepairHint: &hint,
+						}},
+					})
+					return sdk.ToolResult{TextResultForLLM: string(rejected), ResultType: "success"}, nil
+				}
 				return sdk.ToolResult{}, recordErr
 			}
 			result, _ := json.Marshal(map[string]any{"accepted": true})
@@ -1357,16 +1186,18 @@ func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.Ver
 
 type researchApplyBlock struct {
 	*golden.BaseBlock
-	ctx       context.Context
-	address   string
-	session   Session
-	runner    *researchruntime.Runner
-	qcSession Session
-	qcRunner  *qc.Runner
-	qcConfig  qc.Config
-	config    researchruntime.Config
-	publish   func(string, cty.Value)
-	cancel    context.CancelFunc
+	ctx              context.Context
+	address          string
+	session          Session
+	runner           *researchruntime.Runner
+	qcSession        Session
+	qcRunner         *qc.Runner
+	qcConfig         qc.Config
+	config           researchruntime.Config
+	publish          func(string, cty.Value)
+	cancel           context.CancelFunc
+	workflowRun      func(context.Context) (researchruntime.Result, error)
+	workflowSessions []Session
 }
 
 func (*researchApplyBlock) Type() string            { return "static" }
@@ -1378,9 +1209,12 @@ func (b *researchApplyBlock) Address() string       { return b.address }
 func (b *researchApplyBlock) Apply() error {
 	var result researchruntime.Result
 	var err error
-	if b.qcRunner == nil {
+	switch {
+	case b.workflowRun != nil:
+		result, err = b.workflowRun(b.ctx)
+	case b.qcRunner == nil:
 		result, err = b.runner.Run(b.ctx, b.config)
-	} else {
+	default:
 		var reviewed qc.Result
 		reviewed, err = b.qcRunner.Run(b.ctx, b.qcConfig)
 		result = reviewed.Candidate
@@ -1402,6 +1236,13 @@ func (b *researchApplyBlock) Apply() error {
 func (b *researchApplyBlock) Cleanup(ctx context.Context) error {
 	if b.cancel != nil {
 		defer b.cancel()
+	}
+	if len(b.workflowSessions) > 0 {
+		var closeErr error
+		for _, session := range slices.Backward(b.workflowSessions) {
+			closeErr = errors.Join(closeErr, session.Close(ctx))
+		}
+		return closeErr
 	}
 	var qcErr error
 	if b.qcSession != nil {

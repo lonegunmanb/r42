@@ -30,7 +30,7 @@ research "static" "external_tool_snapshot" {
     The fetch tool writes ${block_wd()}/snapshot.md itself.
     Do not finish until ${module.pplx_tools.pplx_fetch_tool_id} succeeds and reports that exact snapshot path.
   PROMPT
-  tool_ids = [
+  collection_tool_ids = [
     module.pplx_tools.pplx_pro_search_tool_id,
     module.pplx_tools.pplx_fetch_tool_id,
   ]
