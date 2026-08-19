@@ -44,7 +44,8 @@ type Config struct {
 	BatchSize           int
 }
 
-const defaultBatchSize = 10
+// DefaultBatchSize is the configured default collection batch size.
+const DefaultBatchSize = 10
 
 // State is the mutable runtime state of one research workflow instance. Each
 // dynamic research member owns an isolated State instance. State is not safe
@@ -64,7 +65,7 @@ type State struct {
 // New creates an unbegun workflow state.
 func New(config Config) *State {
 	if config.BatchSize == 0 {
-		config.BatchSize = defaultBatchSize
+		config.BatchSize = DefaultBatchSize
 	}
 	return &State{config: config}
 }
@@ -101,7 +102,7 @@ func (s *State) Begin() error {
 		return errors.New("collection batch size must be positive")
 	}
 	if s.begun {
-		return errors.New("workflow already begun")
+		return nil
 	}
 	s.phase = PhaseCollection
 	s.collectionRoundsUsed = 1

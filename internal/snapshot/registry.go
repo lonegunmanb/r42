@@ -18,6 +18,10 @@ import (
 type Registration struct {
 	ID   string
 	Path string
+	// New reports whether this registration created a fresh unique snapshot.
+	// A duplicate-content registration returns the existing snapshot with
+	// New=false.
+	New bool
 }
 
 // Snapshot is a registered snapshot with its review state.
@@ -117,7 +121,6 @@ func (r *Registry) RegisterToolResult(toolCallID string) (Registration, error) {
 		r.mu.Lock()
 		_ = os.Remove(path)
 		r.mu.Unlock()
-		return registration, nil
 	}
 	return registration, nil
 }
@@ -250,7 +253,7 @@ func (r *Registry) registerContent(path, hash string) (Registration, error) {
 	r.contentHashes[hash] = id
 	r.registered[id] = path
 	r.order = append(r.order, id)
-	return Registration{ID: id, Path: path}, nil
+	return Registration{ID: id, Path: path, New: true}, nil
 }
 
 func (r *Registry) writeManaged(toolCallID string, content []byte) (string, error) {
