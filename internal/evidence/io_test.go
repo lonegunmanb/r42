@@ -173,6 +173,20 @@ func TestWriteMarkdownArtifact(t *testing.T) {
 		assert.Equal(t, "# Report\n", string(content))
 	})
 
+	t.Run("writes into nested subdirectory", func(t *testing.T) {
+		t.Parallel()
+
+		workspace := t.TempDir()
+		writer, err := NewMarkdownWriter(workspace)
+		require.NoError(t, err)
+		path, err := writer.Write(filepath.Join("subdir", "report.md"), "# Nested\n")
+		require.NoError(t, err)
+		assert.Equal(t, filepath.Join(workspace, "subdir", "report.md"), path)
+		content, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, "# Nested\n", string(content))
+	})
+
 	t.Run("rejects traversal path", func(t *testing.T) {
 		t.Parallel()
 
