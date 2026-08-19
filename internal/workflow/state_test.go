@@ -124,7 +124,8 @@ func TestCollectionRoundsExhausted(t *testing.T) {
 				return
 			}
 			require.Error(t, err)
-			require.ErrorContains(t, err, "collection rounds exhausted")
+			var budgetErr *BudgetExhaustedError
+			require.ErrorAs(t, err, &budgetErr)
 			assert.Equal(t, PhaseCollectionQC, state.phase)
 		})
 	}
@@ -157,6 +158,22 @@ func TestFinalQCReturnPaths(t *testing.T) {
 		require.NoError(t, state.Advance(EventReopenCollection))
 		assert.Equal(t, PhaseCollection, state.phase)
 		assert.Equal(t, 2, state.CollectionRoundsUsed())
+	})
+
+	t.Run("exhausted budget rejects reopen and keeps final qc", func(t *testing.T) {
+		t.Parallel()
+
+		state := New(Config{MaxCollectionRounds: intPointer(1)})
+		require.NoError(t, state.Begin())
+		require.NoError(t, state.Advance(EventCollectionCheckpoint))
+		require.NoError(t, state.Advance(EventSufficient))
+		require.NoError(t, state.Advance(EventResearchComplete))
+		err := state.Advance(EventReopenCollection)
+		require.Error(t, err)
+		var budgetErr *BudgetExhaustedError
+		require.ErrorAs(t, err, &budgetErr)
+		assert.Equal(t, PhaseFinalQC, state.phase)
+		assert.Equal(t, 1, state.CollectionRoundsUsed())
 	})
 
 	t.Run("revise research does not consume round", func(t *testing.T) {

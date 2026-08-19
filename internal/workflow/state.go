@@ -79,6 +79,18 @@ func (e *TransitionError) Error() string {
 	return fmt.Sprintf("invalid transition %s from phase %s", e.Event, e.From)
 }
 
+// BudgetExhaustedError reports that the configured collection-round budget
+// prevents another acquisition phase. Unlike TransitionError, the transition
+// itself is legal; the budget vetoes it.
+type BudgetExhaustedError struct {
+	Phase Phase
+	Event Event
+}
+
+func (e *BudgetExhaustedError) Error() string {
+	return fmt.Sprintf("collection rounds exhausted for %s in phase %s", e.Event, e.Phase)
+}
+
 // Begin starts the workflow in the initial Collection phase (round 1).
 func (s *State) Begin() error {
 	if s.config.MaxCollectionRounds != nil && *s.config.MaxCollectionRounds <= 0 {
@@ -193,7 +205,7 @@ func (s *State) Advance(event Event) error {
 			return nil
 		case EventNeedsMore:
 			if s.config.MaxCollectionRounds != nil && s.collectionRoundsUsed >= *s.config.MaxCollectionRounds {
-				return errors.New("collection rounds exhausted")
+				return &BudgetExhaustedError{Phase: s.phase, Event: event}
 			}
 			s.phase = PhaseCollection
 			s.collectionRoundsUsed++
@@ -215,7 +227,7 @@ func (s *State) Advance(event Event) error {
 			return nil
 		case EventReopenCollection:
 			if s.config.MaxCollectionRounds != nil && s.collectionRoundsUsed >= *s.config.MaxCollectionRounds {
-				return errors.New("collection rounds exhausted")
+				return &BudgetExhaustedError{Phase: s.phase, Event: event}
 			}
 			s.phase = PhaseCollection
 			s.collectionRoundsUsed++
