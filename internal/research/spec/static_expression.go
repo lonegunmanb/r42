@@ -18,6 +18,8 @@ var researchAttributeNames = map[string]struct{}{
 	"tool_ids": {}, "tool_call_quota": {}, "terminate_tool_id": {}, "allowed_tools": {},
 	"disallowed_tools": {}, "skill_directories": {}, "skills": {}, "disabled_skills": {},
 	"permission": {}, "max_protocol_attempts": {}, "timeout": {},
+	"collection_tool_ids": {}, "collection_skill_directories": {}, "collection_skills": {},
+	"collection_disabled_skills": {}, "collection_batch_size": {}, "max_collection_rounds": {},
 }
 
 func (b *ResearchBlock) Decode(block *golden.HclBlock, context *hcl.EvalContext) error {
@@ -87,15 +89,19 @@ func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
 
 	retryBlocks := nestedBlocks(block, "retry")
 	qcBlocks := nestedBlocks(block, "qc")
+	collectionQCBlocks := nestedBlocks(block, "collection_qc")
 	if len(retryBlocks) > 1 {
 		return "", fmt.Errorf("research supports at most one retry block")
 	}
 	if len(qcBlocks) > 1 {
 		return "", fmt.Errorf("research supports at most one qc block")
 	}
+	if len(collectionQCBlocks) > 1 {
+		return "", fmt.Errorf("research supports at most one collection_qc block")
+	}
 	for _, nested := range block.NestedBlocks() {
 		if nested.Type == "retry" || nested.Type == "artifact" || nested.Type == "qc" ||
-			golden.MetaNestedBlockNames.Contains(nested.Type) {
+			nested.Type == "collection_qc" || golden.MetaNestedBlockNames.Contains(nested.Type) {
 			continue
 		}
 		return "", fmt.Errorf("unsupported block type %q in research block", nested.Type)
@@ -129,6 +135,14 @@ func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
 			return "", err
 		}
 	}
+	result.WriteString("collection_qc = ")
+	if len(collectionQCBlocks) == 0 {
+		result.WriteString("null\n")
+	} else {
+		if err := writeCollectionQCObject(&result, collectionQCBlocks[0]); err != nil {
+			return "", err
+		}
+	}
 	result.WriteString("}\n")
 	return result.String(), nil
 }
@@ -153,6 +167,29 @@ func writeQCObject(result *strings.Builder, block *golden.HclBlock) error {
 	retryBlocks := nestedBlocks(block, "retry")
 	if len(retryBlocks) > 1 {
 		return fmt.Errorf("qc supports at most one retry block")
+	}
+	result.WriteString("{\n")
+	writeExpressionAttributes(result, block.Attributes(), nil)
+	result.WriteString("retry = ")
+	if len(retryBlocks) == 0 {
+		result.WriteString("null\n")
+	} else {
+		writeObject(result, retryBlocks[0], nil)
+	}
+	result.WriteString("}\n")
+	return nil
+}
+
+func writeCollectionQCObject(result *strings.Builder, block *golden.HclBlock) error {
+	for _, nested := range block.NestedBlocks() {
+		if nested.Type == "retry" || golden.MetaNestedBlockNames.Contains(nested.Type) {
+			continue
+		}
+		return fmt.Errorf("unsupported block type %q in collection_qc block", nested.Type)
+	}
+	retryBlocks := nestedBlocks(block, "retry")
+	if len(retryBlocks) > 1 {
+		return fmt.Errorf("collection qc supports at most one retry block")
 	}
 	result.WriteString("{\n")
 	writeExpressionAttributes(result, block.Attributes(), nil)
@@ -215,13 +252,20 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 		"disabled_skills": cty.EmptyTupleVal, "permission": cty.NullVal(cty.String),
 		"max_protocol_attempts": cty.NullVal(cty.Number), "timeout": cty.NullVal(cty.String),
 		"retry": cty.EmptyTupleVal, "artifact": cty.EmptyTupleVal, "qc": cty.EmptyTupleVal,
+		"collection_tool_ids":          cty.EmptyTupleVal,
+		"collection_skill_directories": cty.EmptyTupleVal,
+		"collection_skills":            cty.EmptyTupleVal,
+		"collection_disabled_skills":   cty.EmptyTupleVal,
+		"collection_batch_size":        cty.NumberIntVal(DefaultCollectionBatchSize),
+		"max_collection_rounds":        cty.NullVal(cty.Number),
+		"collection_qc":                cty.EmptyTupleVal,
 	}
 	if task.IsKnown() && task.Type().IsObjectType() {
 		for name, value := range task.AsValueMap() {
 			switch name {
 			case "artifacts":
 				values["artifact"] = value
-			case "retry", "qc":
+			case "retry", "qc", "collection_qc":
 				if !value.IsNull() {
 					values[name] = cty.TupleVal([]cty.Value{value})
 				}

@@ -916,6 +916,9 @@ func TestDecodeResearchPlanDefaultsLegacyProfileToModel(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, "legacy-model", planned.Config.Profile)
+	assert.Equal(t, researchspec.DefaultCollectionBatchSize, planned.Config.CollectionBatchSize)
+	assert.Nil(t, planned.Config.MaxCollectionRounds)
+	assert.Nil(t, planned.Config.CollectionQC)
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

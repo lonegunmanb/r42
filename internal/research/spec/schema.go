@@ -28,26 +28,33 @@ var (
 
 type ResearchBlock struct {
 	*golden.BaseBlock
-	ModelProvider       cty.Value       `hcl:"model_provider,optional"`
-	Model               string          `hcl:"model"`
-	Profile             *string         `hcl:"profile,optional"`
-	ReasoningEffort     *string         `hcl:"reasoning_effort,optional"`
-	SystemPrompt        string          `hcl:"system_prompt"`
-	Prompt              *string         `hcl:"prompt,optional"`
-	ToolIDs             []string        `hcl:"tool_ids,optional"`
-	ToolCallQuota       map[string]int  `hcl:"tool_call_quota,optional"`
-	TerminateToolID     *string         `hcl:"terminate_tool_id,optional"`
-	AllowedTools        []string        `hcl:"allowed_tools,optional"`
-	DisallowedTools     []string        `hcl:"disallowed_tools,optional"`
-	SkillDirectories    []string        `hcl:"skill_directories,optional"`
-	Skills              []string        `hcl:"skills,optional"`
-	DisabledSkills      []string        `hcl:"disabled_skills,optional"`
-	Permission          *Permission     `hcl:"permission,optional"`
-	MaxProtocolAttempts *int            `hcl:"max_protocol_attempts,optional"`
-	Timeout             *string         `hcl:"timeout,optional"`
-	RetryBlocks         []RetryBlock    `hcl:"retry,block"`
-	ArtifactBlocks      []ArtifactBlock `hcl:"artifact,block"`
-	QCBlocks            []QCBlock       `hcl:"qc,block"`
+	ModelProvider              cty.Value           `hcl:"model_provider,optional"`
+	Model                      string              `hcl:"model"`
+	Profile                    *string             `hcl:"profile,optional"`
+	ReasoningEffort            *string             `hcl:"reasoning_effort,optional"`
+	SystemPrompt               string              `hcl:"system_prompt"`
+	Prompt                     *string             `hcl:"prompt,optional"`
+	ToolIDs                    []string            `hcl:"tool_ids,optional"`
+	ToolCallQuota              map[string]int      `hcl:"tool_call_quota,optional"`
+	TerminateToolID            *string             `hcl:"terminate_tool_id,optional"`
+	AllowedTools               []string            `hcl:"allowed_tools,optional"`
+	DisallowedTools            []string            `hcl:"disallowed_tools,optional"`
+	SkillDirectories           []string            `hcl:"skill_directories,optional"`
+	Skills                     []string            `hcl:"skills,optional"`
+	DisabledSkills             []string            `hcl:"disabled_skills,optional"`
+	Permission                 *Permission         `hcl:"permission,optional"`
+	MaxProtocolAttempts        *int                `hcl:"max_protocol_attempts,optional"`
+	Timeout                    *string             `hcl:"timeout,optional"`
+	RetryBlocks                []RetryBlock        `hcl:"retry,block"`
+	ArtifactBlocks             []ArtifactBlock     `hcl:"artifact,block"`
+	QCBlocks                   []QCBlock           `hcl:"qc,block"`
+	CollectionToolIDs          []string            `hcl:"collection_tool_ids,optional"`
+	CollectionSkillDirectories []string            `hcl:"collection_skill_directories,optional"`
+	CollectionSkills           []string            `hcl:"collection_skills,optional"`
+	CollectionDisabledSkills   []string            `hcl:"collection_disabled_skills,optional"`
+	CollectionBatchSize        *int                `hcl:"collection_batch_size,optional"`
+	MaxCollectionRounds        *int                `hcl:"max_collection_rounds,optional"`
+	CollectionQCBlocks         []CollectionQCBlock `hcl:"collection_qc,block"`
 
 	planned                Config
 	deferredTaskExpression string
@@ -141,10 +148,13 @@ func (b *ResearchBlock) validateNativeStringFields() error {
 	}
 	if err := validateStringCollections(root, b.EvalContext(), "research", []string{
 		"tool_ids", "allowed_tools", "disallowed_tools", "skill_directories", "skills", "disabled_skills",
+		"collection_tool_ids", "collection_skill_directories", "collection_skills", "collection_disabled_skills",
 	}); err != nil {
 		return err
 	}
-	if err := validateNumberAttributes(root, b.EvalContext(), "research", []string{"max_protocol_attempts"}); err != nil {
+	if err := validateNumberAttributes(root, b.EvalContext(), "research", []string{
+		"max_protocol_attempts", "collection_batch_size", "max_collection_rounds",
+	}); err != nil {
 		return err
 	}
 	for _, nested := range root.NestedBlocks() {
@@ -167,7 +177,27 @@ func (b *ResearchBlock) validateNativeStringFields() error {
 			if err := validateQCStringFields(nested, b.EvalContext()); err != nil {
 				return err
 			}
+		case "collection_qc":
+			if err := validateCollectionQCStringFields(nested, b.EvalContext()); err != nil {
+				return err
+			}
 		}
+	}
+	return nil
+}
+
+func validateCollectionQCStringFields(block *golden.HclBlock, context *hcl.EvalContext) error {
+	if err := validateStringAttributes(block, context, "collection qc", []string{"model", "reasoning_effort", "permission"}); err != nil {
+		return err
+	}
+	for _, nested := range block.NestedBlocks() {
+		if nested.Type != "retry" {
+			continue
+		}
+		if err := validateNumberAttributes(nested, context, "collection qc retry", retryNumberAttributeNames()); err != nil {
+			return err
+		}
+		return validateStringCollections(nested, context, "collection qc retry", []string{"error_message_regex"})
 	}
 	return nil
 }
@@ -289,26 +319,33 @@ func (b *ResearchBlock) Values() map[string]cty.Value {
 		return deferredStaticResearchValues(b.plannedTaskValue)
 	}
 	values := map[string]cty.Value{
-		"model_provider":        optionalObjectValue(b.ModelProvider),
-		"model":                 cty.StringVal(b.Model),
-		"profile":               cty.StringVal(b.planned.ProfileName()),
-		"reasoning_effort":      optionalStringValue(b.ReasoningEffort),
-		"system_prompt":         cty.StringVal(b.SystemPrompt),
-		"prompt":                optionalStringValue(b.Prompt),
-		"tool_ids":              stringListValue(b.ToolIDs),
-		"tool_call_quota":       intMapValue(b.ToolCallQuota),
-		"terminate_tool_id":     optionalStringValue(b.TerminateToolID),
-		"allowed_tools":         stringListValue(b.AllowedTools),
-		"disallowed_tools":      stringListValue(b.DisallowedTools),
-		"skill_directories":     stringListValue(b.SkillDirectories),
-		"skills":                stringListValue(b.Skills),
-		"disabled_skills":       stringListValue(b.DisabledSkills),
-		"permission":            optionalPermissionValue(b.Permission),
-		"max_protocol_attempts": optionalIntValue(b.MaxProtocolAttempts),
-		"timeout":               optionalStringValue(b.Timeout),
-		"retry":                 retryBlockValues(b.RetryBlocks),
-		"artifact":              ArtifactsValue(b.planned.Artifacts, nil),
-		"qc":                    qcBlockValues(b.QCBlocks),
+		"model_provider":               optionalObjectValue(b.ModelProvider),
+		"model":                        cty.StringVal(b.Model),
+		"profile":                      cty.StringVal(b.planned.ProfileName()),
+		"reasoning_effort":             optionalStringValue(b.ReasoningEffort),
+		"system_prompt":                cty.StringVal(b.SystemPrompt),
+		"prompt":                       optionalStringValue(b.Prompt),
+		"tool_ids":                     stringListValue(b.ToolIDs),
+		"tool_call_quota":              intMapValue(b.ToolCallQuota),
+		"terminate_tool_id":            optionalStringValue(b.TerminateToolID),
+		"allowed_tools":                stringListValue(b.AllowedTools),
+		"disallowed_tools":             stringListValue(b.DisallowedTools),
+		"skill_directories":            stringListValue(b.SkillDirectories),
+		"skills":                       stringListValue(b.Skills),
+		"disabled_skills":              stringListValue(b.DisabledSkills),
+		"permission":                   optionalPermissionValue(b.Permission),
+		"max_protocol_attempts":        optionalIntValue(b.MaxProtocolAttempts),
+		"timeout":                      optionalStringValue(b.Timeout),
+		"retry":                        retryBlockValues(b.RetryBlocks),
+		"artifact":                     ArtifactsValue(b.planned.Artifacts, nil),
+		"qc":                           qcBlockValues(b.QCBlocks),
+		"collection_tool_ids":          stringListValue(b.CollectionToolIDs),
+		"collection_skill_directories": stringListValue(b.CollectionSkillDirectories),
+		"collection_skills":            stringListValue(b.CollectionSkills),
+		"collection_disabled_skills":   stringListValue(b.CollectionDisabledSkills),
+		"collection_batch_size":        optionalIntValue(b.CollectionBatchSize),
+		"max_collection_rounds":        optionalIntValue(b.MaxCollectionRounds),
+		"collection_qc":                collectionQCBlockValues(b.CollectionQCBlocks),
 	}
 	if b.planned.TerminateToolID != nil {
 		values["result"] = cty.UnknownVal(cty.String)
@@ -374,7 +411,7 @@ func qcBlockValues(blocks []QCBlock) cty.Value {
 }
 
 func qcCriteriaValue(value cty.Value) cty.Value {
-	criteria, err := normalizeCriteria(value)
+	criteria, err := normalizeCriteria(value, "qc")
 	if err != nil {
 		return cty.UnknownVal(cty.Map(cty.String))
 	}
@@ -397,6 +434,37 @@ func qcBlockType() cty.Type {
 		"permission":        cty.String,
 		"max_qc_rounds":     cty.Number,
 		"retry":             cty.List(retryBlockType),
+	})
+}
+
+func collectionQCBlockValues(blocks []CollectionQCBlock) cty.Value {
+	if len(blocks) != 1 {
+		return cty.ListValEmpty(collectionQCBlockType())
+	}
+	block := blocks[0]
+	criteria := cty.NullVal(cty.Map(cty.String))
+	if hasValue(block.Criteria) {
+		criteria = qcCriteriaValue(block.Criteria)
+	}
+	value := cty.ObjectVal(map[string]cty.Value{
+		"criteria":         criteria,
+		"model_provider":   optionalObjectValue(block.ModelProvider),
+		"model":            optionalStringValue(block.Model),
+		"reasoning_effort": optionalStringValue(block.ReasoningEffort),
+		"permission":       optionalPermissionValue(block.Permission),
+		"retry":            retryBlockValues(block.RetryBlocks),
+	})
+	return cty.ListVal([]cty.Value{value})
+}
+
+func collectionQCBlockType() cty.Type {
+	return cty.Object(map[string]cty.Type{
+		"criteria":         cty.Map(cty.String),
+		"model_provider":   cty.EmptyObject,
+		"model":            cty.String,
+		"reasoning_effort": cty.String,
+		"permission":       cty.String,
+		"retry":            cty.List(retryBlockType),
 	})
 }
 
@@ -475,12 +543,24 @@ type QCBlock struct {
 	RetryBlocks      []RetryBlock   `hcl:"retry,block"`
 }
 
+type CollectionQCBlock struct {
+	Criteria        cty.Value    `hcl:"criteria,optional"`
+	ModelProvider   cty.Value    `hcl:"model_provider,optional"`
+	Model           *string      `hcl:"model,optional"`
+	ReasoningEffort *string      `hcl:"reasoning_effort,optional"`
+	Permission      *Permission  `hcl:"permission,optional"`
+	RetryBlocks     []RetryBlock `hcl:"retry,block"`
+}
+
 func (b *ResearchBlock) toConfig() (Config, error) {
 	if len(b.RetryBlocks) > 1 {
 		return Config{}, errors.New("research must have at most one retry block")
 	}
 	if len(b.QCBlocks) > 1 {
 		return Config{}, errors.New("research must have at most one qc block")
+	}
+	if len(b.CollectionQCBlocks) > 1 {
+		return Config{}, errors.New("research must have at most one collection_qc block")
 	}
 	timeout, err := optionalDuration(b.Timeout, "timeout")
 	if err != nil {
@@ -510,6 +590,12 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 			DisabledSkills:   slices.Clone(b.DisabledSkills),
 			Permission:       PermissionApproveAll,
 		},
+		CollectionToolIDs:          slices.Clone(b.CollectionToolIDs),
+		CollectionSkillDirectories: slices.Clone(b.CollectionSkillDirectories),
+		CollectionSkills:           slices.Clone(b.CollectionSkills),
+		CollectionDisabledSkills:   slices.Clone(b.CollectionDisabledSkills),
+		CollectionBatchSize:        DefaultCollectionBatchSize,
+		MaxCollectionRounds:        clonePointer(b.MaxCollectionRounds),
 	}
 	if config.Policy.DisallowedTools == nil {
 		config.Policy.DisallowedTools = []string{"ask_user"}
@@ -519,6 +605,9 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 	}
 	if b.MaxProtocolAttempts != nil {
 		config.MaxProtocolAttempts = *b.MaxProtocolAttempts
+	}
+	if b.CollectionBatchSize != nil {
+		config.CollectionBatchSize = *b.CollectionBatchSize
 	}
 	if len(b.RetryBlocks) == 1 {
 		config.Retry, err = b.RetryBlocks[0].override()
@@ -532,6 +621,12 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 	}
 	if len(b.QCBlocks) == 1 {
 		config.QC, err = b.QCBlocks[0].toConfig()
+		if err != nil {
+			return Config{}, err
+		}
+	}
+	if len(b.CollectionQCBlocks) == 1 {
+		config.CollectionQC, err = b.CollectionQCBlocks[0].toConfig()
 		if err != nil {
 			return Config{}, err
 		}
@@ -581,7 +676,7 @@ func (b QCBlock) toConfig() (*QCConfig, error) {
 	if len(b.RetryBlocks) > 1 {
 		return nil, errors.New("qc must have at most one retry block")
 	}
-	criteria, err := normalizeCriteria(b.Criteria)
+	criteria, err := normalizeCriteria(b.Criteria, "qc")
 	if err != nil {
 		return nil, err
 	}
@@ -615,22 +710,49 @@ func (b QCBlock) toConfig() (*QCConfig, error) {
 	return config, nil
 }
 
-func normalizeCriteria(value cty.Value) (cty.Value, error) {
+func (b CollectionQCBlock) toConfig() (*CollectionQCConfig, error) {
+	if len(b.RetryBlocks) > 1 {
+		return nil, errors.New("collection qc must have at most one retry block")
+	}
+	config := &CollectionQCConfig{
+		ModelProvider:   b.ModelProvider,
+		Model:           clonePointer(b.Model),
+		ReasoningEffort: clonePointer(b.ReasoningEffort),
+		Permission:      clonePointer(b.Permission),
+	}
+	if hasValue(b.Criteria) {
+		criteria, err := normalizeCriteria(b.Criteria, "collection qc")
+		if err != nil {
+			return nil, err
+		}
+		config.Criteria = criteria
+	}
+	if len(b.RetryBlocks) == 1 {
+		var err error
+		config.Retry, err = b.RetryBlocks[0].override()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return config, nil
+}
+
+func normalizeCriteria(value cty.Value, scope string) (cty.Value, error) {
 	unmarked, marks := value.UnmarkDeepWithPaths()
 	if !unmarked.IsWhollyKnown() {
-		return cty.NilVal, fmt.Errorf("qc criteria must be wholly known during plan")
+		return cty.NilVal, fmt.Errorf("%s criteria must be wholly known during plan", scope)
 	}
 	if unmarked.IsNull() || (!unmarked.Type().IsObjectType() && !unmarked.Type().IsMapType()) {
-		return cty.NilVal, fmt.Errorf("qc criteria must be map of string")
+		return cty.NilVal, fmt.Errorf("%s criteria must be map of string", scope)
 	}
 	for _, criterion := range unmarked.AsValueMap() {
 		if criterion.IsNull() || !criterion.Type().Equals(cty.String) {
-			return cty.NilVal, fmt.Errorf("qc criteria must be map of string")
+			return cty.NilVal, fmt.Errorf("%s criteria must be map of string", scope)
 		}
 	}
 	converted, err := convert.Convert(unmarked, cty.Map(cty.String))
 	if err != nil {
-		return cty.NilVal, fmt.Errorf("qc criteria must be map of string: %w", err)
+		return cty.NilVal, fmt.Errorf("%s criteria must be map of string: %w", scope, err)
 	}
 	return converted.MarkWithPaths(objectMarksToMapPaths(marks)), nil
 }
@@ -726,6 +848,11 @@ func cloneConfig(config Config) Config {
 	result.Policy.SkillDirectories = slices.Clone(config.Policy.SkillDirectories)
 	result.Policy.Skills = slices.Clone(config.Policy.Skills)
 	result.Policy.DisabledSkills = slices.Clone(config.Policy.DisabledSkills)
+	result.CollectionToolIDs = slices.Clone(config.CollectionToolIDs)
+	result.CollectionSkillDirectories = slices.Clone(config.CollectionSkillDirectories)
+	result.CollectionSkills = slices.Clone(config.CollectionSkills)
+	result.CollectionDisabledSkills = slices.Clone(config.CollectionDisabledSkills)
+	result.MaxCollectionRounds = clonePointer(config.MaxCollectionRounds)
 	result.Artifacts = slices.Clone(config.Artifacts)
 	if config.QC != nil {
 		qc := *config.QC
@@ -744,6 +871,17 @@ func cloneConfig(config Config) Config {
 		qc.Skills = slices.Clone(config.QC.Skills)
 		qc.DisabledSkills = slices.Clone(config.QC.DisabledSkills)
 		result.QC = &qc
+	}
+	if config.CollectionQC != nil {
+		collectionQC := *config.CollectionQC
+		collectionQC.Model = cloneStringPointer(config.CollectionQC.Model)
+		collectionQC.ReasoningEffort = cloneStringPointer(config.CollectionQC.ReasoningEffort)
+		if config.CollectionQC.Permission != nil {
+			permission := *config.CollectionQC.Permission
+			collectionQC.Permission = &permission
+		}
+		collectionQC.Retry = cloneRetryOverride(config.CollectionQC.Retry)
+		result.CollectionQC = &collectionQC
 	}
 	return result
 }

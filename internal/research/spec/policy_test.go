@@ -28,6 +28,7 @@ func TestConfigValidateResolvedTools(t *testing.T) {
 				SystemPrompt:        "prompt",
 				Policy:              researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
 				MaxProtocolAttempts: researchspec.DefaultMaxProtocolAttempts,
+				CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
 			},
 		},
 		{
@@ -140,9 +141,10 @@ func TestConfigValidateResolvedTools(t *testing.T) {
 		{
 			name: "unconfigured terminal tool must not resolve",
 			config: researchspec.Config{
-				Model:        "model",
-				SystemPrompt: "prompt",
-				Policy:       researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+				Model:               "model",
+				SystemPrompt:        "prompt",
+				Policy:              researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+				CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
 			},
 			resolved: researchspec.ResolvedTools{
 				Terminate:        &researchspec.ToolPolicyRef{ID: finishToolID, Address: "go_tool.finish", OutputType: cty.String},
@@ -161,9 +163,10 @@ func TestConfigValidateResolvedTools(t *testing.T) {
 		{
 			name: "qc must keep ask user denied",
 			config: researchspec.Config{
-				Model:        "model",
-				SystemPrompt: "prompt",
-				Policy:       researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+				Model:               "model",
+				SystemPrompt:        "prompt",
+				Policy:              researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+				CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
 				QC: &researchspec.QCConfig{
 					Criteria:        cty.MapVal(map[string]cty.Value{"accuracy": cty.StringVal("be accurate")}),
 					DisallowedTools: []string{"bash"},
@@ -175,9 +178,10 @@ func TestConfigValidateResolvedTools(t *testing.T) {
 		{
 			name: "qc verdict is mandatory under defaults",
 			config: researchspec.Config{
-				Model:        "model",
-				SystemPrompt: "prompt",
-				Policy:       researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+				Model:               "model",
+				SystemPrompt:        "prompt",
+				Policy:              researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+				CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
 				QC: &researchspec.QCConfig{
 					Criteria: cty.MapVal(map[string]cty.Value{"accuracy": cty.StringVal("be accurate")}),
 				},
@@ -187,9 +191,10 @@ func TestConfigValidateResolvedTools(t *testing.T) {
 		{
 			name: "builtin wildcard keeps ask user denied",
 			config: researchspec.Config{
-				Model:        "model",
-				SystemPrompt: "prompt",
-				Policy:       researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+				Model:               "model",
+				SystemPrompt:        "prompt",
+				Policy:              researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+				CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
 				QC: &researchspec.QCConfig{
 					Criteria:        cty.MapVal(map[string]cty.Value{"accuracy": cty.StringVal("be accurate")}),
 					AllowedTools:    []string{"custom:r42_qc_verdict"},
@@ -276,6 +281,7 @@ func validResolvedConfig(terminate cty.Value, mutate func(*researchspec.SessionP
 		SystemPrompt:        "prompt",
 		TerminateToolID:     stringPointer(finishToolID),
 		MaxProtocolAttempts: researchspec.DefaultMaxProtocolAttempts,
+		CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
 		Policy:              policy,
 	}
 	if terminate.Type().Equals(cty.NilType) {

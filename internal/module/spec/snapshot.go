@@ -42,6 +42,8 @@ type researchSnapshot struct {
 	Provider            *providerSnapshot            `json:"provider,omitempty"`
 	TerminateToolID     *string                      `json:"terminate_tool_id,omitempty"`
 	QCProvider          *providerSnapshot            `json:"qc_provider,omitempty"`
+	CollectionBatchSize int                          `json:"collection_batch_size,omitempty"`
+	MaxCollectionRounds *int                         `json:"max_collection_rounds,omitempty"`
 }
 
 type policySnapshot struct {
@@ -192,8 +194,13 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 		SystemPrompt: snapshot.SystemPrompt, Prompt: clonePointer(snapshot.Prompt),
 		MaxProtocolAttempts: snapshot.MaxProtocolAttempts, Timeout: nanosecondsDuration(snapshot.TimeoutNanoseconds),
 		Retry: snapshot.Retry, Policy: restorePolicy(snapshot.Policy),
-		Artifacts:       slices.Clone(snapshot.Artifacts),
-		TerminateToolID: clonePointer(snapshot.TerminateToolID),
+		Artifacts:           slices.Clone(snapshot.Artifacts),
+		TerminateToolID:     clonePointer(snapshot.TerminateToolID),
+		CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
+		MaxCollectionRounds: clonePointer(snapshot.MaxCollectionRounds),
+	}
+	if snapshot.CollectionBatchSize > 0 {
+		configValue.CollectionBatchSize = snapshot.CollectionBatchSize
 	}
 	if configValue.Profile == "" {
 		configValue.Profile = configValue.Model

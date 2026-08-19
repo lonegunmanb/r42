@@ -1058,6 +1058,7 @@ func TestResearchBlockRejectsMultipleNestedBlocks(t *testing.T) {
 	}{
 		{name: "two qc blocks", nested: "qc { criteria = { a = \"a\" } }\nqc { criteria = { b = \"b\" } }", expectedError: "research must have at most one qc block"},
 		{name: "two retry blocks", nested: "retry {}\nretry {}", expectedError: "research must have at most one retry block"},
+		{name: "two collection qc blocks", nested: "collection_qc {}\ncollection_qc {}", expectedError: "research must have at most one collection_qc block"},
 	}
 
 	for _, tt := range tests {
@@ -1159,6 +1160,29 @@ func TestResearchBlockRejectsInvalidAttributeValues(t *testing.T) {
 				}}
 			},
 			expectedError: "max_interval_seconds is too large",
+		},
+		{
+			name: "collection qc criteria must convert",
+			mutate: func(block *researchspec.ResearchBlock) {
+				block.CollectionQCBlocks = []researchspec.CollectionQCBlock{{Criteria: cty.EmptyTupleVal}}
+			},
+			expectedError: "collection qc criteria must be map of string",
+		},
+		{
+			name: "collection qc retry block is singular",
+			mutate: func(block *researchspec.ResearchBlock) {
+				block.CollectionQCBlocks = []researchspec.CollectionQCBlock{{RetryBlocks: []researchspec.RetryBlock{{}, {}}}}
+			},
+			expectedError: "collection qc must have at most one retry block",
+		},
+		{
+			name: "collection qc retry must be valid",
+			mutate: func(block *researchspec.ResearchBlock) {
+				block.CollectionQCBlocks = []researchspec.CollectionQCBlock{{
+					RetryBlocks: []researchspec.RetryBlock{{ModelCallRetries: intPointer(-1)}},
+				}}
+			},
+			expectedError: "collection qc retry: model call retries must not be negative",
 		},
 		{
 			name: "complete retry override",

@@ -14,8 +14,10 @@ import (
 )
 
 const (
-	DefaultMaxProtocolAttempts = 10
-	DefaultMaxQCRounds         = 10
+	DefaultMaxProtocolAttempts   = 10
+	DefaultMaxQCRounds           = 10
+	DefaultCollectionBatchSize   = 10
+	DefaultCollectionQCCriterion = "The registered snapshots must provide sufficient evidence to answer the research task."
 )
 
 type Permission string
@@ -34,19 +36,26 @@ type SessionPolicy struct {
 }
 
 type Config struct {
-	ModelProvider       cty.Value
-	Model               string
-	Profile             string
-	ReasoningEffort     *string
-	SystemPrompt        string
-	Prompt              *string
-	TerminateToolID     *string
-	MaxProtocolAttempts int
-	Timeout             *time.Duration
-	Retry               provider.RetryOverride
-	Policy              SessionPolicy
-	Artifacts           []Artifact
-	QC                  *QCConfig
+	ModelProvider              cty.Value
+	Model                      string
+	Profile                    string
+	ReasoningEffort            *string
+	SystemPrompt               string
+	Prompt                     *string
+	TerminateToolID            *string
+	MaxProtocolAttempts        int
+	Timeout                    *time.Duration
+	Retry                      provider.RetryOverride
+	Policy                     SessionPolicy
+	Artifacts                  []Artifact
+	QC                         *QCConfig
+	CollectionToolIDs          []string
+	CollectionSkillDirectories []string
+	CollectionSkills           []string
+	CollectionDisabledSkills   []string
+	CollectionBatchSize        int
+	MaxCollectionRounds        *int
+	CollectionQC               *CollectionQCConfig
 }
 
 func (c Config) ProfileName() string {
@@ -72,10 +81,14 @@ func (c Config) Validate() error {
 	if err := validateToolIDs(c.Policy.ToolIDs, "research tool_ids"); err != nil {
 		return err
 	}
+	if err := validateToolIDs(c.CollectionToolIDs, "research collection_tool_ids"); err != nil {
+		return err
+	}
 	researchToolIDs := slices.Clone(c.Policy.ToolIDs)
 	if c.TerminateToolID != nil {
 		researchToolIDs = append(researchToolIDs, *c.TerminateToolID)
 	}
+	researchToolIDs = append(researchToolIDs, c.CollectionToolIDs...)
 	if err := validateToolCallQuota(c.Policy.ToolCallQuota, researchToolIDs, "research"); err != nil {
 		return err
 	}
@@ -90,6 +103,12 @@ func (c Config) Validate() error {
 	}
 	if c.Timeout != nil && *c.Timeout <= 0 {
 		return errors.New("research timeout must be positive")
+	}
+	if c.CollectionBatchSize <= 0 {
+		return errors.New("research collection batch size must be positive")
+	}
+	if c.MaxCollectionRounds != nil && *c.MaxCollectionRounds <= 0 {
+		return errors.New("research max collection rounds must be positive")
 	}
 	if err := validatePermission(defaultPermission(c.Policy.Permission)); err != nil {
 		return fmt.Errorf("research: %w", err)
@@ -109,6 +128,11 @@ func (c Config) Validate() error {
 	}
 	if c.QC != nil {
 		if err := c.QC.Validate(); err != nil {
+			return err
+		}
+	}
+	if c.CollectionQC != nil {
+		if err := c.CollectionQC.Validate(); err != nil {
 			return err
 		}
 	}
@@ -133,7 +157,7 @@ type QCConfig struct {
 }
 
 func (c QCConfig) Validate() error {
-	if err := validateCriteria(c.Criteria); err != nil {
+	if err := validateCriteria(c.Criteria, "qc"); err != nil {
 		return err
 	}
 	if err := validateOptionalProviderReference(c.ModelProvider, "qc model_provider"); err != nil {
@@ -165,26 +189,125 @@ func (c QCConfig) Validate() error {
 	return nil
 }
 
-func validateCriteria(criteria cty.Value) error {
+func validateCriteria(criteria cty.Value, scope string) error {
 	if criteria.Type().Equals(cty.NilType) {
-		return errors.New("qc criteria must be a non-empty map of string")
+		return fmt.Errorf("%s criteria must be a non-empty map of string", scope)
 	}
 	unmarked, _ := criteria.UnmarkDeep()
 	if !unmarked.IsWhollyKnown() {
-		return errors.New("qc criteria must be wholly known during plan")
+		return fmt.Errorf("%s criteria must be wholly known during plan", scope)
 	}
 	if !unmarked.Type().Equals(cty.Map(cty.String)) {
-		return errors.New("qc criteria must be map of string")
+		return fmt.Errorf("%s criteria must be map of string", scope)
 	}
 	if unmarked.IsNull() || unmarked.LengthInt() == 0 {
-		return errors.New("qc criteria must be a non-empty map of string")
+		return fmt.Errorf("%s criteria must be a non-empty map of string", scope)
 	}
 	for _, value := range unmarked.AsValueMap() {
 		if value.IsNull() {
-			return errors.New("qc criteria values must not be null")
+			return fmt.Errorf("%s criteria values must not be null", scope)
 		}
 	}
 	return nil
+}
+
+// CollectionQCConfig configures the mandatory Collection QC phase. A nil
+// CollectionQC on Config represents the default mandatory Collection QC
+// behavior: the research model and default semantic sufficiency criteria.
+type CollectionQCConfig struct {
+	Criteria        cty.Value
+	ModelProvider   cty.Value
+	Model           *string
+	ReasoningEffort *string
+	Retry           provider.RetryOverride
+	Permission      *Permission
+}
+
+func (c CollectionQCConfig) Validate() error {
+	if hasValue(c.Criteria) {
+		if err := validateCriteria(c.Criteria, "collection qc"); err != nil {
+			return err
+		}
+	}
+	if err := validateOptionalProviderReference(c.ModelProvider, "collection qc model_provider"); err != nil {
+		return err
+	}
+	if c.Model != nil && strings.TrimSpace(*c.Model) == "" {
+		return errors.New("collection qc model must not be empty")
+	}
+	if c.ReasoningEffort != nil && strings.TrimSpace(*c.ReasoningEffort) == "" {
+		return errors.New("collection qc reasoning effort must not be empty")
+	}
+	if c.Permission != nil {
+		if err := validatePermission(*c.Permission); err != nil {
+			return fmt.Errorf("collection qc: %w", err)
+		}
+	}
+	if err := c.Retry.Validate(); err != nil {
+		return fmt.Errorf("collection qc retry: %w", err)
+	}
+	return nil
+}
+
+// EffectiveCollectionQC resolves the Collection QC phase configuration from
+// the research defaults and the optional collection_qc overrides.
+type EffectiveCollectionQC struct {
+	Criteria        cty.Value
+	ModelProvider   cty.Value
+	Model           string
+	Profile         string
+	ReasoningEffort *string
+	Retry           provider.RetryPolicy
+	Permission      Permission
+}
+
+func DefaultCollectionQCCriteria() cty.Value {
+	return cty.MapVal(map[string]cty.Value{
+		"sufficiency": cty.StringVal(DefaultCollectionQCCriterion),
+	})
+}
+
+func (c Config) EffectiveCollectionQC(providerRetry provider.RetryPolicy) (EffectiveCollectionQC, error) {
+	if err := c.Validate(); err != nil {
+		return EffectiveCollectionQC{}, err
+	}
+	researchRetry, err := provider.MergeRetry(providerRetry, c.Retry)
+	if err != nil {
+		return EffectiveCollectionQC{}, fmt.Errorf("research retry: %w", err)
+	}
+	effective := EffectiveCollectionQC{
+		ModelProvider:   c.ModelProvider,
+		Model:           c.Model,
+		Profile:         c.ProfileName(),
+		ReasoningEffort: cloneStringPointer(c.ReasoningEffort),
+		Retry:           researchRetry,
+		Permission:      defaultPermission(c.Policy.Permission),
+		Criteria:        DefaultCollectionQCCriteria(),
+	}
+	if c.CollectionQC == nil {
+		return effective, nil
+	}
+	effective.Retry, err = provider.MergeRetry(researchRetry, c.CollectionQC.Retry)
+	if err != nil {
+		return EffectiveCollectionQC{}, fmt.Errorf("collection qc retry: %w", err)
+	}
+	if hasValue(c.CollectionQC.ModelProvider) {
+		effective.ModelProvider = c.CollectionQC.ModelProvider
+	}
+	if c.CollectionQC.Model != nil {
+		effective.Model = *c.CollectionQC.Model
+		effective.Profile = effective.Model
+	}
+	if c.CollectionQC.ReasoningEffort != nil {
+		effective.ReasoningEffort = cloneStringPointer(c.CollectionQC.ReasoningEffort)
+	}
+	if c.CollectionQC.Permission != nil {
+		effective.Permission = *c.CollectionQC.Permission
+	}
+	if hasValue(c.CollectionQC.Criteria) {
+		effective.Criteria = c.CollectionQC.Criteria
+	}
+	return effective, nil
 }
 
 type EffectiveQC struct {

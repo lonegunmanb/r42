@@ -135,13 +135,15 @@ func TestConfigValidateRequiredFields(t *testing.T) {
 				SystemPrompt:        "research carefully",
 				Policy:              researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
 				MaxProtocolAttempts: researchspec.DefaultMaxProtocolAttempts,
+				CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
 			},
 		},
 		{
 			name: "zero permission receives default",
 			config: researchspec.Config{
-				Model:        "gpt-5.6-sol",
-				SystemPrompt: "research carefully",
+				Model:               "gpt-5.6-sol",
+				SystemPrompt:        "research carefully",
+				CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
 			},
 		},
 	}
@@ -197,7 +199,7 @@ func TestQCConfigRejectsInvalidToolCallQuota(t *testing.T) {
 func TestConfigAcceptsBuiltInToolCallQuotaWithoutToolID(t *testing.T) {
 	t.Parallel()
 
-	config := researchspec.Config{Model: "model", SystemPrompt: "prompt"}
+	config := researchspec.Config{Model: "model", SystemPrompt: "prompt", CollectionBatchSize: researchspec.DefaultCollectionBatchSize}
 	config.Policy.ToolCallQuota = map[string]int{"web_fetch": 2}
 	config.QC = &researchspec.QCConfig{
 		Criteria:      cty.MapVal(map[string]cty.Value{"accuracy": cty.StringVal("check")}),
@@ -240,11 +242,12 @@ func TestConfigEffectiveQCInheritsOnlySessionFields(t *testing.T) {
 	researchLifecycleRetries := 4
 	qcModelCallRetries := 2
 	config := researchspec.Config{
-		ModelProvider:   providerRef,
-		Model:           "research-model",
-		Profile:         "gpt-5.4",
-		SystemPrompt:    "research carefully",
-		ReasoningEffort: stringPointer("high"),
+		ModelProvider:       providerRef,
+		Model:               "research-model",
+		Profile:             "gpt-5.4",
+		SystemPrompt:        "research carefully",
+		ReasoningEffort:     stringPointer("high"),
+		CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
 		Retry: provider.RetryOverride{
 			LifecycleRetries:  &researchLifecycleRetries,
 			ErrorMessageRegex: []string{"research transient"},
@@ -296,10 +299,11 @@ func TestConfigEffectiveQCAppliesPerFieldOverrides(t *testing.T) {
 
 	qcProvider := referenceValue("model_provider.qc", "provider")
 	config := researchspec.Config{
-		ModelProvider:   referenceValue("model_provider.research", "provider"),
-		Model:           "research-model",
-		SystemPrompt:    "research carefully",
-		ReasoningEffort: stringPointer("medium"),
+		ModelProvider:       referenceValue("model_provider.research", "provider"),
+		Model:               "research-model",
+		SystemPrompt:        "research carefully",
+		ReasoningEffort:     stringPointer("medium"),
+		CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
 		Policy: researchspec.SessionPolicy{
 			Permission: researchspec.PermissionApproveAll,
 		},
@@ -360,6 +364,7 @@ func TestConfigValidateTimeout(t *testing.T) {
 			config := researchspec.Config{
 				Model:               "model",
 				SystemPrompt:        "prompt",
+				CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
 				Policy:              researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
 				MaxProtocolAttempts: researchspec.DefaultMaxProtocolAttempts,
 				Timeout:             tt.timeout,
@@ -428,9 +433,10 @@ func TestConfigValidateNestedPolicy(t *testing.T) {
 			t.Parallel()
 
 			config := researchspec.Config{
-				Model:        "model",
-				SystemPrompt: "prompt",
-				Policy:       researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+				Model:               "model",
+				SystemPrompt:        "prompt",
+				Policy:              researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+				CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
 			}
 			tt.mutate(&config)
 			assert.EqualError(t, config.Validate(), tt.expectedError)
@@ -547,9 +553,10 @@ func TestQCConfigAllowsPartialRetryUntilEffectivePolicyIsKnown(t *testing.T) {
 
 func effectiveQCFixture() researchspec.Config {
 	return researchspec.Config{
-		Model:        "model",
-		SystemPrompt: "prompt",
-		Policy:       researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+		Model:               "model",
+		SystemPrompt:        "prompt",
+		Policy:              researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+		CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
 		QC: &researchspec.QCConfig{
 			Criteria: cty.MapVal(map[string]cty.Value{"accuracy": cty.StringVal("be accurate")}),
 		},
