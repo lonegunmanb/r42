@@ -91,10 +91,9 @@ func TestCollectionRoundsExhausted(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		maxRounds     *int
-		events        []Event
-		expectedError string
+		name      string
+		maxRounds *int
+		events    []Event
 	}{
 		{
 			name:      "unlimited rounds allow multiple needs more",

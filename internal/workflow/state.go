@@ -47,7 +47,8 @@ type Config struct {
 const defaultBatchSize = 10
 
 // State is the mutable runtime state of one research workflow instance. Each
-// dynamic research member owns an isolated State instance.
+// dynamic research member owns an isolated State instance. State is not safe
+// for concurrent use.
 type State struct {
 	config Config
 
