@@ -13,6 +13,7 @@ import (
 func TestDecodeDynamicTaskDecodesCollectionFields(t *testing.T) {
 	t.Parallel()
 
+	providerRef := referenceValue("model_provider.qc", "provider")
 	task := cty.ObjectVal(map[string]cty.Value{
 		"model":                        cty.StringVal("wire-model"),
 		"system_prompt":                cty.StringVal("Collect and synthesize."),
@@ -24,9 +25,13 @@ func TestDecodeDynamicTaskDecodesCollectionFields(t *testing.T) {
 		"max_collection_rounds":        cty.NumberIntVal(3),
 		"collection_qc": cty.ObjectVal(map[string]cty.Value{
 			"criteria":         cty.ObjectVal(map[string]cty.Value{"coverage": cty.StringVal("cover the task")}),
+			"model_provider":   providerRef,
 			"model":            cty.StringVal("qc-model"),
 			"reasoning_effort": cty.StringVal("high"),
 			"permission":       cty.StringVal("approve_all"),
+			"retry": cty.ObjectVal(map[string]cty.Value{
+				"lifecycle_retries": cty.NumberIntVal(2),
+			}),
 		}),
 		"artifacts": cty.EmptyTupleVal,
 		"retry":     cty.NullVal(cty.DynamicPseudoType),
@@ -46,6 +51,9 @@ func TestDecodeDynamicTaskDecodesCollectionFields(t *testing.T) {
 	require.NotNil(t, config.CollectionQC)
 	assert.Equal(t, "qc-model", *config.CollectionQC.Model)
 	assert.Equal(t, "high", *config.CollectionQC.ReasoningEffort)
+	assert.True(t, providerRef.RawEquals(config.CollectionQC.ModelProvider))
+	require.NotNil(t, config.CollectionQC.Retry.LifecycleRetries)
+	assert.Equal(t, 2, *config.CollectionQC.Retry.LifecycleRetries)
 	assert.Equal(t, "cover the task", config.CollectionQC.Criteria.Index(cty.StringVal("coverage")).AsString())
 }
 

@@ -959,7 +959,7 @@ research "static" "market" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestSavedDynamicResearchConfigRestoresCollectionFields(t *testing.T) {
+func TestSavedDynamicResearchPlanRoundTripsExpressionAndSerial(t *testing.T) {
 	registerSchemas()
 	golden.RegisterBlock(new(researchspec.ResearchBlock))
 	golden.RegisterBlock(new(researchspec.DynamicResearchBlock))
@@ -996,6 +996,49 @@ research "dynamic" "portfolio" {
 	require.NoError(t, err)
 	assert.NotEmpty(t, dynamic.Expression)
 	assert.False(t, dynamic.Serial)
+}
+
+func TestDynamicResearchPlanResolvePropagatesCollectionQCProvider(t *testing.T) {
+	t.Parallel()
+
+	planned, err := modulespec.DecodeDynamicResearchPlan(cty.ObjectVal(map[string]cty.Value{
+		"payload": cty.StringVal(`{"expression":"[1]","providers":{"model_provider.qc":{"type":"openai","endpoint":"https://example.test"}}}`),
+	}))
+	require.NoError(t, err)
+
+	resolved, err := planned.Resolve(researchspec.Config{
+		Model: "model", SystemPrompt: "prompt",
+		CollectionQC: &researchspec.CollectionQCConfig{
+			ModelProvider: cty.ObjectVal(map[string]cty.Value{
+				"address": cty.StringVal("model_provider.qc"),
+				"kind":    cty.StringVal("provider"),
+			}),
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resolved.CollectionQCProvider)
+	assert.Equal(t, "https://example.test", resolved.CollectionQCProvider.Endpoint)
+}
+
+func TestDynamicResearchPlanResolveRejectsUnplannedCollectionQCProvider(t *testing.T) {
+	t.Parallel()
+
+	planned, err := modulespec.DecodeDynamicResearchPlan(cty.ObjectVal(map[string]cty.Value{
+		"payload": cty.StringVal(`{"expression":"[1]"}`),
+	}))
+	require.NoError(t, err)
+
+	_, err = planned.Resolve(researchspec.Config{
+		Model: "model", SystemPrompt: "prompt",
+		CollectionQC: &researchspec.CollectionQCConfig{
+			ModelProvider: cty.ObjectVal(map[string]cty.Value{
+				"address": cty.StringVal("model_provider.missing"),
+				"kind":    cty.StringVal("provider"),
+			}),
+		},
+	})
+	require.ErrorContains(t, err, "collection qc model_provider")
+	require.ErrorContains(t, err, "was not planned")
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
