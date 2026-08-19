@@ -205,6 +205,27 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 	if block.QCBlocks, err = dynamicQCBlocks(unmarked); err != nil {
 		return Config{}, err
 	}
+	if block.CollectionToolIDs, err = dynamicStringList(unmarked, "collection_tool_ids"); err != nil {
+		return Config{}, err
+	}
+	if block.CollectionSkillDirectories, err = dynamicStringList(unmarked, "collection_skill_directories"); err != nil {
+		return Config{}, err
+	}
+	if block.CollectionSkills, err = dynamicStringList(unmarked, "collection_skills"); err != nil {
+		return Config{}, err
+	}
+	if block.CollectionDisabledSkills, err = dynamicStringList(unmarked, "collection_disabled_skills"); err != nil {
+		return Config{}, err
+	}
+	if block.CollectionBatchSize, err = dynamicOptionalInt(unmarked, "collection_batch_size"); err != nil {
+		return Config{}, err
+	}
+	if block.MaxCollectionRounds, err = dynamicOptionalInt(unmarked, "max_collection_rounds"); err != nil {
+		return Config{}, err
+	}
+	if block.CollectionQCBlocks, err = dynamicCollectionQCBlocks(unmarked); err != nil {
+		return Config{}, err
+	}
 	config, err := block.toConfig()
 	if err != nil {
 		return Config{}, err
@@ -442,6 +463,43 @@ func dynamicQCBlocks(object cty.Value) ([]QCBlock, error) {
 	return []QCBlock{block}, nil
 }
 
+func dynamicCollectionQCBlocks(object cty.Value) ([]CollectionQCBlock, error) {
+	value, ok := dynamicAttribute(object, "collection_qc")
+	if !ok || value.IsNull() {
+		return nil, nil
+	}
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.Type().IsObjectType() && !unmarked.Type().IsMapType() {
+		return nil, fmt.Errorf("collection_qc must be an object")
+	}
+	block := CollectionQCBlock{ModelProvider: cty.NilVal}
+	var err error
+	if block.ModelProvider, err = dynamicOptionalValue(unmarked, "model_provider"); err != nil {
+		return nil, err
+	}
+	if block.Model, err = dynamicOptionalString(unmarked, "model"); err != nil {
+		return nil, err
+	}
+	if block.ReasoningEffort, err = dynamicOptionalString(unmarked, "reasoning_effort"); err != nil {
+		return nil, err
+	}
+	permission, err := dynamicOptionalString(unmarked, "permission")
+	if err != nil {
+		return nil, err
+	}
+	if permission != nil {
+		parsed := Permission(*permission)
+		block.Permission = &parsed
+	}
+	if criteria, ok := dynamicAttribute(unmarked, "criteria"); ok && !criteria.IsNull() {
+		block.Criteria = criteria
+	}
+	if block.RetryBlocks, err = dynamicRetryBlocks(unmarked); err != nil {
+		return nil, err
+	}
+	return []CollectionQCBlock{block}, nil
+}
+
 func dynamicOptionalBool(object cty.Value, name string) (bool, error) {
 	value, ok := dynamicAttribute(object, name)
 	if !ok || value.IsNull() {
@@ -533,6 +591,11 @@ func dynamicTaskOutputType(taskType cty.Type) cty.Type {
 	attributes["artifacts"] = cty.List(artifactValueType)
 	if taskType.HasAttribute("terminate_tool_id") {
 		attributes["result"] = cty.String
+	}
+	attributes["collection_batch_size"] = cty.Number
+	attributes["max_collection_rounds"] = cty.Number
+	if _, exists := attributes["collection_qc"]; exists {
+		attributes["collection_qc"] = collectionQCBlockType()
 	}
 	return cty.Object(attributes)
 }

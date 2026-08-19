@@ -108,7 +108,14 @@ func (p DynamicResearchPlan) Resolve(config researchspec.Config) (ResearchPlan, 
 			return ResearchPlan{}, fmt.Errorf("qc model_provider: %w", err)
 		}
 	}
-	return ResearchPlan{Config: config, Provider: modelProvider, QCProvider: qcProvider}, nil
+	var collectionQCProvider *provider.Config
+	if config.CollectionQC != nil {
+		collectionQCProvider, err = p.resolveProvider(config.CollectionQC.ModelProvider)
+		if err != nil {
+			return ResearchPlan{}, fmt.Errorf("collection qc model_provider: %w", err)
+		}
+	}
+	return ResearchPlan{Config: config, Provider: modelProvider, QCProvider: qcProvider, CollectionQCProvider: collectionQCProvider}, nil
 }
 
 func (p DynamicResearchPlan) resolveProvider(value cty.Value) (*provider.Config, error) {

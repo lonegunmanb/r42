@@ -651,6 +651,7 @@ func TestResearchConfigRejectsUnknownTypedToolIDsDuringPlan(t *testing.T) {
 		fragment string
 	}{
 		{name: "tool ids", fragment: `tool_ids = ["` + unknownID + `"]`},
+		{name: "collection tool ids", fragment: `collection_tool_ids = ["` + unknownID + `"]`},
 		{name: "terminate tool id", fragment: `terminate_tool_id = "` + unknownID + `"`},
 		{name: "allowed tools", fragment: `allowed_tools = ["` + unknownID + `"]`},
 		{name: "disallowed tools", fragment: `disallowed_tools = ["` + unknownID + `"]`},
@@ -876,6 +877,125 @@ research "static" "market" {
 		reconstructed.Config.QC.ToolIDs[0]: 2,
 		"web_search":                       3,
 	}, reconstructed.Config.QC.ToolCallQuota)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestSavedResearchConfigRestoresCollectionFields(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+external_tool "collect" {
+  description = "Collect sources"
+  program     = ["collect", "--json"]
+  input_type  = object({ query = string })
+  output_type = string
+}
+
+research "static" "market" {
+  model         = "test-model"
+  system_prompt = "Collect and synthesize."
+
+  collection_tool_ids = [external_tool.collect.id]
+  collection_skill_directories = ["skills/collection"]
+  collection_skills            = ["source-evaluation"]
+  collection_disabled_skills   = ["dangerous"]
+  collection_batch_size        = 5
+  max_collection_rounds        = 3
+
+  collection_qc {
+    criteria         = { coverage = "Cover the task." }
+    model            = "qc-model"
+    reasoning_effort = "high"
+    permission       = "approve_all"
+  }
+}
+`)
+
+	planned, err := planSource(directory, executor.ResearchConfigOptions{})
+	require.NoError(t, err)
+	node := planned.Saved.Nodes()[0]
+
+	reconstructed, err := modulespec.DecodeResearchPlan(node.Config)
+	require.NoError(t, err)
+	assert.Equal(t, []string(nil), reconstructed.Config.Policy.ToolIDs)
+	require.Len(t, reconstructed.Config.CollectionToolIDs, 1)
+	registry := planned.Saved.Tools()
+	require.Contains(t, registry, reconstructed.Config.CollectionToolIDs[0])
+	assert.Equal(t, "external_tool.collect", registry[reconstructed.Config.CollectionToolIDs[0]].Address)
+	assert.Equal(t, []string{"skills/collection"}, reconstructed.Config.CollectionSkillDirectories)
+	assert.Equal(t, []string{"source-evaluation"}, reconstructed.Config.CollectionSkills)
+	assert.Equal(t, []string{"dangerous"}, reconstructed.Config.CollectionDisabledSkills)
+	assert.Equal(t, 5, reconstructed.Config.CollectionBatchSize)
+	require.NotNil(t, reconstructed.Config.MaxCollectionRounds)
+	assert.Equal(t, 3, *reconstructed.Config.MaxCollectionRounds)
+	require.NotNil(t, reconstructed.Config.CollectionQC)
+	assert.Equal(t, "qc-model", *reconstructed.Config.CollectionQC.Model)
+	assert.Equal(t, "high", *reconstructed.Config.CollectionQC.ReasoningEffort)
+	require.Equal(t, researchspec.PermissionApproveAll, *reconstructed.Config.CollectionQC.Permission)
+	assert.Equal(t, "Cover the task.", reconstructed.Config.CollectionQC.Criteria.Index(cty.StringVal("coverage")).AsString())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestSavedResearchConfigRestoresCollectionDefaultsForLegacySnapshots(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+research "static" "market" {
+  model         = "test-model"
+  system_prompt = "Collect and synthesize."
+}
+`)
+
+	planned, err := planSource(directory, executor.ResearchConfigOptions{})
+	require.NoError(t, err)
+	reconstructed, err := modulespec.DecodeResearchPlan(planned.Saved.Nodes()[0].Config)
+
+	require.NoError(t, err)
+	assert.Equal(t, researchspec.DefaultCollectionBatchSize, reconstructed.Config.CollectionBatchSize)
+	assert.Nil(t, reconstructed.Config.MaxCollectionRounds)
+	assert.Nil(t, reconstructed.Config.CollectionQC)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestSavedDynamicResearchConfigRestoresCollectionFields(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	golden.RegisterBlock(new(researchspec.DynamicResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+external_tool "collect" {
+  description = "Collect sources"
+  program     = ["collect", "--json"]
+  input_type  = object({ query = string })
+  output_type = string
+}
+
+research "dynamic" "portfolio" {
+  tasks = [
+    {
+      model         = "test-model"
+      system_prompt = "Collect and synthesize."
+      collection_tool_ids = [external_tool.collect.id]
+      collection_batch_size = 5
+      max_collection_rounds = 3
+      collection_qc = {
+        criteria = { coverage = "Cover the task." }
+      }
+    },
+  ]
+}
+`)
+
+	planned, err := planSource(directory, executor.ResearchConfigOptions{})
+	require.NoError(t, err)
+	node := planned.Saved.Nodes()[0]
+
+	dynamic, err := modulespec.DecodeDynamicResearchPlan(node.Config)
+	require.NoError(t, err)
+	assert.NotEmpty(t, dynamic.Expression)
+	assert.False(t, dynamic.Serial)
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
