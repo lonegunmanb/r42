@@ -195,18 +195,44 @@ func (w *MarkdownWriter) absolute(path string) (string, error) {
 // resolveWithin resolves path and the workspace with EvalSymlinks and
 // verifies the resolved path stays inside the resolved workspace. A symlinked
 // final component (or any ancestor) that points outside is rejected. The kind
-// label appears in the rejection message.
+// label appears in the rejection message. Missing ancestors are tolerated so
+// nested directories can still be created by the caller.
 func resolveWithin(workspace, path, kind string) (string, error) {
 	resolvedWorkspace, err := filepath.EvalSymlinks(workspace)
 	if err != nil {
 		return "", fmt.Errorf("resolve workspace: %w", err)
 	}
-	parent := filepath.Dir(path)
-	resolvedParent, err := filepath.EvalSymlinks(parent)
+	// Find the nearest existing ancestor so a not-yet-created parent does not
+	// break resolution; its resolved form must stay inside the workspace.
+	existing := path
+	missing := []string{}
+	for {
+		_, statErr := os.Lstat(existing)
+		if statErr == nil {
+			break
+		}
+		if !os.IsNotExist(statErr) {
+			return "", fmt.Errorf("resolve artifact path: %w", statErr)
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			break
+		}
+		missing = append([]string{filepath.Base(existing)}, missing...)
+		existing = parent
+	}
+	resolvedAncestor, err := filepath.EvalSymlinks(existing)
 	if err != nil {
 		return "", fmt.Errorf("resolve artifact directory: %w", err)
 	}
-	target := filepath.Join(resolvedParent, filepath.Base(path))
+	if !withinWorkspace(resolvedWorkspace, resolvedAncestor) {
+		return "", fmt.Errorf("%s artifact path is outside the block workspace", kind)
+	}
+	// Rebuild the full path from the resolved ancestor plus the missing tail.
+	target := resolvedAncestor
+	for _, component := range missing {
+		target = filepath.Join(target, component)
+	}
 	// The final component may itself be a symlink; resolve it and verify the
 	// target stays inside the workspace.
 	resolvedTarget, err := filepath.EvalSymlinks(target)

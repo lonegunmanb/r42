@@ -244,10 +244,10 @@ func TestWriteMarkdownArtifact(t *testing.T) {
 
 		writer, err := NewMarkdownWriter(workspace)
 		require.NoError(t, err)
-		_, err = writer.Write(filepath.Join("linkdir", "report.md"), "# Pwned\n")
+		_, err = writer.Write(filepath.Join("linkdir", "newsub", "report.md"), "# Pwned\n")
 		require.ErrorContains(t, err, "outside")
-		// The external directory must not have been created.
-		_, statErr := os.Stat(filepath.Join(outsideDir, "report.md"))
+		// The external newsub directory must not have been created.
+		_, statErr := os.Stat(filepath.Join(outsideDir, "newsub"))
 		require.Error(t, statErr)
 	})
 }
