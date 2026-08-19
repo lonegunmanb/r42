@@ -7,6 +7,7 @@ package evidence
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,7 +110,7 @@ func (a *ArtifactAccess) resolve(name, path string) (string, error) {
 	}
 	// Resolve symlinks so a workspace-internal link cannot read content from
 	// outside the block workspace.
-	secure, err := resolveWithin(a.workspace, resolved)
+	secure, err := resolveWithin(a.workspace, resolved, "candidate")
 	if err != nil {
 		return "", err
 	}
@@ -164,13 +165,14 @@ func (w *MarkdownWriter) Write(path, content string) (string, error) {
 	if !withinWorkspace(w.workspace, resolved) {
 		return "", errors.New("markdown artifact path is outside the block workspace")
 	}
-	parent := filepath.Dir(resolved)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return "", fmt.Errorf("create artifact directory: %w", err)
-	}
-	secure, err := resolveWithin(w.workspace, resolved)
+	// Resolve and verify the parent directory before creating anything so a
+	// symlinked parent cannot create directories outside the workspace.
+	secure, err := resolveWithin(w.workspace, resolved, "markdown")
 	if err != nil {
 		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(secure), 0o755); err != nil {
+		return "", fmt.Errorf("create artifact directory: %w", err)
 	}
 	if err := os.WriteFile(secure, []byte(content), 0o644); err != nil {
 		return "", fmt.Errorf("write markdown artifact: %w", err)
@@ -192,8 +194,9 @@ func (w *MarkdownWriter) absolute(path string) (string, error) {
 
 // resolveWithin resolves path and the workspace with EvalSymlinks and
 // verifies the resolved path stays inside the resolved workspace. A symlinked
-// final component (or any ancestor) that points outside is rejected.
-func resolveWithin(workspace, path string) (string, error) {
+// final component (or any ancestor) that points outside is rejected. The kind
+// label appears in the rejection message.
+func resolveWithin(workspace, path, kind string) (string, error) {
 	resolvedWorkspace, err := filepath.EvalSymlinks(workspace)
 	if err != nil {
 		return "", fmt.Errorf("resolve workspace: %w", err)
@@ -214,7 +217,7 @@ func resolveWithin(workspace, path string) (string, error) {
 		resolvedTarget = target
 	}
 	if !withinWorkspace(resolvedWorkspace, resolvedTarget) {
-		return "", errors.New("markdown artifact path is outside the block workspace")
+		return "", fmt.Errorf("%s artifact path is outside the block workspace", kind)
 	}
 	return resolvedTarget, nil
 }
@@ -225,15 +228,11 @@ func readBounded(path string, maxBytes int) (string, error) {
 		return "", fmt.Errorf("open %s: %w", path, err)
 	}
 	defer func() { _ = file.Close() }()
-	info, err := file.Stat()
+	content, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)))
 	if err != nil {
-		return "", fmt.Errorf("stat %s: %w", path, err)
-	}
-	buffer := make([]byte, min(int64(maxBytes), info.Size()))
-	if _, err := file.Read(buffer); err != nil {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
-	return string(buffer), nil
+	return string(content), nil
 }
 
 func withinWorkspace(root, path string) bool {

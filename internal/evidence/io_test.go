@@ -229,6 +229,27 @@ func TestWriteMarkdownArtifact(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "original", string(content))
 	})
+
+	t.Run("rejects symlinked parent directory outside workspace", func(t *testing.T) {
+		t.Parallel()
+
+		workspace := t.TempDir()
+		outside := t.TempDir()
+		outsideDir := filepath.Join(outside, "dir")
+		require.NoError(t, os.Mkdir(outsideDir, 0o755))
+		link := filepath.Join(workspace, "linkdir")
+		if err := os.Symlink(outsideDir, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+
+		writer, err := NewMarkdownWriter(workspace)
+		require.NoError(t, err)
+		_, err = writer.Write(filepath.Join("linkdir", "report.md"), "# Pwned\n")
+		require.ErrorContains(t, err, "outside")
+		// The external directory must not have been created.
+		_, statErr := os.Stat(filepath.Join(outsideDir, "report.md"))
+		require.Error(t, statErr)
+	})
 }
 
 func TestWriteMarkdownOverwritesExistingArtifact(t *testing.T) {
