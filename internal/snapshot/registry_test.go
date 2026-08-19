@@ -148,10 +148,12 @@ func TestRegistryDeduplicatesContent(t *testing.T) {
 	registry := NewRegistry(workspace)
 	firstRegistration, err := registry.RegisterPath(first)
 	require.NoError(t, err)
+	require.True(t, firstRegistration.New)
 	assert.Equal(t, 1, registry.PendingCount())
 
 	secondRegistration, err := registry.RegisterPath(second)
 	require.NoError(t, err)
+	assert.False(t, secondRegistration.New)
 	assert.Equal(t, firstRegistration.ID, secondRegistration.ID)
 	assert.Equal(t, 1, registry.PendingCount())
 

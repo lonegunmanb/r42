@@ -97,13 +97,36 @@ func TestRegisterToolHandler(t *testing.T) {
 
 		workspace := t.TempDir()
 		handler := NewRegisterHandler(NewContext(workspace, 10, nil))
+		first := true
 		for index := range 3 {
 			file := filepath.Join(workspace, "dup-"+string(rune('a'+index))+".md")
 			require.NoError(t, os.WriteFile(file, []byte("same"), 0o644))
 			response := handler.Register(RegisterArgs{Path: file})
 			require.True(t, response.Accepted)
+			if index == 0 {
+				require.NotNil(t, response.Output)
+			}
+			if first {
+				// The first registration creates a fresh snapshot.
+				assert.Equal(t, 1, handler.Context().State.UnreviewedSnapshotCount())
+				first = false
+			}
 		}
 		assert.Equal(t, 1, handler.Context().State.UnreviewedSnapshotCount())
+	})
+
+	t.Run("default batch size ten enforces checkpoint pending", func(t *testing.T) {
+		t.Parallel()
+
+		workspace := t.TempDir()
+		handler := NewRegisterHandler(NewContext(workspace, 0, nil))
+		for index := range 10 {
+			file := filepath.Join(workspace, "batch-"+string(rune('a'+index))+".md")
+			require.NoError(t, os.WriteFile(file, []byte("content "+string(rune('a'+index))), 0o644))
+			response := handler.Register(RegisterArgs{Path: file})
+			require.True(t, response.Accepted)
+		}
+		require.True(t, handler.Context().State.CheckpointPending())
 	})
 }
 
