@@ -329,7 +329,8 @@ func TestRegistryRejectsSymlinkEscape(t *testing.T) {
 func TestRegistryConcurrentToolResultDedup(t *testing.T) {
 	t.Parallel()
 
-	registry := NewRegistry(t.TempDir())
+	workspace := t.TempDir()
+	registry := NewRegistry(workspace)
 	require.NoError(t, registry.RetainToolResult("call-1", "identical content"))
 	require.NoError(t, registry.RetainToolResult("call-2", "identical content"))
 
@@ -349,4 +350,8 @@ func TestRegistryConcurrentToolResultDedup(t *testing.T) {
 	require.NoError(t, errors[1])
 	assert.Equal(t, results[0].ID, results[1].ID)
 	assert.Equal(t, 1, registry.PendingCount())
+
+	managedFiles, err := os.ReadDir(filepath.Join(workspace, ".r42-snapshots"))
+	require.NoError(t, err)
+	assert.Len(t, managedFiles, 1)
 }

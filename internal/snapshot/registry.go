@@ -111,14 +111,14 @@ func (r *Registry) RegisterToolResult(toolCallID string) (Registration, error) {
 		return Registration{}, err
 	}
 	// A concurrent registration of identical content may have claimed this
-	// hash first; the managed file we just wrote is then redundant.
-	r.mu.Lock()
-	if claimed, dup := r.contentHashes[hash]; dup && claimed != registration.ID {
+	// hash first; registerContent then returns the claimed registration whose
+	// path differs from the managed file we just wrote, which is redundant.
+	if registration.Path != path {
+		r.mu.Lock()
 		_ = os.Remove(path)
 		r.mu.Unlock()
-		return Registration{ID: claimed, Path: r.registered[claimed]}, nil
+		return registration, nil
 	}
-	r.mu.Unlock()
 	return registration, nil
 }
 
@@ -164,6 +164,7 @@ func (r *Registry) PendingSnapshotIDs() []string {
 }
 
 // ReviewedSnapshotIDs returns snapshot IDs that received a valid verdict.
+// The order is not deterministic.
 func (r *Registry) ReviewedSnapshotIDs() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
