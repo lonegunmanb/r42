@@ -106,7 +106,20 @@ func (r *Registry) RegisterToolResult(toolCallID string) (Registration, error) {
 	if err != nil {
 		return Registration{}, err
 	}
-	return r.registerContent(path, hash)
+	registration, err := r.registerContent(path, hash)
+	if err != nil {
+		return Registration{}, err
+	}
+	// A concurrent registration of identical content may have claimed this
+	// hash first; the managed file we just wrote is then redundant.
+	r.mu.Lock()
+	if claimed, dup := r.contentHashes[hash]; dup && claimed != registration.ID {
+		_ = os.Remove(path)
+		r.mu.Unlock()
+		return Registration{ID: claimed, Path: r.registered[claimed]}, nil
+	}
+	r.mu.Unlock()
+	return registration, nil
 }
 
 // Register validates source exclusivity and dispatches to one of the two
@@ -196,15 +209,25 @@ func (r *Registry) registerPath(path string) (Registration, error) {
 	if err != nil {
 		return Registration{}, fmt.Errorf("resolve snapshot path: %w", err)
 	}
-	if !isWithin(r.workspace, clean) {
-		return Registration{}, fmt.Errorf("snapshot path %q is outside the block workspace", path)
-	}
 	info, err := os.Stat(clean)
 	if err != nil {
 		return Registration{}, fmt.Errorf("snapshot path %q does not exist: %w", path, err)
 	}
 	if info.IsDir() {
 		return Registration{}, fmt.Errorf("snapshot path %q is not a file", path)
+	}
+	// Resolve symlinks so a workspace-internal link cannot smuggle in
+	// content from outside the block workspace.
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return Registration{}, fmt.Errorf("resolve snapshot path %q: %w", path, err)
+	}
+	workspace, err := filepath.EvalSymlinks(r.workspace)
+	if err != nil {
+		return Registration{}, fmt.Errorf("resolve workspace: %w", err)
+	}
+	if !isWithin(workspace, resolved) {
+		return Registration{}, fmt.Errorf("snapshot path %q is outside the block workspace", path)
 	}
 	if info.Size() == 0 {
 		return Registration{}, fmt.Errorf("snapshot path %q is empty", path)

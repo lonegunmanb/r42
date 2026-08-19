@@ -1,9 +1,11 @@
 package snapshot
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -303,4 +305,48 @@ func TestRegistryRegisterToolResultRejectsMissingToolCall(t *testing.T) {
 	registry := NewRegistry(t.TempDir())
 	_, err := registry.RegisterToolResult("")
 	require.ErrorContains(t, err, "tool call id")
+}
+
+func TestRegistryRejectsSymlinkEscape(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.md")
+	require.NoError(t, os.WriteFile(secret, []byte("outside content"), 0o644))
+
+	link := filepath.Join(workspace, "link.md")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	registry := NewRegistry(workspace)
+	_, err := registry.RegisterPath(link)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "outside the block workspace")
+}
+
+func TestRegistryConcurrentToolResultDedup(t *testing.T) {
+	t.Parallel()
+
+	registry := NewRegistry(t.TempDir())
+	require.NoError(t, registry.RetainToolResult("call-1", "identical content"))
+	require.NoError(t, registry.RetainToolResult("call-2", "identical content"))
+
+	var wg sync.WaitGroup
+	results := make([]Registration, 2)
+	errors := make([]error, 2)
+	for index := range 2 {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			results[index], errors[index] = registry.RegisterToolResult(fmt.Sprintf("call-%d", index+1))
+		}(index)
+	}
+	wg.Wait()
+
+	require.NoError(t, errors[0])
+	require.NoError(t, errors[1])
+	assert.Equal(t, results[0].ID, results[1].ID)
+	assert.Equal(t, 1, registry.PendingCount())
 }
