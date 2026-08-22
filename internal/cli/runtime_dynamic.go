@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"sync"
 	"time"
 
@@ -187,7 +190,15 @@ func (b *dynamicResearchApplyBlock) applyTask(
 	if err := b.recordLifecycle("block.factory", debuglog.StatusStarted, event, started, nil); err != nil {
 		return err
 	}
-	block, err := b.factory.newResearchBlock(ctx, address, b.plans[index], func(_ string, value cty.Value) {
+	parentWorkspace, err := b.factory.run.Workspace(b.factory.CanonicalAddress(b.address))
+	if err != nil {
+		return err
+	}
+	workspace := filepath.Join(parentWorkspace, strconv.Itoa(index))
+	if err = os.MkdirAll(workspace, 0o700); err != nil {
+		return fmt.Errorf("create dynamic research task workspace %s: %w", address, err)
+	}
+	block, err := b.factory.newResearchBlock(ctx, address, workspace, b.plans[index], func(_ string, value cty.Value) {
 		*result = value
 	})
 	if block == nil && err == nil {

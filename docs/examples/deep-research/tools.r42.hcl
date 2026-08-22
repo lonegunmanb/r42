@@ -225,11 +225,12 @@ go_tool "save_snapshot" {
 }
 
 go_tool "submit_knowledge" {
-  description = "Submit one subquestion's knowledge records and exact source quotes linked to saved Markdown snapshots, validate their links, and write knowledge.json."
+  description = "Submit one subquestion's knowledge records and exact source quotes linked by registered snapshot IDs, validate their links, and write knowledge.json. `knowledge.confidence` allowed values: `high`, `medium`, `low`."
 
   source = <<-GO
     import (
       "context"
+      "encoding/hex"
       "encoding/json"
       "fmt"
       "net/url"
@@ -242,7 +243,7 @@ go_tool "submit_knowledge" {
       ID           string `json:"id"`
       SourceTitle  string `json:"source_title"`
       URL          string `json:"url"`
-      SnapshotPath string `json:"snapshot_path"`
+      SnapshotID   string `json:"snapshot_id"`
       Locator      string `json:"locator"`
       ExactQuote   string `json:"exact_quote"`
     }
@@ -324,8 +325,8 @@ go_tool "submit_knowledge" {
         if !validHTTPURL(quote.URL) {
           issues = append(issues, newIssue("quote_url", path+".url", "must be an absolute HTTP or HTTPS URL"))
         }
-        if !existingSnapshot(quote.SnapshotPath) {
-          issues = append(issues, newIssue("snapshot_path", path+".snapshot_path", "must name an existing absolute Markdown snapshot under the current block's snapshots directory"))
+        if !validSnapshotID(quote.SnapshotID) {
+          issues = append(issues, newIssue("snapshot_id", path+".snapshot_id", "must name a registered snapshot ID authorized by r42"))
         }
       }
 
@@ -374,13 +375,13 @@ go_tool "submit_knowledge" {
       return err == nil && parsed.Host != "" && (parsed.Scheme == "http" || parsed.Scheme == "https")
     }
 
-    func existingSnapshot(raw string) bool {
-      path := filepath.Clean(strings.TrimSpace(raw))
-      workspace, err := os.Getwd()
-      if err != nil {
+    func validSnapshotID(raw string) bool {
+      id := strings.TrimSpace(raw)
+      if len(id) != len("snapshot-")+32 || !strings.HasPrefix(id, "snapshot-") {
         return false
       }
-      return safePathUnderRoot(path, filepath.Join(workspace, "snapshots"), ".md", true)
+      _, err := hex.DecodeString(strings.TrimPrefix(id, "snapshot-"))
+      return err == nil
     }
 
     func validBlockArtifactPath(raw, name string) bool {
@@ -463,7 +464,7 @@ go_tool "submit_knowledge" {
 }
 
 go_tool "submit_conflict_resolution" {
-  description = "Submit detected cross-subquestion conflicts and their evidence-backed resolutions, then write resolution.json."
+  description = "Submit detected cross-subquestion conflicts and their evidence-backed resolutions, then write resolution.json. `conflicts.status` allowed values: `resolved`, `unresolved`."
 
   source = <<-GO
     import (

@@ -185,6 +185,14 @@ func (r *Registry) MarkReviewed(id string) {
 	r.reviewed[id] = struct{}{}
 }
 
+// IsReviewed reports whether Collection QC accepted a registered snapshot ID.
+func (r *Registry) IsReviewed(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.reviewed[id]
+	return ok
+}
+
 // Snapshots returns every registered snapshot in registration order.
 func (r *Registry) Snapshots() []Snapshot {
 	r.mu.Lock()

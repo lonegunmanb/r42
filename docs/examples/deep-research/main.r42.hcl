@@ -27,9 +27,11 @@ locals {
     continue with the evidence already collected.
   PROMPT
 
-  deep_dive_tool_call_quota = {
+  deep_dive_tool_call_quota = var.web_fetch_tool_call_quota == null ? {} : {
     web_fetch = var.web_fetch_tool_call_quota
   }
+
+  offline_disallowed_tools = ["web_search", "web_fetch"]
 }
 
 research "static" "plan" {
@@ -67,6 +69,10 @@ research "static" "plan" {
     evidence.
     You must finish by calling ${go_tool.submit_research_plan.id}.
 
+    During Collection, do not acquire external evidence; the topic is the
+    complete input for planning, so submit an empty collection checkpoint.
+    During closed Research, create the plan and call the typed submission tool.
+
     Never use PowerShell, a shell, curl, wget, or scripts and command-line
     programs to search the web or download remote content. Do not use them as
     a workaround when a search or source-reading tool reaches its call quota
@@ -85,6 +91,7 @@ research "static" "plan" {
   PROMPT
   tool_ids          = [go_tool.submit_research_plan.id]
   terminate_tool_id = go_tool.submit_research_plan.id
+  disallowed_tools  = local.offline_disallowed_tools
   permission        = "approve_all"
 
   qc {
@@ -103,7 +110,7 @@ research "static" "plan" {
 research "dynamic" "parallel_deep_dive" {
   serial = false
   tasks = [
-    for task in (length(coalesce(var.research_plan, [])) > 0 ? local.supplied_research_tasks : jsondecode(research.static.plan["default"].result).parallel_tasks) : {
+    for index, task in (length(coalesce(var.research_plan, [])) > 0 ? local.supplied_research_tasks : jsondecode(research.static.plan["default"].result).parallel_tasks) : {
       id               = task.id
       subquestion      = task.subquestion
       instructions     = task.instructions
@@ -123,14 +130,19 @@ research "dynamic" "parallel_deep_dive" {
         ${task.instructions}
 
         Any permitted upstream knowledge is included directly in this prompt.
-        Save the complete material returned by every source read as Markdown
-        under "${block_wd()}/snapshots/" before citing it. Call
-        ${go_tool.save_snapshot.id} with that path and the complete Markdown
-        content. Associate every quote with its exact snapshot_path, URL,
-        locator, and verbatim text.
-        Research this subquestion independently. Then call
+
+        During Collection, research this subquestion independently. Save the
+        complete material returned by every retained source as Markdown under
+        "${block_wd()}/${index}/snapshots/" by calling ${go_tool.save_snapshot.id}, then
+        register the returned path with r42_register_snapshot. Submit a
+        collection checkpoint once the evidence is sufficient.
+
+        During closed Research, do not search or fetch. Use the snapshot IDs
+        supplied by r42 with r42_read_snapshot to inspect registered evidence. Associate
+        every quote with its registered snapshot_id, URL, locator, and verbatim
+        text. Then call
         ${go_tool.submit_knowledge.id} with artifact_path exactly
-        "${block_wd()}/${task.id}/knowledge.json", subquestion exactly as
+        "${block_wd()}/${index}/${task.id}/knowledge.json", subquestion exactly as
         assigned above, atomic knowledge claims with IDs prefixed
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
@@ -143,17 +155,16 @@ research "dynamic" "parallel_deep_dive" {
       artifacts = [{
         name      = "knowledge"
         type      = "file"
-        path      = "${block_wd()}/${task.id}/knowledge.json"
+        path      = "${block_wd()}/${index}/${task.id}/knowledge.json"
         required  = true
         non_empty = true
       }]
       retry = null
       qc = {
         criteria = {
-          knowledge_items = "Parse the candidate and knowledge.json. Check every knowledge item individually: its ID is unique, its claim answers the assigned subquestion, its confidence is justified, and its quote_ids support the complete claim."
-          quote_records = "Check every quote record individually. Read its snapshot_path, verify the Markdown snapshot exists under snapshots, locate the passage using locator, and verify exact_quote is verbatim snapshot text rather than a paraphrase or model-generated wording."
-          traceability = "Verify both directions of the evidence graph: every knowledge item cites at least one valid quote, every cited quote and snapshot exists, every quote is used, and no source is cited only by title or URL without a checked snapshot."
-          artifact_consistency = "Read the declared knowledge.json and verify it is semantically identical to the accepted typed-tool candidate."
+          knowledge_items = "Judge whether every knowledge claim answers the assigned subquestion, expresses uncertainty carefully, and is fully supported by its cited quote records."
+          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool snapshot existence and text matching as authoritative."
+          traceability = "Judge whether the cited evidence is sufficient and decision-relevant, and whether material contrary evidence or uncertainty is omitted. Treat typed-tool IDs and graph references as authoritative."
         }
         reasoning_effort = var.reasoning_effort
         max_qc_rounds    = 3
@@ -166,7 +177,7 @@ research "dynamic" "parallel_deep_dive" {
 research "dynamic" "independent_serial_deep_dive" {
   serial = true
   tasks = [
-    for task in (length(coalesce(var.research_plan, [])) > 0 ? [] : jsondecode(research.static.plan["default"].result).independent_serial_tasks) : {
+    for index, task in (length(coalesce(var.research_plan, [])) > 0 ? [] : jsondecode(research.static.plan["default"].result).independent_serial_tasks) : {
       id               = task.id
       subquestion      = task.subquestion
       instructions     = task.instructions
@@ -189,13 +200,20 @@ research "dynamic" "independent_serial_deep_dive" {
         This group runs one task
         at a time but does not wait for the parallel
         group. Research independently without assuming access to another task's
-        result. Save the complete material returned by every source read as
-        Markdown under "${block_wd()}/snapshots/" before citing it. Call
-        ${go_tool.save_snapshot.id} with that path and the complete Markdown
-        content. Associate every quote with its exact snapshot_path, URL,
-        locator, and verbatim text. Then call ${go_tool.submit_knowledge.id}
+        result.
+
+        During Collection, save the complete material returned by every
+        retained source as Markdown under "${block_wd()}/${index}/snapshots/" by calling
+        ${go_tool.save_snapshot.id}, then register the returned path with
+        r42_register_snapshot. Submit a collection checkpoint once the evidence
+        is sufficient.
+
+        During closed Research, do not search or fetch. Use the snapshot IDs
+        supplied by r42 with r42_read_snapshot to inspect registered evidence. Associate
+        every quote with its registered snapshot_id, URL, locator, and verbatim
+        text. Then call ${go_tool.submit_knowledge.id}
         with artifact_path
-        exactly "${block_wd()}/${task.id}/knowledge.json", subquestion exactly
+        exactly "${block_wd()}/${index}/${task.id}/knowledge.json", subquestion exactly
         as assigned above, atomic knowledge claims with IDs prefixed
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
@@ -208,17 +226,16 @@ research "dynamic" "independent_serial_deep_dive" {
       artifacts = [{
         name      = "knowledge"
         type      = "file"
-        path      = "${block_wd()}/${task.id}/knowledge.json"
+        path      = "${block_wd()}/${index}/${task.id}/knowledge.json"
         required  = true
         non_empty = true
       }]
       retry = null
       qc = {
         criteria = {
-          knowledge_items = "Parse the candidate and knowledge.json. Check every knowledge item individually: its ID is unique, its claim answers the assigned subquestion, its confidence is justified, and its quote_ids support the complete claim."
-          quote_records = "Check every quote record individually. Read its snapshot_path, verify the Markdown snapshot exists under snapshots, locate the passage using locator, and verify exact_quote is verbatim snapshot text rather than a paraphrase or model-generated wording."
-          traceability = "Verify both directions of the evidence graph: every knowledge item cites at least one valid quote, every cited quote and snapshot exists, every quote is used, and no source is cited only by title or URL without a checked snapshot."
-          artifact_consistency = "Read the declared knowledge.json and verify it is semantically identical to the accepted typed-tool candidate."
+          knowledge_items = "Judge whether every knowledge claim answers the assigned subquestion, expresses uncertainty carefully, and is fully supported by its cited quote records."
+          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool snapshot existence and text matching as authoritative."
+          traceability = "Judge whether the cited evidence is sufficient and decision-relevant, and whether material contrary evidence or uncertainty is omitted. Treat typed-tool IDs and graph references as authoritative."
         }
         reasoning_effort = var.reasoning_effort
         max_qc_rounds    = 3
@@ -235,7 +252,7 @@ research "dynamic" "final_serial_deep_dive" {
     research.dynamic.independent_serial_deep_dive,
   ]
   tasks = [
-    for task in (length(coalesce(var.research_plan, [])) > 0 ? [] : jsondecode(research.static.plan["default"].result).final_serial_tasks) : {
+    for index, task in (length(coalesce(var.research_plan, [])) > 0 ? [] : jsondecode(research.static.plan["default"].result).final_serial_tasks) : {
       id               = task.id
       subquestion      = task.subquestion
       instructions     = task.instructions
@@ -268,13 +285,20 @@ research "dynamic" "final_serial_deep_dive" {
           [for item in research.dynamic.independent_serial_deep_dive.tasks : "- ${one(item.artifacts).path}"],
         ))}
 
-        Save any new source material as Markdown under
-        "${block_wd()}/snapshots/" before citing it. Call
-        ${go_tool.save_snapshot.id} with that path and the complete Markdown
-        content. Associate every quote with its exact snapshot_path, URL,
-        locator, and verbatim text. Then call ${go_tool.submit_knowledge.id}
+        During Collection, collect only evidence needed beyond the validated
+        upstream JSON. Save each retained source as Markdown under
+        "${block_wd()}/${index}/snapshots/" with ${go_tool.save_snapshot.id}, register the
+        returned path with r42_register_snapshot, and submit a collection
+        checkpoint. If the upstream JSON is sufficient, submit an empty
+        collection checkpoint instead of searching.
+
+        During closed Research, do not search or fetch. Use the snapshot IDs
+        supplied by r42 with r42_read_snapshot for any newly registered evidence and use the
+        validated JSON above directly. Associate every new quote with its exact
+        snapshot_id, URL, locator, and verbatim text. Then call
+        ${go_tool.submit_knowledge.id}
         with artifact_path exactly
-        "${block_wd()}/${task.id}/knowledge.json", subquestion exactly as
+        "${block_wd()}/${index}/${task.id}/knowledge.json", subquestion exactly as
         assigned above, atomic knowledge claims with IDs prefixed
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
@@ -287,17 +311,16 @@ research "dynamic" "final_serial_deep_dive" {
       artifacts = [{
         name      = "knowledge"
         type      = "file"
-        path      = "${block_wd()}/${task.id}/knowledge.json"
+        path      = "${block_wd()}/${index}/${task.id}/knowledge.json"
         required  = true
         non_empty = true
       }]
       retry = null
       qc = {
         criteria = {
-          upstream_use = "Read every upstream knowledge artifact listed in the prompt and verify the candidate accurately uses the relevant claims and quotes rather than merely mentioning the files."
-          knowledge_items = "Check every new knowledge item individually: its ID is unique, its claim answers the assigned subquestion, its confidence is justified, and its quote_ids support the complete claim."
-          quote_records = "Check every new quote record individually. Read its snapshot_path, verify the Markdown snapshot exists under snapshots, locate the cited passage using locator, and verify exact_quote is verbatim snapshot text."
-          artifact_consistency = "Read the declared knowledge.json and verify it is semantically identical to the accepted typed-tool candidate."
+          upstream_use = "Judge whether the candidate accurately uses the relevant claims and quotes from the validated upstream JSON included in the prompt."
+          knowledge_items = "Judge whether every new claim answers the assigned subquestion, expresses uncertainty carefully, and is fully supported by its cited quotes."
+          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool snapshot existence and text matching as authoritative."
         }
         reasoning_effort = var.reasoning_effort
         max_qc_rounds    = 3
@@ -312,13 +335,18 @@ research "static" "resolve_conflicts" {
   model            = var.model
   reasoning_effort = var.reasoning_effort
   system_prompt = <<-PROMPT
-    You are the conflict chair for a deep-research matrix. Read every upstream
-    knowledge.json file. Detect claims that disagree in value, scope, date,
+    You are the conflict chair for a deep-research matrix. Use the validated
+    upstream knowledge JSON included in the prompt. Detect claims that disagree
+    in value, scope, date,
     definition, causality, or source interpretation. Resolve a conflict only
     when the quotes justify a preference; otherwise preserve it as unresolved.
     Never silently drop a minority finding.
 
     You must finish by calling ${go_tool.submit_conflict_resolution.id}.
+
+    During Collection, do not acquire external evidence; the validated upstream
+    JSON is the complete evidence basis, so submit an empty collection checkpoint.
+    During closed Research, compare that JSON and submit the resolution.
 
     Never use PowerShell, a shell, curl, wget, or scripts and command-line
     programs to search the web or download remote content. Do not use them as
@@ -355,6 +383,7 @@ research "static" "resolve_conflicts" {
   PROMPT
   tool_ids          = [go_tool.submit_conflict_resolution.id]
   terminate_tool_id = go_tool.submit_conflict_resolution.id
+  disallowed_tools  = local.offline_disallowed_tools
   permission        = "approve_all"
 
   artifact "resolution" {
@@ -366,11 +395,10 @@ research "static" "resolve_conflicts" {
 
   qc {
     criteria = {
-      coverage = "Read every upstream knowledge.json path listed in the task and verify reviewed_artifacts includes each one exactly once."
+      coverage = "Judge whether the resolution considers every subquestion represented in the validated upstream JSON. Treat typed-tool reviewed_artifacts validation as authoritative."
       detection = "Compare every knowledge claim across subquestions and verify contradictions in values, dates, scope, definitions, causality, and source interpretation were detected; verify an empty conflict list only when the files are genuinely compatible."
       decisions = "Check every conflict decision against its knowledge IDs and supporting quote IDs. A resolved decision must prefer the stronger evidence; an unresolved decision must preserve the uncertainty for synthesis."
-      snapshots = "For every source-backed claim used in a conflict decision, read the referenced snapshot_path and verify the snapshot exists under the originating task's snapshots directory."
-      artifact_consistency = "Read resolution.json and verify it is semantically identical to the accepted typed-tool candidate."
+      evidence_semantics = "Judge whether the accepted quotes actually support each conflict decision without changing scope or qualifiers. Treat typed-tool paths, IDs, and text matching as authoritative."
     }
     reasoning_effort = var.reasoning_effort
     max_qc_rounds    = 3
@@ -403,6 +431,10 @@ research "static" "synthesize" {
     conclusions to model synthesis, or explains paywalls or exhausted web
     quotas. Evidence limitations may be mentioned only when they are stated
     in the validated artifacts and are relevant to the supported conclusion.
+
+    During Collection, do not acquire external evidence; the validated upstream
+    JSON is the complete evidence basis, so submit an empty collection checkpoint.
+    During closed Research, synthesize only that JSON and write the report.
 
     Never use PowerShell, a shell, curl, wget, or scripts and command-line
     programs to search the web or download remote content. Do not use them as
@@ -445,7 +477,7 @@ research "static" "synthesize" {
     files, and do not use pretrained knowledge or opinion to make the report
     sound complete.
   PROMPT
-  disallowed_tools = ["ask_user", "web_search", "web_fetch"]
+  disallowed_tools = concat(["ask_user"], local.offline_disallowed_tools)
   permission       = "approve_all"
 
   artifact "report" {
@@ -457,10 +489,10 @@ research "static" "synthesize" {
 
   qc {
     criteria = {
-      mechanical_audit = "Call ${external_tool.audit_synthesis.id} exactly once in each QC round before judging the current report revision. Pass report_path as the declared report artifact, knowledge_paths as the complete Validated knowledge artifacts list from the task, and resolution_path as the Conflict-resolution artifact. Treat its quote-ID, source-URL, unused-reference, snapshot-existence, and text-equivalence checks as authoritative. Preserve every reported mechanical issue in the QC verdict, but do not repeat those checks with grep or view."
-      plan_coverage = "Read the report and the knowledge.json artifacts, but not their snapshots, and verify the report answers every planner-produced subquestion."
+      mechanical_audit = "Call ${external_tool.audit_synthesis.id} exactly once in each QC round before judging the current report revision. Pass report_path as the declared report artifact, knowledge_paths as the complete Validated knowledge artifacts list from the task, and resolution_path as the Conflict-resolution artifact. Treat its quote-ID, source-URL, unused-reference, and snapshot-ID checks as authoritative; upstream Research typed tools already validated snapshot authorization and exact quote text. Preserve every reported mechanical issue in the QC verdict, but do not repeat those checks with grep or view."
+      plan_coverage = "Use the validated knowledge JSON included in the task to judge whether the report answers every planner-produced subquestion."
       factual_fidelity = "Use each knowledge item's claim, confidence, quote_ids, and exact_quote fields to judge whether every material report statement and conclusion is logically supported without extrapolation. Reject any statement that appears to come from model training, memory, general background knowledge, assumption, or opinion rather than the validated artifacts. This is a semantic judgment; do not repeat the typed tool's text matching."
-      conflict_handling = "Read resolution.json and verify all resolved and unresolved conflicts are represented exactly as decided, without hiding residual uncertainty."
+      conflict_handling = "Use the included conflict-resolution JSON to judge whether all resolved and unresolved conflicts are represented faithfully without hiding residual uncertainty."
       citation_semantics = "For citations that mechanically pass, decide whether the cited exact quote actually supports the surrounding report claim. Do not reopen snapshots unless the mechanical audit itself reports an unreadable or unmatched quote."
       provenance_guard = "Reject a report that includes a 信源限制说明 or equivalent training-data/knowledge-cutoff/paywall/quota disclaimer, or that uses such limitations as a reason to introduce uncited model opinion. Require unsupported conclusions to be removed or explicitly marked as insufficient evidence."
     }

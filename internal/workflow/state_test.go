@@ -144,6 +144,51 @@ func TestCollectionLimitExhaustedDuringReview(t *testing.T) {
 	assert.Equal(t, 2, state.CollectionRoundsUsed())
 }
 
+func TestCollectorCanPermanentlyExhaustUnlimitedCollection(t *testing.T) {
+	t.Parallel()
+
+	state := New(Config{})
+	require.NoError(t, state.Begin())
+	require.NoError(t, state.MarkCollectionExhausted())
+	assert.True(t, state.CollectionLimitExhausted())
+	require.NoError(t, state.Advance(EventCollectionCheckpoint))
+	require.NoError(t, state.Advance(EventCollectionLimitExhausted))
+	require.NoError(t, state.Advance(EventResearchComplete))
+
+	err := state.Advance(EventReopenCollection)
+
+	require.Error(t, err)
+	var budgetErr *BudgetExhaustedError
+	require.ErrorAs(t, err, &budgetErr)
+	assert.Equal(t, PhaseFinalQC, state.Phase())
+}
+
+func TestMarkCollectionExhaustedRejectsInvalidPhases(t *testing.T) {
+	t.Parallel()
+
+	t.Run("before workflow begins", func(t *testing.T) {
+		t.Parallel()
+
+		err := New(Config{}).MarkCollectionExhausted()
+
+		assert.ErrorContains(t, err, "workflow must begin")
+	})
+
+	t.Run("outside collection", func(t *testing.T) {
+		t.Parallel()
+
+		state := New(Config{})
+		require.NoError(t, state.Begin())
+		require.NoError(t, state.Advance(EventCollectionCheckpoint))
+
+		err := state.MarkCollectionExhausted()
+
+		var transitionErr *TransitionError
+		require.ErrorAs(t, err, &transitionErr)
+		assert.Equal(t, PhaseCollectionQC, state.Phase())
+	})
+}
+
 func TestFinalQCReturnPaths(t *testing.T) {
 	t.Parallel()
 

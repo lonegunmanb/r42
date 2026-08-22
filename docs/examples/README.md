@@ -1,8 +1,10 @@
 # r42 examples
 
-The `basic` example is a single research workflow without a terminal tool. It
-uses the official GitHub Copilot SDK default provider, so Apply requires a local
-GitHub Copilot CLI installation with an authenticated account.
+The `basic` example is a reasoning-only research workflow without a terminal
+tool. Collection submits an empty checkpoint because no external evidence is
+needed; closed Research answers from the task statement. It uses the official
+GitHub Copilot SDK default provider, so Apply requires a local GitHub Copilot
+CLI installation with an authenticated account.
 
 From the repository root:
 

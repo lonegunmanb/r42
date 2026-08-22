@@ -1,5 +1,5 @@
 go_tool "submit_claim_cards" {
-  description = "Submit one through five atomic fact cards. confirmed requires a direct authoritative primary source; reported requires a retained published source; inferred requires premise claim IDs and no direct quotation. Unknowns are gaps, not claim cards. All validation errors are returned together."
+  description = "Submit one through five atomic fact cards. `cards.status` allowed values: `confirmed`, `reported`, `inferred`. `confirmed` requires a direct authoritative primary source; `reported` requires a retained published source; `inferred` requires premise claim IDs and no direct quotation. Unknowns are gaps, not claim cards. All validation errors are returned together."
 
   source = <<-GO
     import (
@@ -21,6 +21,7 @@ go_tool "submit_claim_cards" {
       Scope string `json:"scope"`
       AsOf string `json:"as_of"`
       SourceID string `json:"source_id"`
+      SnapshotID string `json:"snapshot_id"`
       SourceURL string `json:"source_url,omitempty"`
       ExactQuote string `json:"exact_quote"`
       Locator string `json:"locator"`
@@ -31,6 +32,7 @@ go_tool "submit_claim_cards" {
       URL string `json:"url"`
       CanonicalURL string `json:"canonical_url"`
       SourceClass string `json:"source_class"`
+      SnapshotID string `json:"snapshot_id"`
     }
     type Input struct {
       WorkspaceDir string `json:"workspace_dir"`
@@ -71,18 +73,25 @@ go_tool "submit_claim_cards" {
         switch strings.TrimSpace(card.Status) {
         case "confirmed", "reported":
           source, exists := sources[strings.TrimSpace(card.SourceID)]
-          if !exists { issues = append(issues, cardIssue("source_id", path+".source_id", "source_id must reference a registered source"))
-          } else if source.SourceClass == "lead_only" {
-            issues = append(issues, cardIssue("source_class", path+".source_id", "lead-only material cannot support a claim card"))
-          } else if card.Status == "confirmed" && source.SourceClass != "authoritative_primary" {
-            issues = append(issues, cardIssue("source_class", path+".source_id", "confirmed requires an authoritative primary source"))
+          if !exists {
+            issues = append(issues, cardIssue("source_id", path+".source_id", "source_id must reference a registered source"))
+          } else {
+            if source.SourceClass == "lead_only" {
+              issues = append(issues, cardIssue("source_class", path+".source_id", "lead-only material cannot support a claim card"))
+            }
+            if card.Status == "confirmed" && source.SourceClass != "authoritative_primary" {
+              issues = append(issues, cardIssue("source_class", path+".source_id", "confirmed requires an authoritative primary source"))
+            }
+            if strings.TrimSpace(card.SnapshotID) != source.SnapshotID {
+              issues = append(issues, cardIssue("snapshot_id", path+".snapshot_id", "snapshot_id must match the registered source"))
+            }
           }
           if strings.TrimSpace(card.ExactQuote) == "" { issues = append(issues, cardIssue("evidence", path+".exact_quote", "exact_quote is required")) }
           if strings.TrimSpace(card.Locator) == "" { issues = append(issues, cardIssue("evidence", path+".locator", "locator is required")) }
           if len(card.DerivedFrom) != 0 { issues = append(issues, cardIssue("derived_from", path+".derived_from", "direct claims must not list inferred premises")) }
         case "inferred":
           if len(card.DerivedFrom) == 0 { issues = append(issues, cardIssue("derived_from", path+".derived_from", "inferred claims require one or more premise claim IDs")) }
-          if strings.TrimSpace(card.SourceID) != "" || strings.TrimSpace(card.ExactQuote) != "" || strings.TrimSpace(card.Locator) != "" {
+          if strings.TrimSpace(card.SourceID) != "" || strings.TrimSpace(card.SnapshotID) != "" || strings.TrimSpace(card.ExactQuote) != "" || strings.TrimSpace(card.Locator) != "" {
             issues = append(issues, cardIssue("inference", path, "inferred claims cite premise IDs instead of pretending a source directly states the inference"))
           }
         default:
@@ -125,7 +134,7 @@ go_tool "submit_claim_cards" {
 }
 
 go_tool "finalize_claim_cards" {
-  description = "Finalize staged atomic claim cards and the hidden source registry. Checks exact quotations against snapshots while ignoring only Unicode whitespace layout differences, validates inference references and cycles, and returns every problem together."
+  description = "Finalize staged atomic claim cards and the hidden source registry. Quote-to-snapshot and URL-to-snapshot matching are enforced when direct evidence is submitted; this tool validates duplicates, source references, dates, inference references, and cycles, and returns every problem together."
 
   source = <<-GO
     import (
@@ -138,10 +147,9 @@ go_tool "finalize_claim_cards" {
       "sort"
       "strings"
       "time"
-      "unicode"
     )
-    type Card struct { ID string `json:"id"`; Statement string `json:"statement"`; Status string `json:"status"`; Scope string `json:"scope"`; AsOf string `json:"as_of"`; SourceID string `json:"source_id"`; SourceURL string `json:"source_url,omitempty"`; ExactQuote string `json:"exact_quote"`; Locator string `json:"locator"`; DerivedFrom []string `json:"derived_from"` }
-    type Source struct { ID string `json:"id"`; URL string `json:"url"`; CanonicalURL string `json:"canonical_url"`; Title string `json:"title"`; Publisher string `json:"publisher"`; PublicationDate string `json:"publication_date"`; AccessedAt string `json:"accessed_at"`; SourceClass string `json:"source_class"`; SnapshotPath string `json:"snapshot_path"`; OriginID string `json:"origin_id"` }
+    type Card struct { ID string `json:"id"`; Statement string `json:"statement"`; Status string `json:"status"`; Scope string `json:"scope"`; AsOf string `json:"as_of"`; SourceID string `json:"source_id"`; SnapshotID string `json:"snapshot_id"`; SourceURL string `json:"source_url,omitempty"`; ExactQuote string `json:"exact_quote"`; Locator string `json:"locator"`; DerivedFrom []string `json:"derived_from"` }
+    type Source struct { ID string `json:"id"`; URL string `json:"url"`; CanonicalURL string `json:"canonical_url"`; Title string `json:"title"`; Publisher string `json:"publisher"`; PublicationDate string `json:"publication_date"`; AccessedAt string `json:"accessed_at"`; SourceClass string `json:"source_class"`; SnapshotID string `json:"snapshot_id"`; OriginID string `json:"origin_id"` }
     type Input struct { WorkspaceDir string `json:"workspace_dir"`; ClaimsPath string `json:"claims_path"`; SourceRegistryPath string `json:"source_registry_path"`; AsOfDate string `json:"as_of_date"`; AllowEmpty bool `json:"allow_empty"` }
     type Output string
     type ClaimDocument struct { ArtifactKind string `json:"artifact_kind"`; AsOfDate string `json:"as_of_date"`; Claims []Card `json:"claims"` }
@@ -158,16 +166,25 @@ go_tool "finalize_claim_cards" {
       if len(cards) == 0 && !input.AllowEmpty { issues = append(issues, finalCardIssue("claims", "claims", "submit at least one claim card")) }
       sourceByID := map[string]Source{}; usedSources := map[string]struct{}{}
       for _, source := range sources { sourceByID[source.ID] = source; published, parseErr := time.Parse("2006-01-02", strings.TrimSpace(source.PublicationDate)); if parseErr != nil { issues = append(issues, finalCardIssue("date", source.ID+".publication_date", "publication_date must use YYYY-MM-DD")) } else if dateErr == nil && published.After(cutoff) { issues = append(issues, finalCardIssue("source_after_as_of_date", source.ID, "source publication_date is later than as_of_date")) } }
-      cardByID := map[string]*Card{}
-      for index := range cards { card := &cards[index]; if _, exists := cardByID[card.ID]; exists { issues = append(issues, finalCardIssue("claim_id", card.ID, "claim IDs must be globally unique")) }; cardByID[card.ID] = card }
+      cardByID := map[string]*Card{}; statementOwner := map[string]string{}; evidenceOwner := map[string]string{}
+      for index := range cards {
+        card := &cards[index]
+        if _, exists := cardByID[card.ID]; exists { issues = append(issues, finalCardIssue("claim_id", card.ID, "claim IDs must be globally unique")) }
+        cardByID[card.ID] = card
+        statementKey := strings.Join(strings.Fields(card.Statement), " ")
+        if owner, exists := statementOwner[statementKey]; statementKey != "" && exists { issues = append(issues, finalCardIssue("duplicate_claim", card.ID, "claim duplicates the normalized statement of "+owner)) } else if statementKey != "" { statementOwner[statementKey] = card.ID }
+        if card.Status != "inferred" {
+          evidenceKey := strings.TrimSpace(card.SourceID)+"\x00"+strings.TrimSpace(card.SnapshotID)+"\x00"+strings.Join(strings.Fields(card.ExactQuote), " ")
+          if owner, exists := evidenceOwner[evidenceKey]; strings.TrimSpace(card.ExactQuote) != "" && exists { issues = append(issues, finalCardIssue("duplicate_claim", card.ID, "direct claim reuses the same source, snapshot, and exact quote as "+owner+"; use the narrow quote for each distinct atomic fact")) } else if strings.TrimSpace(card.ExactQuote) != "" { evidenceOwner[evidenceKey] = card.ID }
+        }
+      }
       for index := range cards {
         card := &cards[index]
         if card.Status == "inferred" { for _, premise := range card.DerivedFrom { if _, exists := cardByID[premise]; !exists { issues = append(issues, finalCardIssue("derived_from", card.ID, "derived_from references an unknown claim ID: "+premise)) } }; continue }
         source, exists := sourceByID[card.SourceID]; if !exists { issues = append(issues, finalCardIssue("source_id", card.ID, "claim references an unregistered source")); continue }
-        usedSources[source.ID] = struct{}{}; card.SourceURL = strings.TrimSpace(source.CanonicalURL); if card.SourceURL == "" { card.SourceURL = strings.TrimSpace(source.URL) }
+        usedSources[source.ID] = struct{}{}; card.SourceURL = strings.TrimSpace(source.URL)
         if card.SourceURL == "" || strings.Contains(card.SourceURL, "...") { issues = append(issues, finalCardIssue("source_url", card.ID, "source URL must be complete and directly usable")) }
-        snapshot, readErr := os.ReadFile(source.SnapshotPath); if readErr != nil { issues = append(issues, finalCardIssue("snapshot_path", source.ID, "cannot read registered snapshot")); continue }
-        if !strings.Contains(finalCardWhitespace(string(snapshot)), finalCardWhitespace(card.ExactQuote)) { issues = append(issues, finalCardIssue("quote_not_found", card.ID+".exact_quote", "exact_quote is not present in the registered snapshot after Unicode whitespace normalization")) }
+        if card.SnapshotID != source.SnapshotID { issues = append(issues, finalCardIssue("snapshot_id", card.ID+".snapshot_id", "snapshot_id must match the registered source")) }
       }
       state := map[string]uint8{}; var visit func(string)
       visit = func(id string) { if state[id] == 1 { issues = append(issues, finalCardIssue("derived_from_cycle", id, "inferred claims must not form a cycle")); return }; if state[id] == 2 { return }; state[id] = 1; if card := cardByID[id]; card != nil { for _, premise := range card.DerivedFrom { visit(premise) } }; state[id] = 2 }
@@ -179,11 +196,10 @@ go_tool "finalize_claim_cards" {
       registry := Registry{AsOfDate:strings.TrimSpace(input.AsOfDate), Sources:retained}
       if err = finalCardWriteJSON(claimsPath, claims); err != nil { return ToolResponse[Output]{}, fmt.Errorf("write claims: %w", err) }
       if err = finalCardWriteJSON(registryPath, registry); err != nil { return ToolResponse[Output]{}, fmt.Errorf("write source registry: %w", err) }
-      result, err := json.Marshal(map[string]any{"claims_path":claimsPath,"source_registry_path":registryPath,"claims":claims,"source_registry":registry}); if err != nil { return ToolResponse[Output]{}, err }; output := Output(result)
+      result, err := json.Marshal(map[string]any{"claims_path":claimsPath,"source_registry_path":registryPath,"claims":claims}); if err != nil { return ToolResponse[Output]{}, err }; output := Output(result)
       return ToolResponse[Output]{Accepted:true, Output:&output}, nil
     }
     func finalCardRecords[T any](directory string) ([]T,error) { paths,err:=filepath.Glob(filepath.Join(directory,"*.json")); if err!=nil{return nil,err}; sort.Strings(paths); result:=make([]T,0,len(paths)); for _,path:=range paths { var item T; payload,readErr:=os.ReadFile(path); if readErr!=nil{return nil,readErr}; if readErr=json.Unmarshal(bytes.TrimPrefix(payload,[]byte{0xef,0xbb,0xbf}),&item);readErr!=nil{return nil,readErr}; result=append(result,item) }; return result,nil }
-    func finalCardWhitespace(value string) string { return strings.Join(strings.FieldsFunc(value, unicode.IsSpace), " ") }
     func finalCardWorkspace(raw,cwd string)(string,[]Issue){path,err:=filepath.Abs(filepath.Clean(strings.TrimSpace(raw)));root:=finalCardBlocksRoot(cwd);if err!=nil||!filepath.IsAbs(raw)||root==""||!finalCardWithin(path,root){return "",[]Issue{finalCardIssue("workspace_dir","workspace_dir","workspace_dir must be an absolute directory inside the current run's blocks directory")}};return path,nil}
     func finalCardPath(raw,workspace,name,field string)(string,[]Issue){path,err:=filepath.Abs(filepath.Clean(strings.TrimSpace(raw)));if workspace==""||err!=nil||!filepath.IsAbs(raw)||filepath.Base(path)!=name||!finalCardWithin(path,workspace){return "",[]Issue{finalCardIssue("invalid_path",field,field+" must end in "+name+" under workspace_dir")}};return path,nil}
     func finalCardBlocksRoot(path string)string{current,err:=filepath.Abs(path);if err!=nil{return ""};for{if strings.EqualFold(filepath.Base(current),"blocks")&&strings.EqualFold(filepath.Base(filepath.Dir(filepath.Dir(current))),"runs"){return current};parent:=filepath.Dir(current);if parent==current{return ""};current=parent}}
@@ -194,7 +210,7 @@ go_tool "finalize_claim_cards" {
 }
 
 go_tool "submit_node_assessment" {
-  description = "Write one evidence-linked supply-chain node assessment. risk_scope describes applicability; conclusion independently describes proof strength. Unknowns and falsification conditions remain explicit."
+  description = "Write one evidence-linked supply-chain node assessment. `risk_scope` allowed values: `global`, `branch`. `conclusion` allowed values: `confirmed`, `candidate`, `not_proven`. `scenarios` allowed values: `current_production`, `expansion_upgrade`, `product_branch`. `risk_scope` describes applicability; `conclusion` independently describes proof strength. Unknowns and falsification conditions remain explicit."
   source = <<-GO
     import("context";"encoding/json";"fmt";"os";"path/filepath";"strings")
     type Input struct { WorkspaceDir string `json:"workspace_dir"`; ArtifactPath string `json:"artifact_path"`; ClaimPaths []string `json:"claim_paths"`; NodeID string `json:"node_id"`; NodeName string `json:"node_name"`; RiskScope string `json:"risk_scope"`; Branch string `json:"branch"`; Scenarios []string `json:"scenarios"`; ActualDependency string `json:"actual_dependency"`; QualifiedAlternatives string `json:"qualified_alternatives"`; SwitchingVsBuffer string `json:"switching_vs_buffer"`; Conclusion string `json:"conclusion"`; ClaimIDs []string `json:"claim_ids"`; Unknowns []string `json:"unknowns"`; FalsificationConditions []string `json:"falsification_conditions"` }
@@ -222,7 +238,7 @@ go_tool "submit_node_assessment" {
 }
 
 go_tool "submit_supply_chain_map" {
-  description = "Write the evidence-linked reference supply chain and a short list of nodes that warrant assessment. This tool does not score, rank, or declare chokepoints."
+  description = "Write the evidence-linked reference supply chain and a short list of nodes that warrant assessment. `nodes.kind` allowed values: `product`, `component`, `material`, `process`, `equipment`, `qualification`, `service`, `system`. `edges.relation` allowed values: `contains`, `supplies`, `transformed_into`, `assembled_into`, `processed_by`, `tested_by`, `qualified_by`, `used_by`. This tool does not score, rank, or declare chokepoints."
   source = <<-GO
     import("context";"encoding/json";"fmt";"os";"path/filepath";"strings")
     type Node struct { ID string `json:"id"`;Name string `json:"name"`;Kind string `json:"kind"`;Stages []string `json:"stages"`;Branches []string `json:"branches"`;ClaimIDs []string `json:"claim_ids"`;Unknowns []string `json:"unknowns"` }
@@ -243,7 +259,7 @@ go_tool "submit_supply_chain_map" {
 }
 
 go_tool "submit_company_priorities" {
-  description = "Write a company research-priority list for one assessed node. A/B/C are follow-up research priorities, never investment ratings. Priority A requires a confirmed exact-node relationship; related-product-only companies cannot be A."
+  description = "Write a company research-priority list for one assessed node. `companies.role` allowed values: `existing_supplier`, `qualified_alternative`, `related_product_only`, `unverified`. `companies.priority` allowed values: `A`, `B`, `C`, `do_not_research`. A/B/C are follow-up research priorities, never investment ratings. Priority A requires a confirmed exact-node relationship; related-product-only companies cannot be A."
   source = <<-GO
     import("context";"encoding/json";"fmt";"os";"path/filepath";"strings")
     type Company struct { Company string `json:"company"`; Ticker string `json:"ticker"`; Market string `json:"market"`; Role string `json:"role"`; Priority string `json:"priority"`; RelationshipClaimIDs []string `json:"relationship_claim_ids"`; EconomicImpactClaimIDs []string `json:"economic_impact_claim_ids"`; WhyResearch string `json:"why_research"`; LargestUnknown string `json:"largest_unknown"`; NextCheck string `json:"next_check"` }
@@ -254,14 +270,14 @@ go_tool "submit_company_priorities" {
     type nodeAssessment struct { NodeID string `json:"node_id"`;NodeName string `json:"node_name"`;Conclusion string `json:"conclusion"` }
     type priorityDocument struct { NodeID string `json:"node_id"`;NodeName string `json:"node_name"`;NodeConclusion string `json:"node_conclusion"`;Companies []Company `json:"companies"`;Conclusion string `json:"conclusion"` }
     func Invoke(_ context.Context,input Input)(ToolResponse[Output],error){cwd,err:=os.Getwd();if err!=nil{return ToolResponse[Output]{},err};issues:=[]Issue{};workspace:=priorityClean(input.WorkspaceDir);root:=priorityBlocksRoot(cwd);if workspace==""||root==""||!priorityWithin(workspace,root){issues=append(issues,priorityIssue("workspace_dir","workspace_dir","must be an absolute directory inside the current run's blocks directory"))};artifact:=priorityClean(input.ArtifactPath);if artifact==""||workspace==""||filepath.Base(artifact)!="company-priorities.json"||!priorityWithin(artifact,workspace){issues=append(issues,priorityIssue("artifact_path","artifact_path","must end in company-priorities.json under workspace_dir"))};nodePath:=priorityClean(input.NodeAssessmentPath);if nodePath==""||root==""||!priorityWithin(nodePath,root){issues=append(issues,priorityIssue("node_assessment_path","node_assessment_path","must be inside the current run's blocks directory"))}
-      claims,claimCards,loadErr:=priorityClaims(input.ClaimPaths,root);if loadErr!=nil{return ToolResponse[Output]{},fmt.Errorf("load claim cards: %w",loadErr)};var node nodeAssessment;if nodePath!=""{payload,readErr:=os.ReadFile(nodePath);if readErr!=nil{return ToolResponse[Output]{},readErr};if readErr=json.Unmarshal(payload,&node);readErr!=nil{return ToolResponse[Output]{},readErr}}
+      claims,taskClaimCards,hasTaskClaims,loadErr:=priorityClaims(input.ClaimPaths,root,workspace);if loadErr!=nil{return ToolResponse[Output]{},fmt.Errorf("load claim cards: %w",loadErr)};if !hasTaskClaims{issues=append(issues,priorityIssue("claim_paths","claim_paths","claim_paths must include the current task workspace claims.json"))};var node nodeAssessment;if nodePath!=""{payload,readErr:=os.ReadFile(nodePath);if readErr!=nil{return ToolResponse[Output]{},readErr};if readErr=json.Unmarshal(payload,&node);readErr!=nil{return ToolResponse[Output]{},readErr}}
       if strings.TrimSpace(input.Conclusion)==""{issues=append(issues,priorityIssue("conclusion","conclusion","conclusion must not be empty"))};roles:=map[string]bool{"existing_supplier":true,"qualified_alternative":true,"related_product_only":true,"unverified":true};levels:=map[string]bool{"A":true,"B":true,"C":true,"do_not_research":true}
       for index,company:=range input.Companies{path:=fmt.Sprintf("companies[%d]",index);for field,value:=range map[string]string{"company":company.Company,"market":company.Market,"why_research":company.WhyResearch,"largest_unknown":company.LargestUnknown,"next_check":company.NextCheck}{if strings.TrimSpace(value)==""{issues=append(issues,priorityIssue("required",path+"."+field,field+" must not be empty"))}};if !roles[company.Role]{issues=append(issues,priorityIssue("role",path+".role","unsupported company role"))};if !levels[company.Priority]{issues=append(issues,priorityIssue("priority",path+".priority","priority must be A, B, C, or do_not_research"))};for _,id:=range append(append([]string{},company.RelationshipClaimIDs...),company.EconomicImpactClaimIDs...){if _,ok:=claims[id];!ok{issues=append(issues,priorityIssue("claim_id",path,id+" does not exist"))}}
         if company.Priority=="A"{if node.Conclusion=="not_proven"||company.Role=="related_product_only"||company.Role=="unverified"||len(company.RelationshipClaimIDs)==0{issues=append(issues,priorityIssue("priority",path+".priority","A requires a proven node and an existing-supplier or qualified-alternative relationship"))}else{for _,id:=range company.RelationshipClaimIDs{if claims[id]!="confirmed"{issues=append(issues,priorityIssue("priority",path+".relationship_claim_ids","A relationship claims must be confirmed"))}}}}
         if company.Priority=="B"&&node.Conclusion=="not_proven"{issues=append(issues,priorityIssue("priority",path+".priority","B requires a confirmed or candidate node"))}
       }
-      if len(issues)>0{return ToolResponse[Output]{Accepted:false,Issues:issues},nil};document:=priorityDocument{NodeID:node.NodeID,NodeName:node.NodeName,NodeConclusion:node.Conclusion,Companies:input.Companies,Conclusion:input.Conclusion};payload,err:=json.MarshalIndent(document,"","  ");if err!=nil{return ToolResponse[Output]{},err};if err=os.MkdirAll(filepath.Dir(artifact),0700);err!=nil{return ToolResponse[Output]{},err};if err=os.WriteFile(artifact,append(payload,'\n'),0600);err!=nil{return ToolResponse[Output]{},err};result,err:=json.Marshal(map[string]any{"node_id":document.NodeID,"node_name":document.NodeName,"node_conclusion":document.NodeConclusion,"companies":document.Companies,"conclusion":document.Conclusion,"claims":claimCards});if err!=nil{return ToolResponse[Output]{},err};output:=Output(result);return ToolResponse[Output]{Accepted:true,Output:&output},nil}
-    func priorityClaims(paths []string,root string)(map[string]string,[]priorityClaim,error){result:=map[string]string{};cards:=[]priorityClaim{};for _,raw:=range paths{path:=priorityClean(raw);if path==""||root==""||!priorityWithin(path,root){return nil,nil,fmt.Errorf("claim path must be absolute inside the current run's blocks directory")};var doc claimDocument;payload,err:=os.ReadFile(path);if err!=nil{return nil,nil,err};if err=json.Unmarshal(payload,&doc);err!=nil{return nil,nil,err};for _,claim:=range doc.Claims{result[claim.ID]=claim.Status;cards=append(cards,claim)}};return result,cards,nil}
+      if len(issues)>0{return ToolResponse[Output]{Accepted:false,Issues:issues},nil};document:=priorityDocument{NodeID:node.NodeID,NodeName:node.NodeName,NodeConclusion:node.Conclusion,Companies:input.Companies,Conclusion:input.Conclusion};payload,err:=json.MarshalIndent(document,"","  ");if err!=nil{return ToolResponse[Output]{},err};if err=os.MkdirAll(filepath.Dir(artifact),0700);err!=nil{return ToolResponse[Output]{},err};if err=os.WriteFile(artifact,append(payload,'\n'),0600);err!=nil{return ToolResponse[Output]{},err};result,err:=json.Marshal(map[string]any{"node_id":document.NodeID,"node_name":document.NodeName,"node_conclusion":document.NodeConclusion,"companies":document.Companies,"conclusion":document.Conclusion,"claims":taskClaimCards});if err!=nil{return ToolResponse[Output]{},err};output:=Output(result);return ToolResponse[Output]{Accepted:true,Output:&output},nil}
+    func priorityClaims(paths []string,root,workspace string)(map[string]string,[]priorityClaim,bool,error){result:=map[string]string{};taskCards:=[]priorityClaim{};hasTaskClaims:=false;taskPath:=filepath.Join(workspace,"claims.json");for _,raw:=range paths{path:=priorityClean(raw);if path==""||root==""||!priorityWithin(path,root){return nil,nil,false,fmt.Errorf("claim path must be absolute inside the current run's blocks directory")};var doc claimDocument;payload,err:=os.ReadFile(path);if err!=nil{return nil,nil,false,err};if err=json.Unmarshal(payload,&doc);err!=nil{return nil,nil,false,err};isTaskClaims:=path==taskPath;if isTaskClaims{hasTaskClaims=true};for _,claim:=range doc.Claims{result[claim.ID]=claim.Status;if isTaskClaims{taskCards=append(taskCards,claim)}}};return result,taskCards,hasTaskClaims,nil}
     func priorityClean(raw string)string{if !filepath.IsAbs(raw){return ""};path,err:=filepath.Abs(filepath.Clean(strings.TrimSpace(raw)));if err!=nil{return ""};return path}
     func priorityBlocksRoot(path string)string{current,err:=filepath.Abs(path);if err!=nil{return ""};for{if strings.EqualFold(filepath.Base(current),"blocks")&&strings.EqualFold(filepath.Base(filepath.Dir(filepath.Dir(current))),"runs"){return current};parent:=filepath.Dir(current);if parent==current{return ""};current=parent}}
     func priorityWithin(path,root string)bool{relative,err:=filepath.Rel(root,path);return err==nil&&relative!=".."&&!strings.HasPrefix(relative,".."+string(filepath.Separator))}
@@ -270,18 +286,63 @@ go_tool "submit_company_priorities" {
 }
 
 go_tool "finalize_research_report" {
-  description = "Finalize report.md by replacing every [[claim:ID]] marker with a direct original-source URL and appending the referenced atomic evidence cards. Invalid or unsupported markers reject without rewriting the report."
+  description = "Finalize the absolute `report.md` in the current research workspace by replacing every `[[claim:ID]]` marker with direct original-source URLs and appending the referenced atomic evidence cards. `claim_paths` must exactly match the tool-discovered set of upstream absolute finalized `claims.json` files inside the current run; every file must have `artifact_kind` equal to `r42_claim_cards`. Missing, extra, or duplicate paths, directories, globs, Markdown files, snapshot IDs, and guessed paths are invalid. All detectable input problems are returned together, and rejection never rewrites the report."
   source = <<-GO
     import("context";"encoding/json";"fmt";"os";"path/filepath";"regexp";"sort";"strings")
     type Input struct { ReportPath string `json:"report_path"`; ClaimPaths []string `json:"claim_paths"` }
     type Output string
     type Card struct { ID string `json:"id"`;Statement string `json:"statement"`;Status string `json:"status"`;Scope string `json:"scope"`;AsOf string `json:"as_of"`;SourceURL string `json:"source_url"`;ExactQuote string `json:"exact_quote"`;Locator string `json:"locator"`;DerivedFrom []string `json:"derived_from"` }
-    type claimDocument struct { Claims []Card `json:"claims"` }
+    type claimDocument struct { ArtifactKind string `json:"artifact_kind"`; Claims []Card `json:"claims"` }
     var reportMarker=regexp.MustCompile(`\[\[claim:([A-Za-z][A-Za-z0-9_-]{0,127})\]\]`)
-    func Invoke(_ context.Context,input Input)(ToolResponse[Output],error){cwd,err:=os.Getwd();if err!=nil{return ToolResponse[Output]{},err};root:=reportBlocksRoot(cwd);issues:=[]Issue{};report:=reportClean(input.ReportPath);if report==""||root==""||filepath.Base(report)!="report.md"||!reportWithin(report,root){issues=append(issues,reportIssue("report_path","report_path","report_path must be an absolute report.md inside the current run's blocks directory"))};cards:=map[string]Card{};for _,raw:=range input.ClaimPaths{path:=reportClean(raw);if path==""||root==""||!reportWithin(path,root){issues=append(issues,reportIssue("claim_path","claim_paths","claim paths must be inside the current run's blocks directory"));continue};var doc claimDocument;payload,readErr:=os.ReadFile(path);if readErr!=nil{return ToolResponse[Output]{},readErr};if readErr=json.Unmarshal(payload,&doc);readErr!=nil{return ToolResponse[Output]{},readErr};for _,card:=range doc.Claims{cards[card.ID]=card}}
-      if len(issues)>0{return ToolResponse[Output]{Accepted:false,Issues:issues},nil};original,err:=os.ReadFile(report);if err!=nil{return ToolResponse[Output]{},err};text:=string(original);matches:=reportMarker.FindAllStringSubmatch(text,-1);if len(matches)==0{issues=append(issues,reportIssue("claim_marker","report.md","report must cite substantive statements with [[claim:ID]] markers"))};referenced:=map[string]bool{};for _,match:=range matches{id:=match[1];card,exists:=cards[id];if !exists{issues=append(issues,reportIssue("claim_id",id,"report references an unknown claim ID"));continue};urls:=reportCardURLs(card,cards,map[string]bool{});if len(urls)==0{issues=append(issues,reportIssue("source_url",id,"claim does not resolve to a complete original-source URL"));continue};valid:=true;for _,url:=range urls{if strings.Contains(url,"..."){issues=append(issues,reportIssue("source_url",id,"claim does not resolve to a complete original-source URL"));valid=false}};if !valid{continue};referenced[id]=true;text=strings.ReplaceAll(text,match[0],reportLinks(id,urls))};if len(issues)>0{return ToolResponse[Output]{Accepted:false,Issues:issues},nil}
-      ids:=make([]string,0,len(referenced));for id:=range referenced{ids=append(ids,id)};sort.Strings(ids);var appendix strings.Builder;appendix.WriteString("\n\n## Evidence cards\n");for _,id:=range ids{card:=cards[id];urls:=reportCardURLs(card,cards,map[string]bool{});appendix.WriteString("\n### "+id+"\n\n");appendix.WriteString("- Statement: "+card.Statement+"\n- Status: "+card.Status+"\n- Scope: "+card.Scope+"\n- As of: "+card.AsOf+"\n- Sources: "+strings.Join(urls,", ")+"\n");if card.ExactQuote!=""{appendix.WriteString("- Exact quote: "+strings.Join(strings.Fields(card.ExactQuote)," ")+"\n- Locator: "+card.Locator+"\n")};if len(card.DerivedFrom)>0{appendix.WriteString("- Derived from: "+strings.Join(card.DerivedFrom,", ")+"\n")}}
-      text+=appendix.String();if err=os.WriteFile(report,[]byte(text),0600);err!=nil{return ToolResponse[Output]{},err};summary,_:=json.Marshal(map[string]any{"report_path":report,"referenced_claim_count":len(ids)});output:=Output(summary);return ToolResponse[Output]{Accepted:true,Output:&output},nil}
+    func Invoke(_ context.Context,input Input)(ToolResponse[Output],error){
+      cwd,err:=os.Getwd();if err!=nil{return ToolResponse[Output]{},err}
+      workspace:=reportClean(cwd);root:=reportBlocksRoot(cwd);issues:=[]Issue{}
+      report:=reportClean(input.ReportPath);expectedReport:=filepath.Join(workspace,"report.md")
+      reportReady:=false
+      if workspace==""||root==""||!reportWithin(workspace,root)||report==""||report!=expectedReport{issues=append(issues,reportIssue("report_path","report_path","report_path must be the absolute report.md in the current research workspace"))}else{fileIssues:=reportRegularFileIssues(report,"report_path");issues=append(issues,fileIssues...);reportReady=len(fileIssues)==0}
+      var original []byte;var text string;var matches [][]string
+      if reportReady{original,err=os.ReadFile(report);if err!=nil{issues=append(issues,reportIssue("report_read","report_path","report.md could not be read"))}else{text=string(original);matches=reportMarker.FindAllStringSubmatch(text,-1);if len(matches)==0{issues=append(issues,reportIssue("claim_marker","report.md","report must cite substantive statements with [[claim:ID]] markers"))}}}
+      expectedPaths,discoverErr:=reportDiscoverClaimPaths(root,workspace);if discoverErr!=nil{return ToolResponse[Output]{},fmt.Errorf("discover upstream claim paths: %w",discoverErr)}
+      expected:=map[string]bool{};for _,path:=range expectedPaths{expected[path]=true}
+      provided:=map[string]int{}
+      cards:=map[string]Card{};owners:=map[string]string{}
+      for pathIndex,raw:=range input.ClaimPaths{
+        normalized:=reportClean(raw)
+        if first,exists:=provided[normalized];normalized!=""&&exists{field:=fmt.Sprintf("claim_paths[%d]",pathIndex);issues=append(issues,reportIssue("claim_path_duplicate",field,fmt.Sprintf("path duplicates claim_paths[%d]",first)));continue}
+        if normalized!=""{provided[normalized]=pathIndex;if !expected[normalized]{field:=fmt.Sprintf("claim_paths[%d]",pathIndex);issues=append(issues,reportIssue("claim_path_unexpected",field,"path is not in the configured finalized claims.json set"))}}
+        path,doc,pathIssues:=reportLoadClaims(raw,root,pathIndex);issues=append(issues,pathIssues...);if len(pathIssues)>0{continue}
+        for cardIndex,card:=range doc.Claims{
+          field:=fmt.Sprintf("claim_paths[%d].claims[%d].id",pathIndex,cardIndex)
+          if owner,exists:=owners[card.ID];exists{issues=append(issues,reportIssue("duplicate_claim_id",field,"claim ID "+card.ID+" is duplicated; first defined in "+owner));continue}
+          owners[card.ID]=path;cards[card.ID]=card
+        }
+      }
+      for _,path:=range expectedPaths{if _,exists:=provided[path];!exists{issues=append(issues,reportIssue("claim_path_missing_expected","claim_paths","upstream claims.json path is missing: "+path))}}
+      if len(issues)>0{return ToolResponse[Output]{Accepted:false,Issues:issues},nil}
+      referenced:=map[string]bool{}
+      for _,match:=range matches{
+        id:=match[1];card,exists:=cards[id];if !exists{issues=append(issues,reportIssue("claim_id",id,"report references an unknown claim ID"));continue}
+        urls:=reportCardURLs(card,cards,map[string]bool{});if len(urls)==0{issues=append(issues,reportIssue("source_url",id,"claim does not resolve to a complete original-source URL"));continue}
+        valid:=true;for _,url:=range urls{if strings.Contains(url,"..."){issues=append(issues,reportIssue("source_url",id,"claim does not resolve to a complete original-source URL"));valid=false}}
+        if !valid{continue};referenced[id]=true;text=strings.ReplaceAll(text,match[0],reportLinks(id,urls))
+      }
+      if len(issues)>0{return ToolResponse[Output]{Accepted:false,Issues:issues},nil}
+      ids:=make([]string,0,len(referenced));for id:=range referenced{ids=append(ids,id)};sort.Strings(ids)
+      var appendix strings.Builder;appendix.WriteString("\n\n## Evidence cards\n")
+      for _,id:=range ids{card:=cards[id];urls:=reportCardURLs(card,cards,map[string]bool{});appendix.WriteString("\n### "+id+"\n\n");appendix.WriteString("- Statement: "+card.Statement+"\n- Status: "+card.Status+"\n- Scope: "+card.Scope+"\n- As of: "+card.AsOf+"\n- Sources: "+strings.Join(urls,", ")+"\n");if card.ExactQuote!=""{appendix.WriteString("- Exact quote: "+strings.Join(strings.Fields(card.ExactQuote)," ")+"\n- Locator: "+card.Locator+"\n")};if len(card.DerivedFrom)>0{appendix.WriteString("- Derived from: "+strings.Join(card.DerivedFrom,", ")+"\n")}}
+      text+=appendix.String();if err=os.WriteFile(report,[]byte(text),0600);err!=nil{return ToolResponse[Output]{},err};summary,_:=json.Marshal(map[string]any{"report_path":report,"referenced_claim_count":len(ids)});output:=Output(summary);return ToolResponse[Output]{Accepted:true,Output:&output},nil
+    }
+    func reportLoadClaims(raw,root string,index int)(string,claimDocument,[]Issue){
+      field:=fmt.Sprintf("claim_paths[%d]",index);path:=reportClean(raw)
+      if path==""||root==""||filepath.Base(path)!="claims.json"||!reportWithin(path,root){return "",claimDocument{},[]Issue{reportIssue("claim_path",field,"must be an absolute path to claims.json inside the current run's blocks directory")}}
+      fileIssues:=reportRegularFileIssues(path,field);if len(fileIssues)>0{return path,claimDocument{},fileIssues}
+      payload,err:=os.ReadFile(path);if err!=nil{return path,claimDocument{},[]Issue{reportIssue("claim_path_read",field,"claims.json could not be read")}}
+      var document claimDocument;if err=json.Unmarshal(payload,&document);err!=nil{return path,claimDocument{},[]Issue{reportIssue("invalid_json",field,"claims.json must contain valid JSON")}}
+      if document.ArtifactKind!="r42_claim_cards"{return path,claimDocument{},[]Issue{reportIssue("artifact_kind",field,"claims.json artifact_kind must equal r42_claim_cards")}}
+      return path,document,nil
+    }
+    func reportDiscoverClaimPaths(root,workspace string)([]string,error){result:=[]string{};err:=filepath.WalkDir(root,func(path string,entry os.DirEntry,walkErr error)error{if walkErr!=nil{return walkErr};if entry.IsDir(){if path!=root&&reportWithin(path,workspace){return filepath.SkipDir};return nil};if entry.Name()=="claims.json"{result=append(result,reportClean(path))};return nil});return result,err}
+    func reportRegularFileIssues(path,field string)[]Issue{info,err:=os.Lstat(path);if os.IsNotExist(err){return []Issue{reportIssue("claim_path_missing",field,"required file does not exist")}};if err!=nil{return []Issue{reportIssue("claim_path_read",field,"file metadata could not be read")}};if !info.Mode().IsRegular(){return []Issue{reportIssue("claim_path",field,"path must name a regular file, not a directory or link")}};return nil}
     func reportCardURLs(card Card,cards map[string]Card,visiting map[string]bool)[]string{if strings.TrimSpace(card.SourceURL)!=""{return []string{strings.TrimSpace(card.SourceURL)}};if visiting[card.ID]{return nil};visiting[card.ID]=true;defer delete(visiting,card.ID);urls:=[]string{};seen:=map[string]bool{};for _,id:=range card.DerivedFrom{if premise,ok:=cards[id];ok{for _,url:=range reportCardURLs(premise,cards,visiting){if !seen[url]{seen[url]=true;urls=append(urls,url)}}}};return urls}
     func reportLinks(id string,urls []string)string{if len(urls)==1{return "["+id+"]("+urls[0]+")"};links:=make([]string,0,len(urls));for index,url:=range urls{links=append(links,fmt.Sprintf("[%s:%d](%s)",id,index+1,url))};return strings.Join(links,", ")}
     func reportClean(raw string)string{if !filepath.IsAbs(raw){return ""};path,err:=filepath.Abs(filepath.Clean(strings.TrimSpace(raw)));if err!=nil{return ""};return path}

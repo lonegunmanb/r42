@@ -10,8 +10,10 @@ from urllib.parse import urlsplit, urlunsplit
 QUOTE_ID_RE = re.compile(
     r"(?<![A-Za-z0-9_-])([A-Za-z0-9][A-Za-z0-9_-]*-quote-[A-Za-z0-9][A-Za-z0-9_-]*)(?![A-Za-z0-9_-])"
 )
+SNAPSHOT_ID_RE = re.compile(r"^snapshot-[0-9a-f]{32}$")
 URL_RE = re.compile(r"https?://[^\s|<>]+")
 MATCH_MODES = (
+    "typed_tool_validated",
     "exact",
     "line_ending_equivalent",
     "whitespace_equivalent",
@@ -416,59 +418,29 @@ def audit(payload, workspace=None):
 
     for quote_id in sorted(body_ids & quotes.keys()):
         quote = quotes[quote_id]
-        snapshot_raw = str(quote.get("snapshot_path", "")).strip()
-        exact_quote = str(quote.get("exact_quote", ""))
+        snapshot_id = str(quote.get("snapshot_id", "")).strip()
         record_path = quote.get("_record_path", quote_id)
-        snapshot_path = Path(snapshot_raw).expanduser()
-        valid_snapshot = (
-            snapshot_path.is_absolute()
-            and snapshot_path.suffix.lower() == ".md"
-            and "snapshots" in {part.lower() for part in snapshot_path.parts}
-            and is_within(snapshot_path, root)
-        )
-        if not valid_snapshot:
+        if not SNAPSHOT_ID_RE.fullmatch(snapshot_id):
             issues.append(
                 new_issue(
-                    "invalid_snapshot_path",
-                    f"quote {quote_id} does not reference a Markdown snapshot in this run",
+                    "invalid_snapshot_id",
+                    f"quote {quote_id} does not reference a registered snapshot ID",
                     record_path,
-                    "Use the absolute snapshot path returned by the configured snapshot tool.",
-                )
-            )
-            result["match_modes"]["not_found"] += 1
-            continue
-        try:
-            snapshot = read_text(snapshot_path.resolve())
-        except (OSError, UnicodeError) as error:
-            issues.append(
-                new_issue(
-                    "missing_snapshot",
-                    f"cannot read snapshot for {quote_id}: {error}",
-                    str(snapshot_path),
-                    "Restore the UTF-8 Markdown snapshot or remove the unsupported quote.",
+                    "Retain the snapshot_id accepted by the upstream Research typed tool.",
                 )
             )
             result["match_modes"]["not_found"] += 1
             continue
         result["snapshots_checked"] += 1
-        mode = match_quote(exact_quote, snapshot)
+        mode = "typed_tool_validated"
         result["match_modes"][mode] += 1
         matches.append(
             {
                 "quote_id": quote_id,
                 "match_mode": mode,
-                "snapshot_path": str(snapshot_path.resolve()),
+                "snapshot_id": snapshot_id,
             }
         )
-        if mode == "not_found":
-            issues.append(
-                new_issue(
-                    "quote_text_not_found",
-                    f"exact_quote for {quote_id} is not text-equivalent to any snapshot passage",
-                    record_path,
-                    "Correct the quote from the saved snapshot; case, numbers, punctuation, and paragraph boundaries must remain unchanged.",
-                )
-            )
 
     audit_path = report_path.parent / "synthesis-audit.json" if report_path else None
     result["pass"] = len(issues) == 0

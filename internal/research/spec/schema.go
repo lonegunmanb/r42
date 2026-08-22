@@ -48,6 +48,7 @@ type ResearchBlock struct {
 	RetryBlocks                []RetryBlock        `hcl:"retry,block"`
 	ArtifactBlocks             []ArtifactBlock     `hcl:"artifact,block"`
 	QCBlocks                   []QCBlock           `hcl:"qc,block"`
+	CollectionModelProvider    cty.Value           `hcl:"collection_model_provider,optional"`
 	CollectionToolIDs          []string            `hcl:"collection_tool_ids,optional"`
 	CollectionSkillDirectories []string            `hcl:"collection_skill_directories,optional"`
 	CollectionSkills           []string            `hcl:"collection_skills,optional"`
@@ -339,6 +340,7 @@ func (b *ResearchBlock) Values() map[string]cty.Value {
 		"retry":                        retryBlockValues(b.RetryBlocks),
 		"artifact":                     ArtifactsValue(b.planned.Artifacts, nil),
 		"qc":                           qcBlockValues(b.QCBlocks),
+		"collection_model_provider":    optionalObjectValue(b.CollectionModelProvider),
 		"collection_tool_ids":          stringListValue(b.CollectionToolIDs),
 		"collection_skill_directories": stringListValue(b.CollectionSkillDirectories),
 		"collection_skills":            stringListValue(b.CollectionSkills),
@@ -591,6 +593,7 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 			Permission:       PermissionApproveAll,
 		},
 		CollectionToolIDs:          slices.Clone(b.CollectionToolIDs),
+		CollectionModelProvider:    b.CollectionModelProvider,
 		CollectionSkillDirectories: slices.Clone(b.CollectionSkillDirectories),
 		CollectionSkills:           slices.Clone(b.CollectionSkills),
 		CollectionDisabledSkills:   slices.Clone(b.CollectionDisabledSkills),
@@ -849,6 +852,7 @@ func cloneConfig(config Config) Config {
 	result.Policy.Skills = slices.Clone(config.Policy.Skills)
 	result.Policy.DisabledSkills = slices.Clone(config.Policy.DisabledSkills)
 	result.CollectionToolIDs = slices.Clone(config.CollectionToolIDs)
+	result.CollectionModelProvider = config.CollectionModelProvider
 	result.CollectionSkillDirectories = slices.Clone(config.CollectionSkillDirectories)
 	result.CollectionSkills = slices.Clone(config.CollectionSkills)
 	result.CollectionDisabledSkills = slices.Clone(config.CollectionDisabledSkills)

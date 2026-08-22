@@ -3,7 +3,10 @@ package cli
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
+	"strings"
+	"sync"
 
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/collection"
@@ -16,6 +19,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/qc"
 	researchruntime "github.com/lonegunmanb/r42/internal/research/runtime"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
+	"github.com/lonegunmanb/r42/internal/snapshot"
 	"github.com/lonegunmanb/r42/internal/workflow"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -26,9 +30,69 @@ const (
 	finalQCVerdictToolName       = "r42_qc_verdict"
 )
 
+const researchSnapshotProtocol = "Evidence protocol: snapshots cross research-block boundaries only by snapshot_id. " +
+	"Use r42_read_snapshot with an authorized snapshot_id to inspect source material. " +
+	"Do not use snapshot paths as cross-block evidence references and do not read or copy snapshot files through the filesystem. " +
+	"Every citation carried into a downstream knowledge result must retain its snapshot_id."
+
+var snapshotIDPattern = regexp.MustCompile(`snapshot-[0-9a-f]{32}`)
+
+type runSnapshotCatalog struct {
+	mu    sync.RWMutex
+	paths map[string]string
+}
+
+func newRunSnapshotCatalog() *runSnapshotCatalog {
+	return &runSnapshotCatalog{paths: map[string]string{}}
+}
+
+func (c *runSnapshotCatalog) add(snapshots []snapshot.Snapshot) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, item := range snapshots {
+		if item.Reviewed {
+			c.paths[item.ID] = item.Path
+		}
+	}
+}
+
+func (c *runSnapshotCatalog) authorized(text ...string) map[string]string {
+	result := map[string]string{}
+	if c == nil {
+		return result
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, value := range text {
+		for _, id := range snapshotIDPattern.FindAllString(value, -1) {
+			if path, ok := c.paths[id]; ok {
+				result[id] = path
+			}
+		}
+	}
+	return result
+}
+
+func closedResearchSystemPrompt(configured string) string {
+	return "You are the closed Research synthesis phase. Read registered evidence only through r42 typed tools. " +
+		"Do not acquire new evidence or use network, shell, generic file, edit, task, or user-input tools.\n\n" +
+		researchSnapshotProtocol + "\n\n" + configured
+}
+
+func researchEvidencePrompt(configured string, ids []string) string {
+	if len(ids) == 0 {
+		return configured
+	}
+	return configured + "\n\nAuthorized evidence snapshot IDs for this Research phase:\n- " + strings.Join(ids, "\n- ")
+}
+
 func (f *runtimeFactory) newResearchBlock(
 	ctx context.Context,
 	address string,
+	workspace string,
 	planned modulespec.ResearchPlan,
 	publish func(string, cty.Value),
 ) (golden.ApplyBlock, error) {
@@ -44,11 +108,13 @@ func (f *runtimeFactory) newResearchBlock(
 	}()
 
 	executionAddress := f.CanonicalAddress(address)
-	workspace, err := f.run.Workspace(executionAddress)
+	var err error
+	researchPhaseRetry, err := researchRetry(planned.Provider, planned.Config.Retry)
 	if err != nil {
 		return nil, err
 	}
-	retry, err := researchRetry(planned.Provider, planned.Config.Retry)
+	collectionProvider := phaseProvider(planned.CollectionProvider, planned.Provider)
+	collectionRetry, err := researchRetry(collectionProvider, planned.Config.Retry)
 	if err != nil {
 		return nil, err
 	}
@@ -77,14 +143,15 @@ func (f *runtimeFactory) newResearchBlock(
 	checkpoints := collection.NewCheckpointRecorder()
 	collectionTools = append(collectionTools, collectionProtocolTools(collectionContext, checkpoints)...)
 	collectionPrompt := appendBuiltInToolCallQuotaPrompt(
-		"You are the Collection phase. Acquire evidence, register every useful snapshot, and call r42_collection_checkpoint before ending the round.\n\n"+planned.Config.SystemPrompt,
+		"You are the Collection phase. Acquire evidence, register every useful snapshot, and call r42_collection_checkpoint before ending the round. If no more evidence can be acquired, submit an empty checkpoint with empty_reason and collection_exhausted=true.\n\n"+planned.Config.SystemPrompt,
 		collectionBuiltInQuota,
 	)
 	collectionSession, err := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionCollection, copilot.SessionConfig{
-		Provider: planned.Provider, Retry: retry, Model: planned.Config.Model, Profile: planned.Config.ProfileName(),
+		Provider: collectionProvider,
+		Retry:    collectionRetry, Model: planned.Config.Model, Profile: planned.Config.ProfileName(),
 		ReasoningEffort: pointerValue(planned.Config.ReasoningEffort), SystemPrompt: collectionPrompt, WorkingDirectory: workspace,
 		Tools: collectionTools, AvailableTools: phaseAllowedTools(planned.Config.Policy.AllowedTools, toolNames(collectionTools)),
-		ExcludedTools:    slices.Clone(planned.Config.Policy.DisallowedTools),
+		ExcludedTools:    collectionDisallowedTools(planned.Config.Policy.DisallowedTools),
 		SkillDirectories: slices.Clone(planned.Config.CollectionSkillDirectories), Skills: slices.Clone(planned.Config.CollectionSkills),
 		DisabledSkills: slices.Clone(planned.Config.CollectionDisabledSkills),
 		Hooks:          collectionBuiltInHooks(newToolCallQuota(collectionBuiltInQuota), collectionContext.Gate()),
@@ -96,7 +163,12 @@ func (f *runtimeFactory) newResearchBlock(
 	collectionRunner := collection.NewRunner(collectionSession, checkpoints)
 
 	// Collection QC is always present and has fixed read-only capabilities.
-	effectiveCollectionQC, err := planned.Config.EffectiveCollectionQC(provider.DefaultRetryPolicy())
+	collectionQCProvider := phaseProvider(planned.CollectionQCProvider, planned.Provider)
+	collectionQCProviderRetry, err := researchRetry(collectionQCProvider, provider.RetryOverride{})
+	if err != nil {
+		return cleanupSetup(err)
+	}
+	effectiveCollectionQC, err := planned.Config.EffectiveCollectionQC(collectionQCProviderRetry)
 	if err != nil {
 		return cleanupSetup(err)
 	}
@@ -107,7 +179,8 @@ func (f *runtimeFactory) newResearchBlock(
 	collectionVerdicts := collectionqc.NewVerdictRecorder()
 	collectionQCReadTools = append(collectionQCReadTools, collectionQCVerdictTool(collectionVerdicts))
 	collectionQCSession, err := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionCollectionQC, copilot.SessionConfig{
-		Provider: planned.CollectionQCProvider, Retry: effectiveCollectionQC.Retry, Model: effectiveCollectionQC.Model,
+		Provider: collectionQCProvider,
+		Retry:    effectiveCollectionQC.Retry, Model: effectiveCollectionQC.Model,
 		Profile: effectiveCollectionQC.Profile, ReasoningEffort: pointerValue(effectiveCollectionQC.ReasoningEffort),
 		SystemPrompt:     "You are Collection QC. Semantically assess whether registered snapshots are sufficient. Use only r42 read tools and submit a typed verdict.",
 		WorkingDirectory: workspace, Tools: collectionQCReadTools,
@@ -127,10 +200,22 @@ func (f *runtimeFactory) newResearchBlock(
 	if err != nil {
 		return cleanupSetup(err)
 	}
-	readWriteTools, err := evidenceTools(collectionContext.Registry, workspace, planned.Config.Artifacts, true)
+	upstreamText := planned.Config.SystemPrompt
+	if planned.Config.Prompt != nil {
+		upstreamText += "\n" + *planned.Config.Prompt
+	}
+	upstream := f.snapshotCatalog.authorized(upstreamText)
+	readWriteTools, snapshotAccess, err := evidenceToolsWithUpstream(
+		collectionContext.Registry,
+		upstream,
+		workspace,
+		planned.Config.Artifacts,
+		true,
+	)
 	if err != nil {
 		return cleanupSetup(err)
 	}
+	researchTools = enforceSnapshotIDReferences(researchTools, snapshotAccess, workspace)
 	researchTools = append(researchTools, readWriteTools...)
 	resolved := researchspec.ResolvedTools{}
 	terminateName := ""
@@ -147,13 +232,13 @@ func (f *runtimeFactory) newResearchBlock(
 		return cleanupSetup(err)
 	}
 	researchPrompt := appendBuiltInToolCallQuotaPrompt(
-		"You are the closed Research synthesis phase. Read registered snapshots through r42 tools. Do not acquire new evidence or use network, shell, generic file, edit, task, or user-input tools.\n\n"+planned.Config.SystemPrompt,
+		closedResearchSystemPrompt(planned.Config.SystemPrompt),
 		researchBuiltInQuota,
 	)
 	researchSession, err := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionResearch, copilot.SessionConfig{
-		Provider: planned.Provider, Retry: retry, Model: planned.Config.Model, Profile: planned.Config.ProfileName(),
+		Provider: planned.Provider, Retry: researchPhaseRetry, Model: planned.Config.Model, Profile: planned.Config.ProfileName(),
 		ReasoningEffort: pointerValue(planned.Config.ReasoningEffort), SystemPrompt: researchPrompt, WorkingDirectory: workspace,
-		Tools: researchTools, AvailableTools: phaseAllowedTools(planned.Config.Policy.AllowedTools, toolNames(researchTools)),
+		Tools: researchTools, AvailableTools: closedWorldAllowedTools(planned.Config.Policy.AllowedTools, toolNames(researchTools)),
 		ExcludedTools:    closedWorldDisallowedTools(planned.Config.Policy.DisallowedTools),
 		SkillDirectories: slices.Clone(planned.Config.Policy.SkillDirectories), Skills: slices.Clone(planned.Config.Policy.Skills),
 		DisabledSkills: slices.Clone(planned.Config.Policy.DisabledSkills), Hooks: builtInToolCallQuotaHooks(newToolCallQuota(researchBuiltInQuota)),
@@ -167,7 +252,18 @@ func (f *runtimeFactory) newResearchBlock(
 	if !ok {
 		return cleanupSetup(fmt.Errorf("research session does not support phase recording"))
 	}
-	coordinatedResearch := &phasedResearch{research: researchRunner, session: recordedResearchSession}
+	coordinatedResearch := &phasedResearch{
+		research: researchRunner,
+		session:  recordedResearchSession,
+		snapshotIDs: func() []string {
+			ids := collectionContext.Registry.ReviewedSnapshotIDs()
+			for id := range upstream {
+				ids = append(ids, id)
+			}
+			slices.Sort(ids)
+			return ids
+		},
+	}
 
 	initialPrompt := "Begin the configured research task."
 	if planned.Config.Prompt != nil {
@@ -202,7 +298,12 @@ func (f *runtimeFactory) newResearchBlock(
 
 	var finalReviewer coordinator.FinalReviewer
 	if planned.Config.QC != nil {
-		effectiveFinalQC, effectiveErr := planned.Config.EffectiveQC(provider.DefaultRetryPolicy())
+		finalQCProvider := phaseProvider(planned.QCProvider, planned.Provider)
+		finalQCProviderRetry, retryErr := researchRetry(finalQCProvider, provider.RetryOverride{})
+		if retryErr != nil {
+			return cleanupSetup(retryErr)
+		}
+		effectiveFinalQC, effectiveErr := planned.Config.EffectiveQC(finalQCProviderRetry)
 		if effectiveErr != nil {
 			return cleanupSetup(effectiveErr)
 		}
@@ -212,7 +313,13 @@ func (f *runtimeFactory) newResearchBlock(
 		if toolsErr != nil {
 			return cleanupSetup(toolsErr)
 		}
-		finalEvidenceTools, toolsErr := evidenceTools(collectionContext.Registry, workspace, planned.Config.Artifacts, false)
+		finalEvidenceTools, _, toolsErr := evidenceToolsWithUpstream(
+			collectionContext.Registry,
+			upstream,
+			workspace,
+			planned.Config.Artifacts,
+			false,
+		)
 		if toolsErr != nil {
 			return cleanupSetup(toolsErr)
 		}
@@ -220,11 +327,15 @@ func (f *runtimeFactory) newResearchBlock(
 		finalVerdicts := qc.NewVerdictRecorder()
 		finalTools = append(finalTools, qcVerdictTool(executionAddress, f.recorder, finalVerdicts))
 		finalSession, openErr := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionFinalQC, copilot.SessionConfig{
-			Provider: planned.QCProvider, Retry: effectiveFinalQC.Retry, Model: effectiveFinalQC.Model, Profile: effectiveFinalQC.Profile,
-			ReasoningEffort:  pointerValue(effectiveFinalQC.ReasoningEffort),
-			SystemPrompt:     appendBuiltInToolCallQuotaPrompt("You are Final QC. Review only registered snapshots and candidate artifacts, then submit pass, revise_research, or reopen_collection.", finalBuiltInQuota),
+			Provider: finalQCProvider,
+			Retry:    effectiveFinalQC.Retry, Model: effectiveFinalQC.Model, Profile: effectiveFinalQC.Profile,
+			ReasoningEffort: pointerValue(effectiveFinalQC.ReasoningEffort),
+			SystemPrompt: appendBuiltInToolCallQuotaPrompt(
+				"You are Final QC. Review only authorized snapshots by snapshot_id and candidate artifacts, then submit pass, revise_research, or reopen_collection. "+researchSnapshotProtocol,
+				finalBuiltInQuota,
+			),
 			WorkingDirectory: workspace, Tools: finalTools,
-			AvailableTools:   phaseAllowedTools(effectiveFinalQC.AllowedTools, toolNames(finalTools)),
+			AvailableTools:   closedWorldAllowedTools(effectiveFinalQC.AllowedTools, toolNames(finalTools)),
 			ExcludedTools:    closedWorldDisallowedTools(effectiveFinalQC.DisallowedTools),
 			SkillDirectories: slices.Clone(effectiveFinalQC.SkillDirectories), Skills: slices.Clone(effectiveFinalQC.Skills),
 			DisabledSkills: slices.Clone(effectiveFinalQC.DisabledSkills), Hooks: builtInToolCallQuotaHooks(newToolCallQuota(finalBuiltInQuota)),
@@ -255,9 +366,19 @@ func (f *runtimeFactory) newResearchBlock(
 		workflowRun: func(runContext context.Context) (researchruntime.Result, error) {
 			return workflowRunner.Run(runContext, workflowConfig)
 		},
+		afterSuccess: func() {
+			f.snapshotCatalog.add(collectionContext.Registry.Snapshots())
+		},
 	}
 	keepContext = true
 	return block, nil
+}
+
+func phaseProvider(override, fallback *provider.Config) *provider.Config {
+	if override != nil {
+		return override
+	}
+	return fallback
 }
 
 func (f *runtimeFactory) openRecordedWorkflowSession(ctx context.Context, address string, kind debuglog.SessionKind, config copilot.SessionConfig) (Session, error) {
@@ -284,7 +405,10 @@ type budgetedFinalReviewer struct {
 }
 
 func (r *budgetedFinalReviewer) Review(ctx context.Context, config qc.Config, candidate researchruntime.Result) (qc.Verdict, error) {
-	r.recorder.SetCollectionBudget(qc.CollectionBudget{RoundsUsed: r.state.CollectionRoundsUsed(), MaxRounds: r.state.MaxCollectionRounds()})
+	r.recorder.SetCollectionBudget(qc.CollectionBudget{
+		RoundsUsed: r.state.CollectionRoundsUsed(), MaxRounds: r.state.MaxCollectionRounds(),
+		Exhausted: r.state.CollectionExhausted(),
+	})
 	return r.runner.Review(ctx, config, candidate)
 }
 

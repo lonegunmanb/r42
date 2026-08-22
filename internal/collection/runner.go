@@ -58,7 +58,7 @@ func (r *Runner) Run(ctx context.Context, config RunConfig) (CheckpointOutput, e
 			return CheckpointOutput{}, fmt.Errorf("collection checkpoint tool failed: %w", failure)
 		}
 		if len(outputs) > 0 {
-			return outputs[0], nil
+			return mergeCheckpoints(outputs), nil
 		}
 		if attempt >= config.MaxProtocolAttempts {
 			return CheckpointOutput{}, fmt.Errorf(
@@ -69,6 +69,25 @@ func (r *Runner) Run(ctx context.Context, config RunConfig) (CheckpointOutput, e
 		}
 		prompt = fmt.Sprintf("You must call the %q tool before this Collection round can finish.", config.CheckpointToolName)
 	}
+}
+
+func mergeCheckpoints(outputs []CheckpointOutput) CheckpointOutput {
+	merged := CheckpointOutput{}
+	seen := make(map[string]struct{})
+	for _, output := range outputs {
+		for _, id := range output.SnapshotIDs {
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			merged.SnapshotIDs = append(merged.SnapshotIDs, id)
+		}
+		if strings.TrimSpace(output.EmptyReason) != "" {
+			merged.EmptyReason = output.EmptyReason
+		}
+		merged.CollectionExhausted = merged.CollectionExhausted || output.CollectionExhausted
+	}
+	return merged
 }
 
 // CheckpointRecorder captures accepted checkpoint tool calls.

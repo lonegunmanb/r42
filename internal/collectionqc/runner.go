@@ -65,6 +65,8 @@ type Config struct {
 	Task                  Task
 	Criteria              cty.Value
 	CheckpointSnapshotIDs []string
+	CheckpointEmptyReason string
+	CollectionExhausted   bool
 	MaxProtocolAttempts   int
 	VerdictToolName       string
 }
@@ -178,9 +180,11 @@ type contextDocument struct {
 	Task                  Task              `json:"task"`
 	Criteria              map[string]string `json:"criteria"`
 	CheckpointSnapshotIDs []string          `json:"checkpoint_snapshot_ids"`
+	CheckpointEmptyReason string            `json:"checkpoint_empty_reason,omitempty"`
 	PreviousIssues        []string          `json:"previous_issues"`
 	CollectionRoundsUsed  int               `json:"collection_rounds_used"`
 	CollectionCanReopen   bool              `json:"collection_can_reopen"`
+	CollectionExhausted   bool              `json:"collection_exhausted"`
 }
 
 func contextPrompt(config Config, collectionContext *collection.Context) (string, error) {
@@ -196,9 +200,11 @@ func contextPrompt(config Config, collectionContext *collection.Context) (string
 		Task:                  config.Task,
 		Criteria:              criteriaMap,
 		CheckpointSnapshotIDs: append([]string{}, config.CheckpointSnapshotIDs...),
+		CheckpointEmptyReason: config.CheckpointEmptyReason,
 		PreviousIssues:        collectionContext.State.LastCollectionQCIssues(),
 		CollectionRoundsUsed:  collectionContext.State.CollectionRoundsUsed(),
 		CollectionCanReopen:   !collectionContext.State.CollectionLimitExhausted(),
+		CollectionExhausted:   config.CollectionExhausted,
 	}
 	encoded, err := json.Marshal(document)
 	if err != nil {

@@ -81,28 +81,34 @@ uses general file or shell tools to inspect upstream paths.
 This example requires Python 3 for the local `audit_synthesis` external tool;
 the research and planning tools remain inline Go tools compiled by r42.
 
-`save_snapshot` is the typed boundary for source capture: it accepts complete
-Markdown content and writes only absolute `.md` paths under the current block's
-`snapshots/` directory. `submit_research_plan` rejects an empty plan, duplicate task IDs, blank
+`save_snapshot` is the typed boundary for source capture: during Collection it
+accepts complete Markdown content and writes only absolute `.md` paths under
+the current block's `snapshots/` directory. Collection then registers each
+returned path with `r42_register_snapshot` before checkpointing.
+`submit_research_plan` rejects an empty plan, duplicate task IDs, blank
 subquestions, and vague instructions. Its accepted JSON becomes
 `research.static.plan["default"].result`, which the three dynamic blocks decode
 with HCL `for` expressions when no caller-supplied plan is present.
 
 Every deep-dive task must call `submit_knowledge`. The typed tool validates
 unique knowledge and quote IDs, bidirectional claim-to-quote references, valid
-source URLs, existing Markdown snapshot paths, and confidence
+source URLs, registered snapshot IDs, and confidence
 values before writing `knowledge.json` under that task's workspace. Before
-submitting knowledge, the researcher must call `save_snapshot` for every
-source it uses, storing the complete fetched material under
-`<block_wd>/snapshots/`; each quote records its exact `snapshot_path`. Collection
-QC reviews registered snapshots before closed Research submits knowledge. Final
-QC then reviews each claim, quote, snapshot, and artifact; failed QC returns a
-revision or Collection-reopen decision up to `max_qc_rounds`.
+submitting knowledge, Collection must call `save_snapshot` for every source it
+retains, store the complete fetched material under `<block_wd>/snapshots/`, and
+register it. Collection QC reviews those registered snapshots. R42 supplies the
+approved IDs to closed Research, which can inspect them only through
+`r42_read_snapshot`; submitted quotes retain `snapshot_id` rather than filesystem
+paths. Final QC
+reviews semantic support; failed QC returns a revision or Collection-reopen
+decision up to `max_qc_rounds`.
 
-Each materialized deep-dive task has its own `web_fetch` entry in
+By default, each materialized deep-dive task has its own `web_fetch` entry in
 `tool_call_quota`. The `web_fetch_tool_call_quota` input variable controls the
 number of successful built-in fetch calls allowed for each task's Collection
-session and defaults to 20; failed fetches do not consume it.
+session and defaults to 20; failed fetches do not consume it. Set the variable
+to `null` to omit the `web_fetch` quota and leave evidence-sufficiency judgment
+to Collection QC.
 
 The conflict resolver reads all knowledge artifacts from all three dynamic
 groups, records resolved and unresolved contradictions in `resolution.json`,

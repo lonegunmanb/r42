@@ -5,9 +5,11 @@
 package evidence
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +26,9 @@ type SnapshotInfo struct {
 // SnapshotAccess provides read-only access to registered snapshots. Paths are
 // resolved by snapshot ID only; callers never pass filesystem paths.
 type SnapshotAccess struct {
-	registry *snapshot.Registry
+	registry          *snapshot.Registry
+	upstream          map[string]string
+	reviewedLocalOnly bool
 }
 
 // NewSnapshotAccess creates snapshot read access over a registry rooted at the
@@ -43,6 +47,22 @@ func NewSnapshotAccessWithRegistry(registry *snapshot.Registry) (*SnapshotAccess
 		return nil, errors.New("snapshot registry is required")
 	}
 	return &SnapshotAccess{registry: registry}, nil
+}
+
+// NewSnapshotAccessWithRegistryAndUpstream creates read access over the local
+// Collection registry plus an explicitly authorized upstream ID-to-path view.
+func NewSnapshotAccessWithRegistryAndUpstream(
+	registry *snapshot.Registry,
+	upstream map[string]string,
+) (*SnapshotAccess, error) {
+	access, err := NewSnapshotAccessWithRegistry(registry)
+	if err != nil {
+		return nil, err
+	}
+	access.upstream = make(map[string]string, len(upstream))
+	access.reviewedLocalOnly = true
+	maps.Copy(access.upstream, upstream)
+	return access, nil
 }
 
 // Register registers an existing workspace file as a snapshot.
@@ -70,11 +90,81 @@ func (a *SnapshotAccess) ReadSnapshot(id string, maxBytes int) (string, error) {
 	if maxBytes <= 0 {
 		return "", errors.New("read bound must be positive")
 	}
-	path, err := a.registry.Snapshot(id)
+	path, err := a.authorizedPath(id)
 	if err != nil {
 		return "", err
 	}
 	return readBounded(path, maxBytes)
+}
+
+// HasSnapshot reports whether an ID is available through this authorized view.
+func (a *SnapshotAccess) HasSnapshot(id string) bool {
+	_, err := a.authorizedPath(id)
+	return err == nil
+}
+
+// ContainsNormalizedText validates a quote while ignoring Unicode whitespace
+// layout differences and preserving all other text, punctuation, and order.
+func (a *SnapshotAccess) ContainsNormalizedText(id, quote string) (bool, error) {
+	path, err := a.authorizedPath(id)
+	if err != nil {
+		return false, err
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read snapshot %q: %w", id, err)
+	}
+	normalizedQuote := normalizeWhitespace(quote)
+	return normalizedQuote != "" && strings.Contains(normalizeWhitespace(string(content)), normalizedQuote), nil
+}
+
+// SnapshotSourceURL returns the fetched source URL recorded in the snapshot
+// Markdown header.
+func (a *SnapshotAccess) SnapshotSourceURL(id string) (string, error) {
+	path, err := a.authorizedPath(id)
+	if err != nil {
+		return "", err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open snapshot %q: %w", id, err)
+	}
+	defer func() { _ = file.Close() }()
+
+	scanner := bufio.NewScanner(file)
+	for range 64 {
+		if !scanner.Scan() {
+			break
+		}
+		line := strings.TrimSpace(scanner.Text())
+		if value, found := strings.CutPrefix(line, "- URL:"); found {
+			sourceURL := strings.TrimSpace(value)
+			if sourceURL == "" {
+				return "", fmt.Errorf("snapshot %q has an empty URL header", id)
+			}
+			return sourceURL, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("read snapshot %q header: %w", id, err)
+	}
+	return "", fmt.Errorf("snapshot %q has no URL header", id)
+}
+
+func (a *SnapshotAccess) authorizedPath(id string) (string, error) {
+	path, err := a.registry.Snapshot(id)
+	localAllowed := err == nil && (!a.reviewedLocalOnly || a.registry.IsReviewed(id))
+	if localAllowed {
+		return path, nil
+	}
+	if path, ok := a.upstream[id]; ok {
+		return path, nil
+	}
+	return "", fmt.Errorf("unknown snapshot %q", id)
+}
+
+func normalizeWhitespace(value string) string {
+	return strings.Join(strings.Fields(value), " ")
 }
 
 // ArtifactAccess provides read-only access to declared candidate artifacts.

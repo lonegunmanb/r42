@@ -24,15 +24,16 @@ variable "research_plan" {
 
 variable "web_fetch_tool_call_quota" {
   type        = number
-  description = "Maximum successful built-in web_fetch calls allowed per deep-dive Collection session."
+  description = "Maximum successful built-in web_fetch calls allowed per deep-dive Collection session. Set null for no limit."
   default     = 20
+  nullable    = true
 
   validation {
-    condition = (
+    condition = var.web_fetch_tool_call_quota == null ? true : (
       var.web_fetch_tool_call_quota >= 1 &&
       floor(var.web_fetch_tool_call_quota) == var.web_fetch_tool_call_quota
     )
-    error_message = "web_fetch_tool_call_quota must be a positive integer."
+    error_message = "web_fetch_tool_call_quota must be null or a positive integer."
   }
 }
 
@@ -56,7 +57,7 @@ variable "system_prompt" {
     submit atomic knowledge claims and separate verbatim quote records. Save
     the complete material returned by every source read as Markdown under the
     current block workspace's snapshots/ directory before citing it. Every quote must include the
-    exact snapshot_path, locator, URL, and verbatim text from that snapshot.
+    registered snapshot_id, locator, URL, and verbatim text from that snapshot.
     Every claim must reference at least one quote ID, and every quote must be
     used. Before calling the tool, be ready for it to write the accepted
     payload to the declared knowledge.json artifact.

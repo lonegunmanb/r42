@@ -30,6 +30,36 @@ func TestRunnerReturnsRecordedCheckpoint(t *testing.T) {
 	assert.Equal(t, []string{"collect evidence"}, session.prompts)
 }
 
+func TestRunnerMergesAllRecordedCheckpoints(t *testing.T) {
+	t.Parallel()
+
+	recorder := collection.NewCheckpointRecorder()
+	session := &runnerSession{onSend: func(int) error {
+		require.NoError(t, recorder.Record(collection.CheckpointOutput{
+			SnapshotIDs: []string{"snapshot-1", "snapshot-2"},
+		}))
+		require.NoError(t, recorder.Record(collection.CheckpointOutput{
+			SnapshotIDs: []string{"snapshot-2", "snapshot-3"},
+		}))
+		return recorder.Record(collection.CheckpointOutput{
+			EmptyReason:         "supplementary search found no additional sources",
+			CollectionExhausted: true,
+		})
+	}}
+	runner := collection.NewRunner(session, recorder)
+
+	result, err := runner.Run(t.Context(), collection.RunConfig{
+		InitialPrompt:       "collect evidence",
+		MaxProtocolAttempts: 3,
+		CheckpointToolName:  "r42_collection_checkpoint",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"snapshot-1", "snapshot-2", "snapshot-3"}, result.SnapshotIDs)
+	assert.Equal(t, "supplementary search found no additional sources", result.EmptyReason)
+	assert.True(t, result.CollectionExhausted)
+}
+
 func TestRunnerRequiresCheckpointAndReusesSession(t *testing.T) {
 	t.Parallel()
 

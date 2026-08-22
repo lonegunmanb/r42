@@ -62,6 +62,7 @@ type State struct {
 	cursor                 int
 	unreviewedCount        int
 	checkpointPending      bool
+	collectionExhausted    bool
 	lastCollectionQCIssues []string
 }
 
@@ -178,10 +179,36 @@ func (s *State) CollectionLimitExhausted() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	if s.collectionExhausted {
+		return true
+	}
 	if s.config.MaxCollectionRounds == nil {
 		return false
 	}
 	return s.collectionRoundsUsed >= *s.config.MaxCollectionRounds
+}
+
+// CollectionExhausted reports whether Collection explicitly declared that it
+// cannot acquire more evidence, independent of any configured round limit.
+func (s *State) CollectionExhausted() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.collectionExhausted
+}
+
+// MarkCollectionExhausted permanently closes Collection for this workflow.
+func (s *State) MarkCollectionExhausted() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.begun {
+		return errors.New("workflow must begin before exhausting collection")
+	}
+	if s.phase != PhaseCollection {
+		return &TransitionError{From: s.phase, Event: EventCollectionLimitExhausted}
+	}
+	s.collectionExhausted = true
+	return nil
 }
 
 // RegisterSnapshot records one newly registered unique snapshot. Reaching the
@@ -259,7 +286,7 @@ func (s *State) Advance(event Event) error {
 			s.cursor++
 			return nil
 		case EventNeedsMore:
-			if s.config.MaxCollectionRounds != nil && s.collectionRoundsUsed >= *s.config.MaxCollectionRounds {
+			if s.collectionExhausted || s.config.MaxCollectionRounds != nil && s.collectionRoundsUsed >= *s.config.MaxCollectionRounds {
 				return &BudgetExhaustedError{Phase: s.phase, Event: event}
 			}
 			s.phase = PhaseCollection
@@ -285,7 +312,7 @@ func (s *State) Advance(event Event) error {
 			s.phase = PhaseResearch
 			return nil
 		case EventReopenCollection:
-			if s.config.MaxCollectionRounds != nil && s.collectionRoundsUsed >= *s.config.MaxCollectionRounds {
+			if s.collectionExhausted || s.config.MaxCollectionRounds != nil && s.collectionRoundsUsed >= *s.config.MaxCollectionRounds {
 				return &BudgetExhaustedError{Phase: s.phase, Event: event}
 			}
 			s.phase = PhaseCollection

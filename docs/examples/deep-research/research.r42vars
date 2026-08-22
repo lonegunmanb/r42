@@ -1,6 +1,7 @@
-topic = "美国与日本联手于 2026 年 08 月 02 日干预了日本汇率，我希望研究一下此事件中美日动用的工具和资金量，后续日本汇率的走势分析，分短期（一个月）中期（六个月）长期（一年以上），最终报告采用中文撰写"
+topic = "Moderna与默沙东联合研发的个性化mRNA癌症疫苗在大型三期临床试验中取得成功，成为首个在三期试验中证明疗效的个性化癌症疫苗，被业界视为肿瘤免疫治疗领域的里程碑式突破。我需要研究 A 股市场有哪些公司可能受益于该消息，受益的逻辑链条时什么，最终报告采用中文撰写"
 model            = "deepseek-v4-flash"
-reasoning_effort = "medium"
+reasoning_effort = "low"
+web_fetch_tool_call_quota = null
 model_provider = {
   endpoint = "https://api.deepseek.com"
   wire_api = "responses"

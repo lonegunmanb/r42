@@ -14,9 +14,11 @@ func TestDecodeDynamicTaskDecodesCollectionFields(t *testing.T) {
 	t.Parallel()
 
 	providerRef := referenceValue("model_provider.qc", "provider")
+	collectionProviderRef := referenceValue("model_provider.collection", "provider")
 	task := cty.ObjectVal(map[string]cty.Value{
 		"model":                        cty.StringVal("wire-model"),
 		"system_prompt":                cty.StringVal("Collect and synthesize."),
+		"collection_model_provider":    collectionProviderRef,
 		"collection_tool_ids":          cty.TupleVal([]cty.Value{cty.StringVal("tool_fixture_source")}),
 		"collection_skill_directories": cty.TupleVal([]cty.Value{cty.StringVal("skills/collection")}),
 		"collection_skills":            cty.TupleVal([]cty.Value{cty.StringVal("source-evaluation")}),
@@ -41,6 +43,7 @@ func TestDecodeDynamicTaskDecodesCollectionFields(t *testing.T) {
 	config, err := researchspec.DecodeDynamicTask(task)
 
 	require.NoError(t, err)
+	assert.True(t, collectionProviderRef.RawEquals(config.CollectionModelProvider))
 	assert.Equal(t, []string{"tool_fixture_source"}, config.CollectionToolIDs)
 	assert.Equal(t, []string{"skills/collection"}, config.CollectionSkillDirectories)
 	assert.Equal(t, []string{"source-evaluation"}, config.CollectionSkills)

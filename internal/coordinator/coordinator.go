@@ -103,6 +103,8 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 				return researchruntime.Result{}, fmt.Errorf("run collection: %w", err)
 			}
 			config.CollectionQC.CheckpointSnapshotIDs = append([]string(nil), checkpoint.SnapshotIDs...)
+			config.CollectionQC.CheckpointEmptyReason = checkpoint.EmptyReason
+			config.CollectionQC.CollectionExhausted = checkpoint.CollectionExhausted
 			if err = r.state.Advance(workflow.EventCollectionCheckpoint); err != nil {
 				return researchruntime.Result{}, err
 			}
@@ -124,7 +126,11 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 		case workflow.PhaseResearch:
 			researchConfig := config.Research
 			if len(researchIssues) > 0 {
-				researchConfig.InitialPrompt = issuePrompt("Use the available snapshots to address these issues:", researchIssues)
+				researchConfig.InitialPrompt = appendIssuePrompt(
+					config.Research.InitialPrompt,
+					"Address these review issues while completing the original task:",
+					researchIssues,
+				)
 			}
 			var err error
 			candidate, err = r.research.Run(ctx, researchConfig)
@@ -211,4 +217,12 @@ func issuePrompt(header string, issues []corespec.Issue) string {
 		fmt.Fprintf(&result, "\n- [%s] %s", issue.Code, issue.Message)
 	}
 	return result.String()
+}
+
+func appendIssuePrompt(initialPrompt, header string, issues []corespec.Issue) string {
+	revisionPrompt := issuePrompt(header, issues)
+	if strings.TrimSpace(initialPrompt) == "" {
+		return revisionPrompt
+	}
+	return strings.TrimRight(initialPrompt, "\r\n") + "\n\n" + revisionPrompt
 }

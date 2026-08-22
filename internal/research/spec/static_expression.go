@@ -18,7 +18,7 @@ var researchAttributeNames = map[string]struct{}{
 	"tool_ids": {}, "tool_call_quota": {}, "terminate_tool_id": {}, "allowed_tools": {},
 	"disallowed_tools": {}, "skill_directories": {}, "skills": {}, "disabled_skills": {},
 	"permission": {}, "max_protocol_attempts": {}, "timeout": {},
-	"collection_tool_ids": {}, "collection_skill_directories": {}, "collection_skills": {},
+	"collection_model_provider": {}, "collection_tool_ids": {}, "collection_skill_directories": {}, "collection_skills": {},
 	"collection_disabled_skills": {}, "collection_batch_size": {}, "max_collection_rounds": {},
 }
 
@@ -252,6 +252,7 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 		"disabled_skills": cty.EmptyTupleVal, "permission": cty.NullVal(cty.String),
 		"max_protocol_attempts": cty.NullVal(cty.Number), "timeout": cty.NullVal(cty.String),
 		"retry": cty.EmptyTupleVal, "artifact": cty.EmptyTupleVal, "qc": cty.EmptyTupleVal,
+		"collection_model_provider":    cty.NullVal(cty.EmptyObject),
 		"collection_tool_ids":          cty.EmptyTupleVal,
 		"collection_skill_directories": cty.EmptyTupleVal,
 		"collection_skills":            cty.EmptyTupleVal,

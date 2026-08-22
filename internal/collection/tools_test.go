@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -170,6 +171,113 @@ func TestCheckpointToolHandler(t *testing.T) {
 		assert.Empty(t, response.Output.SnapshotIDs)
 	})
 
+	t.Run("empty checkpoint rejects whitespace reason", func(t *testing.T) {
+		t.Parallel()
+
+		checkpoint := NewCheckpointHandler(NewContext(t.TempDir(), 10, nil))
+		response := checkpoint.Submit(CheckpointArgs{
+			EmptyReason:         " \t\n ",
+			CollectionExhausted: true,
+		})
+
+		assert.False(t, response.Accepted)
+		require.NotEmpty(t, response.Issues)
+		assert.Equal(t, "empty_checkpoint", response.Issues[0].Code)
+	})
+
+	t.Run("empty checkpoint can declare collection exhausted", func(t *testing.T) {
+		t.Parallel()
+
+		context := NewContext(t.TempDir(), 10, nil)
+		checkpoint := NewCheckpointHandler(context)
+		response := checkpoint.Submit(CheckpointArgs{
+			EmptyReason:         "configured source tools are exhausted",
+			CollectionExhausted: true,
+		})
+
+		require.True(t, response.Accepted)
+		require.NotNil(t, response.Output)
+		assert.True(t, response.Output.CollectionExhausted)
+		assert.Equal(t, "configured source tools are exhausted", response.Output.EmptyReason)
+		assert.True(t, context.State.CollectionLimitExhausted())
+	})
+
+	t.Run("exhaustion requires an empty checkpoint", func(t *testing.T) {
+		t.Parallel()
+
+		workspace := t.TempDir()
+		handler := NewRegisterHandler(NewContext(workspace, 10, nil))
+		file := filepath.Join(workspace, "evidence.md")
+		require.NoError(t, os.WriteFile(file, []byte("content"), 0o644))
+		require.True(t, handler.Register(RegisterArgs{Path: file}).Accepted)
+
+		response := NewCheckpointHandler(handler.Context()).Submit(CheckpointArgs{
+			EmptyReason:         "cannot find more",
+			CollectionExhausted: true,
+		})
+
+		assert.False(t, response.Accepted)
+		require.NotEmpty(t, response.Issues)
+		assert.Equal(t, "collection_exhausted", response.Issues[0].Code)
+	})
+
+	t.Run("exhaustion after an earlier checkpoint means no additional snapshots", func(t *testing.T) {
+		t.Parallel()
+
+		workspace := t.TempDir()
+		context := NewContext(workspace, 10, nil)
+		register := NewRegisterHandler(context)
+		checkpoint := NewCheckpointHandler(context)
+		file := filepath.Join(workspace, "evidence.md")
+		require.NoError(t, os.WriteFile(file, []byte("content"), 0o644))
+		registration := register.Register(RegisterArgs{Path: file})
+		require.True(t, registration.Accepted)
+
+		first := checkpoint.Submit(CheckpointArgs{})
+		require.True(t, first.Accepted)
+		require.NotNil(t, first.Output)
+		assert.Equal(t, []string{registration.Output.ID}, first.Output.SnapshotIDs)
+
+		final := checkpoint.Submit(CheckpointArgs{
+			EmptyReason:         "supplementary search found no additional sources",
+			CollectionExhausted: true,
+		})
+
+		require.True(t, final.Accepted)
+		require.NotNil(t, final.Output)
+		assert.Empty(t, final.Output.SnapshotIDs)
+		assert.True(t, final.Output.CollectionExhausted)
+		assert.True(t, context.State.CollectionLimitExhausted())
+	})
+
+	t.Run("later checkpoint submits only newly registered snapshots", func(t *testing.T) {
+		t.Parallel()
+
+		workspace := t.TempDir()
+		context := NewContext(workspace, 10, nil)
+		register := NewRegisterHandler(context)
+		checkpoint := NewCheckpointHandler(context)
+		registerFile := func(name, content string) string {
+			path := filepath.Join(workspace, name)
+			require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+			response := register.Register(RegisterArgs{Path: path})
+			require.True(t, response.Accepted)
+			return response.Output.ID
+		}
+
+		firstID := registerFile("first.md", "first")
+		first := checkpoint.Submit(CheckpointArgs{})
+		require.True(t, first.Accepted)
+		assert.Equal(t, []string{firstID}, first.Output.SnapshotIDs)
+
+		secondID := registerFile("second.md", "second")
+		second := checkpoint.Submit(CheckpointArgs{})
+
+		require.True(t, second.Accepted)
+		require.NotNil(t, second.Output)
+		assert.Equal(t, []string{secondID}, second.Output.SnapshotIDs)
+	})
+
 	t.Run("checkpoint cannot omit selected snapshots", func(t *testing.T) {
 		t.Parallel()
 
@@ -250,6 +358,46 @@ func TestContextValidation(t *testing.T) {
 	require.NoError(t, NewContext(t.TempDir(), 0, nil).Validate())
 	require.Error(t, NewContext(t.TempDir(), -1, nil).Validate())
 	require.NoError(t, NewContext(t.TempDir(), 10, nil).Validate())
+}
+
+func TestProtocolHandlersRejectNilContext(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		invoke func() corespec.ToolResponse[struct{}]
+	}{
+		{
+			name: "register",
+			invoke: func() corespec.ToolResponse[struct{}] {
+				response := NewRegisterHandler(nil).Register(RegisterArgs{Path: "snapshot.md"})
+				return eraseResponse(response)
+			},
+		},
+		{
+			name: "checkpoint",
+			invoke: func() corespec.ToolResponse[struct{}] {
+				response := NewCheckpointHandler(nil).Submit(CheckpointArgs{EmptyReason: "none"})
+				return eraseResponse(response)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var response corespec.ToolResponse[struct{}]
+			require.NotPanics(t, func() { response = tt.invoke() })
+			assert.False(t, response.Accepted)
+			require.NotEmpty(t, response.Issues)
+			assert.Equal(t, "context_validation", response.Issues[0].Code)
+		})
+	}
+}
+
+func eraseResponse[T any](response corespec.ToolResponse[T]) corespec.ToolResponse[struct{}] {
+	return corespec.ToolResponse[struct{}]{Accepted: response.Accepted, Issues: response.Issues}
 }
 
 func TestRegisterHandlerInfrastructureErrors(t *testing.T) {

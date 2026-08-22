@@ -20,6 +20,7 @@ import (
 type ResearchPlan struct {
 	Config               researchspec.Config
 	Provider             *provider.Config
+	CollectionProvider   *provider.Config
 	QCProvider           *provider.Config
 	CollectionQCProvider *provider.Config
 	Expression           string
@@ -41,6 +42,7 @@ type researchSnapshot struct {
 	Artifacts                  []researchspec.Artifact      `json:"artifacts"`
 	QC                         *qcSnapshot                  `json:"qc,omitempty"`
 	Provider                   *providerSnapshot            `json:"provider,omitempty"`
+	CollectionProvider         *providerSnapshot            `json:"collection_provider,omitempty"`
 	TerminateToolID            *string                      `json:"terminate_tool_id,omitempty"`
 	QCProvider                 *providerSnapshot            `json:"qc_provider,omitempty"`
 	CollectionToolIDs          []string                     `json:"collection_tool_ids,omitempty"`
@@ -155,6 +157,12 @@ func EncodeResearchPlan(
 		CollectionBatchSize:        config.CollectionBatchSize,
 		MaxCollectionRounds:        clonePointer(config.MaxCollectionRounds),
 	}
+	var collectionSensitive bool
+	snapshot.CollectionProvider, collectionSensitive, err = resolveProvider(config.CollectionModelProvider, planning)
+	if err != nil {
+		return cty.NilVal, err
+	}
+	sensitive = sensitive || collectionSensitive
 	if config.QC != nil {
 		criteria, criteriaErr := stringMap(config.QC.Criteria)
 		if criteriaErr != nil {
@@ -275,6 +283,7 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 	}
 	return ResearchPlan{
 		Config: configValue, Provider: restoreProvider(snapshot.Provider),
+		CollectionProvider:   restoreProvider(snapshot.CollectionProvider),
 		QCProvider:           restoreProvider(snapshot.QCProvider),
 		CollectionQCProvider: restoreProvider(snapshot.CollectionQCProvider),
 	}, nil
@@ -289,7 +298,8 @@ func (p ResearchPlan) Resolve(config researchspec.Config) (ResearchPlan, error) 
 		return ResearchPlan{}, err
 	}
 	return ResearchPlan{
-		Config: resolved.Config, Provider: resolved.Provider, QCProvider: resolved.QCProvider,
+		Config: resolved.Config, Provider: resolved.Provider, CollectionProvider: resolved.CollectionProvider,
+		QCProvider:           resolved.QCProvider,
 		CollectionQCProvider: resolved.CollectionQCProvider,
 	}, nil
 }

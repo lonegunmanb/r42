@@ -311,7 +311,8 @@ round state.
 Research session fields include:
 
 - `model_provider`: optional provider reference; omission uses the SDK's
-  default provider behavior.
+  default provider behavior. It is the default provider for all workflow
+  phases.
 - `model`: required.
 - `profile`: optional Copilot runtime model identity, defaulting to `model`.
   With BYOK, r42 sends `profile` as `ProviderConfig.ModelID` for capability and
@@ -320,6 +321,8 @@ Research session fields include:
 - `reasoning_effort`: an arbitrary non-empty string passed through unchanged.
 - `system_prompt`: required.
 - `prompt`: optional.
+- `collection_model_provider`: optional Collection-only provider override;
+  omission reuses `model_provider`.
 - `collection_tool_ids`: typed acquisition or snapshot-producing tool IDs used
   only by Collection.
 - `tool_ids`: trusted typed tool IDs used only by closed Research.
@@ -348,11 +351,21 @@ r42 sends a fixed start message. r42 does not validate whether a model supports
 a given reasoning effort; unsupported parameters are surfaced by the provider,
 with HTTP 400 failing immediately.
 
+Provider selection is resolved per phase. Collection uses
+`collection_model_provider` when present, Collection QC uses its nested
+`model_provider` when present, and Final QC uses its nested `model_provider`
+when present. Every omitted phase override reuses the research block's
+top-level `model_provider`; closed Research always uses that top-level provider.
+Retry composition starts from the selected phase provider, then applies the
+research-level retry override and, for either QC phase, its nested retry
+override.
+
 ### Tool policy
 
 There is no default allowlist. When present, `allowed_tools` first narrows the
 available set. `disallowed_tools` is then applied and always wins. Collection is
-the only open-world phase. Research always adds a fixed denylist for obvious
+the only open-world phase, but it always denies `task`, `powershell`, and `curl`
+to prevent delegation and command-line network fallbacks. Research always adds a fixed denylist for obvious
 network, shell, generic file, edit, task/sub-agent, and user-input built-ins.
 Explicit custom typed tools remain an author trust boundary.
 
@@ -552,7 +565,8 @@ Collection --checkpoint--> Collection QC --sufficient--> Research
 ```
 
 Collection is the only open-world phase. It uses only
-`collection_tool_ids`, Collection skills, the shared built-in policy, and the
+its effective provider, `collection_tool_ids`, Collection skills, the shared
+built-in policy, and the
 mandatory `r42_register_snapshot` and `r42_collection_checkpoint` tools. A
 configured typed acquisition result is retained by tool-call ID so registration
 can materialize it as a managed file; a tool that already wrote a file can
@@ -566,6 +580,14 @@ sets `checkpoint_pending`: new acquisition calls are rejected, but already
 in-flight work may finish and registration/checkpoint remain callable. The
 default batch size is 10.
 
+When configured source tools cannot obtain any more useful material, Collection
+can submit an empty checkpoint with `collection_exhausted = true` and a concrete
+`empty_reason`. This is an explicit terminal statement from the persistent
+Collection session, not an inference from an unchanged snapshot set. Collection
+QC receives both fields together with `collection_can_reopen = false`; it may
+still return `needs_more` with semantic gaps, but the workflow then advances to
+closed Research with those issues instead of reopening Collection.
+
 Collection QC is mandatory even when no `collection_qc` block is declared. It
 uses a persistent session with fixed read-only snapshot/artifact projections and
 the mandatory `r42_collection_qc_verdict` tool. It performs semantic sufficiency
@@ -577,7 +599,11 @@ Malformed verdicts do not advance the reviewed cursor; valid verdicts do.
 `max_collection_rounds` counts actual entries into Collection, including the
 initial phase and later reopens. Omission means unlimited. When Collection QC
 requests more after the configured limit is exhausted, Research proceeds with
-the unresolved issues and existing snapshots. Merely revising Research or
+the unresolved issues and existing snapshots. A collector-declared exhaustion
+has the same no-reopen effect independently of this numeric limit. Final QC gets
+a typed rejection if it requests `reopen_collection` after either condition;
+the rejection distinguishes the configured round limit from the Collection
+session's explicit exhaustion. Merely revising Research or
 retrying a verdict does not consume a Collection round.
 
 Research is closed-world synthesis. It can read all registered snapshots by ID,

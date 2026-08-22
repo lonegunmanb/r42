@@ -212,15 +212,20 @@ type VerdictRecorder struct {
 type CollectionBudget struct {
 	RoundsUsed int
 	MaxRounds  *int
+	Exhausted  bool
 }
 
 // CollectionRoundBudgetExhaustedError rejects a Final-QC reopen request while
 // leaving the verdict protocol active for a repair attempt.
 type CollectionRoundBudgetExhaustedError struct {
-	Rounds int
+	Rounds             int
+	CollectorExhausted bool
 }
 
 func (e *CollectionRoundBudgetExhaustedError) Error() string {
+	if e.CollectorExhausted {
+		return "cannot reopen collection: the Collection session reported that no further evidence can be collected"
+	}
 	return fmt.Sprintf("cannot reopen collection: all %d collection rounds have been used", e.Rounds)
 }
 
@@ -234,8 +239,14 @@ func (r *VerdictRecorder) Record(verdict Verdict) error {
 	}
 	r.mu.Lock()
 	if verdict.Decision == DecisionReopenCollection && !collectionCanReopen(r.collectionBudget) {
+		rejection := &CollectionRoundBudgetExhaustedError{
+			Rounds: r.collectionBudget.RoundsUsed, CollectorExhausted: r.collectionBudget.Exhausted,
+		}
+		if r.collectionBudget.MaxRounds != nil {
+			rejection.Rounds = *r.collectionBudget.MaxRounds
+		}
 		r.mu.Unlock()
-		return &CollectionRoundBudgetExhaustedError{Rounds: *r.collectionBudget.MaxRounds}
+		return rejection
 	}
 	verdict.Issues = cloneIssues(verdict.Issues)
 	r.verdicts = append(r.verdicts, verdict)
@@ -263,6 +274,9 @@ func (r *VerdictRecorder) CollectionCanReopen() bool {
 }
 
 func collectionCanReopen(budget CollectionBudget) bool {
+	if budget.Exhausted {
+		return false
+	}
 	return budget.MaxRounds == nil || budget.RoundsUsed < *budget.MaxRounds
 }
 

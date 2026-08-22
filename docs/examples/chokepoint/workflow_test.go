@@ -3,6 +3,7 @@ package chokepoint_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +12,45 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRegisterEvidenceSourceUsesSnapshotID(t *testing.T) {
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "register_evidence_source"))
+	require.NoError(t, err)
+	workspace := blockDirectory(t, "register-evidence")
+	ledgerPath := filepath.Join(workspace, "evidence-ledger.json")
+	snapshotID := "snapshot-0123456789abcdef0123456789abcdef"
+	input := map[string]any{
+		"workspace_dir": workspace, "ledger_path": ledgerPath,
+		"url": "https://example.com/official", "canonical_url": "https://example.com/official",
+		"title": "Official filing", "publisher": "Example issuer",
+		"publication_date": "2026-01-02", "accessed_at": "2026-08-09",
+		"source_type": "official_filing", "reporting_basis": "public_document",
+		"provenance": "original", "snapshot_id": snapshotID,
+		"named_entities": []string{"Example issuer"},
+	}
+
+	response, err := program.Invoke(t.Context(), marshalInput(t, input), workspace)
+
+	require.NoError(t, err)
+	require.True(t, response.Accepted, "issues: %#v", response.Issues)
+	var output map[string]any
+	require.NoError(t, json.Unmarshal(*response.Output, &output))
+	var source map[string]any
+	require.NoError(t, readJSON(valueAs[string](t, output["source_path"]), &source))
+	assert.Equal(t, snapshotID, source["snapshot_id"])
+	assert.NotContains(t, source, "snapshot_path")
+	assert.NotContains(t, source, "snapshot_sha256")
+	assert.NotContains(t, source, "content_fingerprint")
+
+	input["snapshot_id"] = filepath.Join(workspace, "sources", "official.md")
+	rejected, err := program.Invoke(t.Context(), marshalInput(t, input), workspace)
+	require.NoError(t, err)
+	assert.False(t, rejected.Accepted)
+	assert.Contains(t, issueCodes(rejected), "snapshot_id")
+}
 
 func TestClaimCardsKeepOneEvidenceLayer(t *testing.T) {
 	compiler, err := gotool.NewCompiler()
@@ -29,13 +69,14 @@ func TestClaimCardsKeepOneEvidenceLayer(t *testing.T) {
 			map[string]any{
 				"id": "C-001", "statement": "CXMT outsources chip packaging.",
 				"status": "confirmed", "scope": "DDR5 die packaging", "as_of": "2025-12-31",
-				"source_id": "source-official", "exact_quote": "The company outsources all chip packaging.",
-				"locator": "page 227, production model", "derived_from": []string{},
+				"source_id": "source-official", "snapshot_id": "snapshot-0123456789abcdef0123456789abcdef",
+				"exact_quote": "The company outsources all chip packaging.",
+				"locator":     "page 227, production model", "derived_from": []string{},
 			},
 			map[string]any{
 				"id": "I-001", "statement": "Outsourcing creates external capacity dependency.",
 				"status": "inferred", "scope": "DDR5 die packaging", "as_of": "2025-12-31",
-				"source_id": "", "exact_quote": "", "locator": "", "derived_from": []string{"C-001"},
+				"source_id": "", "snapshot_id": "", "exact_quote": "", "locator": "", "derived_from": []string{"C-001"},
 			},
 		},
 	}), workspace)
@@ -51,8 +92,10 @@ func TestClaimCardsKeepOneEvidenceLayer(t *testing.T) {
 	require.NotNil(t, finalized.Output)
 	var finalizedOutput map[string]any
 	require.NoError(t, json.Unmarshal([]byte(toolStringOutput(t, finalized)), &finalizedOutput))
+	assert.Equal(t, claimsPath, finalizedOutput["claims_path"])
+	assert.Equal(t, registryPath, finalizedOutput["source_registry_path"])
 	assert.Contains(t, finalizedOutput, "claims")
-	assert.Contains(t, finalizedOutput, "source_registry")
+	assert.NotContains(t, finalizedOutput, "source_registry")
 	assert.FileExists(t, claimsPath)
 	assert.FileExists(t, registryPath)
 
@@ -63,9 +106,20 @@ func TestClaimCardsKeepOneEvidenceLayer(t *testing.T) {
 	confirmed := valueAs[map[string]any](t, cards[0])
 	assert.Equal(t, "confirmed", confirmed["status"])
 	assert.Equal(t, "https://example.com/official", confirmed["source_url"])
+	assert.Equal(t, "snapshot-0123456789abcdef0123456789abcdef", confirmed["snapshot_id"])
 	assert.NotContains(t, confirmed, "confirmation_basis")
 	assert.NotContains(t, confirmed, "dispute_status")
 	assert.NotContains(t, confirmed, "freshness_status")
+
+	var registry map[string]any
+	require.NoError(t, readJSON(registryPath, &registry))
+	sources := mapValue[[]any](t, registry, "sources")
+	require.Len(t, sources, 1)
+	source := valueAs[map[string]any](t, sources[0])
+	assert.Equal(t, "snapshot-0123456789abcdef0123456789abcdef", source["snapshot_id"])
+	assert.NotContains(t, source, "snapshot_path")
+	assert.NotContains(t, source, "snapshot_sha256")
+	assert.NotContains(t, source, "content_fingerprint")
 }
 
 func TestClaimCardsRejectUnsupportedStatusAndLeadOnlyEvidence(t *testing.T) {
@@ -92,10 +146,29 @@ func TestClaimCardsRejectUnsupportedStatusAndLeadOnlyEvidence(t *testing.T) {
 			mutate: func(card map[string]any) {
 				card["status"] = "inferred"
 				card["source_id"] = ""
+				card["snapshot_id"] = ""
 				card["exact_quote"] = ""
 				card["locator"] = ""
 			},
 			expectedCode: "derived_from",
+		},
+		{
+			name: "snapshot must match registered source",
+			mutate: func(card map[string]any) {
+				card["snapshot_id"] = "snapshot-ffffffffffffffffffffffffffffffff"
+			},
+			expectedCode: "snapshot_id",
+		},
+		{
+			name: "inference rejects direct snapshot evidence",
+			mutate: func(card map[string]any) {
+				card["status"] = "inferred"
+				card["source_id"] = ""
+				card["exact_quote"] = ""
+				card["locator"] = ""
+				card["derived_from"] = []string{"C-000"}
+			},
+			expectedCode: "inference",
 		},
 		{
 			name: "lead only source cannot support a card",
@@ -111,8 +184,9 @@ func TestClaimCardsRejectUnsupportedStatusAndLeadOnlyEvidence(t *testing.T) {
 			card := map[string]any{
 				"id": "C-001", "statement": "CXMT outsources chip packaging.",
 				"status": "confirmed", "scope": "DDR5 die packaging", "as_of": "2025-12-31",
-				"source_id": "source-official", "exact_quote": "The company outsources all chip packaging.",
-				"locator": "page 227", "derived_from": []string{},
+				"source_id": "source-official", "snapshot_id": "snapshot-0123456789abcdef0123456789abcdef",
+				"exact_quote": "The company outsources all chip packaging.",
+				"locator":     "page 227", "derived_from": []string{},
 			}
 			test.mutate(card)
 
@@ -146,6 +220,53 @@ func TestClaimCardsCanFinalizeAnEmptyCompanySearch(t *testing.T) {
 	var document map[string]any
 	require.NoError(t, readJSON(claimsPath, &document))
 	assert.Empty(t, mapValue[[]any](t, document, "claims"))
+}
+
+func TestFinalizeClaimCardsRejectsDuplicateClaimsAcrossBatches(t *testing.T) {
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "finalize_claim_cards"))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name  string
+		cards []map[string]any
+	}{
+		{
+			name: "same normalized statement",
+			cards: []map[string]any{
+				directClaimCard("C-001", "The facility cost $91 million.", "The facility cost $91 million."),
+				directClaimCard("C-002", " The facility\n cost $91 million. ", "Reported facility cost was $91 million."),
+			},
+		},
+		{
+			name: "same direct evidence",
+			cards: []map[string]any{
+				directClaimCard("C-001", "The facility cost $91 million and will expand.", "The facility cost $91 million and will expand."),
+				directClaimCard("C-002", "The facility cost $91 million.", "The facility cost $91 million and will expand."),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workspace, claimsPath, registryPath := claimCardFixture(t, tt.name)
+			directory := filepath.Join(workspace, ".decision-draft", "claims")
+			require.NoError(t, os.MkdirAll(directory, 0o700))
+			for _, card := range tt.cards {
+				require.NoError(t, writeJSON(filepath.Join(directory, valueAs[string](t, card["id"])+".json"), card))
+			}
+
+			response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+				"workspace_dir": workspace, "claims_path": claimsPath,
+				"source_registry_path": registryPath, "as_of_date": "2026-08-09",
+			}), workspace)
+
+			require.NoError(t, invokeErr)
+			assert.False(t, response.Accepted)
+			assert.Contains(t, issueCodes(response), "duplicate_claim")
+		})
+	}
 }
 
 func TestNodeAssessmentSeparatesScopeFromConclusion(t *testing.T) {
@@ -264,13 +385,73 @@ func TestCompanyPrioritiesRequireNodeAndRelationshipEvidence(t *testing.T) {
 	assert.Contains(t, issueCodes(rejected), "priority")
 }
 
+func TestCompanyPrioritiesReturnOnlyCurrentTaskClaims(t *testing.T) {
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "submit_company_priorities"))
+	require.NoError(t, err)
+
+	workspace := blockDirectory(t, "company-priority-compact")
+	upstreamWorkspace := filepath.Join(filepath.Dir(workspace), "upstream")
+	require.NoError(t, os.MkdirAll(upstreamWorkspace, 0o700))
+	upstreamClaimsPath := filepath.Join(upstreamWorkspace, "claims.json")
+	taskClaimsPath := filepath.Join(workspace, "claims.json")
+	require.NoError(t, writeJSON(upstreamClaimsPath, map[string]any{
+		"artifact_kind": "r42_claim_cards",
+		"claims":        []any{map[string]any{"id": "BASE-001", "status": "confirmed"}},
+	}))
+	require.NoError(t, writeJSON(taskClaimsPath, map[string]any{
+		"artifact_kind": "r42_claim_cards",
+		"claims":        []any{map[string]any{"id": "TASK-001", "status": "reported"}},
+	}))
+	nodePath := filepath.Join(workspace, "node-assessment.json")
+	require.NoError(t, writeJSON(nodePath, map[string]any{
+		"node_id": "node-osat", "node_name": "Packaging services", "conclusion": "candidate",
+	}))
+
+	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"workspace_dir":        workspace,
+		"artifact_path":        filepath.Join(workspace, "company-priorities.json"),
+		"node_assessment_path": nodePath,
+		"claim_paths":          []string{upstreamClaimsPath, taskClaimsPath},
+		"companies":            []any{},
+		"conclusion":           "No public company merits follow-up research.",
+	}), workspace)
+
+	require.NoError(t, err)
+	require.True(t, response.Accepted, "issues: %#v", response.Issues)
+	var output struct {
+		Claims []struct {
+			ID string `json:"id"`
+		} `json:"claims"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(toolStringOutput(t, response)), &output))
+	require.Len(t, output.Claims, 1)
+	assert.Equal(t, "TASK-001", output.Claims[0].ID)
+
+	rejected, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"workspace_dir":        workspace,
+		"artifact_path":        filepath.Join(workspace, "company-priorities.json"),
+		"node_assessment_path": nodePath,
+		"claim_paths":          []string{upstreamClaimsPath},
+		"companies":            []any{},
+		"conclusion":           "No public company merits follow-up research.",
+	}), workspace)
+	require.NoError(t, err)
+	assert.False(t, rejected.Accepted)
+	assert.Contains(t, issueCodes(rejected), "claim_paths")
+}
+
 func TestFinalizeResearchReportUsesClaimURLsWithoutManifest(t *testing.T) {
+	claimWorkspace, claimsPath, _ := finalizedClaimCardFixture(t, "report-claims")
+	workspace := filepath.Join(filepath.Dir(claimWorkspace), "report")
+	require.NoError(t, os.MkdirAll(workspace, 0o700))
 	compiler, err := gotool.NewCompiler()
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
 	program, err := compiler.Compile(t.Context(), goToolSource(t, "finalize_research_report"))
 	require.NoError(t, err)
-	workspace, claimsPath, _ := finalizedClaimCardFixture(t, "report")
 	reportPath := filepath.Join(workspace, "report.md")
 	require.NoError(t, os.WriteFile(reportPath, []byte("# Report\n\nCXMT outsources packaging. [[claim:C-001]]\n"), 0o600))
 
@@ -289,20 +470,23 @@ func TestFinalizeResearchReportUsesClaimURLsWithoutManifest(t *testing.T) {
 }
 
 func TestFinalizeResearchReportLinksEveryInferencePremise(t *testing.T) {
-	compiler, err := gotool.NewCompiler()
-	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
-	program, err := compiler.Compile(t.Context(), goToolSource(t, "finalize_research_report"))
-	require.NoError(t, err)
-	workspace := blockDirectory(t, "inference-report")
-	claimsPath := filepath.Join(workspace, "claims.json")
+	claimWorkspace := blockDirectory(t, "inference-claims")
+	workspace := filepath.Join(filepath.Dir(claimWorkspace), "inference-report")
+	require.NoError(t, os.MkdirAll(workspace, 0o700))
+	claimsPath := filepath.Join(claimWorkspace, "claims.json")
 	require.NoError(t, writeJSON(claimsPath, map[string]any{
+		"artifact_kind": "r42_claim_cards",
 		"claims": []any{
 			map[string]any{"id": "C-001", "statement": "Premise one", "status": "confirmed", "scope": "node", "as_of": "2026-01-01", "source_url": "https://example.com/one", "exact_quote": "one", "locator": "p1", "derived_from": []string{}},
 			map[string]any{"id": "C-002", "statement": "Premise two", "status": "confirmed", "scope": "node", "as_of": "2026-01-01", "source_url": "https://example.com/two", "exact_quote": "two", "locator": "p2", "derived_from": []string{}},
 			map[string]any{"id": "I-001", "statement": "Combined inference", "status": "inferred", "scope": "node", "as_of": "2026-01-01", "source_url": "", "exact_quote": "", "locator": "", "derived_from": []string{"C-001", "C-002"}},
 		},
 	}))
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "finalize_research_report"))
+	require.NoError(t, err)
 	reportPath := filepath.Join(workspace, "report.md")
 	require.NoError(t, os.WriteFile(reportPath, []byte("# Report\n\nCombined inference. [[claim:I-001]]\n"), 0o600))
 
@@ -317,27 +501,234 @@ func TestFinalizeResearchReportLinksEveryInferencePremise(t *testing.T) {
 	assert.Contains(t, rewritten, "https://example.com/two")
 }
 
+func TestFinalizeResearchReportRejectsAllMechanicalClaimPathIssuesWithoutRewriting(t *testing.T) {
+	workspace := blockDirectory(t, "invalid-report-inputs")
+	reportPath := filepath.Join(workspace, "report.md")
+	original := []byte("# Report\n\nSupported statement. [[claim:C-001]]\n")
+	require.NoError(t, os.WriteFile(reportPath, original, 0o600))
+	wrongKindPath := filepath.Join(workspace, "claims.json")
+	require.NoError(t, writeJSON(wrongKindPath, map[string]any{
+		"artifact_kind": "draft_claims", "claims": []any{},
+	}))
+	malformedWorkspace := filepath.Join(filepath.Dir(workspace), "malformed")
+	require.NoError(t, os.MkdirAll(malformedWorkspace, 0o700))
+	malformedPath := filepath.Join(malformedWorkspace, "claims.json")
+	require.NoError(t, os.WriteFile(malformedPath, []byte("{"), 0o600))
+	directoryWorkspace := filepath.Join(filepath.Dir(workspace), "directory")
+	directoryPath := filepath.Join(directoryWorkspace, "claims.json")
+	require.NoError(t, os.MkdirAll(directoryPath, 0o700))
+	claimPaths := []string{
+		wrongKindPath,
+		malformedPath,
+		filepath.Join(workspace, "missing", "claims.json"),
+		filepath.Join(workspace, "claims-*.json"),
+		workspace,
+		directoryPath,
+	}
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "finalize_research_report"))
+	require.NoError(t, err)
+
+	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"report_path": reportPath,
+		"claim_paths": claimPaths,
+	}), workspace)
+
+	require.NoError(t, err)
+	assert.False(t, response.Accepted)
+	codes := issueCodes(response)
+	assert.Contains(t, codes, "artifact_kind")
+	assert.Contains(t, codes, "invalid_json")
+	assert.Contains(t, codes, "claim_path_missing")
+	assert.Contains(t, codes, "claim_path")
+	assert.Equal(t, original, mustReadFile(t, reportPath))
+}
+
+func TestFinalizeResearchReportRejectsDuplicateClaimIDsAcrossFiles(t *testing.T) {
+	workspace := blockDirectory(t, "duplicate-report-claims")
+	reportPath := filepath.Join(workspace, "report.md")
+	original := []byte("# Report\n\nSupported statement. [[claim:C-001]]\n")
+	require.NoError(t, os.WriteFile(reportPath, original, 0o600))
+	claimPaths := make([]string, 0, 2)
+	for _, directory := range []string{"first", "second"} {
+		claimWorkspace := filepath.Join(filepath.Dir(workspace), directory)
+		require.NoError(t, os.MkdirAll(claimWorkspace, 0o700))
+		claimPath := filepath.Join(claimWorkspace, "claims.json")
+		require.NoError(t, writeJSON(claimPath, map[string]any{
+			"artifact_kind": "r42_claim_cards",
+			"claims": []any{map[string]any{
+				"id": "C-001", "statement": "Statement", "status": "confirmed",
+				"scope": "scope", "as_of": "2026-01-01",
+				"source_url": "https://example.com/source", "exact_quote": "quote",
+				"locator": "body", "derived_from": []string{},
+			}},
+		}))
+		claimPaths = append(claimPaths, claimPath)
+	}
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "finalize_research_report"))
+	require.NoError(t, err)
+
+	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"report_path": reportPath, "claim_paths": claimPaths,
+	}), workspace)
+
+	require.NoError(t, err)
+	assert.False(t, response.Accepted)
+	assert.Contains(t, issueCodes(response), "duplicate_claim_id")
+	assert.Equal(t, original, mustReadFile(t, reportPath))
+}
+
+func TestFinalizeResearchReportRejectsReportOutsideCurrentWorkspace(t *testing.T) {
+	claimWorkspace, claimsPath, _ := finalizedClaimCardFixture(t, "report-claims")
+	workspace := filepath.Join(filepath.Dir(claimWorkspace), "report-workspace")
+	require.NoError(t, os.MkdirAll(workspace, 0o700))
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "finalize_research_report"))
+	require.NoError(t, err)
+
+	otherWorkspace := filepath.Join(filepath.Dir(workspace), "other-report-workspace")
+	require.NoError(t, os.MkdirAll(otherWorkspace, 0o700))
+	reportPath := filepath.Join(otherWorkspace, "report.md")
+	original := []byte("# Report\n\nSupported statement. [[claim:C-001]]\n")
+	require.NoError(t, os.WriteFile(reportPath, original, 0o600))
+
+	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"report_path": reportPath, "claim_paths": []string{claimsPath},
+	}), workspace)
+
+	require.NoError(t, err)
+	assert.False(t, response.Accepted)
+	assert.Contains(t, issueCodes(response), "report_path")
+	assert.Equal(t, original, mustReadFile(t, reportPath))
+}
+
+func TestFinalizeResearchReportRequiresExactClaimPathSet(t *testing.T) {
+	tests := []struct {
+		name       string
+		claimPaths func(expected, unexpected []string) []string
+		issueCode  string
+	}{
+		{
+			name: "missing configured path",
+			claimPaths: func(expected, _ []string) []string {
+				return expected[:1]
+			},
+			issueCode: "claim_path_missing_expected",
+		},
+		{
+			name: "unexpected path",
+			claimPaths: func(expected, unexpected []string) []string {
+				return append(append([]string{}, expected...), unexpected[0])
+			},
+			issueCode: "claim_path_unexpected",
+		},
+		{
+			name: "duplicate configured path",
+			claimPaths: func(expected, _ []string) []string {
+				return append(append([]string{}, expected...), expected[0])
+			},
+			issueCode: "claim_path_duplicate",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workspace := blockDirectory(t, tt.name)
+			blocks := filepath.Dir(workspace)
+			expected := []string{
+				filepath.Join(blocks, "first", "claims.json"),
+				filepath.Join(blocks, "second", "claims.json"),
+			}
+			unexpected := []string{filepath.Join(workspace, "claims.json")}
+			provided := tt.claimPaths(expected, unexpected)
+			pathsToCreate := append([]string{}, expected...)
+			if len(provided) > len(expected) && provided[len(provided)-1] == unexpected[0] {
+				pathsToCreate = append(pathsToCreate, unexpected[0])
+			}
+			for index, path := range pathsToCreate {
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+				require.NoError(t, writeJSON(path, map[string]any{
+					"artifact_kind": "r42_claim_cards",
+					"claims": []any{map[string]any{
+						"id":        fmt.Sprintf("C-%03d", index+1),
+						"statement": "Statement", "status": "confirmed", "scope": "scope",
+						"as_of": "2026-01-01", "source_url": "https://example.com/source",
+						"exact_quote": "quote", "locator": "body", "derived_from": []string{},
+					}},
+				}))
+			}
+			reportPath := filepath.Join(workspace, "report.md")
+			original := []byte("# Report\n\nSupported statement. [[claim:C-001]]\n")
+			require.NoError(t, os.WriteFile(reportPath, original, 0o600))
+			compiler, err := gotool.NewCompiler()
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+			program, err := compiler.Compile(t.Context(), goToolSource(t, "finalize_research_report"))
+			require.NoError(t, err)
+
+			response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+				"report_path": reportPath,
+				"claim_paths": provided,
+			}), workspace)
+
+			require.NoError(t, err)
+			assert.False(t, response.Accepted)
+			assert.Contains(t, issueCodes(response), tt.issueCode)
+			assert.Equal(t, original, mustReadFile(t, reportPath))
+		})
+	}
+}
+
+func TestFinalizeResearchReportReturnsIndependentReportAndClaimIssuesTogether(t *testing.T) {
+	workspace := blockDirectory(t, "combined-report-issues")
+	claimsPath := filepath.Join(filepath.Dir(workspace), "malformed", "claims.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(claimsPath), 0o700))
+	require.NoError(t, os.WriteFile(claimsPath, []byte("{"), 0o600))
+	reportPath := filepath.Join(workspace, "report.md")
+	original := []byte("# Report without a claim marker\n")
+	require.NoError(t, os.WriteFile(reportPath, original, 0o600))
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "finalize_research_report"))
+	require.NoError(t, err)
+
+	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"report_path": reportPath, "claim_paths": []string{claimsPath},
+	}), workspace)
+
+	require.NoError(t, err)
+	assert.False(t, response.Accepted)
+	assert.Contains(t, issueCodes(response), "invalid_json")
+	assert.Contains(t, issueCodes(response), "claim_marker")
+	assert.Equal(t, original, mustReadFile(t, reportPath))
+}
+
 func claimCardFixture(t *testing.T, name string) (string, string, string) {
 	t.Helper()
 	workspace := blockDirectory(t, name)
-	snapshot := filepath.Join(workspace, "sources", "official.md")
-	require.NoError(t, os.MkdirAll(filepath.Dir(snapshot), 0o700))
-	require.NoError(t, os.WriteFile(snapshot, []byte("The company outsources all chip packaging."), 0o600))
 	draft := filepath.Join(workspace, ".evidence-draft", "sources")
 	require.NoError(t, os.MkdirAll(draft, 0o700))
 	require.NoError(t, writeJSON(filepath.Join(draft, "source-official.json"), map[string]any{
 		"id": "source-official", "url": "https://example.com/official",
-		"canonical_url": "https://example.com/official", "title": "Official filing",
+		"canonical_url": "https://example.com/canonical", "title": "Official filing",
 		"publisher": "Example issuer", "publication_date": "2026-01-02",
 		"accessed_at": "2026-08-09", "source_class": "authoritative_primary",
-		"snapshot_path": snapshot, "origin_id": "origin-official",
+		"snapshot_id": "snapshot-0123456789abcdef0123456789abcdef", "origin_id": "origin-official",
 	}))
 	require.NoError(t, writeJSON(filepath.Join(draft, "source-lead.json"), map[string]any{
 		"id": "source-lead", "url": "https://example.com/lead",
 		"canonical_url": "https://example.com/lead", "title": "Forum post",
 		"publisher": "Unknown", "publication_date": "2026-01-02",
 		"accessed_at": "2026-08-09", "source_class": "lead_only",
-		"snapshot_path": snapshot, "origin_id": "origin-lead",
+		"snapshot_id": "snapshot-abcdef0123456789abcdef0123456789", "origin_id": "origin-lead",
 	}))
 	return workspace, filepath.Join(workspace, "claims.json"), filepath.Join(workspace, "source-registry.json")
 }
@@ -351,6 +742,7 @@ func finalizedClaimCardFixture(t *testing.T, name string) (string, string, strin
 			"id": "C-001", "statement": "CXMT outsources chip packaging.",
 			"status": "confirmed", "scope": "DDR5 die packaging", "as_of": "2025-12-31",
 			"source_id": "source-official", "source_url": "https://example.com/official",
+			"snapshot_id": "snapshot-0123456789abcdef0123456789abcdef",
 			"exact_quote": "The company outsources all chip packaging.",
 			"locator":     "page 227", "derived_from": []string{},
 		}},
@@ -362,4 +754,13 @@ func finalizedClaimCardFixture(t *testing.T, name string) (string, string, strin
 		}},
 	}))
 	return workspace, claimsPath, registryPath
+}
+
+func directClaimCard(id, statement, quote string) map[string]any {
+	return map[string]any{
+		"id": id, "statement": statement,
+		"status": "confirmed", "scope": "facility investment", "as_of": "2026-01-02",
+		"source_id": "source-official", "snapshot_id": "snapshot-0123456789abcdef0123456789abcdef",
+		"exact_quote": quote, "locator": "article body", "derived_from": []string{},
+	}
 }

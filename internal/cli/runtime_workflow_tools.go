@@ -3,7 +3,11 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"path/filepath"
+	"regexp"
 	"slices"
+	"strings"
 
 	sdk "github.com/github/copilot-sdk/go"
 	"github.com/lonegunmanb/r42/internal/collection"
@@ -15,7 +19,22 @@ import (
 )
 
 var closedWorldBuiltIns = []string{
-	"web_search", "web_fetch", "bash", "powershell", "shell", "view", "edit", "task", "ask_user",
+	"web_search", "web_fetch", "bash", "powershell", "read_powershell", "list_powershell",
+	"shell", "view", "edit", "create", "glob", "task", "ask_user",
+}
+
+var collectionBlockedBuiltIns = []string{"task", "powershell", "curl"}
+
+var validSnapshotIDPattern = regexp.MustCompile(`^snapshot-[0-9a-f]{32}$`)
+
+func collectionDisallowedTools(configured []string) []string {
+	result := slices.Clone(configured)
+	for _, name := range collectionBlockedBuiltIns {
+		if !slices.Contains(result, name) {
+			result = append(result, name)
+		}
+	}
+	return result
 }
 
 func closedWorldDisallowedTools(configured []string) []string {
@@ -26,6 +45,13 @@ func closedWorldDisallowedTools(configured []string) []string {
 		}
 	}
 	return result
+}
+
+func closedWorldAllowedTools(configured, mandatory []string) []string {
+	if configured == nil {
+		return slices.Clone(mandatory)
+	}
+	return phaseAllowedTools(configured, mandatory)
 }
 
 func collectionBuiltInHooks(quota *toolCallQuota, gate *collection.AcquisitionGate) *sdk.SessionHooks {
@@ -110,8 +136,11 @@ func collectionProtocolTools(context *collection.Context, checkpoints *collectio
 			},
 		},
 		{
-			Name: "r42_collection_checkpoint", Description: "Submit all unreviewed snapshots for Collection QC",
-			Parameters: objectSchema(map[string]any{"empty_reason": map[string]any{"type": "string"}}, nil),
+			Name: "r42_collection_checkpoint", Description: "Submit all unreviewed snapshots for Collection QC, or report that Collection is exhausted",
+			Parameters: objectSchema(map[string]any{
+				"empty_reason":         map[string]any{"type": "string"},
+				"collection_exhausted": map[string]any{"type": "boolean"},
+			}, nil),
 			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
 				args, err := decodeArguments[collection.CheckpointArgs](invocation.Arguments)
 				if err != nil {
@@ -159,6 +188,33 @@ func evidenceTools(
 	if err != nil {
 		return nil, err
 	}
+	return evidenceToolsWithAccess(snapshots, workspace, artifacts, write)
+}
+
+func evidenceToolsWithUpstream(
+	registry *snapshot.Registry,
+	upstream map[string]string,
+	workspace string,
+	artifacts []researchspec.Artifact,
+	write bool,
+) ([]sdk.Tool, *evidence.SnapshotAccess, error) {
+	snapshots, err := evidence.NewSnapshotAccessWithRegistryAndUpstream(registry, upstream)
+	if err != nil {
+		return nil, nil, err
+	}
+	tools, err := evidenceToolsWithAccess(snapshots, workspace, artifacts, write)
+	tools = slices.DeleteFunc(tools, func(tool sdk.Tool) bool {
+		return tool.Name == "r42_list_snapshots"
+	})
+	return tools, snapshots, err
+}
+
+func evidenceToolsWithAccess(
+	snapshots *evidence.SnapshotAccess,
+	workspace string,
+	artifacts []researchspec.Artifact,
+	write bool,
+) ([]sdk.Tool, error) {
 	artifactAccess, err := evidence.NewArtifactAccess(workspace)
 	if err != nil {
 		return nil, err
@@ -253,6 +309,269 @@ func evidenceTools(
 	return tools, nil
 }
 
+func enforceSnapshotIDReferences(
+	tools []sdk.Tool,
+	access *evidence.SnapshotAccess,
+	workspace string,
+) []sdk.Tool {
+	result := slices.Clone(tools)
+	for index := range result {
+		original := result[index].Handler
+		result[index].Handler = func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			invalidIDs := invalidSnapshotIDs(invocation.Arguments)
+			if len(invalidIDs) > 0 {
+				return rejectedToolResult(
+					"invalid_snapshot_id",
+					"snapshot_id must use snapshot- plus 32 lowercase hexadecimal characters, not a filesystem path: "+
+						strings.Join(invalidIDs, ", "),
+				)
+			}
+			foreignPaths := foreignSnapshotPaths(invocation.Arguments, workspace)
+			if len(foreignPaths) > 0 {
+				return rejectedToolResult(
+					"snapshot_path_not_allowed",
+					"use snapshot_id for cross-block evidence references; paths are outside this research task workspace: "+
+						strings.Join(foreignPaths, ", "),
+				)
+			}
+			unknown := unknownSnapshotIDs(invocation.Arguments, access)
+			if len(unknown) > 0 {
+				return rejectedToolResult(
+					"unknown_snapshot_id",
+					"snapshot IDs are not authorized for this research task: "+strings.Join(unknown, ", "),
+				)
+			}
+			invalidQuotes, validationErr := invalidSnapshotQuotes(invocation.Arguments, access)
+			if validationErr != nil {
+				return rejectedToolResult("snapshot_read_failed", validationErr.Error())
+			}
+			if len(invalidQuotes) > 0 {
+				return rejectedToolResult(
+					"snapshot_quote_not_found",
+					"exact_quote is not present in its referenced snapshot_id after whitespace normalization: "+
+						strings.Join(invalidQuotes, ", "),
+				)
+			}
+			invalidURLs, validationErr := invalidSnapshotURLs(invocation.Arguments, access)
+			if validationErr != nil {
+				return rejectedToolResult("snapshot_read_failed", validationErr.Error())
+			}
+			if len(invalidURLs) > 0 {
+				return rejectedToolResult(
+					"snapshot_url_mismatch",
+					"source URL must match the URL recorded in its referenced snapshot_id: "+
+						strings.Join(invalidURLs, ", "),
+				)
+			}
+			return original(invocation)
+		}
+	}
+	return result
+}
+
+type snapshotURLReference struct {
+	id  string
+	url string
+}
+
+func invalidSnapshotURLs(arguments any, access *evidence.SnapshotAccess) ([]string, error) {
+	references := make([]snapshotURLReference, 0)
+	collectSnapshotURLs(arguments, &references)
+	invalid := make([]string, 0)
+	for _, reference := range references {
+		expected, err := access.SnapshotSourceURL(reference.id)
+		if err != nil {
+			return nil, err
+		}
+		actualURL, actualOK := normalizeSnapshotURL(reference.url)
+		expectedURL, expectedOK := normalizeSnapshotURL(expected)
+		if !expectedOK {
+			return nil, fmt.Errorf("snapshot %q URL header must be an absolute HTTP or HTTPS URL", reference.id)
+		}
+		if !actualOK || actualURL != expectedURL {
+			invalid = append(invalid, reference.id)
+		}
+	}
+	return invalid, nil
+}
+
+func collectSnapshotURLs(value any, result *[]snapshotURLReference) {
+	switch typed := value.(type) {
+	case map[string]any:
+		id, hasID := typed["snapshot_id"].(string)
+		if hasID && strings.TrimSpace(id) != "" {
+			for _, field := range []string{"url", "source_url"} {
+				if sourceURL, ok := typed[field].(string); ok && strings.TrimSpace(sourceURL) != "" {
+					*result = append(*result, snapshotURLReference{id: id, url: sourceURL})
+				}
+			}
+		}
+		for _, nested := range typed {
+			collectSnapshotURLs(nested, result)
+		}
+	case []any:
+		for _, nested := range typed {
+			collectSnapshotURLs(nested, result)
+		}
+	}
+}
+
+func normalizeSnapshotURL(raw string) (string, bool) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return "", false
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.Fragment = ""
+	return parsed.String(), true
+}
+
+func invalidSnapshotIDs(arguments any) []string {
+	seen := map[string]struct{}{}
+	collectSnapshotIDs(arguments, seen)
+	invalid := make([]string, 0, len(seen))
+	for id := range seen {
+		if !validSnapshotIDPattern.MatchString(id) {
+			invalid = append(invalid, id)
+		}
+	}
+	slices.Sort(invalid)
+	return invalid
+}
+
+type snapshotQuoteReference struct {
+	id    string
+	quote string
+}
+
+func invalidSnapshotQuotes(arguments any, access *evidence.SnapshotAccess) ([]string, error) {
+	references := make([]snapshotQuoteReference, 0)
+	collectSnapshotQuotes(arguments, &references)
+	invalid := make([]string, 0)
+	for _, reference := range references {
+		contains, err := access.ContainsNormalizedText(reference.id, reference.quote)
+		if err != nil {
+			return nil, err
+		}
+		if !contains {
+			invalid = append(invalid, reference.id)
+		}
+	}
+	return invalid, nil
+}
+
+func collectSnapshotQuotes(value any, result *[]snapshotQuoteReference) {
+	switch typed := value.(type) {
+	case map[string]any:
+		id, hasID := typed["snapshot_id"].(string)
+		quote, hasQuote := typed["exact_quote"].(string)
+		if hasID && hasQuote && strings.TrimSpace(id) != "" && strings.TrimSpace(quote) != "" {
+			*result = append(*result, snapshotQuoteReference{id: id, quote: quote})
+		}
+		for _, nested := range typed {
+			collectSnapshotQuotes(nested, result)
+		}
+	case []any:
+		for _, nested := range typed {
+			collectSnapshotQuotes(nested, result)
+		}
+	}
+}
+
+func unknownSnapshotIDs(arguments any, access *evidence.SnapshotAccess) []string {
+	seen := map[string]struct{}{}
+	collectSnapshotIDs(arguments, seen)
+	unknown := make([]string, 0, len(seen))
+	for id := range seen {
+		if !access.HasSnapshot(id) {
+			unknown = append(unknown, id)
+		}
+	}
+	slices.Sort(unknown)
+	return unknown
+}
+
+func collectSnapshotIDs(value any, result map[string]struct{}) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			switch key {
+			case "snapshot_id":
+				if id, ok := nested.(string); ok && strings.TrimSpace(id) != "" {
+					result[id] = struct{}{}
+				}
+			case "snapshot_ids":
+				switch ids := nested.(type) {
+				case []any:
+					for _, item := range ids {
+						if id, stringOK := item.(string); stringOK && strings.TrimSpace(id) != "" {
+							result[id] = struct{}{}
+						}
+					}
+				case []string:
+					for _, id := range ids {
+						if strings.TrimSpace(id) != "" {
+							result[id] = struct{}{}
+						}
+					}
+				}
+			default:
+				collectSnapshotIDs(nested, result)
+			}
+		}
+	case []any:
+		for _, nested := range typed {
+			collectSnapshotIDs(nested, result)
+		}
+	}
+}
+
+func foreignSnapshotPaths(value any, workspace string) []string {
+	paths := make([]string, 0)
+	collectSnapshotPaths(value, &paths)
+	foreign := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if !pathWithinWorkspace(workspace, path) {
+			foreign = append(foreign, path)
+		}
+	}
+	return foreign
+}
+
+func collectSnapshotPaths(value any, result *[]string) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, nested := range typed {
+			if key == "snapshot_path" {
+				if path, ok := nested.(string); ok && strings.TrimSpace(path) != "" {
+					*result = append(*result, path)
+				}
+				continue
+			}
+			collectSnapshotPaths(nested, result)
+		}
+	case []any:
+		for _, nested := range typed {
+			collectSnapshotPaths(nested, result)
+		}
+	}
+}
+
+func pathWithinWorkspace(workspace, path string) bool {
+	root, err := filepath.Abs(workspace)
+	if err != nil {
+		return false
+	}
+	candidate, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(root, candidate)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
 type boundedReadArgs struct {
 	ID       string `json:"id"`
 	MaxBytes int    `json:"max_bytes"`
@@ -267,7 +586,11 @@ type markdownWriteArgs struct {
 }
 
 func objectSchema(properties map[string]any, required []string) map[string]any {
-	return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
+	schema := map[string]any{"type": "object", "properties": properties, "additionalProperties": false}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	return schema
 }
 
 func issueArraySchema() map[string]any {

@@ -2,14 +2,19 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	sdk "github.com/github/copilot-sdk/go"
 	"github.com/lonegunmanb/r42/internal/collection"
 	"github.com/lonegunmanb/r42/internal/collectionqc"
+	"github.com/lonegunmanb/r42/internal/evidence"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
+	"github.com/lonegunmanb/r42/internal/snapshot"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,8 +24,48 @@ func TestClosedWorldDisallowedToolsIncludesAcquisitionAndArbitraryIO(t *testing.
 
 	tools := closedWorldDisallowedTools(nil)
 
-	for _, name := range []string{"web_search", "web_fetch", "bash", "powershell", "shell", "view", "edit", "task", "ask_user"} {
+	for _, name := range []string{
+		"web_search", "web_fetch", "bash", "powershell", "read_powershell", "list_powershell",
+		"shell", "view", "edit", "create", "glob", "task", "ask_user",
+	} {
 		assert.Contains(t, tools, name)
+	}
+}
+
+func TestClosedWorldAllowedToolsDefaultsToMountedTypedTools(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, []string{"r42_read_snapshot", "submit"}, closedWorldAllowedTools(
+		nil,
+		[]string{"r42_read_snapshot", "submit"},
+	))
+}
+
+func TestCollectionDisallowedToolsBlocksDelegationAndShellFallbacks(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		configured []string
+		expected   []string
+	}{
+		{name: "defaults", expected: []string{"task", "powershell", "curl"}},
+		{
+			name:       "preserves custom exclusions without duplicating defaults",
+			configured: []string{"custom", "curl"},
+			expected:   []string{"custom", "curl", "task", "powershell"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			input := slices.Clone(tt.configured)
+
+			tools := collectionDisallowedTools(input)
+
+			assert.ElementsMatch(t, tt.expected, tools)
+			assert.Equal(t, tt.configured, input)
+		})
 	}
 }
 
@@ -108,4 +153,232 @@ func TestEvidenceToolsExposeIDsAndDeclaredArtifactNamesOnly(t *testing.T) {
 	write, err := tools[3].Handler(sdk.ToolInvocation{Arguments: map[string]any{"name": "unknown", "content": "# no"}})
 	require.NoError(t, err)
 	assert.Contains(t, write.TextResultForLLM, `"accepted":false`)
+}
+
+func TestResearchSnapshotProtocolUsesIDsInsteadOfPaths(t *testing.T) {
+	t.Parallel()
+
+	prompt := closedResearchSystemPrompt("Configured instructions.")
+
+	assert.Contains(t, prompt, "snapshot_id")
+	assert.Contains(t, prompt, "r42_read_snapshot")
+	assert.Contains(t, prompt, "Do not use snapshot paths as cross-block evidence references")
+	assert.True(t, strings.HasSuffix(prompt, "Configured instructions."))
+}
+
+func TestResearchEvidenceToolsDoNotExposeSnapshotListing(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	context := collection.NewContext(workspace, 10, nil)
+	tools, _, err := evidenceToolsWithUpstream(context.Registry, nil, workspace, nil, true)
+
+	require.NoError(t, err)
+	assert.NotContains(t, toolNames(tools), "r42_list_snapshots")
+	assert.Contains(t, toolNames(tools), "r42_read_snapshot")
+}
+
+func TestResearchTypedToolsRejectUnknownSnapshotIDs(t *testing.T) {
+	t.Parallel()
+
+	access, err := evidence.NewSnapshotAccess(t.TempDir())
+	require.NoError(t, err)
+	called := false
+	tools := enforceSnapshotIDReferences([]sdk.Tool{{
+		Name: "submit",
+		Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
+			called = true
+			return sdk.ToolResult{ResultType: "success"}, nil
+		},
+	}}, access, t.TempDir())
+
+	result, err := tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"quotes": []any{map[string]any{"snapshot_id": "snapshot-00000000000000000000000000000000"}},
+	}})
+
+	require.NoError(t, err)
+	assert.False(t, called)
+	assert.Contains(t, result.TextResultForLLM, "unknown_snapshot_id")
+}
+
+func TestResearchTypedToolsRejectPathsUsedAsSnapshotIDs(t *testing.T) {
+	t.Parallel()
+
+	access, err := evidence.NewSnapshotAccess(t.TempDir())
+	require.NoError(t, err)
+	called := false
+	tools := enforceSnapshotIDReferences([]sdk.Tool{{
+		Name: "submit",
+		Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
+			called = true
+			return sdk.ToolResult{ResultType: "success"}, nil
+		},
+	}}, access, t.TempDir())
+
+	result, err := tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"snapshot_id": `C:\runs\blocks\source.md`,
+	}})
+
+	require.NoError(t, err)
+	assert.False(t, called)
+	assert.Contains(t, result.TextResultForLLM, "invalid_snapshot_id")
+	assert.Contains(t, result.TextResultForLLM, "not a filesystem path")
+}
+
+func TestResearchTypedToolsRejectSnapshotPaths(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	access, err := evidence.NewSnapshotAccess(workspace)
+	require.NoError(t, err)
+	called := false
+	tools := enforceSnapshotIDReferences([]sdk.Tool{{
+		Name: "submit",
+		Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
+			called = true
+			return sdk.ToolResult{ResultType: "success"}, nil
+		},
+	}}, access, workspace)
+
+	result, err := tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"quotes": []any{map[string]any{"snapshot_path": "C:/snapshots/source.md"}},
+	}})
+
+	require.NoError(t, err)
+	assert.False(t, called)
+	assert.Contains(t, result.TextResultForLLM, "snapshot_path_not_allowed")
+
+	_, err = tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"quotes": []any{map[string]any{"snapshot_path": filepath.Join(workspace, "snapshots", "source.md")}},
+	}})
+	require.NoError(t, err)
+	assert.True(t, called)
+}
+
+func TestResearchTypedToolsValidateExactQuotesBySnapshotID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		exactQuote   string
+		accepted     bool
+		expectedCode string
+	}{
+		{name: "accepts unicode whitespace differences", exactQuote: "alpha beta", accepted: true},
+		{name: "rejects text absent from snapshot", exactQuote: "alpha gamma", expectedCode: "snapshot_quote_not_found"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			workspace := t.TempDir()
+			path := filepath.Join(workspace, "source.md")
+			require.NoError(t, os.WriteFile(path, []byte("alpha\n\tbeta"), 0o600))
+			registry := snapshot.NewRegistry(workspace)
+			registered, err := registry.RegisterPath(path)
+			require.NoError(t, err)
+			registry.MarkReviewed(registered.ID)
+			access, err := evidence.NewSnapshotAccessWithRegistryAndUpstream(registry, nil)
+			require.NoError(t, err)
+			called := false
+			tools := enforceSnapshotIDReferences([]sdk.Tool{{
+				Name: "submit",
+				Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
+					called = true
+					return sdk.ToolResult{ResultType: "success"}, nil
+				},
+			}}, access, workspace)
+
+			result, err := tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+				"quotes": []any{map[string]any{
+					"snapshot_id": registered.ID,
+					"exact_quote": tt.exactQuote,
+				}},
+			}})
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.accepted, called)
+			if tt.expectedCode != "" {
+				assert.Contains(t, result.TextResultForLLM, tt.expectedCode)
+			}
+		})
+	}
+}
+
+func TestResearchTypedToolsValidateSourceURLBySnapshotID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		field        string
+		sourceURL    string
+		snapshotURL  string
+		accepted     bool
+		expectedCode string
+	}{
+		{name: "accepts snapshot source URL", field: "url", sourceURL: "https://example.com/source", snapshotURL: "https://example.com/source", accepted: true},
+		{name: "accepts normalized trailing slash", field: "url", sourceURL: "https://example.com/source/", snapshotURL: "https://example.com/source", accepted: true},
+		{name: "rejects a different source URL", field: "url", sourceURL: "https://example.com/other", snapshotURL: "https://example.com/source", expectedCode: "snapshot_url_mismatch"},
+		{name: "rejects invalid source URL scheme", field: "url", sourceURL: "ftp://example.com/source", snapshotURL: "https://example.com/source", expectedCode: "snapshot_url_mismatch"},
+		{name: "rejects source URL without host", field: "url", sourceURL: "https:///source", snapshotURL: "https://example.com/source", expectedCode: "snapshot_url_mismatch"},
+		{name: "rejects mismatched claim source URL", field: "source_url", sourceURL: "https://example.com/other", snapshotURL: "https://example.com/source", expectedCode: "snapshot_url_mismatch"},
+		{name: "rejects invalid snapshot URL header", field: "url", sourceURL: "https://example.com/source", snapshotURL: "ftp://example.com/source", expectedCode: "snapshot_read_failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			workspace := t.TempDir()
+			path := filepath.Join(workspace, "source.md")
+			content := "# Source\n\n- URL: " + tt.snapshotURL + "\n- Fetched at: 2026-08-21T00:00:00Z\n\nEvidence."
+			require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+			registry := snapshot.NewRegistry(workspace)
+			registered, err := registry.RegisterPath(path)
+			require.NoError(t, err)
+			registry.MarkReviewed(registered.ID)
+			access, err := evidence.NewSnapshotAccessWithRegistryAndUpstream(registry, nil)
+			require.NoError(t, err)
+			called := false
+			tools := enforceSnapshotIDReferences([]sdk.Tool{{
+				Name: "register_evidence_source",
+				Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
+					called = true
+					return sdk.ToolResult{ResultType: "success"}, nil
+				},
+			}}, access, workspace)
+
+			result, err := tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+				"snapshot_id": registered.ID,
+				tt.field:      tt.sourceURL,
+			}})
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.accepted, called)
+			if tt.expectedCode != "" {
+				assert.Contains(t, result.TextResultForLLM, tt.expectedCode)
+			}
+		})
+	}
+}
+
+func TestRunSnapshotCatalogPublishesOnlyReviewedSnapshots(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := snapshot.NewRegistry(workspace)
+	paths := []string{
+		filepath.Join(workspace, "reviewed.md"),
+		filepath.Join(workspace, "pending.md"),
+	}
+	for index, path := range paths {
+		require.NoError(t, os.WriteFile(path, fmt.Appendf(nil, "content-%d", index), 0o600))
+		_, err := registry.RegisterPath(path)
+		require.NoError(t, err)
+	}
+	items := registry.Snapshots()
+	registry.MarkReviewed(items[0].ID)
+
+	catalog := newRunSnapshotCatalog()
+	catalog.add(registry.Snapshots())
+	authorized := catalog.authorized(items[0].ID + " " + items[1].ID)
+
+	assert.Equal(t, map[string]string{items[0].ID: items[0].Path}, authorized)
 }

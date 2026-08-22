@@ -66,15 +66,16 @@ variable "use_pplx" {
 
 variable "pplx_tool_call_quota" {
   type        = number
-  description = "Maximum successful Perplexity fetch calls allowed per Collection session when use_pplx is true."
-  default     = 10
+  description = "Maximum successful Perplexity fetch calls allowed per Collection session when use_pplx is true. Set null for no limit; Collection QC decides when the acquired evidence is sufficient."
+  default     = null
+  nullable    = true
 
   validation {
-    condition = (
+    condition = var.pplx_tool_call_quota == null ? true : (
       var.pplx_tool_call_quota >= 1 &&
       floor(var.pplx_tool_call_quota) == var.pplx_tool_call_quota
     )
-    error_message = "pplx_tool_call_quota must be a positive integer."
+    error_message = "pplx_tool_call_quota must be null or a positive integer."
   }
 }
 

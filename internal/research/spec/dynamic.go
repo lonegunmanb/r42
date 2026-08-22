@@ -205,6 +205,9 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 	if block.QCBlocks, err = dynamicQCBlocks(unmarked); err != nil {
 		return Config{}, err
 	}
+	if block.CollectionModelProvider, err = dynamicOptionalValue(unmarked, "collection_model_provider"); err != nil {
+		return Config{}, err
+	}
 	if block.CollectionToolIDs, err = dynamicStringList(unmarked, "collection_tool_ids"); err != nil {
 		return Config{}, err
 	}

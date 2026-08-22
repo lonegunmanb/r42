@@ -6,6 +6,8 @@ package collection
 
 import (
 	"errors"
+	"strings"
+	"sync"
 
 	"github.com/lonegunmanb/r42/internal/snapshot"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
@@ -19,6 +21,9 @@ type Context struct {
 	State     *workflow.State
 	Registry  *snapshot.Registry
 	batchSize int
+
+	mu           sync.Mutex
+	checkpointed map[string]struct{}
 }
 
 // NewContext creates a Collection protocol context with default batch size 10
@@ -28,10 +33,11 @@ func NewContext(workspace string, batchSize int, maxCollectionRounds *int) *Cont
 		batchSize = workflow.DefaultBatchSize
 	}
 	return &Context{
-		Workspace: workspace,
-		State:     workflow.New(workflow.Config{MaxCollectionRounds: maxCollectionRounds, BatchSize: batchSize}),
-		Registry:  snapshot.NewRegistry(workspace),
-		batchSize: batchSize,
+		Workspace:    workspace,
+		State:        workflow.New(workflow.Config{MaxCollectionRounds: maxCollectionRounds, BatchSize: batchSize}),
+		Registry:     snapshot.NewRegistry(workspace),
+		batchSize:    batchSize,
+		checkpointed: make(map[string]struct{}),
 	}
 }
 
@@ -102,6 +108,12 @@ func (h *RegisterHandler) Context() *Context { return h.context }
 // Register performs one snapshot registration, returning a structured
 // ToolResponse so rejections are repairable.
 func (h *RegisterHandler) Register(args RegisterArgs) corespec.ToolResponse[RegistrationOutput] {
+	if h.context == nil {
+		return infrastructureRejection[RegistrationOutput]("context_validation", errors.New("collection context is required"))
+	}
+	h.context.mu.Lock()
+	defer h.context.mu.Unlock()
+
 	if err := h.context.BeginWorkflow(); err != nil {
 		return infrastructureRejection[RegistrationOutput]("context_validation", err)
 	}
@@ -131,12 +143,15 @@ func (h *RegisterHandler) Register(args RegisterArgs) corespec.ToolResponse[Regi
 
 // CheckpointArgs is the model-facing input of the checkpoint tool.
 type CheckpointArgs struct {
-	EmptyReason string `json:"empty_reason"`
+	EmptyReason         string `json:"empty_reason"`
+	CollectionExhausted bool   `json:"collection_exhausted"`
 }
 
 // CheckpointOutput lists the snapshot IDs submitted for review.
 type CheckpointOutput struct {
-	SnapshotIDs []string `json:"snapshot_ids"`
+	SnapshotIDs         []string `json:"snapshot_ids"`
+	EmptyReason         string   `json:"empty_reason,omitempty"`
+	CollectionExhausted bool     `json:"collection_exhausted,omitempty"`
 }
 
 // CheckpointHandler owns the mandatory checkpoint tool.
@@ -152,22 +167,47 @@ func NewCheckpointHandler(context *Context) *CheckpointHandler {
 // Submit submits every unreviewed snapshot. An empty checkpoint requires a
 // non-empty reason.
 func (h *CheckpointHandler) Submit(args CheckpointArgs) corespec.ToolResponse[CheckpointOutput] {
+	if h.context == nil {
+		return infrastructureRejection[CheckpointOutput]("context_validation", errors.New("collection context is required"))
+	}
+	h.context.mu.Lock()
+	defer h.context.mu.Unlock()
+
 	if err := h.context.BeginWorkflow(); err != nil {
 		return infrastructureRejection[CheckpointOutput]("context_validation", err)
 	}
-	pending := h.context.Registry.PendingSnapshotIDs()
-	if len(pending) == 0 && args.EmptyReason == "" {
+	pending := make([]string, 0)
+	for _, registered := range h.context.Registry.Snapshots() {
+		if _, submitted := h.context.checkpointed[registered.ID]; !submitted {
+			pending = append(pending, registered.ID)
+		}
+	}
+	if len(pending) == 0 && strings.TrimSpace(args.EmptyReason) == "" {
 		return rejection[CheckpointOutput]("empty_checkpoint", "no snapshots are pending; provide an empty_reason explaining why")
+	}
+	if len(pending) > 0 && args.CollectionExhausted {
+		return rejection[CheckpointOutput]("collection_exhausted", "collection_exhausted is only allowed for an empty checkpoint")
 	}
 	if len(pending) > 0 && args.EmptyReason != "" {
 		return rejection[CheckpointOutput]("empty_checkpoint", "snapshots are pending; empty_reason is only allowed for an empty checkpoint")
+	}
+	if args.CollectionExhausted {
+		if err := h.context.State.MarkCollectionExhausted(); err != nil {
+			return infrastructureRejection[CheckpointOutput]("state_update", err)
+		}
 	}
 	if len(pending) > 0 {
 		if err := h.context.State.Checkpoint(); err != nil {
 			return rejection[CheckpointOutput]("checkpoint_failed", err.Error())
 		}
+		for _, id := range pending {
+			h.context.checkpointed[id] = struct{}{}
+		}
 	}
-	output := CheckpointOutput{SnapshotIDs: pending}
+	output := CheckpointOutput{
+		SnapshotIDs: pending, EmptyReason: args.EmptyReason,
+		CollectionExhausted: args.CollectionExhausted,
+	}
 	return corespec.ToolResponse[CheckpointOutput]{Accepted: true, Output: &output}
 }
 

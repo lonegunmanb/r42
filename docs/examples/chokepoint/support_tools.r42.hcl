@@ -1,16 +1,18 @@
 go_tool "register_evidence_source" {
-  description = "Register one retained source in the current evidence-ledger draft. url is the fetched page; canonical_url is the original publication URL and may equal url. source_type, reporting_basis, and provenance use broad classifications; unfamiliar values are retained as unknown instead of rejecting the call. The host derives source, origin, and independence IDs."
+  description = <<-DESC
+    Register one retained source in the current evidence-ledger draft. `url` must equal the fetched URL recorded in the referenced snapshot; this is enforced by the typed-tool host. `canonical_url` is optional publication identity metadata and may equal `url`. `source_type` allowed values: `authoritative_primary`, `official_filing`, `official_product`, `official_statement`, `regulator`, `qualified_media`, `credible_media`, `named_media`, `peer_reviewed`, `industry_research`, `other_published`, `other`, `lead_only`, `self_media`, `forum`, `aggregator`. `reporting_basis` allowed values: `public_document`, `named_source`, `anonymous_sources`, `direct_observation`, `published_methodology`. `provenance` allowed values: `original`, `syndication`, `aggregation`. Unfamiliar values are retained as unknown instead of rejecting the call. The host derives source, origin, and independence IDs.
+  DESC
 
   source = <<-GO
     import (
       "bytes"
       "context"
-      "crypto/sha256"
       "encoding/json"
       "fmt"
       "net/url"
       "os"
       "path/filepath"
+      "regexp"
       "strings"
       "time"
     )
@@ -27,7 +29,7 @@ go_tool "register_evidence_source" {
       SourceType      string   `json:"source_type"`
       ReportingBasis  string   `json:"reporting_basis"`
       Provenance      string   `json:"provenance"`
-      SnapshotPath    string   `json:"snapshot_path"`
+      SnapshotID      string   `json:"snapshot_id"`
       NamedEntities   []string `json:"named_entities"`
     }
 
@@ -47,7 +49,6 @@ go_tool "register_evidence_source" {
       CanonicalURL    string   `json:"canonical_url"`
       OriginID        string   `json:"origin_id"`
       IndependenceGroup string `json:"independence_group"`
-      ContentFingerprint string `json:"content_fingerprint"`
       Title           string   `json:"title"`
       Publisher       string   `json:"publisher"`
       PublicationDate string   `json:"publication_date"`
@@ -56,10 +57,11 @@ go_tool "register_evidence_source" {
       SourceClass     string   `json:"source_class"`
       ReportingBasis  string   `json:"reporting_basis"`
       Provenance      string   `json:"provenance"`
-      SnapshotPath    string   `json:"snapshot_path"`
-      SnapshotSHA256  string   `json:"snapshot_sha256"`
+      SnapshotID      string   `json:"snapshot_id"`
       NamedEntities   []string `json:"named_entities"`
     }
+
+    var evidenceSnapshotID = regexp.MustCompile(`^snapshot-[0-9a-f]{32}$`)
 
     func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
       currentDirectory, err := os.Getwd()
@@ -100,41 +102,28 @@ go_tool "register_evidence_source" {
       if !evidenceDate(input.AccessedAt) {
         issues = append(issues, evidenceIssue("date", "accessed_at", "accessed_at must use YYYY-MM-DD"))
       }
-      snapshotPath, snapshotErr := filepath.Abs(filepath.Clean(strings.TrimSpace(input.SnapshotPath)))
-      if snapshotErr != nil || !filepath.IsAbs(input.SnapshotPath) || !strings.EqualFold(filepath.Ext(snapshotPath), ".md") || !evidenceFileExists(snapshotPath) {
-        issues = append(issues, evidenceIssue("snapshot_path", "snapshot_path", "snapshot_path must name an existing absolute Markdown snapshot"))
-      } else {
-        root := evidenceBlocksRoot(workspace)
-        if root == "" || !evidenceWithin(snapshotPath, root) {
-          issues = append(issues, evidenceIssue("snapshot_path", "snapshot_path", "snapshot_path must be inside the current run's blocks directory"))
-        }
+      snapshotID := strings.TrimSpace(input.SnapshotID)
+      if !evidenceSnapshotID.MatchString(snapshotID) {
+        issues = append(issues, evidenceIssue("snapshot_id", "snapshot_id", "snapshot_id must use the registered snapshot- plus 32 lowercase hexadecimal characters format, not a filesystem path"))
       }
       if len(issues) > 0 {
         return ToolResponse[Output]{Accepted: false, Issues: issues}, nil
       }
-      snapshot, err := os.ReadFile(snapshotPath)
-      if err != nil {
-        return ToolResponse[Output]{}, fmt.Errorf("read evidence snapshot: %w", err)
-      }
-      snapshotDigest := sha256.Sum256(snapshot)
-      snapshotHash := fmt.Sprintf("%x", snapshotDigest)
-      contentDigest := sha256.Sum256([]byte(strings.ToLower(strings.Join(strings.Fields(string(snapshot)), " "))))
-      contentFingerprint := fmt.Sprintf("%x", contentDigest)
-      originDigest := sha256.Sum256([]byte(canonicalURL))
-      originID := "origin-" + fmt.Sprintf("%x", originDigest)[:20]
+      suffix := strings.TrimPrefix(snapshotID, "snapshot-")
+      sourceID := "source-" + suffix
+      originID := "origin-" + suffix[:20]
       independenceGroup := originID
       existing, loadErr := loadEvidenceSources(filepath.Join(filepath.Dir(ledgerPath), ".evidence-draft", "sources"))
       if loadErr != nil {
         return ToolResponse[Output]{}, fmt.Errorf("load registered evidence sources: %w", loadErr)
       }
       for _, candidate := range existing {
-        if candidate.ContentFingerprint == contentFingerprint && candidate.IndependenceGroup != "" {
+        if candidate.CanonicalURL == canonicalURL && candidate.OriginID != "" {
+          originID = candidate.OriginID
           independenceGroup = candidate.IndependenceGroup
           break
         }
       }
-      sourceDigest := sha256.Sum256([]byte(normalizedURL + ":" + snapshotHash))
-      sourceID := "source-" + fmt.Sprintf("%x", sourceDigest)[:20]
       entities := make([]string, 0, len(input.NamedEntities))
       for _, entity := range input.NamedEntities {
         if entity = strings.TrimSpace(entity); entity != "" {
@@ -144,12 +133,11 @@ go_tool "register_evidence_source" {
       record := SourceRecord{
         ID: sourceID, URL: strings.TrimSpace(input.URL), NormalizedURL: normalizedURL,
         CanonicalURL: canonicalURL, OriginID: originID, IndependenceGroup: independenceGroup,
-        ContentFingerprint: contentFingerprint,
         Title: strings.TrimSpace(input.Title), Publisher: strings.TrimSpace(input.Publisher),
         PublicationDate: strings.TrimSpace(input.PublicationDate), AccessedAt: strings.TrimSpace(input.AccessedAt),
         SourceType: sourceType, SourceClass: sourceClass,
         ReportingBasis: evidenceReportingBasis(input.ReportingBasis), Provenance: evidenceProvenance(input.Provenance),
-        SnapshotPath: snapshotPath, SnapshotSHA256: snapshotHash, NamedEntities: entities,
+        SnapshotID: snapshotID, NamedEntities: entities,
       }
       sourcePath := filepath.Join(filepath.Dir(ledgerPath), ".evidence-draft", "sources", sourceID+".json")
       if err = writeEvidenceJSON(sourcePath, record); err != nil {
@@ -279,11 +267,6 @@ go_tool "register_evidence_source" {
       return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
     }
 
-    func evidenceFileExists(path string) bool {
-      info, err := os.Stat(path)
-      return err == nil && !info.IsDir()
-    }
-
     func writeEvidenceJSON(path string, value any) error {
       if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
         return err
@@ -306,7 +289,7 @@ go_tool "register_evidence_source" {
 }
 
 go_tool "submit_supply_chain_scope" {
-  description = "Validate the declared product boundary and coverage inventory, write scope.json, and return its JSON."
+  description = "Validate the declared product boundary and coverage inventory, write scope.json, and return its JSON. `coverage_items.track` allowed values: `product_structure`, `manufacturing_testing`, `equipment`, `materials_chemicals`, `qualification_integration`."
 
   source = <<-GO
     import (

@@ -216,12 +216,17 @@ func TestConfigEffectiveCollectionQC(t *testing.T) {
 func TestResearchBlockPlansCollectionFields(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
+model_provider "collection" {
+  type     = "openai"
+  endpoint = "https://collection.example.test"
+}
 fixture_tool "source" {}
 
 research "static" "market" {
   model         = "model"
   system_prompt = "Collect and synthesize."
 
+  collection_model_provider = model_provider.collection
   collection_tool_ids = [
     fixture_tool.source.id,
   ]
@@ -244,6 +249,7 @@ research "static" "market" {
 `)
 	require.NoError(t, config.RunPlan())
 	planned := golden.Blocks[*researchspec.ResearchBlock](config)[0].ResearchConfig()
+	assertReference(t, planned.CollectionModelProvider, "model_provider.collection", "provider")
 	assert.Equal(t, []string{"tool_fixture_source"}, planned.CollectionToolIDs)
 	require.Len(t, planned.CollectionSkillDirectories, 1)
 	assert.NotEmpty(t, planned.CollectionSkillDirectories[0])
@@ -279,10 +285,15 @@ research "static" "market" {
 func TestResearchBlockValuesExposeCollectionFields(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
+model_provider "collection" {
+  type     = "openai"
+  endpoint = "https://collection.example.test"
+}
 research "static" "market" {
   model         = "model"
   system_prompt = "Collect and synthesize."
 
+  collection_model_provider = model_provider.collection
   collection_tool_ids = ["tool_fixture_source"]
   collection_batch_size = 5
   max_collection_rounds = 3
@@ -295,6 +306,7 @@ research "static" "market" {
 	require.NoError(t, config.RunPlan())
 	block := golden.Blocks[*researchspec.ResearchBlock](config)[0]
 	values := block.Values()
+	assertReference(t, values["collection_model_provider"], "model_provider.collection", "provider")
 	batchSize, _ := values["collection_batch_size"].AsBigFloat().Int64()
 	assert.Equal(t, int64(5), batchSize)
 	maxRounds, _ := values["max_collection_rounds"].AsBigFloat().Int64()
@@ -343,6 +355,10 @@ research "static" "market" {
 func TestResearchBlockSerializesCollectionFieldsInDeferredExpression(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
+model_provider "collection" {
+  type     = "openai"
+  endpoint = "https://collection.example.test"
+}
 fixture_tool "finish" {}
 
 research "static" "source" {
@@ -356,6 +372,7 @@ research "static" "summary" {
   system_prompt = "summary"
   prompt        = research.static.source.result
 
+  collection_model_provider = model_provider.collection
   collection_tool_ids = ["tool_fixture_collect"]
   collection_batch_size = 4
   max_collection_rounds = 2
@@ -368,6 +385,7 @@ research "static" "summary" {
 `)
 	require.NoError(t, config.RunPlan())
 	value := config.EvalContext().Variables["research"].GetAttr("static").GetAttr("summary")
+	assertReference(t, value.GetAttr("collection_model_provider"), "model_provider.collection", "provider")
 	batchSize, _ := value.GetAttr("collection_batch_size").AsBigFloat().Int64()
 	assert.Equal(t, int64(4), batchSize)
 	maxRounds, _ := value.GetAttr("max_collection_rounds").AsBigFloat().Int64()

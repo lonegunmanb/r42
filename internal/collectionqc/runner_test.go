@@ -86,6 +86,36 @@ func TestRunnerCarriesIssuesToResearchWhenCollectionBudgetIsExhausted(t *testing
 	assert.Equal(t, []string{issue.Message}, collectionContext.State.LastCollectionQCIssues())
 }
 
+func TestRunnerCarriesCollectorExhaustionToResearchAndQCContext(t *testing.T) {
+	t.Parallel()
+
+	collectionContext := collection.NewContext(t.TempDir(), 10, nil)
+	require.NoError(t, collectionContext.BeginWorkflow())
+	require.NoError(t, collectionContext.State.MarkCollectionExhausted())
+	require.NoError(t, collectionContext.State.Advance("checkpoint"))
+	verdicts := collectionqc.NewVerdictRecorder()
+	issue := corespec.Issue{Code: "coverage", Message: "evidence remains incomplete"}
+	session := &fakeSession{onSend: func(prompt string) error {
+		assert.Contains(t, prompt, `"checkpoint_empty_reason":"configured source tools are exhausted"`)
+		assert.Contains(t, prompt, `"collection_exhausted":true`)
+		assert.Contains(t, prompt, `"collection_can_reopen":false`)
+		return verdicts.Record(collectionqc.Verdict{
+			Decision: collectionqc.DecisionNeedsMore,
+			Issues:   []corespec.Issue{issue},
+		})
+	}}
+	runner := collectionqc.NewRunner(session, verdicts, collectionContext)
+	config := validConfig(nil)
+	config.CheckpointEmptyReason = "configured source tools are exhausted"
+	config.CollectionExhausted = true
+
+	result, err := runner.Review(t.Context(), config)
+
+	require.NoError(t, err)
+	assert.True(t, result.CollectionLimitExhausted)
+	assert.Equal(t, "research", collectionContext.State.Phase().String())
+}
+
 func TestRunnerMalformedVerdictDoesNotAdvanceWatermark(t *testing.T) {
 	t.Parallel()
 

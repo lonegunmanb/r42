@@ -162,8 +162,10 @@ The report order is:
 
 By default, Collection uses the built-in web_search and web_fetch tools. Set
 use_pplx to true to use the pplx_pro_search and pplx_fetch Go tools from the
-local module. In that mode the built-in web tools are disabled for Collection
-and pplx_tool_call_quota limits successful fetches per Collection session.
+local module. In that mode the built-in web tools are disabled for Collection.
+pplx_tool_call_quota limits successful pplx_fetch calls per Collection session;
+set it to null (the default) for no call limit and let Collection QC decide
+when the acquired evidence is sufficient.
 
 Every block uses the default `collection_batch_size = 10`. The examples omit
 `max_collection_rounds`, so Collection may reopen without a round limit. Search

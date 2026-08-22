@@ -50,6 +50,101 @@ research "static" "source" {
 	assert.Equal(t, 1, opener.qc.closeCalls)
 }
 
+func TestProductionRuntimeReusesResearchProviderAcrossWorkflowSessions(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+model_provider "primary" {
+  type     = "openai"
+  endpoint = "https://models.example.test"
+  retry { lifecycle_retries = 17 }
+}
+
+research "static" "source" {
+  model_provider = model_provider.primary
+  model          = "test-model"
+  system_prompt  = "Collect evidence."
+  qc { criteria = { accuracy = "Must be accurate" } }
+}
+`), 0o600))
+	opener := &qcOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+
+	require.NoError(t, err)
+	require.Len(t, opener.configs, 4)
+	providerConfig := opener.configs[0].Provider
+	require.NotNil(t, providerConfig)
+	for _, sessionConfig := range opener.configs[1:] {
+		assert.Same(t, providerConfig, sessionConfig.Provider)
+	}
+	for _, sessionConfig := range opener.configs {
+		assert.Equal(t, 17, sessionConfig.Retry.LifecycleRetries)
+	}
+}
+
+func TestProductionRuntimeUsesExplicitWorkflowPhaseProviders(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+model_provider "primary" {
+  type     = "openai"
+  endpoint = "https://primary.example.test"
+  retry { lifecycle_retries = 11 }
+}
+model_provider "collection" {
+  type     = "openai"
+  endpoint = "https://collection.example.test"
+  retry { lifecycle_retries = 12 }
+}
+model_provider "collection_qc" {
+  type     = "openai"
+  endpoint = "https://collection-qc.example.test"
+  retry { lifecycle_retries = 13 }
+}
+model_provider "final_qc" {
+  type     = "openai"
+  endpoint = "https://final-qc.example.test"
+  retry { lifecycle_retries = 14 }
+}
+
+research "static" "source" {
+  model_provider            = model_provider.primary
+  collection_model_provider = model_provider.collection
+  model                     = "test-model"
+  system_prompt             = "Collect evidence."
+
+  collection_qc {
+    model_provider = model_provider.collection_qc
+  }
+  qc {
+    criteria       = { accuracy = "Must be accurate" }
+    model_provider = model_provider.final_qc
+  }
+}
+`), 0o600))
+	opener := &qcOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+
+	require.NoError(t, err)
+	require.Len(t, opener.configs, 4)
+	assert.Equal(t, "https://collection.example.test", opener.configs[0].Provider.Endpoint)
+	assert.Equal(t, "https://collection-qc.example.test", opener.configs[1].Provider.Endpoint)
+	assert.Equal(t, "https://primary.example.test", opener.configs[2].Provider.Endpoint)
+	assert.Equal(t, "https://final-qc.example.test", opener.configs[3].Provider.Endpoint)
+	assert.Equal(t, 12, opener.configs[0].Retry.LifecycleRetries)
+	assert.Equal(t, 13, opener.configs[1].Retry.LifecycleRetries)
+	assert.Equal(t, 11, opener.configs[2].Retry.LifecycleRetries)
+	assert.Equal(t, 14, opener.configs[3].Retry.LifecycleRetries)
+}
+
 func TestProductionRuntimeAppliesResearchTimeoutAcrossQC(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()

@@ -686,6 +686,7 @@ func TestResearchBlockRejectsStringReferencePlaceholders(t *testing.T) {
 		expectedError string
 	}{
 		{name: "model provider", attribute: `model_provider = "fixture_provider.primary"`, expectedError: "research model_provider must be a provider reference"},
+		{name: "collection model provider", attribute: `collection_model_provider = "fixture_provider.collection"`, expectedError: "research collection_model_provider must be a provider reference"},
 		{name: "tool ids", attribute: `tool_ids = [""]`, expectedError: "research tool_ids must not contain empty values"},
 		{name: "terminate tool id", attribute: `terminate_tool_id = ""`, expectedError: "research terminate_tool_id must not be empty"},
 		{name: "qc model provider", attribute: "qc {\ncriteria = { accuracy = \"accurate\" }\nmodel_provider = \"fixture_provider.quality\"\n}", expectedError: "qc model_provider must be a provider reference"},
@@ -711,6 +712,7 @@ func TestResearchBlockRejectsCrossCategoryReferences(t *testing.T) {
 		expectedError string
 	}{
 		{name: "research provider is tool", attribute: "model_provider = fixture_tool.lookup", expectedError: "research model_provider must be a provider reference"},
+		{name: "collection provider is tool", attribute: "collection_model_provider = fixture_tool.lookup", expectedError: "research collection_model_provider must be a provider reference"},
 		{name: "research tool ids contain provider", attribute: "tool_ids = [model_provider.primary]", expectedError: "string required, but have object"},
 		{name: "terminate tool id is provider", attribute: "terminate_tool_id = model_provider.primary", expectedError: "string required, but have object"},
 		{name: "qc provider is tool", attribute: "qc {\ncriteria = { accuracy = \"accurate\" }\nmodel_provider = fixture_tool.lookup\n}", expectedError: "qc model_provider must be a provider reference"},

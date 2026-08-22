@@ -453,12 +453,13 @@ that depend on its successful completion are not run.
 
 | Field | Required | Purpose |
 | --- | --- | --- |
-| `model_provider` | No | References a `model_provider` block containing endpoint, authentication, transport, and retry defaults. When omitted, the Copilot SDK uses its default provider behavior. |
+| `model_provider` | No | Default provider for every phase in this research workflow. It contains endpoint, authentication, transport, and retry defaults. When omitted, the Copilot SDK uses its default provider behavior. |
 | `model` | Yes | Model identifier passed to the provider, for example `gpt-5.6-sol`. |
 | `profile` | No | Copilot runtime profile used for model capabilities and built-in tools. Defaults to `model`; set it separately when a BYOK provider model should use another known model's runtime profile. |
 | `reasoning_effort` | No | Non-empty provider-specific reasoning level. r42 passes it through without restricting the allowed names. |
 | `system_prompt` | Yes | Instructions appended to r42's fixed research protocol system prompt. |
 | `prompt` | No | Initial user task. When omitted, r42 sends a fixed start message. |
+| `collection_model_provider` | No | Collection provider override. When omitted, Collection reuses `model_provider`. |
 | `collection_tool_ids` | No | IDs of acquisition or snapshot-producing typed tools available only during Collection. This is where search and fetch tools belong. |
 | `tool_ids` | No | IDs of typed tools available only to the closed Research synthesis session. |
 | `tool_call_quota` | No | `map(number)` of non-negative per-session call limits. It may name configured Collection or Research typed tools, the terminate tool, or Copilot built-ins. Collection and Research keep separate counters. |
@@ -491,6 +492,12 @@ registered snapshot; an empty checkpoint must explain why no new evidence is
 needed. After `collection_batch_size` unique registrations, new acquisition
 calls pause until the checkpoint is submitted, while in-flight completion,
 registration, and checkpoint calls remain available.
+
+By default, Collection, Collection QC, closed Research, and Final QC all reuse
+the research block's `model_provider`. Collection can override it with
+`collection_model_provider`; Collection QC and Final QC can override it with
+their nested `model_provider` fields. An omitted override never clears the
+top-level provider.
 
 This changes the meaning of `tool_ids`: acquisition tools that previously
 appeared there must move to `collection_tool_ids`. Research uses only registered
@@ -622,11 +629,11 @@ default sufficiency criterion.
 | Field | Required | Purpose |
 | --- | --- | --- |
 | `criteria` | No | Non-empty `map(string)` of semantic evidence-sufficiency checks. Omission uses the default criterion. |
-| `model_provider` | No | Collection-QC provider override; otherwise inherits Research. |
+| `model_provider` | No | Collection-QC provider override; otherwise reuses the research block's top-level `model_provider`. |
 | `model` | No | Collection-QC model override; otherwise inherits Research. |
 | `reasoning_effort` | No | Collection-QC reasoning override; otherwise inherits Research. |
 | `permission` | No | Permission override; otherwise inherits Research. |
-| `retry` | No | One retry block layered over the effective Research retry policy. |
+| `retry` | No | One retry block layered over the selected Collection-QC provider policy and then the research-level retry override. |
 
 Collection QC can list and read registered snapshots but cannot acquire or
 modify evidence. It reviews the current checkpoint plus prior issues and calls
@@ -645,7 +652,7 @@ snapshots. Omitting `qc` completes the block after Research succeeds.
 | Field | Required | Purpose |
 | --- | --- | --- |
 | `criteria` | Yes | Non-empty `map(string)`. Each key is a stable criterion ID and each value is the concrete review instruction given to QC. |
-| `model_provider` | No | QC provider override; otherwise inherits the effective research provider. |
+| `model_provider` | No | Final-QC provider override; otherwise reuses the research block's top-level `model_provider`. |
 | `model` | No | QC model override; otherwise inherits the research model. |
 | `reasoning_effort` | No | QC reasoning override; otherwise inherits the research value. |
 | `tool_ids` | No | Typed tools available only to QC. Research tools are not inherited. |
@@ -657,7 +664,7 @@ snapshots. Omitting `qc` completes the block after Research succeeds.
 | `disabled_skills` | No | Skills disabled only for QC. |
 | `permission` | No | QC permission override; otherwise inherits the research permission. |
 | `max_qc_rounds` | No | Maximum number of QC evaluations, including the first evaluation. Defaults to `10`; at most `max_qc_rounds - 1` QC-triggered research revisions can occur. |
-| `retry` | No | One retry block using the same fields as research. It overrides the effective research retry policy field by field. |
+| `retry` | No | One retry block using the same fields as research. It is layered after the selected Final-QC provider policy and the research-level retry override. |
 
 Collection, Research, and Final QC quotas use independent counters, even when
 sessions use the same tool. Typed-tool calls consume quota only after their arguments pass schema

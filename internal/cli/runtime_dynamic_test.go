@@ -282,6 +282,43 @@ func TestProductionRuntimeRunsDynamicTasksConcurrentlyByDefault(t *testing.T) {
 	require.NoError(t, <-done)
 }
 
+func TestProductionRuntimeDynamicTasksUseIndexedWorkspaces(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+research "dynamic" "followups" {
+  tasks = [for index, topic in ["alpha", "beta"] : {
+    model         = "test-model"
+    system_prompt = "Research the assigned topic."
+    prompt        = "${block_wd()}/${index}/${topic}"
+    artifacts     = []
+    retry         = null
+    qc            = null
+  }]
+}
+`), 0o600))
+	opener := &dynamicTestOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 2})
+
+	require.NoError(t, err)
+	workingDirectories := make(map[string]struct{})
+	for _, config := range opener.Configs() {
+		workingDirectories[filepath.Clean(config.WorkingDirectory)] = struct{}{}
+	}
+	assert.Len(t, workingDirectories, 2)
+	require.Len(t, opener.Prompts(), 2)
+	for _, config := range opener.Configs() {
+		workspace := filepath.ToSlash(config.WorkingDirectory)
+		topic := map[string]string{"0": "alpha", "1": "beta"}[filepath.Base(workspace)]
+		assert.Contains(t, opener.Prompts(), workspace+"/"+topic)
+	}
+}
+
 func TestProductionRuntimeStopsSerialDynamicTasksAfterFailure(t *testing.T) {
 	t.Parallel()
 
@@ -343,6 +380,7 @@ type dynamicTestOpener struct {
 	mu          sync.Mutex
 	topics      []string
 	prompts     []string
+	configs     []copilot.SessionConfig
 	failPrompt  string
 	started     chan string
 	blockPrompt string
@@ -350,7 +388,16 @@ type dynamicTestOpener struct {
 }
 
 func (o *dynamicTestOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
+	o.mu.Lock()
+	o.configs = append(o.configs, config)
+	o.mu.Unlock()
 	return &dynamicTestSession{config: config, opener: o}, nil
+}
+
+func (o *dynamicTestOpener) Configs() []copilot.SessionConfig {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]copilot.SessionConfig(nil), o.configs...)
 }
 
 func (o *dynamicTestOpener) Prompts() []string {

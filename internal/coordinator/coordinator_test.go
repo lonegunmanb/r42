@@ -31,7 +31,11 @@ func TestRunnerCoordinatesReopenAndResearchRevision(t *testing.T) {
 	}}
 	runner := coordinator.NewRunner(state, collector, collectionReviewer, researcher, finalReviewer)
 
-	result, err := runner.Run(t.Context(), coordinator.Config{FinalQCEnabled: true, MaxFinalQCRounds: 3})
+	result, err := runner.Run(t.Context(), coordinator.Config{
+		Research:         researchruntime.Config{InitialPrompt: "original synthesis task"},
+		FinalQCEnabled:   true,
+		MaxFinalQCRounds: 3,
+	})
 
 	require.NoError(t, err)
 	assert.Equal(t, workflow.PhaseComplete, state.Phase())
@@ -39,9 +43,36 @@ func TestRunnerCoordinatesReopenAndResearchRevision(t *testing.T) {
 	assert.Equal(t, 2, collectionReviewer.calls)
 	assert.Equal(t, 3, researcher.calls)
 	assert.Equal(t, 3, finalReviewer.calls)
+	assert.Contains(t, researcher.prompts[0], "original synthesis task")
+	assert.Contains(t, researcher.prompts[1], "original synthesis task")
 	assert.Contains(t, researcher.prompts[1], "coverage")
+	assert.Contains(t, researcher.prompts[2], "original synthesis task")
 	assert.Contains(t, researcher.prompts[2], "accuracy")
 	assert.Equal(t, "candidate-3", *result.Value)
+}
+
+func TestRunnerPreservesResearchTaskWhenCollectionQCIssuesCannotReopenCollection(t *testing.T) {
+	t.Parallel()
+
+	state := workflow.New(workflow.Config{})
+	collector := &fakeCollector{}
+	reviewer := &fakeCollectionReviewer{
+		state:               state,
+		decisions:           []collectionqc.Decision{collectionqc.DecisionNeedsMore},
+		issues:              [][]corespec.Issue{issues("closed_input")},
+		forceLimitExhausted: true,
+	}
+	researcher := &fakeResearcher{}
+	runner := coordinator.NewRunner(state, collector, reviewer, researcher, nil)
+
+	_, err := runner.Run(t.Context(), coordinator.Config{
+		Research: researchruntime.Config{InitialPrompt: "write report.md from validated JSON"},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, researcher.prompts, 1)
+	assert.Contains(t, researcher.prompts[0], "write report.md from validated JSON")
+	assert.Contains(t, researcher.prompts[0], "closed_input")
 }
 
 func TestRunnerDoesNotStartUnreviewableWorkAfterLastFinalQCRound(t *testing.T) {
@@ -117,10 +148,32 @@ func TestRunnerCarriesCollectionQCIssuesIntoNextCollectionPrompt(t *testing.T) {
 	assert.Contains(t, collector.prompts[1], "missing_primary_source")
 }
 
+func TestRunnerPassesCollectorExhaustionToCollectionQC(t *testing.T) {
+	t.Parallel()
+
+	state := workflow.New(workflow.Config{})
+	collector := &fakeCollector{checkpoint: collection.CheckpointOutput{
+		EmptyReason:         "configured source tools are exhausted",
+		CollectionExhausted: true,
+	}}
+	reviewer := &fakeCollectionReviewer{
+		state: state, decisions: []collectionqc.Decision{collectionqc.DecisionSufficient},
+	}
+	runner := coordinator.NewRunner(state, collector, reviewer, &fakeResearcher{}, nil)
+
+	_, err := runner.Run(t.Context(), coordinator.Config{})
+
+	require.NoError(t, err)
+	require.Len(t, reviewer.configs, 1)
+	assert.Equal(t, "configured source tools are exhausted", reviewer.configs[0].CheckpointEmptyReason)
+	assert.True(t, reviewer.configs[0].CollectionExhausted)
+}
+
 type fakeCollector struct {
 	calls        int
 	prompts      []string
 	checkContext func(context.Context)
+	checkpoint   collection.CheckpointOutput
 }
 
 func (f *fakeCollector) Run(ctx context.Context, config collection.RunConfig) (collection.CheckpointOutput, error) {
@@ -129,19 +182,22 @@ func (f *fakeCollector) Run(ctx context.Context, config collection.RunConfig) (c
 	if f.checkContext != nil {
 		f.checkContext(ctx)
 	}
-	return collection.CheckpointOutput{}, nil
+	return f.checkpoint, nil
 }
 
 type fakeCollectionReviewer struct {
-	state        *workflow.State
-	decisions    []collectionqc.Decision
-	issues       [][]corespec.Issue
-	calls        int
-	checkContext func(context.Context)
+	state               *workflow.State
+	decisions           []collectionqc.Decision
+	issues              [][]corespec.Issue
+	configs             []collectionqc.Config
+	forceLimitExhausted bool
+	calls               int
+	checkContext        func(context.Context)
 }
 
-func (f *fakeCollectionReviewer) Review(ctx context.Context, _ collectionqc.Config) (collectionqc.Result, error) {
+func (f *fakeCollectionReviewer) Review(ctx context.Context, config collectionqc.Config) (collectionqc.Result, error) {
 	f.calls++
+	f.configs = append(f.configs, config)
 	if f.checkContext != nil {
 		f.checkContext(ctx)
 	}
@@ -154,6 +210,9 @@ func (f *fakeCollectionReviewer) Review(ctx context.Context, _ collectionqc.Conf
 	event := workflow.EventSufficient
 	if decision == collectionqc.DecisionNeedsMore {
 		event = workflow.EventNeedsMore
+		if f.forceLimitExhausted {
+			event = workflow.EventCollectionLimitExhausted
+		}
 	}
 	if err := f.state.Advance(event); err != nil {
 		return collectionqc.Result{}, err
@@ -165,7 +224,10 @@ func (f *fakeCollectionReviewer) Review(ctx context.Context, _ collectionqc.Conf
 		}
 		f.state.SetLastCollectionQCIssues(messages)
 	}
-	return collectionqc.Result{Verdict: collectionqc.Verdict{Decision: decision, Issues: verdictIssues}}, nil
+	return collectionqc.Result{
+		Verdict:                  collectionqc.Verdict{Decision: decision, Issues: verdictIssues},
+		CollectionLimitExhausted: f.forceLimitExhausted,
+	}, nil
 }
 
 type fakeResearcher struct {

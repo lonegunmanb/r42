@@ -46,9 +46,6 @@ func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 		t.Parallel()
 		program, compileErr := compiler.Compile(t.Context(), goToolSource(t, "submit_knowledge"))
 		require.NoError(t, compileErr)
-		foreignSnapshot := filepath.Join(foreign, "snapshots", "source-submit.md")
-		require.NoError(t, os.MkdirAll(filepath.Dir(foreignSnapshot), 0o700))
-		require.NoError(t, os.WriteFile(foreignSnapshot, []byte("quoted text"), 0o600))
 		artifactPath := filepath.Join(current, "task", "knowledge.json")
 
 		response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
@@ -59,7 +56,7 @@ func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 			}},
 			"quotes": []any{map[string]any{
 				"id": "quote-1", "source_title": "Source", "url": "https://example.com/source",
-				"snapshot_path": foreignSnapshot, "locator": "paragraph 1", "exact_quote": "quoted text",
+				"snapshot_id": "invalid", "locator": "paragraph 1", "exact_quote": "quoted text",
 			}},
 		}), current)
 
@@ -116,9 +113,6 @@ func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 		t.Parallel()
 		program, compileErr := compiler.Compile(t.Context(), goToolSource(t, "submit_knowledge"))
 		require.NoError(t, compileErr)
-		validSnapshot := filepath.Join(current, "snapshots", "valid.md")
-		require.NoError(t, os.MkdirAll(filepath.Dir(validSnapshot), 0o700))
-		require.NoError(t, os.WriteFile(validSnapshot, []byte("quoted text"), 0o600))
 		foreignTarget := filepath.Join(foreign, "knowledge-target.json")
 		require.NoError(t, os.WriteFile(foreignTarget, []byte("original"), 0o600))
 		linkedArtifact := filepath.Join(current, "linked", "knowledge.json")
@@ -133,7 +127,7 @@ func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 			}},
 			"quotes": []any{map[string]any{
 				"id": "quote-1", "source_title": "Source", "url": "https://example.com/source",
-				"snapshot_path": validSnapshot, "locator": "paragraph 1", "exact_quote": "quoted text",
+				"snapshot_id": "snapshot-33333333333333333333333333333333", "locator": "paragraph 1", "exact_quote": "quoted text",
 			}},
 		}), current)
 
@@ -143,6 +137,31 @@ func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 		require.NoError(t, readErr)
 		assert.Equal(t, "original", string(content))
 	})
+}
+
+func TestTypedToolDescriptionsPublishAllowedValues(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		tool    string
+		field   string
+		allowed []string
+	}{
+		{tool: "submit_knowledge", field: "knowledge.confidence", allowed: []string{"high", "medium", "low"}},
+		{tool: "submit_conflict_resolution", field: "conflicts.status", allowed: []string{"resolved", "unresolved"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.tool+"/"+tt.field, func(t *testing.T) {
+			t.Parallel()
+
+			description := goToolDescription(t, tt.tool)
+			assert.Contains(t, description, "`"+tt.field+"`")
+			for _, value := range tt.allowed {
+				assert.Contains(t, description, "`"+value+"`", "allowed value %q must be published", value)
+			}
+		})
+	}
 }
 
 func goToolSource(t *testing.T, name string) string {
@@ -157,6 +176,25 @@ func goToolSource(t *testing.T, name string) string {
 			continue
 		}
 		value, valueDiagnostics := block.Body.Attributes["source"].Expr.Value(nil)
+		require.False(t, valueDiagnostics.HasErrors(), valueDiagnostics.Error())
+		return value.AsString()
+	}
+	require.FailNow(t, "go tool not found", "name=%s", name)
+	return ""
+}
+
+func goToolDescription(t *testing.T, name string) string {
+	t.Helper()
+	parser := hclparse.NewParser()
+	file, diagnostics := parser.ParseHCLFile("tools.r42.hcl")
+	require.False(t, diagnostics.HasErrors(), diagnostics.Error())
+	body, ok := file.Body.(*hclsyntax.Body)
+	require.True(t, ok)
+	for _, block := range body.Blocks {
+		if block.Type != "go_tool" || len(block.Labels) != 1 || block.Labels[0] != name {
+			continue
+		}
+		value, valueDiagnostics := block.Body.Attributes["description"].Expr.Value(nil)
 		require.False(t, valueDiagnostics.HasErrors(), valueDiagnostics.Error())
 		return value.AsString()
 	}

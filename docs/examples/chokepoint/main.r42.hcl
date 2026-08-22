@@ -23,18 +23,26 @@ research "static" "primary_source_baseline" {
     ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
     Workspace: "${block_wd()}"
 
-    Find the newest official filings, regulator records, product specifications,
-    customer or contract disclosures, and applicable rules available by the
-    cutoff. Save every retained source as a Markdown snapshot. Register each
-    source with ${go_tool.register_evidence_source.id}, using workspace_dir
-    "${block_wd()}" and ledger_path "${block_wd()}/evidence-ledger.json".
+    During Collection, find the newest official filings, regulator records,
+    product specifications, customer or contract disclosures, and applicable
+    rules available by the cutoff. Save every retained source as a Markdown
+    snapshot, register its path or retained source tool call ID with
+    r42_register_snapshot, and submit a collection checkpoint when the primary
+    corpus is sufficient.
+
+    During closed Research, do not search or fetch. Use the authorized snapshot_id
+    values supplied to this phase with r42_read_snapshot. Register each retained
+    source with ${go_tool.register_evidence_source.id}, using that snapshot_id,
+    workspace_dir "${block_wd()}", and ledger_path
+    "${block_wd()}/evidence-ledger.json".
 
     Submit atomic cards in batches of at most five with
     ${go_tool.submit_claim_cards.id}. Use confirmed only when an authoritative
     primary source directly states the claim. Use reported for direct published
-    reporting. Use inferred only for a conclusion derived from existing card IDs;
-    inferred cards use derived_from and no source_id, quote, or locator. Do not
-    submit unknown as a claim card.
+    reporting. A direct card must use the same snapshot_id as its registered
+    source. Use inferred only for a conclusion derived from existing card IDs;
+    inferred cards use derived_from and no source_id, snapshot_id, quote, or
+    locator. Do not submit unknown as a claim card.
 
     Finish with ${go_tool.finalize_claim_cards.id}:
     workspace_dir "${block_wd()}", claims_path "${block_wd()}/claims.json",
@@ -100,8 +108,14 @@ research "static" "brainstorm" {
     ${local.source_tool_guidance}
     ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
 
-    Use the validated baseline and this workflow's registered snapshots. Write
-    "${block_wd()}/brainstorm.md" with the
+    During Collection, acquire only evidence needed beyond the validated
+    baseline. Register every retained path or source tool call ID with
+    r42_register_snapshot and submit a collection checkpoint. If the baseline
+    is sufficient for scope design, submit an empty collection checkpoint.
+
+    During closed Research, do not search or fetch. Use the authorized snapshot_id
+    values supplied to this phase with r42_read_snapshot, and use the validated
+    baseline directly. Write "${block_wd()}/brainstorm.md" with the
     focal boundary, product variants, layered components, transformation stages,
     manufacturing, packaging, testing, module integration, downstream system
     qualification, competing dependency hypotheses, and open questions for the
@@ -148,80 +162,93 @@ research "static" "brainstorm" {
   }
 }
 
-research "static" "graph_track" {
-  for_each = local.graph_tracks
+research "dynamic" "graph_track" {
+  tasks = [
+    for index, track_key in keys(local.graph_tracks) : {
+      model_provider   = model_provider.primary
+      model            = var.model
+      reasoning_effort = var.reasoning_effort
+      system_prompt    = var.research_system_prompt
+      prompt = <<-PROMPT
+        Topic: ${var.topic}
+        Evidence cutoff: ${var.as_of_date}
+        Track: ${local.graph_tracks[track_key].title}
+        Assigned question: ${local.graph_tracks[track_key].question}
+        Validated scope JSON:
+        ${research.static.brainstorm.result}
+        Validated primary-source baseline JSON:
+        ${research.static.primary_source_baseline.result}
+        ${local.source_tool_guidance}
+        ${var.use_pplx ? format("Perplexity snapshot_dir: %s/%d/sources", block_wd(), index) : ""}
+        Workspace: "${block_wd()}/${index}"
 
-  model_provider   = model_provider.primary
-  model            = var.model
-  reasoning_effort = var.reasoning_effort
-  system_prompt    = var.research_system_prompt
-  prompt = <<-PROMPT
-    Topic: ${var.topic}
-    Evidence cutoff: ${var.as_of_date}
-    Track: ${each.value.title}
-    Assigned question: ${each.value.question}
-    Validated scope JSON:
-    ${research.static.brainstorm.result}
-    Validated primary-source baseline JSON:
-    ${research.static.primary_source_baseline.result}
-    ${local.source_tool_guidance}
-    ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
-    Workspace: "${block_wd()}"
+        During Collection, research only this track and address every assigned
+        coverage item. Preserve product variants and distinguish generic-chain facts
+        from target facts. Save every retained source under snapshots/sources,
+        register its path or retained source tool call ID with
+        r42_register_snapshot, and submit a collection checkpoint when sufficient.
 
-    Research only this track and address every assigned coverage item. Preserve
-    product variants and distinguish generic-chain facts from target facts.
-    Save every retained source under the snapshots/sources directory and register
-    it with ${go_tool.register_evidence_source.id}, using ledger_path
-    "${block_wd()}/evidence-ledger.json".
+        During closed Research, do not search or fetch. Use the authorized snapshot_id
+        values supplied to this phase with r42_read_snapshot. Register every retained
+        source with ${go_tool.register_evidence_source.id}, using that snapshot_id and
+        ledger_path "${block_wd()}/${index}/evidence-ledger.json". Direct claim
+        cards must use the same snapshot_id as their registered source.
 
-    Submit one independently auditable claim per card with
-    ${go_tool.submit_claim_cards.id}, in batches of at most five. Prefix IDs
-    with "${each.key}-". Use confirmed, reported, and inferred exactly as
-    described by the tool; record unresolved questions in the track narrative,
-    not as fake claims.
+        Submit one independently auditable claim per card with
+        ${go_tool.submit_claim_cards.id}, in batches of at most five. Prefix IDs
+        with "${track_key}-". Use confirmed, reported, and inferred exactly as
+        described by the tool; record unresolved questions in the track narrative,
+        not as fake claims.
 
-    Finish with ${go_tool.finalize_claim_cards.id}: workspace_dir
-    "${block_wd()}", claims_path "${block_wd()}/claims.json",
-    source_registry_path "${block_wd()}/source-registry.json", as_of_date
-    "${var.as_of_date}", and allow_empty false.
-  PROMPT
-  collection_tool_ids = local.pplx_tool_ids
-  tool_ids = [
-    go_tool.register_evidence_source.id,
-    go_tool.submit_claim_cards.id,
-    go_tool.finalize_claim_cards.id,
-  ]
-  tool_call_quota   = local.pplx_tool_call_quota
-  terminate_tool_id = go_tool.finalize_claim_cards.id
-  disallowed_tools  = local.research_disallowed_tools
-  permission        = "approve_all"
-
-  artifact "claims" {
-    type      = "file"
-    path      = "${block_wd()}/claims.json"
-    required  = true
-    non_empty = true
-  }
-  artifact "source_registry" {
-    type      = "file"
-    path      = "${block_wd()}/source-registry.json"
-    required  = true
-    non_empty = true
-  }
-
-  qc {
-    criteria = {
-      track_scope = "Judge whether the cards answer this track's assigned questions and preserve material unknowns without drifting into company selection."
-      entailment = "Judge whether each source actually entails its atomic claim with the stated party, period, product branch, and qualifier. Treat typed-tool schema, path, URL, date, and quote matching as authoritative."
-      inference = "Judge whether inferred cards follow from their premise cards without silently upgrading correlation, supplier marketing, or general industry structure into a target-specific fact."
+        Finish with ${go_tool.finalize_claim_cards.id}: workspace_dir
+        "${block_wd()}/${index}", claims_path
+        "${block_wd()}/${index}/claims.json", source_registry_path
+        "${block_wd()}/${index}/source-registry.json", as_of_date
+        "${var.as_of_date}", and allow_empty false.
+      PROMPT
+      collection_tool_ids = local.pplx_tool_ids
+      tool_ids = [
+        go_tool.register_evidence_source.id,
+        go_tool.submit_claim_cards.id,
+        go_tool.finalize_claim_cards.id,
+      ]
+      tool_call_quota   = local.pplx_tool_call_quota
+      terminate_tool_id = go_tool.finalize_claim_cards.id
+      disallowed_tools  = local.research_disallowed_tools
+      permission        = "approve_all"
+      artifacts = [
+        {
+          name      = "claims"
+          type      = "file"
+          path      = "${block_wd()}/${index}/claims.json"
+          required  = true
+          non_empty = true
+        },
+        {
+          name      = "source_registry"
+          type      = "file"
+          path      = "${block_wd()}/${index}/source-registry.json"
+          required  = true
+          non_empty = true
+        },
+      ]
+      retry = null
+      qc = {
+        criteria = {
+          track_scope = "Judge whether the cards answer this track's assigned questions and preserve material unknowns without drifting into company selection."
+          entailment = "Judge whether each source actually entails its atomic claim with the stated party, period, product branch, and qualifier. Treat typed-tool schema, path, URL, date, and quote matching as authoritative."
+          inference = "Judge whether inferred cards follow from their premise cards without silently upgrading correlation, supplier marketing, or general industry structure into a target-specific fact."
+        }
+        model_provider   = model_provider.primary
+        model            = local.qc_model
+        reasoning_effort = var.reasoning_effort
+        max_qc_rounds    = var.max_qc_rounds
+        disallowed_tools = local.semantic_qc_disallowed_tools
+        permission       = "approve_all"
+        retry            = null
+      }
     }
-    model_provider   = model_provider.primary
-    model            = local.qc_model
-    reasoning_effort = var.reasoning_effort
-    max_qc_rounds    = var.max_qc_rounds
-    disallowed_tools = local.semantic_qc_disallowed_tools
-    permission       = "approve_all"
-  }
+  ]
 }
 
 research "static" "build_supply_chain" {
@@ -240,9 +267,13 @@ research "static" "build_supply_chain" {
     ${research.static.brainstorm.result}
     Validated baseline and track claim JSON:
     ${research.static.primary_source_baseline.result}
-    ${join("\n", [for item in research.static.graph_track : item.result])}
+    ${join("\n", [for item in research.dynamic.graph_track.tasks : item.result])}
 
-    Use only the validated JSON above. Call ${go_tool.submit_supply_chain_map.id} once with
+    During Collection, do not acquire new evidence. The validated JSON above is
+    complete for this stage, so submit an empty collection checkpoint.
+
+    During closed Research, use only the validated JSON above. Call
+    ${go_tool.submit_supply_chain_map.id} once with
     workspace_dir "${block_wd()}", artifact_path
     "${block_wd()}/supply-chain.json", the exact topic and scope_path, and
     claim_paths containing the baseline plus all five track claim files.
@@ -300,17 +331,20 @@ research "dynamic" "assess_nodes" {
         ${research.static.build_supply_chain.result}
         Validated claim JSON:
         ${research.static.primary_source_baseline.result}
-        ${join("\n", [for item in research.static.graph_track : item.result])}
+        ${join("\n", [for item in research.dynamic.graph_track.tasks : item.result])}
 
-        Use the included map and claims. Answer five questions: which scenario is
+        During Collection, do not acquire new evidence. The validated map and
+        claims are complete for this stage, so submit an empty collection checkpoint.
+
+        During closed Research, use the included map and claims. Answer five questions: which scenario is
         affected (current production, expansion/upgrade, or a product branch);
         whether the named target actually depends on this node; which alternatives
         are already qualified and have usable capacity; whether switching and
         recovery exceed known buffers; and what evidence would falsify the view.
 
         Call ${go_tool.submit_node_assessment.id} with task workspace_dir
-        "${block_wd()}/${format("%03d", index + 1)}", artifact_path
-        "${block_wd()}/${format("%03d", index + 1)}/node-assessment.json",
+        "${block_wd()}/${index}", artifact_path
+        "${block_wd()}/${index}/node-assessment.json",
         all claim_paths above, and the target node. risk_scope is global or
         branch; conclusion is independently confirmed, candidate, or not_proven.
         Keep unknowns and falsification_conditions explicit.
@@ -322,7 +356,7 @@ research "dynamic" "assess_nodes" {
       artifacts = [{
         name      = "node_assessment"
         type      = "file"
-        path      = "${block_wd()}/${format("%03d", index + 1)}/node-assessment.json"
+        path      = "${block_wd()}/${index}/node-assessment.json"
         required  = true
         non_empty = true
       }]
@@ -359,32 +393,39 @@ research "dynamic" "prioritize_companies" {
         ${assessment.result}
         Validated existing claim JSON:
         ${research.static.primary_source_baseline.result}
-        ${join("\n", [for item in research.static.graph_track : item.result])}
-        Task workspace: "${block_wd()}/${format("%03d", index + 1)}"
+        ${join("\n", [for item in research.dynamic.graph_track.tasks : item.result])}
+        Task workspace: "${block_wd()}/${index}"
         ${local.source_tool_guidance}
-        ${var.use_pplx ? format("Perplexity snapshot_dir: %s/%03d/sources", block_wd(), index + 1) : ""}
+        ${var.use_pplx ? format("Perplexity snapshot_dir: %s/%d/sources", block_wd(), index) : ""}
 
-        This single stage asks whether any public company deserves more research
-        because of this exact assessed node. Investigate at most
+        During Collection, investigate whether any public company deserves more
+        research because of this exact assessed node. Investigate at most
         ${var.max_candidates_per_chokepoint} companies. For each, distinguish an
         existing supplier, qualified alternative, related-product-only company,
-        or unverified lead. Verify the exact legal entity and security.
+        or unverified lead. Verify the exact legal entity and security. Register
+        every retained path or source tool call ID with r42_register_snapshot,
+        then submit a collection checkpoint. If no new evidence is needed,
+        submit an empty collection checkpoint.
+
+        During closed Research, do not search or fetch. Use the authorized snapshot_id
+        values supplied to this phase with r42_read_snapshot.
 
         Register retained sources with ${go_tool.register_evidence_source.id}
-        using workspace_dir above and ledger_path
-        "${block_wd()}/${format("%03d", index + 1)}/evidence-ledger.json".
+        using the authorized snapshot_id, workspace_dir above, and ledger_path
+        "${block_wd()}/${index}/evidence-ledger.json".
         Submit atomic relationship and economic-exposure cards with
-        ${go_tool.submit_claim_cards.id}. Never claim that a related product
+        ${go_tool.submit_claim_cards.id}, using the registered source's same
+        snapshot_id for every direct card. Never claim that a related product
         proves adoption, qualification, market share, revenue, or profit impact.
 
         Finalize cards with ${go_tool.finalize_claim_cards.id}, claims_path
-        "${block_wd()}/${format("%03d", index + 1)}/claims.json",
+        "${block_wd()}/${index}/claims.json",
         source_registry_path
-        "${block_wd()}/${format("%03d", index + 1)}/source-registry.json",
+        "${block_wd()}/${index}/source-registry.json",
         cutoff above, and allow_empty true.
 
         Then call ${go_tool.submit_company_priorities.id} with artifact_path
-        "${block_wd()}/${format("%03d", index + 1)}/company-priorities.json",
+        "${block_wd()}/${index}/company-priorities.json",
         the node assessment path, and claim_paths containing the baseline, all
         five track files, and this task's claims.json.
 
@@ -410,21 +451,21 @@ research "dynamic" "prioritize_companies" {
         {
           name      = "claims"
           type      = "file"
-          path      = "${block_wd()}/${format("%03d", index + 1)}/claims.json"
+          path      = "${block_wd()}/${index}/claims.json"
           required  = true
           non_empty = true
         },
         {
           name      = "source_registry"
           type      = "file"
-          path      = "${block_wd()}/${format("%03d", index + 1)}/source-registry.json"
+          path      = "${block_wd()}/${index}/source-registry.json"
           required  = true
           non_empty = true
         },
         {
           name      = "company_priorities"
           type      = "file"
-          path      = "${block_wd()}/${format("%03d", index + 1)}/company-priorities.json"
+          path      = "${block_wd()}/${index}/company-priorities.json"
           required  = true
           non_empty = true
         },
@@ -469,9 +510,22 @@ research "static" "synthesize" {
     ${join("\n", [for task in research.dynamic.prioritize_companies.tasks : task.result])}
     Validated baseline and track claims:
     ${research.static.primary_source_baseline.result}
-    ${join("\n", [for item in research.static.graph_track : item.result])}
+    ${join("\n", [for item in research.dynamic.graph_track.tasks : item.result])}
+    Finalized claim_paths JSON array:
+    ${jsonencode(local.synthesis_claim_paths)}
 
-    Use only the validated JSON above and write "${block_wd()}/report.md" in this order:
+    The `claims` fields in the baseline, track, and company-priority results are
+    the complete atomic claim-card JSON available for report citations. Each
+    company-priority result includes only the new claims produced by that task;
+    baseline and track claims are listed once above.
+
+    During Collection, do not acquire new evidence. The validated JSON above is
+    complete for synthesis. Submit an empty collection checkpoint with
+    empty_reason "validated upstream JSON is the complete closed input" and
+    collection_exhausted=true.
+
+    During closed Research, use only the validated JSON above and write
+    "${block_wd()}/report.md" in this order:
     1. companies worth further research, showing A/B/C/do-not-research, exact
        node and role, strongest evidence, largest unknown, and next check;
     2. confirmed and candidate global or branch-specific risk nodes;
@@ -487,15 +541,27 @@ research "static" "synthesize" {
     Do not cite internal artifact counts or methodology statements as external
     facts. Do not write a URL table or RPT IDs.
 
-    Finish with ${go_tool.finalize_research_report.id}, report_path
-    "${block_wd()}/report.md", and claim_paths containing every claim file above.
-    The tool replaces claim markers with original URLs and appends the referenced
-    evidence cards.
+    Finish with ${go_tool.finalize_research_report.id}. Set report_path to exactly
+    "${block_wd()}/report.md". Set claim_paths to the Finalized claim_paths JSON
+    array above, unchanged. Every element is an absolute path to one finalized claims.json
+    artifact; do not substitute directories, globs, Markdown files,
+    snapshot IDs, or guessed paths. The tool replaces claim markers with original
+    URLs and appends the referenced evidence cards.
   PROMPT
   tool_ids          = [go_tool.finalize_research_report.id]
   terminate_tool_id = go_tool.finalize_research_report.id
   disallowed_tools  = local.offline_disallowed_tools
   permission        = "approve_all"
+
+  collection_qc {
+    criteria = {
+      closed_input = "This is closed-input synthesis over already validated upstream JSON. An empty checkpoint with collection_exhausted=true is sufficient. Do not request new sources or re-review upstream evidence coverage."
+    }
+    model_provider   = model_provider.primary
+    model            = local.qc_model
+    reasoning_effort = var.reasoning_effort
+    permission       = "approve_all"
+  }
 
   artifact "report" {
     type      = "file"

@@ -23,7 +23,7 @@ class MatchQuoteTests(unittest.TestCase):
 
 
 class AuditTests(unittest.TestCase):
-    def test_audit_accepts_layout_equivalent_quote(self):
+    def test_audit_accepts_typed_tool_validated_snapshot_id(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = self._write_fixture(Path(directory))
 
@@ -31,14 +31,14 @@ class AuditTests(unittest.TestCase):
 
             self.assertTrue(result["pass"])
             self.assertEqual([], result["issues"])
-            self.assertEqual(1, result["match_modes"]["whitespace_equivalent"])
+            self.assertEqual(1, result["match_modes"]["typed_tool_validated"])
             self.assertEqual(1, result["report_quote_ids"])
             self.assertEqual(1, result["knowledge_quote_ids"])
             full_audit = json.loads(
                 Path(result["audit_path"]).read_text(encoding="utf-8")
             )
             self.assertEqual(
-                "whitespace_equivalent",
+                "typed_tool_validated",
                 full_audit["matches"][0]["match_mode"],
             )
             self.assertEqual("topic-quote-001", full_audit["matches"][0]["quote_id"])
@@ -77,7 +77,7 @@ class AuditTests(unittest.TestCase):
                     "id": "topic-quote-002",
                     "source_title": "Unused example",
                     "url": "https://example.com/unused",
-                    "snapshot_path": knowledge["quotes"][0]["snapshot_path"],
+                    "snapshot_id": knowledge["quotes"][0]["snapshot_id"],
                     "locator": "paragraph 2",
                     "exact_quote": "Text absent from the snapshot.",
                 }
@@ -137,14 +137,11 @@ class AuditTests(unittest.TestCase):
     ):
         run = root / ".r42" / "runs" / "run-test" / "blocks"
         knowledge_dir = run / "knowledge" / "task"
-        snapshot_dir = run / "knowledge" / "snapshots"
         report_dir = run / "report"
         resolution_dir = run / "resolution"
-        for path in (knowledge_dir, snapshot_dir, report_dir, resolution_dir):
+        for path in (knowledge_dir, report_dir, resolution_dir):
             path.mkdir(parents=True, exist_ok=True)
 
-        snapshot_path = snapshot_dir / "source.md"
-        snapshot_path.write_text("The exchange rate\n  remained stable.", encoding="utf-8")
         knowledge_path = knowledge_dir / "knowledge.json"
         knowledge_path.write_text(
             json.dumps(
@@ -164,7 +161,7 @@ class AuditTests(unittest.TestCase):
                             "id": "topic-quote-001",
                             "source_title": "Example",
                             "url": "https://example.com/source",
-                            "snapshot_path": str(snapshot_path),
+                            "snapshot_id": "snapshot-11111111111111111111111111111111",
                             "locator": "paragraph 1",
                             "exact_quote": "The exchange rate remained stable.",
                         }

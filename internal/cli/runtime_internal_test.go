@@ -76,6 +76,33 @@ func TestQCVerdictToolSchemaDescribesIssueFields(t *testing.T) {
 	}`, string(schema))
 }
 
+func TestObjectSchemaRequiredFields(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		required []string
+		want     []string
+	}{
+		{name: "nil", required: nil},
+		{name: "empty", required: []string{}},
+		{name: "non-empty", required: []string{"decision"}, want: []string{"decision"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			schema := objectSchema(map[string]any{}, tt.required)
+			if len(tt.want) == 0 {
+				assert.NotContains(t, schema, "required")
+				return
+			}
+			assert.Equal(t, tt.want, schema["required"])
+		})
+	}
+}
+
 func TestQCVerdictToolReturnsRepairableCollectionBudgetRejection(t *testing.T) {
 	t.Parallel()
 

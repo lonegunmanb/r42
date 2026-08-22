@@ -14,8 +14,15 @@ research "static" "external_tool_snapshot" {
   model            = "deepseek-v4-flash"
   reasoning_effort = "low"
   system_prompt = <<-PROMPT
-    You are testing two external research tools. You must call both tools in order:
-    first ${module.pplx_tools.pplx_pro_search_tool_id}, then ${module.pplx_tools.pplx_fetch_tool_id}.
+    You are testing phased research with two external acquisition tools.
+
+    During Collection, call ${module.pplx_tools.pplx_pro_search_tool_id}, then
+    ${module.pplx_tools.pplx_fetch_tool_id}. Register the fetched Markdown path
+    with r42_register_snapshot and submit the collection checkpoint.
+
+    During closed Research, do not call acquisition tools. Use
+    r42_list_snapshots and r42_read_snapshot to verify the registered snapshot,
+    then finish with a concise confirmation of the Python release found.
 
     Never use PowerShell, a shell, curl, wget, or scripts and command-line
     programs to search the web or download remote content. Do not use them as
@@ -28,13 +35,16 @@ research "static" "external_tool_snapshot" {
     Search for the latest stable Python release announcement on python.org.
     Select one python.org result and call ${module.pplx_tools.pplx_fetch_tool_id} with its URL.
     The fetch tool writes ${block_wd()}/snapshot.md itself.
-    Do not finish until ${module.pplx_tools.pplx_fetch_tool_id} succeeds and reports that exact snapshot path.
+    During Collection, do not checkpoint until the fetch succeeds, reports that
+    exact path, and r42_register_snapshot accepts it. During closed Research,
+    verify the snapshot through the r42 snapshot readers before responding.
   PROMPT
   collection_tool_ids = [
     module.pplx_tools.pplx_pro_search_tool_id,
     module.pplx_tools.pplx_fetch_tool_id,
   ]
-  permission = "approve_all"
+  disallowed_tools = ["web_search", "web_fetch"]
+  permission        = "approve_all"
 
   artifact "snapshot" {
     type      = "file"

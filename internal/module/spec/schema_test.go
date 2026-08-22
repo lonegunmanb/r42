@@ -882,9 +882,15 @@ research "static" "market" {
 //nolint:paralleltest // Golden's block registry is process-global.
 func TestSavedResearchConfigRestoresCollectionFields(t *testing.T) {
 	registerSchemas()
+	golden.RegisterBlock(new(provider.ModelProviderBlock))
 	golden.RegisterBlock(new(researchspec.ResearchBlock))
 	directory := t.TempDir()
 	writeR42(t, directory, "main.r42.hcl", `
+model_provider "collection" {
+  type     = "openai"
+  endpoint = "https://collection.example.test"
+}
+
 external_tool "collect" {
   description = "Collect sources"
   program     = ["collect", "--json"]
@@ -896,6 +902,7 @@ research "static" "market" {
   model         = "test-model"
   system_prompt = "Collect and synthesize."
 
+  collection_model_provider = model_provider.collection
   collection_tool_ids = [external_tool.collect.id]
   collection_skill_directories = ["skills/collection"]
   collection_skills            = ["source-evaluation"]
@@ -918,6 +925,8 @@ research "static" "market" {
 
 	reconstructed, err := modulespec.DecodeResearchPlan(node.Config)
 	require.NoError(t, err)
+	require.NotNil(t, reconstructed.CollectionProvider)
+	assert.Equal(t, "https://collection.example.test", reconstructed.CollectionProvider.Endpoint)
 	assert.Equal(t, []string(nil), reconstructed.Config.Policy.ToolIDs)
 	require.Len(t, reconstructed.Config.CollectionToolIDs, 1)
 	registry := planned.Saved.Tools()
@@ -1018,6 +1027,45 @@ func TestDynamicResearchPlanResolvePropagatesCollectionQCProvider(t *testing.T) 
 	require.NoError(t, err)
 	require.NotNil(t, resolved.CollectionQCProvider)
 	assert.Equal(t, "https://example.test", resolved.CollectionQCProvider.Endpoint)
+}
+
+func TestDynamicResearchPlanResolvePropagatesCollectionProvider(t *testing.T) {
+	t.Parallel()
+
+	planned, err := modulespec.DecodeDynamicResearchPlan(cty.ObjectVal(map[string]cty.Value{
+		"payload": cty.StringVal(`{"expression":"[1]","providers":{"model_provider.collection":{"type":"openai","endpoint":"https://collection.example.test"}}}`),
+	}))
+	require.NoError(t, err)
+
+	resolved, err := planned.Resolve(researchspec.Config{
+		Model: "model", SystemPrompt: "prompt",
+		CollectionModelProvider: cty.ObjectVal(map[string]cty.Value{
+			"address": cty.StringVal("model_provider.collection"),
+			"kind":    cty.StringVal("provider"),
+		}),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, resolved.CollectionProvider)
+	assert.Equal(t, "https://collection.example.test", resolved.CollectionProvider.Endpoint)
+}
+
+func TestDynamicResearchPlanResolveRejectsUnplannedCollectionProvider(t *testing.T) {
+	t.Parallel()
+
+	planned, err := modulespec.DecodeDynamicResearchPlan(cty.ObjectVal(map[string]cty.Value{
+		"payload": cty.StringVal(`{"expression":"[1]"}`),
+	}))
+	require.NoError(t, err)
+
+	_, err = planned.Resolve(researchspec.Config{
+		Model: "model", SystemPrompt: "prompt",
+		CollectionModelProvider: cty.ObjectVal(map[string]cty.Value{
+			"address": cty.StringVal("model_provider.missing"),
+			"kind":    cty.StringVal("provider"),
+		}),
+	})
+	require.ErrorContains(t, err, "collection model_provider")
+	require.ErrorContains(t, err, "was not planned")
 }
 
 func TestDynamicResearchPlanResolveRejectsUnplannedCollectionQCProvider(t *testing.T) {

@@ -209,6 +209,7 @@ func (e *Engine) apply(
 		state: new(runtimeState), tools: planned.Tools(), directory: planned.Directory(),
 		contextValues: planned.Context(), localExpressions: planned.LocalExpressions(),
 		sessionStallTimeout: effectiveSessionStallTimeout(options.SessionStallTimeout),
+		snapshotCatalog:     newRunSnapshotCatalog(),
 	}
 	runner := executor.New(factory, nil)
 	outputs, applyErr := runner.Apply(ctx, planned, options.Parallelism)
@@ -289,6 +290,7 @@ type runtimeFactory struct {
 	contextValues       map[string]cty.Value
 	localExpressions    map[string]string
 	sessionStallTimeout time.Duration
+	snapshotCatalog     *runSnapshotCatalog
 }
 
 type runtimeState struct {
@@ -348,7 +350,11 @@ func (f *runtimeFactory) New(
 			return nil, err
 		}
 	}
-	return f.newResearchBlock(ctx, node.Address, planned, f.publish)
+	workspace, err := f.run.Workspace(f.CanonicalAddress(node.Address))
+	if err != nil {
+		return nil, err
+	}
+	return f.newResearchBlock(ctx, node.Address, workspace, planned, f.publish)
 }
 
 func (f *runtimeFactory) openSession(
@@ -403,6 +409,7 @@ func (f *runtimeFactory) newModuleBlock(
 		directory: node.Module.Plan.Directory(), contextValues: node.Module.Plan.Context(),
 		localExpressions:    node.Module.Plan.LocalExpressions(),
 		sessionStallTimeout: f.sessionStallTimeout,
+		snapshotCatalog:     f.snapshotCatalog,
 	}
 	return &moduleApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address,
@@ -1198,6 +1205,7 @@ type researchApplyBlock struct {
 	cancel           context.CancelFunc
 	workflowRun      func(context.Context) (researchruntime.Result, error)
 	workflowSessions []Session
+	afterSuccess     func()
 }
 
 func (*researchApplyBlock) Type() string            { return "static" }
@@ -1221,6 +1229,9 @@ func (b *researchApplyBlock) Apply() error {
 	}
 	if err != nil {
 		return err
+	}
+	if b.afterSuccess != nil {
+		b.afterSuccess()
 	}
 	value := map[string]cty.Value{"artifact": researchspec.ArtifactsValue(b.config.Artifacts, result.Artifacts)}
 	if b.config.TerminateToolName != "" {
@@ -1494,10 +1505,11 @@ func (s *recordingSession) currentKind() debuglog.SessionKind {
 }
 
 type phasedResearch struct {
-	research qc.Research
-	session  *recordingSession
-	mu       sync.Mutex
-	calls    int
+	research    qc.Research
+	session     *recordingSession
+	snapshotIDs func() []string
+	mu          sync.Mutex
+	calls       int
 }
 
 func (r *phasedResearch) Run(ctx context.Context, config researchruntime.Config) (researchruntime.Result, error) {
@@ -1509,6 +1521,9 @@ func (r *phasedResearch) Run(ctx context.Context, config researchruntime.Config)
 		r.session.setKind(debuglog.SessionResearch)
 	} else {
 		r.session.setKind(debuglog.SessionRevision)
+	}
+	if r.snapshotIDs != nil {
+		config.InitialPrompt = researchEvidencePrompt(config.InitialPrompt, r.snapshotIDs())
 	}
 	return r.research.Run(ctx, config)
 }

@@ -7,7 +7,7 @@ locals {
     module.pplx_tools.pplx_pro_search_tool_id,
     module.pplx_tools.pplx_fetch_tool_id,
   ] : []
-  pplx_tool_call_quota = {
+  pplx_tool_call_quota = var.pplx_tool_call_quota == null ? {} : {
     for tool_id in [module.pplx_tools.pplx_fetch_tool_id] : tool_id => var.pplx_tool_call_quota
     if var.use_pplx
   }
@@ -32,6 +32,22 @@ locals {
     "Use the built-in web_search tool to discover current sources and web_fetch",
     "to read every source retained as evidence.",
   ])
+  synthesis_claim_paths = concat(
+    [one([
+      for artifact in research.static.primary_source_baseline.artifact :
+      artifact.path if artifact.name == "claims"
+    ])],
+    [
+      for task in research.dynamic.graph_track.tasks : one([
+        for artifact in task.artifacts : artifact.path if artifact.name == "claims"
+      ])
+    ],
+    [
+      for task in research.dynamic.prioritize_companies.tasks : one([
+        for artifact in task.artifacts : artifact.path if artifact.name == "claims"
+      ])
+    ],
+  )
   graph_tracks = {
     product_structure = {
       title = "Product structure and BOM"

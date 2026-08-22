@@ -72,4 +72,23 @@ func TestVerdictRecorderAllowsUnlimitedReopen(t *testing.T) {
 	assert.True(t, recorder.CollectionCanReopen())
 }
 
+func TestVerdictRecorderRejectsReopenAfterCollectorExhaustion(t *testing.T) {
+	t.Parallel()
+
+	recorder := qc.NewVerdictRecorder()
+	recorder.SetCollectionBudget(qc.CollectionBudget{RoundsUsed: 1, Exhausted: true})
+
+	err := recorder.Record(qc.Verdict{
+		Decision: qc.DecisionReopenCollection,
+		Issues:   []corespec.Issue{{Code: "coverage", Message: "find more evidence"}},
+	})
+
+	require.Error(t, err)
+	var rejection *qc.CollectionRoundBudgetExhaustedError
+	require.ErrorAs(t, err, &rejection)
+	assert.True(t, rejection.CollectorExhausted)
+	assert.Contains(t, rejection.Error(), "Collection session reported")
+	assert.False(t, recorder.CollectionCanReopen())
+}
+
 func intPointer(value int) *int { return &value }

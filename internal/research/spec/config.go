@@ -49,6 +49,7 @@ type Config struct {
 	Policy                     SessionPolicy
 	Artifacts                  []Artifact
 	QC                         *QCConfig
+	CollectionModelProvider    cty.Value
 	CollectionToolIDs          []string
 	CollectionSkillDirectories []string
 	CollectionSkills           []string
@@ -82,6 +83,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := validateToolIDs(c.CollectionToolIDs, "research collection_tool_ids"); err != nil {
+		return err
+	}
+	if err := validateOptionalProviderReference(c.CollectionModelProvider, "research collection_model_provider"); err != nil {
 		return err
 	}
 	researchToolIDs := slices.Clone(c.Policy.ToolIDs)

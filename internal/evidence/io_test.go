@@ -119,6 +119,67 @@ func TestSnapshotAccessUsesSharedRegistry(t *testing.T) {
 	assert.Equal(t, "shared evidence", content)
 }
 
+func TestSnapshotSourceURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		content   string
+		expected  string
+		errorText string
+	}{
+		{name: "reads markdown URL header", content: "# Source\n\n- URL: https://example.com/source\n\nBody", expected: "https://example.com/source"},
+		{name: "rejects empty URL header", content: "# Source\n\n- URL:   \n\nBody", errorText: "empty URL header"},
+		{name: "rejects missing URL header", content: "# Source\n\nBody", errorText: "no URL header"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			workspace := t.TempDir()
+			path := filepath.Join(workspace, "source.md")
+			require.NoError(t, os.WriteFile(path, []byte(tt.content), 0o600))
+			access, err := NewSnapshotAccess(workspace)
+			require.NoError(t, err)
+			id, err := access.Register(path)
+			require.NoError(t, err)
+
+			actual, err := access.SnapshotSourceURL(id)
+
+			if tt.errorText != "" {
+				require.ErrorContains(t, err, tt.errorText)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, actual)
+		})
+	}
+}
+
+func TestSnapshotAccessReadsOnlyAuthorizedUpstreamSnapshotsByID(t *testing.T) {
+	t.Parallel()
+
+	local := snapshot.NewRegistry(t.TempDir())
+	upstreamWorkspace := t.TempDir()
+	upstreamPath := filepath.Join(upstreamWorkspace, "source.md")
+	require.NoError(t, os.WriteFile(upstreamPath, []byte("upstream evidence"), 0o600))
+	upstream := snapshot.NewRegistry(upstreamWorkspace)
+	registered, err := upstream.RegisterPath(upstreamPath)
+	require.NoError(t, err)
+
+	access, err := NewSnapshotAccessWithRegistryAndUpstream(local, map[string]string{
+		registered.ID: registered.Path,
+	})
+	require.NoError(t, err)
+	content, err := access.ReadSnapshot(registered.ID, 100)
+	require.NoError(t, err)
+	assert.Equal(t, "upstream evidence", content)
+
+	unapproved, err := NewSnapshotAccessWithRegistryAndUpstream(local, map[string]string{})
+	require.NoError(t, err)
+	_, err = unapproved.ReadSnapshot(registered.ID, 100)
+	require.ErrorContains(t, err, "unknown snapshot")
+}
+
 func TestReadDeclaredArtifact(t *testing.T) {
 	t.Parallel()
 
