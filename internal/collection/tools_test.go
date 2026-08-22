@@ -40,6 +40,86 @@ func TestRegisterToolHandler(t *testing.T) {
 		assert.FileExists(t, response.Output.Path)
 	})
 
+	t.Run("adds source header to path snapshot", func(t *testing.T) {
+		t.Parallel()
+
+		workspace := t.TempDir()
+		file := filepath.Join(workspace, "evidence.md")
+		require.NoError(t, os.WriteFile(file, []byte("evidence"), 0o644))
+
+		response := NewRegisterHandler(NewContext(workspace, 10, nil)).Register(RegisterArgs{
+			Path: file, Source: "local-record:42",
+		})
+
+		require.True(t, response.Accepted)
+		content, err := os.ReadFile(file)
+		require.NoError(t, err)
+		assert.Equal(t, "- Source: local-record:42\n\nevidence", string(content))
+	})
+
+	t.Run("preserves compatible source header", func(t *testing.T) {
+		t.Parallel()
+
+		tests := []struct {
+			name    string
+			content string
+		}{
+			{name: "source", content: "- Source: existing-record\n\nevidence"},
+			{name: "legacy URL", content: "- URL: https://example.com/source\n\nevidence"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+				workspace := t.TempDir()
+				file := filepath.Join(workspace, "evidence.md")
+				require.NoError(t, os.WriteFile(file, []byte(tt.content), 0o644))
+
+				response := NewRegisterHandler(NewContext(workspace, 10, nil)).Register(RegisterArgs{
+					Path: file, Source: "new-record",
+				})
+
+				require.True(t, response.Accepted)
+				content, err := os.ReadFile(file)
+				require.NoError(t, err)
+				assert.Equal(t, tt.content, string(content))
+			})
+		}
+	})
+
+	t.Run("preserves valid URL after empty source metadata", func(t *testing.T) {
+		t.Parallel()
+
+		workspace := t.TempDir()
+		file := filepath.Join(workspace, "evidence.md")
+		original := "- Source:   \n- URL: https://example.com/ignored\n\nevidence"
+		require.NoError(t, os.WriteFile(file, []byte(original), 0o644))
+
+		response := NewRegisterHandler(NewContext(workspace, 10, nil)).Register(RegisterArgs{
+			Path: file, Source: "local-record:42",
+		})
+
+		require.True(t, response.Accepted)
+		content, err := os.ReadFile(file)
+		require.NoError(t, err)
+		assert.Equal(t, original, string(content))
+	})
+
+	t.Run("adds source header to retained tool result", func(t *testing.T) {
+		t.Parallel()
+
+		handler := NewRegisterHandler(NewContext(t.TempDir(), 10, nil))
+		require.NoError(t, handler.Context().Registry.RetainToolResult("call-source", "evidence"))
+
+		response := handler.Register(RegisterArgs{
+			SourceToolCallID: "call-source", Source: "database-row:42",
+		})
+
+		require.True(t, response.Accepted)
+		content, err := os.ReadFile(response.Output.Path)
+		require.NoError(t, err)
+		assert.Equal(t, "- Source: database-row:42\n\nevidence", string(content))
+	})
+
 	t.Run("rejects both or neither source", func(t *testing.T) {
 		t.Parallel()
 

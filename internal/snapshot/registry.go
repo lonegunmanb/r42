@@ -82,12 +82,24 @@ func (r *Registry) RetainToolResult(toolCallID, result string) error {
 
 // RegisterPath registers an existing non-empty file in the block workspace.
 func (r *Registry) RegisterPath(path string) (Registration, error) {
-	return r.registerPath(path)
+	return r.registerPath(path, "")
+}
+
+// RegisterPathWithSource registers an existing file and adds a source header
+// when source is provided and the file has no compatible header.
+func (r *Registry) RegisterPathWithSource(path, source string) (Registration, error) {
+	return r.registerPath(path, source)
 }
 
 // RegisterToolResult registers a previously retained acquisition result by
 // writing its text into a managed file.
 func (r *Registry) RegisterToolResult(toolCallID string) (Registration, error) {
+	return r.RegisterToolResultWithSource(toolCallID, "")
+}
+
+// RegisterToolResultWithSource registers retained acquisition text and adds a
+// source header when source is provided and the text has no compatible header.
+func (r *Registry) RegisterToolResultWithSource(toolCallID, source string) (Registration, error) {
 	if strings.TrimSpace(toolCallID) == "" {
 		return Registration{}, errors.New("tool call id is required")
 	}
@@ -97,7 +109,8 @@ func (r *Registry) RegisterToolResult(toolCallID string) (Registration, error) {
 		r.mu.Unlock()
 		return Registration{}, fmt.Errorf("tool call %q was not retained", toolCallID)
 	}
-	hash := contentHash([]byte(result))
+	content := withSourceHeader([]byte(result), source)
+	hash := contentHash(content)
 	if existing, dup := r.contentHashes[hash]; dup {
 		id := existing
 		path := r.registered[id]
@@ -106,7 +119,7 @@ func (r *Registry) RegisterToolResult(toolCallID string) (Registration, error) {
 	}
 	r.mu.Unlock()
 
-	path, err := r.writeManaged(toolCallID, []byte(result))
+	path, err := r.writeManaged(toolCallID, content)
 	if err != nil {
 		return Registration{}, err
 	}
@@ -134,7 +147,7 @@ func (r *Registry) Register(path, toolCallID string) (Registration, error) {
 		return Registration{}, errors.New("exactly one source (path or source_tool_call_id) is required")
 	}
 	if hasPath {
-		return r.registerPath(path)
+		return r.registerPath(path, "")
 	}
 	return r.RegisterToolResult(toolCallID)
 }
@@ -216,7 +229,7 @@ func (r *Registry) Snapshot(id string) (string, error) {
 	return path, nil
 }
 
-func (r *Registry) registerPath(path string) (Registration, error) {
+func (r *Registry) registerPath(path, source string) (Registration, error) {
 	clean, err := filepath.Abs(path)
 	if err != nil {
 		return Registration{}, fmt.Errorf("resolve snapshot path: %w", err)
@@ -248,7 +261,40 @@ func (r *Registry) registerPath(path string) (Registration, error) {
 	if err != nil {
 		return Registration{}, fmt.Errorf("read snapshot path %q: %w", path, err)
 	}
+	prepared := withSourceHeader(content, source)
+	if len(prepared) != len(content) {
+		if err = os.WriteFile(clean, prepared, info.Mode().Perm()); err != nil {
+			return Registration{}, fmt.Errorf("write snapshot source header %q: %w", path, err)
+		}
+		content = prepared
+	}
 	return r.registerContent(clean, contentHash(content))
+}
+
+func withSourceHeader(content []byte, source string) []byte {
+	normalized := strings.Join(strings.Fields(source), " ")
+	if normalized == "" || hasSourceHeader(string(content)) {
+		return content
+	}
+	return append([]byte("- Source: "+normalized+"\n\n"), content...)
+}
+
+func hasSourceHeader(content string) bool {
+	lines := strings.Split(content, "\n")
+	if len(lines) > 64 {
+		lines = lines[:64]
+	}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		for _, prefix := range []string{"- Source:", "- URL:"} {
+			if value, found := strings.CutPrefix(trimmed, prefix); found {
+				if strings.TrimSpace(value) != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (r *Registry) registerContent(path, hash string) (Registration, error) {
@@ -268,9 +314,19 @@ func (r *Registry) writeManaged(toolCallID string, content []byte) (string, erro
 	if err := os.MkdirAll(r.managedDir, 0o755); err != nil {
 		return "", fmt.Errorf("create snapshot directory: %w", err)
 	}
-	path := filepath.Join(r.managedDir, managedFileName(toolCallID))
-	if err := os.WriteFile(path, content, 0o644); err != nil {
+	file, err := os.CreateTemp(r.managedDir, "tool-*.txt")
+	if err != nil {
+		return "", fmt.Errorf("create managed snapshot: %w", err)
+	}
+	path := file.Name()
+	if _, err = file.Write(content); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
 		return "", fmt.Errorf("write managed snapshot: %w", err)
+	}
+	if err = file.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close managed snapshot: %w", err)
 	}
 	return path, nil
 }
@@ -283,11 +339,6 @@ func contentHash(content []byte) string {
 func newSnapshotID(workspace, contentHash string) string {
 	sum := sha256.Sum256([]byte("r42/snapshot/v1:" + workspace + ":" + contentHash))
 	return "snapshot-" + hex.EncodeToString(sum[:16])
-}
-
-func managedFileName(toolCallID string) string {
-	sum := sha256.Sum256([]byte("r42/managed:" + toolCallID))
-	return "tool-" + hex.EncodeToString(sum[:12]) + ".txt"
 }
 
 func isWithin(root, path string) bool {

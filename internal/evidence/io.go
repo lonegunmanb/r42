@@ -118,9 +118,9 @@ func (a *SnapshotAccess) ContainsNormalizedText(id, quote string) (bool, error) 
 	return normalizedQuote != "" && strings.Contains(normalizeWhitespace(string(content)), normalizedQuote), nil
 }
 
-// SnapshotSourceURL returns the fetched source URL recorded in the snapshot
-// Markdown header.
-func (a *SnapshotAccess) SnapshotSourceURL(id string) (string, error) {
+// SnapshotSource returns the source identifier recorded in the snapshot
+// Markdown header. The legacy URL header remains readable for existing runs.
+func (a *SnapshotAccess) SnapshotSource(id string) (string, error) {
 	path, err := a.authorizedPath(id)
 	if err != nil {
 		return "", err
@@ -132,23 +132,29 @@ func (a *SnapshotAccess) SnapshotSourceURL(id string) (string, error) {
 	defer func() { _ = file.Close() }()
 
 	scanner := bufio.NewScanner(file)
+	foundHeader := false
 	for range 64 {
 		if !scanner.Scan() {
 			break
 		}
 		line := strings.TrimSpace(scanner.Text())
-		if value, found := strings.CutPrefix(line, "- URL:"); found {
-			sourceURL := strings.TrimSpace(value)
-			if sourceURL == "" {
-				return "", fmt.Errorf("snapshot %q has an empty URL header", id)
+		for _, prefix := range []string{"- Source:", "- URL:"} {
+			if value, found := strings.CutPrefix(line, prefix); found {
+				foundHeader = true
+				source := strings.TrimSpace(value)
+				if source != "" {
+					return source, nil
+				}
 			}
-			return sourceURL, nil
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return "", fmt.Errorf("read snapshot %q header: %w", id, err)
 	}
-	return "", fmt.Errorf("snapshot %q has no URL header", id)
+	if foundHeader {
+		return "", fmt.Errorf("snapshot %q has an empty Source header", id)
+	}
+	return "", fmt.Errorf("snapshot %q has no Source header", id)
 }
 
 func (a *SnapshotAccess) authorizedPath(id string) (string, error) {
@@ -247,6 +253,15 @@ func NewMarkdownWriter(workspace string) (*MarkdownWriter, error) {
 // workspace, returning the absolute path. It never follows symlinks or writes
 // outside the workspace.
 func (w *MarkdownWriter) Write(path, content string) (string, error) {
+	return w.write(path, content, false)
+}
+
+// WriteNew writes Markdown content only when the target path does not exist.
+func (w *MarkdownWriter) WriteNew(path, content string) (string, error) {
+	return w.write(path, content, true)
+}
+
+func (w *MarkdownWriter) write(path, content string, exclusive bool) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", errors.New("artifact path is required")
 	}
@@ -273,8 +288,25 @@ func (w *MarkdownWriter) Write(path, content string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(secure), 0o755); err != nil {
 		return "", fmt.Errorf("create artifact directory: %w", err)
 	}
-	if err := os.WriteFile(secure, []byte(content), 0o644); err != nil {
+	if !exclusive {
+		if err := os.WriteFile(secure, []byte(content), 0o644); err != nil {
+			return "", fmt.Errorf("write markdown artifact: %w", err)
+		}
+		return secure, nil
+	}
+	file, err := os.OpenFile(secure, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
 		return "", fmt.Errorf("write markdown artifact: %w", err)
+	}
+	_, writeErr := io.WriteString(file, content)
+	closeErr := file.Close()
+	if writeErr != nil {
+		_ = os.Remove(secure)
+		return "", fmt.Errorf("write markdown artifact: %w", writeErr)
+	}
+	if closeErr != nil {
+		_ = os.Remove(secure)
+		return "", fmt.Errorf("close markdown artifact: %w", closeErr)
 	}
 	return secure, nil
 }

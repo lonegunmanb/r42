@@ -84,6 +84,7 @@ func (g *AcquisitionGate) Acquire() error {
 type RegisterArgs struct {
 	Path             string `json:"path"`
 	SourceToolCallID string `json:"source_tool_call_id"`
+	Source           string `json:"source"`
 }
 
 // RegistrationOutput is the model-facing output of a successful registration.
@@ -125,9 +126,9 @@ func (h *RegisterHandler) Register(args RegisterArgs) corespec.ToolResponse[Regi
 	var registration snapshot.Registration
 	var err error
 	if hasPath {
-		registration, err = h.context.Registry.RegisterPath(args.Path)
+		registration, err = h.context.Registry.RegisterPathWithSource(args.Path, args.Source)
 	} else {
-		registration, err = h.context.Registry.RegisterToolResult(args.SourceToolCallID)
+		registration, err = h.context.Registry.RegisterToolResultWithSource(args.SourceToolCallID, args.Source)
 	}
 	if err != nil {
 		return rejection[RegistrationOutput]("invalid_snapshot_source", err.Error())

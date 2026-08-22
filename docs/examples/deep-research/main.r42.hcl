@@ -64,9 +64,10 @@ research "static" "plan" {
     exclusions, and expected reasoning. Do not perform the research yourself.
     Every task must tell the researcher to save complete source material as
     Markdown under its block_wd()/snapshots/ directory and associate every
-    quote with the exact saved snapshot path. Tell it to call
-    ${go_tool.save_snapshot.id} after every source read. A URL alone is not
-    evidence.
+    quote with the snapshot_id returned by r42_save_snapshot. Tell it to call
+    r42_save_snapshot after every source read, passing the source URL in source.
+    Tell it to use the returned snapshot_id directly and not call
+    r42_register_snapshot afterward. A source identifier alone is not evidence.
     You must finish by calling ${go_tool.submit_research_plan.id}.
 
     During Collection, do not acquire external evidence; the topic is the
@@ -133,8 +134,9 @@ research "dynamic" "parallel_deep_dive" {
 
         During Collection, research this subquestion independently. Save the
         complete material returned by every retained source as Markdown under
-        "${block_wd()}/${index}/snapshots/" by calling ${go_tool.save_snapshot.id}, then
-        register the returned path with r42_register_snapshot. Submit a
+        "${block_wd()}/${index}/snapshots/" by calling r42_save_snapshot with
+        source set to the source URL. Use the returned snapshot_id directly;
+        do not call r42_register_snapshot for the returned path. Submit a
         collection checkpoint once the evidence is sufficient.
 
         During closed Research, do not search or fetch. Use the snapshot IDs
@@ -147,8 +149,7 @@ research "dynamic" "parallel_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      collection_tool_ids = [go_tool.save_snapshot.id]
-      tool_ids            = [go_tool.submit_knowledge.id]
+      tool_ids          = [go_tool.submit_knowledge.id]
       tool_call_quota   = local.deep_dive_tool_call_quota
       terminate_tool_id = go_tool.submit_knowledge.id
       permission        = "approve_all"
@@ -204,9 +205,9 @@ research "dynamic" "independent_serial_deep_dive" {
 
         During Collection, save the complete material returned by every
         retained source as Markdown under "${block_wd()}/${index}/snapshots/" by calling
-        ${go_tool.save_snapshot.id}, then register the returned path with
-        r42_register_snapshot. Submit a collection checkpoint once the evidence
-        is sufficient.
+        r42_save_snapshot with source set to the source URL. Use the returned
+        snapshot_id directly; do not call r42_register_snapshot for the returned
+        path. Submit a collection checkpoint once the evidence is sufficient.
 
         During closed Research, do not search or fetch. Use the snapshot IDs
         supplied by r42 with r42_read_snapshot to inspect registered evidence. Associate
@@ -218,8 +219,7 @@ research "dynamic" "independent_serial_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      collection_tool_ids = [go_tool.save_snapshot.id]
-      tool_ids            = [go_tool.submit_knowledge.id]
+      tool_ids          = [go_tool.submit_knowledge.id]
       tool_call_quota   = local.deep_dive_tool_call_quota
       terminate_tool_id = go_tool.submit_knowledge.id
       permission        = "approve_all"
@@ -287,9 +287,10 @@ research "dynamic" "final_serial_deep_dive" {
 
         During Collection, collect only evidence needed beyond the validated
         upstream JSON. Save each retained source as Markdown under
-        "${block_wd()}/${index}/snapshots/" with ${go_tool.save_snapshot.id}, register the
-        returned path with r42_register_snapshot, and submit a collection
-        checkpoint. If the upstream JSON is sufficient, submit an empty
+        "${block_wd()}/${index}/snapshots/" with r42_save_snapshot, passing the
+        source URL in source. Use the returned snapshot_id directly; do not call
+        r42_register_snapshot for the returned path. Submit a collection checkpoint.
+        If the upstream JSON is sufficient, submit an empty
         collection checkpoint instead of searching.
 
         During closed Research, do not search or fetch. Use the snapshot IDs
@@ -303,8 +304,7 @@ research "dynamic" "final_serial_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      collection_tool_ids = [go_tool.save_snapshot.id]
-      tool_ids            = [go_tool.submit_knowledge.id]
+      tool_ids          = [go_tool.submit_knowledge.id]
       tool_call_quota   = local.deep_dive_tool_call_quota
       terminate_tool_id = go_tool.submit_knowledge.id
       permission        = "approve_all"

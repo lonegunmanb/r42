@@ -26,22 +26,6 @@ func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
 
-	t.Run("save snapshot", func(t *testing.T) {
-		t.Parallel()
-		program, compileErr := compiler.Compile(t.Context(), goToolSource(t, "save_snapshot"))
-		require.NoError(t, compileErr)
-		path := filepath.Join(foreign, "snapshots", "source-save.md")
-
-		response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
-			"snapshot_path": path,
-			"content":       "foreign content",
-		}), current)
-
-		require.NoError(t, invokeErr)
-		assert.False(t, response.Accepted)
-		assert.NoFileExists(t, path)
-	})
-
 	t.Run("submit knowledge", func(t *testing.T) {
 		t.Parallel()
 		program, compileErr := compiler.Compile(t.Context(), goToolSource(t, "submit_knowledge"))
@@ -85,28 +69,6 @@ func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 		require.NoError(t, invokeErr)
 		assert.False(t, response.Accepted)
 		assert.NoFileExists(t, foreignArtifact)
-	})
-
-	t.Run("save snapshot output symlink", func(t *testing.T) {
-		t.Parallel()
-		program, compileErr := compiler.Compile(t.Context(), goToolSource(t, "save_snapshot"))
-		require.NoError(t, compileErr)
-		foreignTarget := filepath.Join(foreign, "snapshot-target.md")
-		require.NoError(t, os.WriteFile(foreignTarget, []byte("original"), 0o600))
-		linkedPath := filepath.Join(current, "snapshots", "linked.md")
-		require.NoError(t, os.MkdirAll(filepath.Dir(linkedPath), 0o700))
-		require.NoError(t, os.Symlink(foreignTarget, linkedPath))
-
-		response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
-			"snapshot_path": linkedPath,
-			"content":       "overwritten",
-		}), current)
-
-		require.NoError(t, invokeErr)
-		assert.False(t, response.Accepted)
-		content, readErr := os.ReadFile(foreignTarget)
-		require.NoError(t, readErr)
-		assert.Equal(t, "original", string(content))
 	})
 
 	t.Run("submit knowledge output symlink", func(t *testing.T) {

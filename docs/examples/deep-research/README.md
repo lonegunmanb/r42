@@ -81,10 +81,16 @@ uses general file or shell tools to inspect upstream paths.
 This example requires Python 3 for the local `audit_synthesis` external tool;
 the research and planning tools remain inline Go tools compiled by r42.
 
-`save_snapshot` is the typed boundary for source capture: during Collection it
-accepts complete Markdown content and writes only absolute `.md` paths under
-the current block's `snapshots/` directory. Collection then registers each
-returned path with `r42_register_snapshot` before checkpointing.
+The built-in `r42_save_snapshot` tool is the typed boundary for source capture:
+during Collection it accepts complete Markdown content plus a required source
+identifier and writes only `.md` paths under the current block's `snapshots/`
+directory. The source may be a URL or another stable identifier. The tool also
+registers the snapshot and returns its `snapshot_id`; Collection uses that ID
+directly and does not call `r42_register_snapshot` for the returned path.
+
+This workflow passes the source URL because its quote schema requires web
+citations; the built-in tool itself does not require an HTTP(S) source.
+
 `submit_research_plan` rejects an empty plan, duplicate task IDs, blank
 subquestions, and vague instructions. Its accepted JSON becomes
 `research.static.plan["default"].result`, which the three dynamic blocks decode
@@ -94,10 +100,11 @@ Every deep-dive task must call `submit_knowledge`. The typed tool validates
 unique knowledge and quote IDs, bidirectional claim-to-quote references, valid
 source URLs, registered snapshot IDs, and confidence
 values before writing `knowledge.json` under that task's workspace. Before
-submitting knowledge, Collection must call `save_snapshot` for every source it
+submitting knowledge, Collection must call `r42_save_snapshot` for every source it
 retains, store the complete fetched material under `<block_wd>/snapshots/`, and
-register it. Collection QC reviews those registered snapshots. R42 supplies the
-approved IDs to closed Research, which can inspect them only through
+use its returned `snapshot_id` directly. Collection QC reviews those registered
+snapshots. R42 supplies the approved IDs to closed Research, which can inspect
+them only through
 `r42_read_snapshot`; submitted quotes retain `snapshot_id` rather than filesystem
 paths. Final QC
 reviews semantic support; failed QC returns a revision or Collection-reopen

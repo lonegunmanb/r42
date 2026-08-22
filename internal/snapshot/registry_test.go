@@ -10,7 +10,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
+
+func TestMain(m *testing.M) { goleak.VerifyTestMain(m) }
 
 func TestRegistryRegisterPath(t *testing.T) {
 	t.Parallel()
@@ -134,6 +137,27 @@ func TestRegistryRegisterToolResultErrors(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first.ID, second.ID)
 	assert.Equal(t, 1, registry.PendingCount())
+}
+
+func TestRegistryRegisterToolResultWithDifferentSourcesKeepsBothSnapshots(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := NewRegistry(workspace)
+	require.NoError(t, registry.RetainToolResult("call-1", "evidence"))
+	first, err := registry.RegisterToolResultWithSource("call-1", "source:first")
+	require.NoError(t, err)
+	second, err := registry.RegisterToolResultWithSource("call-1", "source:second")
+	require.NoError(t, err)
+
+	assert.NotEqual(t, first.ID, second.ID)
+	assert.NotEqual(t, first.Path, second.Path)
+	firstContent, err := os.ReadFile(first.Path)
+	require.NoError(t, err)
+	assert.Equal(t, "- Source: source:first\n\nevidence", string(firstContent))
+	secondContent, err := os.ReadFile(second.Path)
+	require.NoError(t, err)
+	assert.Equal(t, "- Source: source:second\n\nevidence", string(secondContent))
 }
 
 func TestRegistryDeduplicatesContent(t *testing.T) {
@@ -356,4 +380,38 @@ func TestRegistryConcurrentToolResultDedup(t *testing.T) {
 	managedFiles, err := os.ReadDir(filepath.Join(workspace, ".r42-snapshots"))
 	require.NoError(t, err)
 	assert.Len(t, managedFiles, 1)
+}
+
+func TestRegistryConcurrentToolResultWithDifferentSourcesKeepsBothSnapshots(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := NewRegistry(workspace)
+	require.NoError(t, registry.RetainToolResult("call-1", "evidence"))
+
+	sources := []string{"source:first", "source:second"}
+	results := make([]Registration, len(sources))
+	errors := make([]error, len(sources))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for index := range sources {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			results[index], errors[index] = registry.RegisterToolResultWithSource("call-1", sources[index])
+		}(index)
+	}
+	close(start)
+	wg.Wait()
+
+	require.NoError(t, errors[0])
+	require.NoError(t, errors[1])
+	assert.NotEqual(t, results[0].ID, results[1].ID)
+	assert.NotEqual(t, results[0].Path, results[1].Path)
+	for index, result := range results {
+		content, err := os.ReadFile(result.Path)
+		require.NoError(t, err)
+		assert.Equal(t, "- Source: "+sources[index]+"\n\nevidence", string(content))
+	}
 }

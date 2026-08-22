@@ -143,7 +143,7 @@ func (f *runtimeFactory) newResearchBlock(
 	checkpoints := collection.NewCheckpointRecorder()
 	collectionTools = append(collectionTools, collectionProtocolTools(collectionContext, checkpoints)...)
 	collectionPrompt := appendBuiltInToolCallQuotaPrompt(
-		"You are the Collection phase. Acquire evidence, register every useful snapshot, and call r42_collection_checkpoint before ending the round. If no more evidence can be acquired, submit an empty checkpoint with empty_reason and collection_exhausted=true.\n\n"+planned.Config.SystemPrompt,
+		"You are the Collection phase. Acquire evidence and preserve complete source material. When source content is not already available as a workspace file or retained source-tool result, call r42_save_snapshot with a non-empty source identifier; it saves and registers the snapshot, so use its returned snapshot_id directly and do not call r42_register_snapshot afterward. Use r42_register_snapshot only for an existing workspace snapshot file or retained source-tool result; supply its optional source when that content has no Source or legacy URL header. Call r42_collection_checkpoint before ending the round. If no more evidence can be acquired, submit an empty checkpoint with empty_reason and collection_exhausted=true.\n\n"+planned.Config.SystemPrompt,
 		collectionBuiltInQuota,
 	)
 	collectionSession, err := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionCollection, copilot.SessionConfig{
@@ -215,12 +215,14 @@ func (f *runtimeFactory) newResearchBlock(
 	if err != nil {
 		return cleanupSetup(err)
 	}
-	researchTools = enforceSnapshotIDReferences(researchTools, snapshotAccess, workspace)
-	researchTools = append(researchTools, readWriteTools...)
-	resolved := researchspec.ResolvedTools{}
 	terminateName := ""
 	if planned.Config.TerminateToolID != nil {
 		terminateName = *planned.Config.TerminateToolID
+	}
+	researchTools = enforceSnapshotIDReferences(researchTools, snapshotAccess, workspace, terminateName, terminal)
+	researchTools = append(researchTools, readWriteTools...)
+	resolved := researchspec.ResolvedTools{}
+	if planned.Config.TerminateToolID != nil {
 		definition := f.tools[terminateName]
 		resolved.Terminate = &researchspec.ToolPolicyRef{ID: definition.ID, Address: definition.Address, OutputType: terminalType}
 		resolved.TerminateSDKName = terminateName

@@ -119,7 +119,7 @@ func TestSnapshotAccessUsesSharedRegistry(t *testing.T) {
 	assert.Equal(t, "shared evidence", content)
 }
 
-func TestSnapshotSourceURL(t *testing.T) {
+func TestSnapshotSource(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -128,9 +128,11 @@ func TestSnapshotSourceURL(t *testing.T) {
 		expected  string
 		errorText string
 	}{
-		{name: "reads markdown URL header", content: "# Source\n\n- URL: https://example.com/source\n\nBody", expected: "https://example.com/source"},
-		{name: "rejects empty URL header", content: "# Source\n\n- URL:   \n\nBody", errorText: "empty URL header"},
-		{name: "rejects missing URL header", content: "# Source\n\nBody", errorText: "no URL header"},
+		{name: "reads arbitrary source header", content: "- Source: local-record:42\n\nBody", expected: "local-record:42"},
+		{name: "reads legacy URL header", content: "# Source\n\n- URL: https://example.com/source\n\nBody", expected: "https://example.com/source"},
+		{name: "skips empty header before valid URL", content: "- Source:   \n- URL: https://example.com/source\n\nBody", expected: "https://example.com/source"},
+		{name: "rejects empty source header", content: "- Source:   \n\nBody", errorText: "empty Source header"},
+		{name: "rejects missing source header", content: "# Source\n\nBody", errorText: "no Source header"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -143,7 +145,7 @@ func TestSnapshotSourceURL(t *testing.T) {
 			id, err := access.Register(path)
 			require.NoError(t, err)
 
-			actual, err := access.SnapshotSourceURL(id)
+			actual, err := access.SnapshotSource(id)
 
 			if tt.errorText != "" {
 				require.ErrorContains(t, err, tt.errorText)
