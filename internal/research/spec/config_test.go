@@ -405,7 +405,7 @@ func TestConfigValidateNestedPolicy(t *testing.T) {
 		{
 			name: "invalid artifact",
 			mutate: func(config *researchspec.Config) {
-				config.Artifacts = []researchspec.Artifact{{Name: "report", Type: "archive", Path: "report.zip"}}
+				config.Artifacts = []researchspec.Artifact{{Name: "report", Type: "archive", Path: "report.zip", Description: "Report"}}
 			},
 			expectedError: "artifact report type must be file or directory",
 		},
@@ -413,8 +413,8 @@ func TestConfigValidateNestedPolicy(t *testing.T) {
 			name: "duplicate artifact",
 			mutate: func(config *researchspec.Config) {
 				config.Artifacts = []researchspec.Artifact{
-					{Name: "report", Type: researchspec.ArtifactTypeFile, Path: "a.md"},
-					{Name: "report", Type: researchspec.ArtifactTypeFile, Path: "b.md"},
+					{Name: "report", Type: researchspec.ArtifactTypeFile, Path: "a.md", Description: "First report"},
+					{Name: "report", Type: researchspec.ArtifactTypeFile, Path: "b.md", Description: "Second report"},
 				}
 			},
 			expectedError: "artifact report is declared more than once",

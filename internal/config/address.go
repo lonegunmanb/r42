@@ -1,14 +1,17 @@
 package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/function"
+	ctyjson "github.com/zclconf/go-cty/cty/json"
 )
 
 type AddressKind string
@@ -60,10 +63,36 @@ func AddressFromValue(value cty.Value) (Address, bool) {
 
 func Functions() map[string]function.Function {
 	return map[string]function.Function{
-		"cwd":       cwdFunction(),
-		"one":       oneFunction(),
-		"tool_name": toolNameFunction(),
+		"cwd":                cwdFunction(),
+		"one":                oneFunction(),
+		"tool_name":          toolNameFunction(),
+		"jsondecodewithtype": jsonDecodeWithTypeFunction(),
 	}
+}
+
+func jsonDecodeWithTypeFunction() function.Function {
+	return function.New(&function.Spec{
+		Params: []function.Parameter{
+			{Name: "json", Type: cty.String},
+			{Name: "type", Type: typeexpr.TypeConstraintType},
+		},
+		Type: func(arguments []cty.Value) (cty.Type, error) {
+			if len(arguments) != 2 || !arguments[1].IsKnown() || arguments[1].IsNull() {
+				return cty.NilType, function.NewArgError(1, errors.New("type must be known"))
+			}
+			return typeexpr.TypeConstraintFromVal(arguments[1]), nil
+		},
+		Impl: func(arguments []cty.Value, returnType cty.Type) (cty.Value, error) {
+			if !json.Valid([]byte(arguments[0].AsString())) {
+				return cty.NilVal, function.NewArgError(0, errors.New("json must be valid"))
+			}
+			decoded, err := ctyjson.Unmarshal([]byte(arguments[0].AsString()), returnType)
+			if err != nil {
+				return cty.NilVal, function.NewArgError(0, err)
+			}
+			return decoded, nil
+		},
+	})
 }
 
 func cwdFunction() function.Function {

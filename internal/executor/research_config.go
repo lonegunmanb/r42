@@ -394,6 +394,7 @@ func (c *ResearchConfig) savedPlan(planned modulespec.Plan) (*internalplan.Plan,
 		}
 		nodes = append(nodes, internalplan.NodeSpec{
 			Address: block.Address(), Kind: "research", Dependencies: dependencies[block.Address()], Config: snapshot,
+			Origin: modulespec.BlockOrigin(block.HclBlock()),
 		})
 	}
 	for _, block := range golden.Blocks[*researchspec.DynamicResearchBlock](c) {
@@ -403,12 +404,14 @@ func (c *ResearchConfig) savedPlan(planned modulespec.Plan) (*internalplan.Plan,
 		}
 		nodes = append(nodes, internalplan.NodeSpec{
 			Address: block.Address(), Kind: "research", Dependencies: dependencies[block.Address()], Config: snapshot,
+			Origin: modulespec.BlockOrigin(block.HclBlock()),
 		})
 	}
 	for _, block := range golden.Blocks[*modulespec.ModuleBlock](c) {
 		module := planned.Modules[block.Name()]
 		nodes = append(nodes, internalplan.NodeSpec{
 			Address: block.Address(), Kind: "module", Dependencies: dependencies[block.Address()], Config: cty.EmptyObjectVal,
+			Origin: modulespec.BlockOrigin(block.HclBlock()),
 			Module: &internalplan.ModuleSpec{Plan: module.Saved, Parallelism: module.Parallelism, Timeout: module.Timeout},
 		})
 	}

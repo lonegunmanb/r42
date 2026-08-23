@@ -94,7 +94,9 @@ func TestClaimCardsKeepOneEvidenceLayer(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(toolStringOutput(t, finalized)), &finalizedOutput))
 	assert.Equal(t, claimsPath, finalizedOutput["claims_path"])
 	assert.Equal(t, registryPath, finalizedOutput["source_registry_path"])
-	assert.Contains(t, finalizedOutput, "claims")
+	assert.Equal(t, 2, int(valueAs[float64](t, finalizedOutput["claim_count"])))
+	assert.Equal(t, 1, int(valueAs[float64](t, finalizedOutput["source_count"])))
+	assert.NotContains(t, finalizedOutput, "claims")
 	assert.NotContains(t, finalizedOutput, "source_registry")
 	assert.FileExists(t, claimsPath)
 	assert.FileExists(t, registryPath)
@@ -222,7 +224,56 @@ func TestClaimCardsCanFinalizeAnEmptyCompanySearch(t *testing.T) {
 	assert.Empty(t, mapValue[[]any](t, document, "claims"))
 }
 
-func TestFinalizeClaimCardsRejectsDuplicateClaimsAcrossBatches(t *testing.T) {
+func TestClaimCardsCanRemoveAStagedClaim(t *testing.T) {
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	stage, err := compiler.Compile(t.Context(), goToolSource(t, "submit_claim_cards"))
+	require.NoError(t, err)
+	finalize, err := compiler.Compile(t.Context(), goToolSource(t, "finalize_claim_cards"))
+	require.NoError(t, err)
+	workspace, claimsPath, registryPath := claimCardFixture(t, "remove-staged-claim")
+
+	response, err := stage.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"workspace_dir": workspace,
+		"claims_path":   claimsPath,
+		"cards":         []any{directClaimCard("C-001", "The facility cost $91 million.", "The facility cost $91 million.")},
+	}), workspace)
+	require.NoError(t, err)
+	require.True(t, response.Accepted, "issues: %#v", response.Issues)
+
+	response, err = stage.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"workspace_dir":    workspace,
+		"claims_path":      claimsPath,
+		"cards":            []any{directClaimCard("C-001", "The facility cost $92 million.", "The facility cost $92 million.")},
+		"remove_claim_ids": []string{"C-001", "C-missing"},
+	}), workspace)
+	require.NoError(t, err)
+	require.True(t, response.Accepted, "issues: %#v", response.Issues)
+	var removalOutput map[string]any
+	require.NoError(t, json.Unmarshal(*response.Output, &removalOutput))
+	assert.InEpsilon(t, float64(1), removalOutput["removed"], 0)
+	response, err = stage.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"workspace_dir":    workspace,
+		"claims_path":      claimsPath,
+		"remove_claim_ids": []string{"C-001"},
+	}), workspace)
+	require.NoError(t, err)
+	require.True(t, response.Accepted, "issues: %#v", response.Issues)
+
+	finalized, err := finalize.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"workspace_dir": workspace, "claims_path": claimsPath,
+		"source_registry_path": registryPath, "as_of_date": "2026-08-09",
+		"allow_empty": true,
+	}), workspace)
+	require.NoError(t, err)
+	require.True(t, finalized.Accepted, "issues: %#v", finalized.Issues)
+	var document map[string]any
+	require.NoError(t, readJSON(claimsPath, &document))
+	assert.Empty(t, mapValue[[]any](t, document, "claims"))
+}
+
+func TestFinalizeClaimCardsDeduplicatesOnlyIdenticalClaims(t *testing.T) {
 	compiler, err := gotool.NewCompiler()
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
@@ -230,22 +281,25 @@ func TestFinalizeClaimCardsRejectsDuplicateClaimsAcrossBatches(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		name  string
-		cards []map[string]any
+		name          string
+		cards         []map[string]any
+		expectedCount int
 	}{
 		{
-			name: "same normalized statement",
+			name: "identical claim with different ids",
 			cards: []map[string]any{
 				directClaimCard("C-001", "The facility cost $91 million.", "The facility cost $91 million."),
-				directClaimCard("C-002", " The facility\n cost $91 million. ", "Reported facility cost was $91 million."),
+				directClaimCard("C-002", "The facility cost $91 million.", "The facility cost $91 million."),
 			},
+			expectedCount: 1,
 		},
 		{
-			name: "same direct evidence",
+			name: "same evidence supports distinct claims",
 			cards: []map[string]any{
 				directClaimCard("C-001", "The facility cost $91 million and will expand.", "The facility cost $91 million and will expand."),
 				directClaimCard("C-002", "The facility cost $91 million.", "The facility cost $91 million and will expand."),
 			},
+			expectedCount: 2,
 		},
 	}
 	for _, tt := range tests {
@@ -263,10 +317,51 @@ func TestFinalizeClaimCardsRejectsDuplicateClaimsAcrossBatches(t *testing.T) {
 			}), workspace)
 
 			require.NoError(t, invokeErr)
-			assert.False(t, response.Accepted)
-			assert.Contains(t, issueCodes(response), "duplicate_claim")
+			require.True(t, response.Accepted, "issues: %#v", response.Issues)
+			require.NotNil(t, response.Output)
+			var output map[string]any
+			require.NoError(t, json.Unmarshal([]byte(toolStringOutput(t, response)), &output))
+			assert.InEpsilon(t, float64(tt.expectedCount), output["claim_count"], 0)
 		})
 	}
+}
+
+func TestFinalizeClaimCardsRemapsReferencesToDeduplicatedClaims(t *testing.T) {
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "finalize_claim_cards"))
+	require.NoError(t, err)
+	workspace, claimsPath, registryPath := claimCardFixture(t, "deduplicated-reference")
+	directory := filepath.Join(workspace, ".decision-draft", "claims")
+	require.NoError(t, os.MkdirAll(directory, 0o700))
+	cards := []map[string]any{
+		directClaimCard("C-001", "The facility cost $91 million.", "The facility cost $91 million."),
+		directClaimCard("C-002", "The facility cost $91 million.", "The facility cost $91 million."),
+		{
+			"id": "I-001", "statement": "The facility has a material capital requirement.",
+			"status": "inferred", "scope": "facility", "as_of": "2026-01-01",
+			"source_id": "", "snapshot_id": "", "exact_quote": "", "locator": "",
+			"derived_from": []string{"C-002"},
+		},
+	}
+	for _, card := range cards {
+		require.NoError(t, writeJSON(filepath.Join(directory, valueAs[string](t, card["id"])+".json"), card))
+	}
+
+	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"workspace_dir": workspace, "claims_path": claimsPath,
+		"source_registry_path": registryPath, "as_of_date": "2026-08-09",
+	}), workspace)
+	require.NoError(t, err)
+	require.True(t, response.Accepted, "issues: %#v", response.Issues)
+
+	var document map[string]any
+	require.NoError(t, readJSON(claimsPath, &document))
+	claims := mapValue[[]any](t, document, "claims")
+	require.Len(t, claims, 2)
+	inferred := valueAs[map[string]any](t, claims[1])
+	assert.Equal(t, []any{"C-001"}, inferred["derived_from"])
 }
 
 func TestNodeAssessmentSeparatesScopeFromConclusion(t *testing.T) {

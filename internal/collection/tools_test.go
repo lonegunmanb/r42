@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	artifactpkg "github.com/lonegunmanb/r42/internal/artifact"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,6 +28,23 @@ func TestRegisterToolHandler(t *testing.T) {
 		assert.NotEmpty(t, response.Output.ID)
 		assert.Equal(t, file, response.Output.Path)
 		assert.Empty(t, response.Issues)
+	})
+
+	t.Run("registers description", func(t *testing.T) {
+		t.Parallel()
+
+		workspace := t.TempDir()
+		file := filepath.Join(workspace, "described.md")
+		require.NoError(t, os.WriteFile(file, []byte("content"), 0o644))
+		handler := NewRegisterHandler(NewContext(workspace, 10, nil))
+
+		response := handler.Register(RegisterArgs{Path: file, Description: "Regulatory filing excerpts"})
+
+		require.True(t, response.Accepted)
+		require.NotNil(t, response.Output)
+		assert.Equal(t, "Regulatory filing excerpts", response.Output.Description)
+		require.Len(t, handler.Context().Registry.Snapshots(), 1)
+		assert.Equal(t, "Regulatory filing excerpts", handler.Context().Registry.Snapshots()[0].Description)
 	})
 
 	t.Run("registers retained tool result", func(t *testing.T) {
@@ -209,6 +227,31 @@ func TestRegisterToolHandler(t *testing.T) {
 		}
 		require.True(t, handler.Context().State.CheckpointPending())
 	})
+}
+
+func TestRegisterToolHandlerAddsSnapshotToArtifactRegistry(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "source.md")
+	require.NoError(t, os.WriteFile(path, []byte("source"), 0o600))
+	artifacts := artifactpkg.NewRegistry()
+	handler := NewRegisterHandler(NewContextWithArtifactRegistry(workspace, 10, nil, artifacts))
+
+	response := handler.Register(RegisterArgs{Path: path, Description: "Primary source"})
+
+	require.True(t, response.Accepted)
+	record, err := artifacts.Record(response.Output.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "Primary source", record.Description)
+	assert.Equal(t, artifactpkg.KindSnapshot, record.Kind)
+	assert.False(t, record.Ready)
+
+	require.NoError(t, handler.Context().MarkSnapshotReviewed(response.Output.ID))
+
+	record, err = artifacts.Record(response.Output.ID)
+	require.NoError(t, err)
+	assert.True(t, record.Ready)
 }
 
 func TestCheckpointToolHandler(t *testing.T) {

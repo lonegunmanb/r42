@@ -10,18 +10,26 @@ import (
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"
+	ctyjson "github.com/zclconf/go-cty/cty/json"
 )
 
 type DynamicResearchPlan struct {
 	Expression string
 	Providers  map[string]*provider.Config
 	Serial     bool
+	Tasks      cty.Value
 }
 
 type dynamicResearchSnapshot struct {
 	Expression string                       `json:"expression"`
 	Providers  map[string]*providerSnapshot `json:"providers,omitempty"`
 	Serial     bool                         `json:"serial,omitempty"`
+	Tasks      *dynamicTasksSnapshot        `json:"tasks,omitempty"`
+}
+
+type dynamicTasksSnapshot struct {
+	Type  json.RawMessage `json:"type"`
+	Value json.RawMessage `json:"value"`
 }
 
 func EncodeDynamicResearchPlan(
@@ -56,8 +64,17 @@ func EncodeDynamicResearchPlan(
 			}
 		}
 	}
+	var taskSnapshot *dynamicTasksSnapshot
+	if block.Tasks.IsWhollyKnown() {
+		unmarked, _ := block.Tasks.UnmarkDeep()
+		typeJSON, typeErr := ctyjson.MarshalType(unmarked.Type())
+		valueJSON, valueErr := ctyjson.Marshal(unmarked, unmarked.Type())
+		if typeErr == nil && valueErr == nil {
+			taskSnapshot = &dynamicTasksSnapshot{Type: typeJSON, Value: valueJSON}
+		}
+	}
 	encoded, err := json.Marshal(dynamicResearchSnapshot{
-		Expression: expression, Providers: providers, Serial: block.Serial,
+		Expression: expression, Providers: providers, Serial: block.Serial, Tasks: taskSnapshot,
 	})
 	if err != nil {
 		return cty.NilVal, fmt.Errorf("encode dynamic research plan: %w", err)
@@ -89,11 +106,23 @@ func DecodeDynamicResearchPlan(value cty.Value) (DynamicResearchPlan, error) {
 	if snapshot.Expression == "" {
 		return DynamicResearchPlan{}, fmt.Errorf("dynamic research plan expression is required")
 	}
-	return DynamicResearchPlan{
+	result := DynamicResearchPlan{
 		Expression: snapshot.Expression,
 		Providers:  restoreProviders(snapshot.Providers),
 		Serial:     snapshot.Serial,
-	}, nil
+	}
+	if snapshot.Tasks != nil {
+		taskType, err := ctyjson.UnmarshalType(snapshot.Tasks.Type)
+		if err != nil {
+			return DynamicResearchPlan{}, fmt.Errorf("decode dynamic research task type: %w", err)
+		}
+		tasks, err := ctyjson.Unmarshal(snapshot.Tasks.Value, taskType)
+		if err != nil {
+			return DynamicResearchPlan{}, fmt.Errorf("decode dynamic research tasks: %w", err)
+		}
+		result.Tasks = tasks
+	}
+	return result, nil
 }
 
 func (p DynamicResearchPlan) Resolve(config researchspec.Config) (ResearchPlan, error) {

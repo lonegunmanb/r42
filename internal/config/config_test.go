@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/config"
@@ -503,6 +504,27 @@ func TestNewBaseConfigIncludesGoldenEnvAndR42Functions(t *testing.T) {
 	assert.NotContains(t, workingDirectory.AsString(), `\`)
 	assert.Equal(t, "r42", base.DslFullName())
 	assert.Equal(t, "r42", base.DslAbbreviation())
+}
+
+func TestJSONDecodeWithType(t *testing.T) {
+	t.Parallel()
+
+	targetType := cty.Object(map[string]cty.Type{"name": cty.String})
+	result, err := config.Functions()["jsondecodewithtype"].Call([]cty.Value{
+		cty.StringVal(`{"name":"r42"}`),
+		typeexpr.TypeConstraintVal(targetType),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, targetType, result.Type())
+	assert.Equal(t, "r42", result.GetAttr("name").AsString())
+	expression, diagnostics := hclsyntax.ParseExpression(
+		[]byte(`jsondecodewithtype("{\"name\":\"r42\"}", object({name = string}))`),
+		"config.r42.hcl", hcl.InitialPos,
+	)
+	require.False(t, diagnostics.HasErrors(), diagnostics.Error())
+	value, diagnostics := expression.Value(&hcl.EvalContext{Functions: config.Functions()})
+	require.False(t, diagnostics.HasErrors(), diagnostics.Error())
+	assert.Equal(t, "r42", value.GetAttr("name").AsString())
 }
 
 var registerFixtureBlocks sync.Once

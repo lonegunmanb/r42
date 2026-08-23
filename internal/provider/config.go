@@ -34,6 +34,7 @@ const (
 type Config struct {
 	Type           Type
 	Endpoint       string
+	PreflightModel *string
 	WireAPI        *WireAPI
 	Transport      *Transport
 	Headers        cty.Value

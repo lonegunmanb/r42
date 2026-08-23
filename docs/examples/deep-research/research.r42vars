@@ -1,4 +1,4 @@
-topic = "Moderna与默沙东联合研发的个性化mRNA癌症疫苗在大型三期临床试验中取得成功，成为首个在三期试验中证明疗效的个性化癌症疫苗，被业界视为肿瘤免疫治疗领域的里程碑式突破。我需要研究 A 股市场有哪些公司可能受益于该消息，受益的逻辑链条时什么，最终报告采用中文撰写"
+topic = "investigate financial and strategic forecast for NVIDIA's Q2 FY2027 earnings release (scheduled for late August 2026), synthesizing consensus sell-side expectations, buy-side whisper numbers, segment-level revenue projections (Data Center, Gaming, ProViz, Automotive), gross margin trajectories, and forward guidance for Q3 FY2027 based strictly on information available up to the August 22, 2026 cutoff."
 model            = "deepseek-v4-flash"
 reasoning_effort = "low"
 web_fetch_tool_call_quota = null

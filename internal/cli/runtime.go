@@ -18,6 +18,7 @@ import (
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/hclfuncs"
+	artifactpkg "github.com/lonegunmanb/r42/internal/artifact"
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
 	"github.com/lonegunmanb/r42/internal/config"
 	"github.com/lonegunmanb/r42/internal/copilot"
@@ -25,6 +26,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/executor"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/plan"
+	"github.com/lonegunmanb/r42/internal/preflight"
 	"github.com/lonegunmanb/r42/internal/project"
 	"github.com/lonegunmanb/r42/internal/provider"
 	"github.com/lonegunmanb/r42/internal/qc"
@@ -133,6 +135,9 @@ func (e *Engine) ConfigFromPlan(
 	planned *plan.Plan,
 	options executor.ResearchConfigOptions,
 ) (*executor.ResearchConfig, error) {
+	if err := requirePreflightReport(planned); err != nil {
+		return nil, err
+	}
 	ctx := options.Context
 	options.Apply = func(saved *plan.Plan) (map[string]cty.Value, []error, error) {
 		return e.apply(ctx, saved, options)
@@ -150,6 +155,226 @@ func (e *Engine) ConfigFromPlan(
 	}
 	return config, nil
 }
+
+func requirePreflightReport(planned *plan.Plan) error {
+	_, expected, err := preflight.Document(planned)
+	if err != nil {
+		return fmt.Errorf("inspect preflight requirements: %w", err)
+	}
+	if len(expected) == 0 {
+		return nil
+	}
+	report := planned.PreflightReport()
+	if report == nil {
+		return fmt.Errorf("saved plan is missing a successful preflight report")
+	}
+	if len(report.Checks) != len(expected) {
+		return fmt.Errorf("saved plan preflight report has %d checks, want %d", len(report.Checks), len(expected))
+	}
+	expectedIDs := make(map[string]struct{}, len(expected))
+	for _, item := range expected {
+		expectedIDs[item.ID] = struct{}{}
+	}
+	seenIDs := make(map[string]struct{}, len(report.Checks))
+	for _, check := range report.Checks {
+		if _, ok := expectedIDs[check.CheckID]; !ok {
+			return fmt.Errorf("saved plan preflight report has unknown check %q", check.CheckID)
+		}
+		if _, duplicate := seenIDs[check.CheckID]; duplicate {
+			return fmt.Errorf("saved plan preflight report duplicates check %q", check.CheckID)
+		}
+		seenIDs[check.CheckID] = struct{}{}
+		if check.Verdict != preflight.VerdictSufficient {
+			return fmt.Errorf("saved plan preflight check %q is %s", check.CheckID, check.Verdict)
+		}
+	}
+	return nil
+}
+
+// Preflight runs the plan-only dataflow review before a plan is displayed or saved.
+func (e *Engine) Preflight(ctx context.Context, planned *plan.Plan, modelOverride string) error {
+	document, expected, err := preflight.Document(planned)
+	if err != nil {
+		return err
+	}
+	if len(expected) == 0 {
+		return nil
+	}
+	selection, err := selectPreflightSelection(planned, modelOverride)
+	if err != nil {
+		return err
+	}
+	selectedProvider := selection.Provider
+	providers := selection.Providers
+	model := selection.Model
+	if selectedProvider == nil {
+		return fmt.Errorf("preflight requires a resolved research model provider")
+	}
+	if model == "" && len(providers) > 1 {
+		return fmt.Errorf("preflight model flag is required when more than one model provider is configured")
+	}
+	if model == "" {
+		return fmt.Errorf("preflight model is required")
+	}
+	documentJSON, err := document.JSON()
+	if err != nil {
+		return fmt.Errorf("encode preflight plan: %w", err)
+	}
+	const toolName = "r42_preflight_result"
+	var submitted bool
+	var submittedResult preflight.Input
+	var submittedMu sync.Mutex
+	tool := sdk.Tool{
+		Name: toolName,
+		Description: "Submit exactly one preflight check for every required input_from_agent field. " +
+			"verdict must be sufficient, insufficient, or ambiguous_contract; reason is required; insufficient and ambiguous_contract require issues.",
+		Parameters: objectSchema(map[string]any{
+			"checks": map[string]any{"type": "array", "items": map[string]any{
+				"type": "object", "properties": map[string]any{
+					"check_id": map[string]any{"type": "string"},
+					"verdict":  map[string]any{"type": "string", "description": "Allowed values: sufficient, insufficient, ambiguous_contract"},
+					"reason":   map[string]any{"type": "string"},
+					"issues":   issueArraySchema(),
+				}, "required": []string{"check_id", "verdict", "reason"},
+			}},
+		}, []string{"checks"}),
+		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			args, decodeErr := decodeArguments[preflight.Input](invocation.Arguments)
+			if decodeErr != nil {
+				return rejectedToolResult("invalid_preflight_result", decodeErr.Error())
+			}
+			if validateErr := args.Validate(expected); validateErr != nil {
+				return rejectedToolResult("invalid_preflight_result", validateErr.Error())
+			}
+			submittedMu.Lock()
+			submitted = true
+			submittedResult = args
+			submittedMu.Unlock()
+			return acceptedToolResult(preflight.Output{})
+		},
+	}
+	sessions := e.options.Sessions
+	if sessions == nil {
+		sessions = newOfficialSessionOpener()
+	}
+	session, err := sessions.Open(ctx, copilot.SessionConfig{
+		Provider: selectedProvider, Retry: provider.DefaultRetryPolicy(), Model: model,
+		SystemPrompt: "You are r42 preflight. You may read only the immutable plan JSON in the prompt. " +
+			"Do not use filesystem, shell, web, artifact, or snapshot access. Determine whether each required input_from_agent field can be constructed from the declared sources and HCL source snapshots.",
+		WorkingDirectory: planned.Directory(), Tools: []sdk.Tool{tool}, AvailableTools: []string{toolName},
+		ExcludedTools: closedWorldDisallowedTools(nil),
+	})
+	if err != nil {
+		return fmt.Errorf("open preflight session: %w", err)
+	}
+	defer func() { _ = session.Close(context.WithoutCancel(ctx)) }()
+	prompt := "Plan JSON:\n" + string(documentJSON) + "\nSubmit the complete preflight result now."
+	for attempt := 1; attempt <= preflightAttempts; attempt++ {
+		if _, err = session.SendAndWait(ctx, sdk.MessageOptions{Prompt: prompt}); err != nil {
+			return fmt.Errorf("send preflight prompt: %w", err)
+		}
+		submittedMu.Lock()
+		wasSubmitted := submitted
+		submittedMu.Unlock()
+		if wasSubmitted {
+			submittedMu.Lock()
+			result := submittedResult
+			submittedMu.Unlock()
+			if err = recordPreflightResult(planned, result); err != nil {
+				return err
+			}
+			return nil
+		}
+		// The tool handler validates its own input; a successful session turn with no
+		// accepted result is retried with a precise protocol reminder.
+		if attempt == preflightAttempts {
+			return fmt.Errorf("preflight result was not submitted")
+		}
+		prompt = "Call r42_preflight_result with exactly one valid check for every required field."
+	}
+	return nil
+}
+
+type preflightSelection struct {
+	Provider  *provider.Config
+	Providers map[*provider.Config]struct{}
+	Model     string
+}
+
+func selectPreflightSelection(planned *plan.Plan, modelOverride string) (preflightSelection, error) {
+	if planned == nil {
+		return preflightSelection{}, fmt.Errorf("plan is required")
+	}
+
+	selection := preflightSelection{
+		Providers: make(map[*provider.Config]struct{}),
+		Model:     strings.TrimSpace(modelOverride),
+	}
+	for _, node := range planned.Nodes() {
+		if node.Kind != "research" {
+			continue
+		}
+
+		staticPlan, staticErr := modulespec.DecodeResearchPlan(node.Config)
+		if staticErr == nil && staticPlan.Expression == "" {
+			selection.add(staticPlan)
+			continue
+		}
+
+		dynamicPlan, dynamicErr := modulespec.DecodeDynamicResearchPlan(node.Config)
+		if dynamicErr != nil || dynamicPlan.Tasks == cty.NilVal || !dynamicPlan.Tasks.IsWhollyKnown() {
+			continue
+		}
+		configs, _, decodeErr := researchspec.DecodeDynamicTasks(dynamicPlan.Tasks)
+		if decodeErr != nil {
+			return preflightSelection{}, fmt.Errorf("decode %s dynamic tasks: %w", node.Address, decodeErr)
+		}
+		for index, config := range configs {
+			resolved, resolveErr := dynamicPlan.Resolve(config)
+			if resolveErr != nil {
+				return preflightSelection{}, fmt.Errorf("resolve %s.tasks[%d]: %w", node.Address, index, resolveErr)
+			}
+			selection.add(resolved)
+		}
+	}
+	return selection, nil
+}
+
+func (s *preflightSelection) add(researchPlan modulespec.ResearchPlan) {
+	if researchPlan.Provider == nil {
+		return
+	}
+	if s.Provider == nil {
+		s.Provider = researchPlan.Provider
+	}
+	s.Providers[researchPlan.Provider] = struct{}{}
+	if s.Model != "" {
+		return
+	}
+	if researchPlan.Provider.PreflightModel != nil {
+		s.Model = strings.TrimSpace(*researchPlan.Provider.PreflightModel)
+	}
+	if s.Model == "" {
+		s.Model = researchPlan.Config.Model
+	}
+}
+
+func recordPreflightResult(planned *plan.Plan, result preflight.Input) error {
+	report := plan.PreflightReport{Checks: make([]plan.PreflightCheck, len(result.Checks))}
+	for index, check := range result.Checks {
+		report.Checks[index] = plan.PreflightCheck{
+			CheckID: check.CheckID, Verdict: check.Verdict, Reason: check.Reason,
+			Issues: slices.Clone(check.Issues),
+		}
+		if check.Verdict != preflight.VerdictSufficient {
+			return fmt.Errorf("preflight check %q returned %s: %s", check.CheckID, check.Verdict, check.Reason)
+		}
+	}
+	planned.SetPreflightReport(report)
+	return nil
+}
+
+const preflightAttempts = 3
 
 func (e *Engine) apply(
 	ctx context.Context,
@@ -210,6 +435,7 @@ func (e *Engine) apply(
 		contextValues: planned.Context(), localExpressions: planned.LocalExpressions(),
 		sessionStallTimeout: effectiveSessionStallTimeout(options.SessionStallTimeout),
 		snapshotCatalog:     newRunSnapshotCatalog(),
+		artifactRegistry:    artifactpkg.NewRegistry(),
 	}
 	runner := executor.New(factory, nil)
 	outputs, applyErr := runner.Apply(ctx, planned, options.Parallelism)
@@ -291,6 +517,7 @@ type runtimeFactory struct {
 	localExpressions    map[string]string
 	sessionStallTimeout time.Duration
 	snapshotCatalog     *runSnapshotCatalog
+	artifactRegistry    *artifactpkg.Registry
 }
 
 type runtimeState struct {
@@ -298,6 +525,15 @@ type runtimeState struct {
 	compiler   *gotool.Compiler
 	warningsMu sync.Mutex
 	warnings   []error
+}
+
+func (f *runtimeFactory) ensureArtifactRegistry() *artifactpkg.Registry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.artifactRegistry == nil {
+		f.artifactRegistry = artifactpkg.NewRegistry()
+	}
+	return f.artifactRegistry
 }
 
 func (s *runtimeState) addWarning(err error) {
@@ -410,6 +646,7 @@ func (f *runtimeFactory) newModuleBlock(
 		localExpressions:    node.Module.Plan.LocalExpressions(),
 		sessionStallTimeout: f.sessionStallTimeout,
 		snapshotCatalog:     f.snapshotCatalog,
+		artifactRegistry:    f.artifactRegistry,
 	}
 	return &moduleApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address,
@@ -567,6 +804,19 @@ func (f *runtimeFactory) buildTools(
 				if !response.Accepted {
 					quota.rollback(definition.ID)
 				}
+				outputValue := cty.NullVal(analysis.OutputType)
+				if response.Output != nil {
+					outputValue, decodeErr = ctyjson.Unmarshal(*response.Output, analysis.OutputType)
+					if decodeErr != nil {
+						return sdk.ToolResult{}, fmt.Errorf("decode %s output for postcondition: %w", definition.Address, decodeErr)
+					}
+				}
+				if postconditionErr := evaluateToolPostconditions(value, outputValue, definition.Postconditions); postconditionErr != nil {
+					if isTerminal {
+						terminal.RecordError(postconditionErr)
+					}
+					return sdk.ToolResult{}, fmt.Errorf("%s postcondition failed: %w", definition.Address, postconditionErr)
+				}
 				wire := corespec.ToolResponse[json.RawMessage]{
 					Accepted: response.Accepted, Output: response.Output, Issues: response.Issues,
 				}
@@ -692,6 +942,16 @@ func (f *runtimeFactory) buildExternalTool(
 			if !result.Accepted {
 				quota.rollback(definition.ID)
 			}
+			outputValue := cty.NullVal(output.Type())
+			if result.Output != nil {
+				outputValue = *result.Output
+			}
+			if postconditionErr := evaluateToolPostconditions(value, outputValue, definition.Postconditions); postconditionErr != nil {
+				if isTerminal {
+					terminal.RecordError(postconditionErr)
+				}
+				return sdk.ToolResult{}, fmt.Errorf("%s postcondition failed: %w", definition.Address, postconditionErr)
+			}
 			var rawOutput *json.RawMessage
 			if result.Output != nil {
 				encodedOutput, encodeErr := ctyjson.Marshal(*result.Output, output.Type())
@@ -729,6 +989,20 @@ func (f *runtimeFactory) buildExternalTool(
 		},
 	}
 	return tool, output.Type(), nil
+}
+
+func evaluateToolPostconditions(input, output cty.Value, conditions []corespec.Condition) error {
+	if len(conditions) == 0 {
+		return nil
+	}
+	for _, condition := range conditions {
+		if _, err := condition.Evaluate(
+			map[string]cty.Value{"input": input, "output": output}, nil,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type toolCallQuota struct {
@@ -1206,6 +1480,7 @@ type researchApplyBlock struct {
 	workflowRun      func(context.Context) (researchruntime.Result, error)
 	workflowSessions []Session
 	afterSuccess     func()
+	artifactRegistry *artifactpkg.Registry
 }
 
 func (*researchApplyBlock) Type() string            { return "static" }
@@ -1233,7 +1508,22 @@ func (b *researchApplyBlock) Apply() error {
 	if b.afterSuccess != nil {
 		b.afterSuccess()
 	}
-	value := map[string]cty.Value{"artifact": researchspec.ArtifactsValue(b.config.Artifacts, result.Artifacts)}
+	if b.artifactRegistry != nil {
+		for _, id := range b.config.ArtifactIDs {
+			if err = b.artifactRegistry.MarkReady(id); err != nil {
+				return err
+			}
+		}
+		for _, item := range result.Snapshots {
+			if err = b.artifactRegistry.MarkReady(item.ID); err != nil {
+				return err
+			}
+		}
+	}
+	value := map[string]cty.Value{
+		"artifact":  researchspec.ArtifactsValueWithIDs(b.config.Artifacts, result.Artifacts, b.config.ArtifactIDs),
+		"snapshots": researchspec.SnapshotsValue(result.Snapshots),
+	}
 	if b.config.TerminateToolName != "" {
 		value["result"] = cty.NullVal(cty.String)
 		if result.Value != nil {

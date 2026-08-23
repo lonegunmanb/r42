@@ -79,6 +79,7 @@ research "static" "fact" {
   artifact "answer" {
     type = "file"
     path = "${block_wd()}/answer.md"
+	description = "Answer fixture"
   }
 }
 `)
@@ -207,11 +208,13 @@ research "static" "summary" {
   artifact "report" {
     type = "file"
     path = "${block_wd()}/report.md"
+	description = "Report fixture"
   }
 
   artifact "evidence" {
     type      = "file"
     path      = "${block_wd()}/evidence.json"
+	description = "Evidence fixture"
     required  = true
     non_empty = true
   }
@@ -357,6 +360,7 @@ research "static" "fact" {
   artifact "answer" {
     type = "file"
     path = "${block_wd()}/answer.md"
+	description = "Answer fixture"
   }
 }
 `)
@@ -436,6 +440,7 @@ research "static" "market" {
   artifact "report" {
     type      = "file"
     path      = "report.md"
+	description = "Report fixture"
     required  = true
     non_empty = true
   }
@@ -494,7 +499,8 @@ research "static" "market" {
 	assert.Equal(t, "tool_fixture_finish", *planned.TerminateToolID)
 	require.Len(t, planned.Artifacts, 1)
 	assert.Equal(t, researchspec.Artifact{
-		Name: "report", Type: researchspec.ArtifactTypeFile, Path: "report.md", Required: true, NonEmpty: true,
+		Name: "report", Type: researchspec.ArtifactTypeFile, Path: "report.md",
+		Description: "Report fixture", Required: true, NonEmpty: true,
 	}, planned.Artifacts[0])
 	require.NotNil(t, planned.QC)
 	assertReference(t, planned.QC.ModelProvider, "model_provider.quality", "provider")
@@ -604,11 +610,13 @@ research "static" "market" {
   artifact "report" {
     type = "file"
     path = "report.md"
+	description = "Report fixture"
   }
 
   artifact "evidence" {
     type = "directory"
     path = "evidence"
+	description = "Evidence fixture"
   }
 
   qc {
@@ -774,6 +782,7 @@ system_prompt = "prompt"
 artifact "report" {
   type = "file"
   path = 42
+	description = "Report fixture"
 }`,
 			expectedError: "artifact path must be a string",
 		},
@@ -798,6 +807,7 @@ system_prompt = "prompt"
 artifact "report" {
   type = "file"
   path = "report.md"
+  description = "Report fixture"
   required = "true"
 }`,
 			expectedError: "artifact required must be a bool",
@@ -1017,7 +1027,8 @@ research "static" "explicit_zero" {
 
   artifact "report" {
     type      = "file"
-    path      = "report.md"
+    path        = "report.md"
+    description = "Final research report"
     required  = false
     non_empty = false
   }
@@ -1048,6 +1059,143 @@ research "static" "explicit_zero" {
 	effective, err := planned.EffectiveQC(provider.DefaultRetryPolicy())
 	require.NoError(t, err)
 	assert.Equal(t, 0, effective.MaxRounds)
+}
+
+func TestArtifactDescriptionIsRequiredAndPublished(t *testing.T) {
+	t.Parallel()
+
+	artifact := researchspec.Artifact{
+		Name: "claims", Type: researchspec.ArtifactTypeFile, Path: "claims.json",
+		Description: "Normalized claims with evidence references",
+	}
+	require.NoError(t, artifact.Validate())
+	values := researchspec.ArtifactsValue([]researchspec.Artifact{artifact}, nil).AsValueSlice()
+	require.Len(t, values, 1)
+	assert.False(t, values[0].GetAttr("id").IsKnown())
+	assert.Equal(t, artifact.Description, values[0].GetAttr("description").AsString())
+	withID := researchspec.ArtifactsValueWithIDs(
+		[]researchspec.Artifact{artifact}, nil, map[string]string{"claims": "artifact-1"},
+	).AsValueSlice()
+	assert.Equal(t, "artifact-1", withID[0].GetAttr("id").AsString())
+
+	artifact.Description = " "
+	require.ErrorContains(t, artifact.Validate(), "description is required")
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockPlansToolUseFieldOwnership(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+fixture_tool "finish" {}
+research "static" "owned" {
+  model         = "test-model"
+  system_prompt = "Research."
+
+  tool_use "submit" {
+    tool_id   = fixture_tool.finish.id
+    terminate = true
+    input = {
+      workspace = block_wd()
+    }
+    input_from_agent = {
+      claims = [{
+        id          = "artifact-upstream"
+        path        = "claims.json"
+        description = "Upstream claims"
+      }]
+    }
+  }
+}
+
+	`)
+
+	require.NoError(t, config.RunPlan())
+	block := golden.Blocks[*researchspec.ResearchBlock](config)[0]
+	planned := block.ResearchConfig()
+	require.Len(t, planned.ToolUses, 1)
+	assert.Equal(t, "submit", planned.ToolUses[0].Name)
+	assert.Equal(t, "tool_fixture_finish", planned.ToolUses[0].ToolID)
+	assert.True(t, planned.ToolUses[0].Terminate)
+	assert.Equal(t, []string{"tool_fixture_finish"}, planned.Policy.ToolIDs)
+	require.NotNil(t, planned.TerminateToolID)
+	assert.Equal(t, "tool_fixture_finish", *planned.TerminateToolID)
+	assert.True(t, planned.ToolUses[0].Input.Type().HasAttribute("workspace"))
+	assert.True(t, planned.ToolUses[0].InputFromAgent.Type().HasAttribute("claims"))
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchToolUseValidationPreservesExpressionAndChecksInput(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+fixture_tool "finish" {}
+research "static" "fixture" {
+  model = "test"
+  system_prompt = "system"
+  tool_use "finish" {
+    tool_id = fixture_tool.finish.id
+    terminate = true
+    input_from_agent = { claims = [] }
+    validation {
+      condition = length(input.claims) > 0
+      error_message = "at least one claim is required"
+    }
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	planned := golden.Blocks[*researchspec.ResearchBlock](config)
+	require.Len(t, planned, 1)
+	require.Len(t, planned[0].ResearchConfig().ToolUses, 1)
+	validations := planned[0].ResearchConfig().ToolUses[0].Validations
+	require.Len(t, validations, 1)
+	assert.Equal(t, "length(input.claims) > 0", validations[0].Expression)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchToolUseValidationRejectsUndeclaredRoot(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+fixture_tool "finish" {}
+research "static" "fixture" {
+  model = "test"
+  system_prompt = "system"
+  tool_use "finish" {
+    tool_id = fixture_tool.finish.id
+    terminate = true
+    input_from_agent = { claims = [] }
+    validation {
+      condition = output.ok
+      error_message = "must be valid"
+    }
+  }
+}
+`)
+
+	assert.ErrorContains(t, config.RunPlan(), "condition may only reference input")
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockRejectsMixedLegacyAndToolUseSyntax(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+fixture_tool "finish" {}
+research "static" "mixed" {
+  model             = "test-model"
+  system_prompt     = "Research."
+  tool_ids          = [fixture_tool.finish.id]
+  terminate_tool_id = fixture_tool.finish.id
+  tool_use "submit" {
+    tool_id   = fixture_tool.finish.id
+    terminate = true
+    input_from_agent = { value = [] }
+  }
+}
+`)
+
+	err := config.RunPlan()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "tool_use cannot be combined with tool_ids or terminate_tool_id")
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

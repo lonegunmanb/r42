@@ -30,6 +30,21 @@ func TestRegistryRegisterPath(t *testing.T) {
 	assert.Equal(t, 1, registry.PendingCount())
 }
 
+func TestRegistryPreservesSnapshotDescription(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	file := filepath.Join(workspace, "evidence.md")
+	require.NoError(t, os.WriteFile(file, []byte("evidence content"), 0o644))
+
+	registry := NewRegistry(workspace)
+	registration, err := registry.RegisterPathWithMetadata(file, "record:42", "Quarterly revenue guidance")
+	require.NoError(t, err)
+	assert.Equal(t, "Quarterly revenue guidance", registration.Description)
+	require.Len(t, registry.Snapshots(), 1)
+	assert.Equal(t, "Quarterly revenue guidance", registry.Snapshots()[0].Description)
+}
+
 func TestRegistryRegisterPathErrors(t *testing.T) {
 	t.Parallel()
 

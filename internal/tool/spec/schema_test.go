@@ -293,6 +293,48 @@ external_tool "target" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
+func TestExternalToolPostconditionUsesInputAndOutput(t *testing.T) {
+	config := parseToolConfig(t, `
+external_tool "target" {
+  description = "Target"
+  program = ["target"]
+  input_type = object({ name = string })
+  output_type = object({ saved = bool })
+
+  postcondition {
+    condition     = input.name != "" && output.saved
+    error_message = "target must save the named value"
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	blocks := golden.Blocks[*toolspec.ExternalToolBlock](config)
+	require.Len(t, blocks, 1)
+	require.Len(t, blocks[0].Postconditions, 1)
+	assert.Contains(t, blocks[0].Postconditions[0].Expression, "output.saved")
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestExternalToolPostconditionFailsDuringPlanWhenKnownFalse(t *testing.T) {
+	config := parseToolConfig(t, `
+external_tool "target" {
+  description = "Target"
+  program = ["target"]
+  input_type = object({})
+  output_type = object({})
+
+  postcondition {
+    condition     = false
+    error_message = "known invalid tool contract"
+  }
+}
+`)
+
+	require.ErrorContains(t, config.RunPlan(), "known invalid tool contract")
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
 func TestGoToolBlockValidation(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -335,6 +377,32 @@ func TestGoToolBlockValidation(t *testing.T) {
 			assert.ErrorContains(t, err, tt.expectedError)
 		})
 	}
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestGoToolPostconditionUsesInputAndOutput(t *testing.T) {
+	config := parseToolConfig(t, `
+go_tool "target" {
+  description = "Target"
+  source = <<-GO
+    import "context"
+    type Input struct { Name string `+"`json:\"name\"`"+` }
+    type Output struct { Saved bool `+"`json:\"saved\"`"+` }
+    func Invoke(context.Context, Input) (ToolResponse[Output], error) { return ToolResponse[Output]{}, nil }
+  GO
+
+  postcondition {
+    condition     = input.name != "" && output.saved
+    error_message = "target must save the named value"
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	blocks := golden.Blocks[*toolspec.GoToolBlock](config)
+	require.Len(t, blocks, 1)
+	require.Len(t, blocks[0].Postconditions, 1)
+	assert.Contains(t, blocks[0].Postconditions[0].Expression, "output.saved")
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

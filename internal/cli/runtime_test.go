@@ -177,12 +177,14 @@ research "static" "source" {
 	artifact "report" {
 	  type = "file"
 	  path = "report.md"
+	  description = "Runtime report fixture"
 	}
 }
 locals {
   report_with_retries = "${one(research.static.source.artifact).path}|${one(research.static.source.retry).lifecycle_retries}"
 }
 output "report_path" { value = local.report_with_retries }
+output "report_id" { value = one(research.static.source.artifact).id }
 `), 0o600))
 	opener := &fakeSessionOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
@@ -207,6 +209,7 @@ output "report_path" { value = local.report_with_retries }
 	assert.True(t, filepath.IsAbs(path))
 	assert.Equal(t, "report.md", filepath.Base(path))
 	assert.Equal(t, "3", retries)
+	assert.Regexp(t, `^artifact-[0-9a-f-]{36}$`, result.Outputs["report_id"].AsString())
 }
 
 func TestProductionRuntimeExecutesTerminalGoTool(t *testing.T) {

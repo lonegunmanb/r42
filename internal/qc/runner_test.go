@@ -37,7 +37,8 @@ func TestRunnerPassesCandidateWithIsolatedQCContext(t *testing.T) {
 			"accuracy": cty.StringVal("cite primary sources"),
 		}),
 		Artifacts: []researchspec.Artifact{{
-			Name: "report", Type: researchspec.ArtifactTypeFile, Path: "report.md", Required: true,
+			Name: "report", Type: researchspec.ArtifactTypeFile, Path: "report.md",
+			Description: "Report fixture", Required: true,
 		}},
 		Research:            researchruntime.Config{InitialPrompt: prompt, MaxProtocolAttempts: 10, Workspace: "D:/work"},
 		MaxRounds:           10,

@@ -128,7 +128,9 @@ func (r *Runner) Review(ctx context.Context, config Config) (Result, error) {
 	}
 
 	for _, id := range config.CheckpointSnapshotIDs {
-		r.collection.Registry.MarkReviewed(id)
+		if err = r.collection.MarkSnapshotReviewed(id); err != nil {
+			return Result{}, fmt.Errorf("publish reviewed snapshot %q: %w", id, err)
+		}
 	}
 	issueMessages := make([]string, len(verdict.Issues))
 	for index, issue := range verdict.Issues {

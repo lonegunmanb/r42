@@ -17,6 +17,7 @@ type ModelProviderBlock struct {
 	*golden.BaseBlock
 	ProviderType         Type         `hcl:"type"`
 	Endpoint             string       `hcl:"endpoint"`
+	PreflightModel       *string      `hcl:"preflight_model,optional"`
 	WireAPI              *WireAPI     `hcl:"wire_api,optional"`
 	Transport            *Transport   `hcl:"transport,optional"`
 	Headers              cty.Value    `hcl:"headers,optional"`
@@ -43,9 +44,10 @@ func (*ModelProviderBlock) CanExecutePrePlan() bool { return false }
 
 func (b *ModelProviderBlock) Value() cty.Value {
 	return cty.ObjectVal(map[string]cty.Value{
-		"address": cty.StringVal(b.Address()),
-		"kind":    cty.StringVal("provider"),
-		"retry":   retryBlockValues(b.RetryBlocks),
+		"address":         cty.StringVal(b.Address()),
+		"kind":            cty.StringVal("provider"),
+		"preflight_model": optionalStringValue(b.PreflightModel),
+		"retry":           retryBlockValues(b.RetryBlocks),
 	})
 }
 
@@ -73,7 +75,7 @@ func (b *ModelProviderBlock) validateStringAttributes() error {
 		return nil
 	}
 	for _, name := range []string{
-		"type", "endpoint", "wire_api", "transport", "api_key", "api_key_ref", "bearer_token", "bearer_token_ref",
+		"type", "endpoint", "preflight_model", "wire_api", "transport", "api_key", "api_key_ref", "bearer_token", "bearer_token_ref",
 	} {
 		attribute, ok := b.HclBlock().Body.Attributes[name]
 		if !ok {
@@ -165,6 +167,13 @@ func stringListValue(values []string) cty.Value {
 	return cty.ListVal(result)
 }
 
+func optionalStringValue(value *string) cty.Value {
+	if value == nil {
+		return cty.NullVal(cty.String)
+	}
+	return cty.StringVal(*value)
+}
+
 func (b *ModelProviderBlock) toConfig() (Config, error) {
 	if len(b.RetryBlocks) > 1 {
 		return Config{}, errors.New("model provider must have at most one retry block")
@@ -179,6 +188,7 @@ func (b *ModelProviderBlock) toConfig() (Config, error) {
 	config := Config{
 		Type:           b.ProviderType,
 		Endpoint:       b.Endpoint,
+		PreflightModel: clonePointer(b.PreflightModel),
 		WireAPI:        clonePointer(b.WireAPI),
 		Transport:      clonePointer(b.Transport),
 		Headers:        headers,

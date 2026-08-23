@@ -10,12 +10,14 @@ import (
 	"github.com/lonegunmanb/r42/internal/config"
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
+	"github.com/lonegunmanb/r42/internal/tool/gotool"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
 )
 
 var (
 	_ golden.PlanBlock        = (*GoToolBlock)(nil)
+	_ golden.CustomDecode     = (*GoToolBlock)(nil)
 	_ golden.PlanBlock        = (*ExternalToolBlock)(nil)
 	_ golden.CustomDecode     = (*ExternalToolBlock)(nil)
 	_ golden.SingleValueBlock = (*GoToolBlock)(nil)
@@ -24,8 +26,9 @@ var (
 
 type GoToolBlock struct {
 	*golden.BaseBlock
-	Description string `hcl:"description"`
-	Source      string `hcl:"source"`
+	Description    string `hcl:"description"`
+	Source         string `hcl:"source"`
+	Postconditions []corespec.Condition
 }
 
 func (*GoToolBlock) Type() string { return "" }
@@ -54,6 +57,84 @@ func (b *GoToolBlock) Value() cty.Value {
 	})
 }
 
+func (b *GoToolBlock) Decode(block *golden.HclBlock, context *hcl.EvalContext) error {
+	if err := validateGoToolSchema(block); err != nil {
+		return err
+	}
+	description, err := decodeGoRequiredString(block, context, "description")
+	if err != nil {
+		return err
+	}
+	source, err := decodeGoRequiredString(block, context, "source")
+	if err != nil {
+		return err
+	}
+	b.Description = description
+	b.Source = source
+	if !hasNestedBlock(block, "postcondition") {
+		return nil
+	}
+	analysis, err := gotool.Analyze(source)
+	if err != nil {
+		return fmt.Errorf("go tool postcondition types: %w", err)
+	}
+	b.Postconditions, err = decodePostconditions(
+		block,
+		context,
+		cty.UnknownVal(analysis.InputType),
+		cty.UnknownVal(analysis.OutputType),
+	)
+	if err != nil {
+		return fmt.Errorf("go tool postcondition: %w", err)
+	}
+	return nil
+}
+
+func validateGoToolSchema(block *golden.HclBlock) error {
+	for name := range block.Attributes() {
+		if name == "description" || name == "source" || golden.MetaAttributeNames.Contains(name) {
+			continue
+		}
+		return fmt.Errorf("unsupported argument; An argument named %q is not expected here", name)
+	}
+	for _, nested := range block.NestedBlocks() {
+		if nested.Type == "postcondition" || golden.MetaNestedBlockNames.Contains(nested.Type) {
+			continue
+		}
+		return fmt.Errorf("unsupported block type; Blocks of type %q are not expected here", nested.Type)
+	}
+	return nil
+}
+
+func decodeGoRequiredString(
+	block *golden.HclBlock,
+	context *hcl.EvalContext,
+	name string,
+) (string, error) {
+	attribute, ok := block.Attributes()[name]
+	if !ok {
+		return "", fmt.Errorf("go tool %s is required", name)
+	}
+	value, diagnostics := attribute.Expr.Value(context)
+	if diagnostics.HasErrors() {
+		return "", diagnostics
+	}
+	value, _ = value.UnmarkDeep()
+	if !value.IsWhollyKnown() || value.IsNull() || !value.Type().Equals(cty.String) {
+		return "", fmt.Errorf("go tool %s must be a known string", name)
+	}
+	return value.AsString(), nil
+}
+
+func hasNestedBlock(block *golden.HclBlock, blockType string) bool {
+	for _, nested := range block.NestedBlocks() {
+		if nested.Type == blockType {
+			return true
+		}
+	}
+	return false
+}
+
 func (b *GoToolBlock) ExecuteDuringPlan() error {
 	return debuglog.PlanBlock(b.Context(), b.Address(), b.BlockType(), func() error {
 		if strings.TrimSpace(b.Description) == "" {
@@ -68,9 +149,10 @@ func (b *GoToolBlock) ExecuteDuringPlan() error {
 
 type ExternalToolBlock struct {
 	*golden.BaseBlock
-	Description string
-	Program     []string
-	WorkingDir  string
+	Description    string
+	Program        []string
+	WorkingDir     string
+	Postconditions []corespec.Condition
 
 	inputConstraint  Constraint
 	outputConstraint Constraint
@@ -142,6 +224,15 @@ func (b *ExternalToolBlock) Decode(block *golden.HclBlock, context *hcl.EvalCont
 	b.WorkingDir = workingDir
 	b.inputConstraint = inputConstraint
 	b.outputConstraint = outputConstraint
+	b.Postconditions, err = decodePostconditions(
+		block,
+		context,
+		cty.UnknownVal(inputConstraint.Type()),
+		cty.UnknownVal(outputConstraint.Type()),
+	)
+	if err != nil {
+		return fmt.Errorf("external tool postcondition: %w", err)
+	}
 
 	return nil
 }
@@ -161,6 +252,9 @@ func validateExternalToolSchema(block *golden.HclBlock) error {
 		return fmt.Errorf("unsupported argument; An argument named %q is not expected here", name)
 	}
 	for _, nested := range block.NestedBlocks() {
+		if nested.Type == "postcondition" {
+			continue
+		}
 		if golden.MetaNestedBlockNames.Contains(nested.Type) {
 			continue
 		}
@@ -168,6 +262,54 @@ func validateExternalToolSchema(block *golden.HclBlock) error {
 	}
 
 	return nil
+}
+
+func decodePostconditions(
+	block *golden.HclBlock,
+	context *hcl.EvalContext,
+	input cty.Value,
+	output cty.Value,
+) ([]corespec.Condition, error) {
+	result := make([]corespec.Condition, 0)
+	for _, nested := range block.NestedBlocks() {
+		if nested.Type != "postcondition" {
+			continue
+		}
+		for name := range nested.Attributes() {
+			if name != "condition" && name != "error_message" {
+				return nil, fmt.Errorf("unsupported postcondition argument %q", name)
+			}
+		}
+		if len(nested.NestedBlocks()) != 0 {
+			return nil, fmt.Errorf("postcondition must not contain nested blocks")
+		}
+		conditionAttribute, ok := nested.Attributes()["condition"]
+		if !ok {
+			return nil, fmt.Errorf("condition is required")
+		}
+		errorAttribute, ok := nested.Attributes()["error_message"]
+		if !ok {
+			return nil, fmt.Errorf("error_message is required")
+		}
+		errorValue, diagnostics := errorAttribute.Expr.Value(context)
+		if diagnostics.HasErrors() {
+			return nil, diagnostics
+		}
+		errorValue, _ = errorValue.UnmarkDeep()
+		if !errorValue.IsWhollyKnown() || errorValue.IsNull() || !errorValue.Type().Equals(cty.String) {
+			return nil, fmt.Errorf("error_message must be a known string")
+		}
+		condition := corespec.Condition{
+			Expression: conditionAttribute.ExprString(), ErrorMessage: errorValue.AsString(),
+		}
+		if _, err := condition.Evaluate(
+			map[string]cty.Value{"input": input, "output": output}, context.Functions,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, condition)
+	}
+	return result, nil
 }
 
 func (b *ExternalToolBlock) ExecuteDuringPlan() error {

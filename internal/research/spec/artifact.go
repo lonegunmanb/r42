@@ -13,11 +13,12 @@ const (
 )
 
 type Artifact struct {
-	Name     string
-	Type     ArtifactType
-	Path     string
-	Required bool
-	NonEmpty bool
+	Name        string
+	Type        ArtifactType
+	Path        string
+	Description string
+	Required    bool
+	NonEmpty    bool
 }
 
 func (a Artifact) Validate() error {
@@ -29,6 +30,9 @@ func (a Artifact) Validate() error {
 	}
 	if strings.TrimSpace(a.Path) == "" {
 		return fmt.Errorf("artifact %s path is required", a.Name)
+	}
+	if strings.TrimSpace(a.Description) == "" {
+		return fmt.Errorf("artifact %s description is required", a.Name)
 	}
 	return nil
 }

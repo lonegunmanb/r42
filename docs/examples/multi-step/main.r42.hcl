@@ -49,6 +49,7 @@ research "static" "external_tool_snapshot" {
   artifact "snapshot" {
     type      = "file"
     path      = "${block_wd()}/snapshot.md"
+	description = "Markdown snapshot returned by the configured external fetch process"
     required  = true
     non_empty = true
   }

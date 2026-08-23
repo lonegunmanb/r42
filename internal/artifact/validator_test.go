@@ -28,7 +28,7 @@ func TestValidateResolvesAllowedArtifactPaths(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			result, err := artifactpkg.Validate(workspace, []researchspec.Artifact{{
-				Name: tt.name, Type: researchspec.ArtifactTypeFile, Path: tt.path,
+				Name: tt.name, Type: researchspec.ArtifactTypeFile, Path: tt.path, Description: "Artifact fixture",
 			}})
 			require.NoError(t, err)
 			assert.Empty(t, result.Issues)
@@ -50,16 +50,16 @@ func TestValidateReportsRepairableArtifactIssues(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(workspace, "nested-dir", "report.txt"), []byte("report"), 0o600))
 
 	artifacts := []researchspec.Artifact{
-		{Name: "missing", Type: researchspec.ArtifactTypeFile, Path: "missing.txt", Required: true},
-		{Name: "optional", Type: researchspec.ArtifactTypeFile, Path: "optional.txt"},
-		{Name: "empty_file", Type: researchspec.ArtifactTypeFile, Path: "empty.txt", Required: true, NonEmpty: true},
-		{Name: "empty_file_allowed", Type: researchspec.ArtifactTypeFile, Path: "empty.txt", Required: true},
-		{Name: "wrong_file_type", Type: researchspec.ArtifactTypeFile, Path: "empty-dir", Required: true},
-		{Name: "empty_directory", Type: researchspec.ArtifactTypeDirectory, Path: "empty-dir", Required: true, NonEmpty: true},
-		{Name: "empty_tree", Type: researchspec.ArtifactTypeDirectory, Path: "empty-tree", Required: true, NonEmpty: true},
-		{Name: "wrong_directory_type", Type: researchspec.ArtifactTypeDirectory, Path: "full.txt", Required: true},
-		{Name: "full_file", Type: researchspec.ArtifactTypeFile, Path: "full.txt", Required: true, NonEmpty: true},
-		{Name: "nested_directory", Type: researchspec.ArtifactTypeDirectory, Path: "nested-dir", Required: true, NonEmpty: true},
+		{Name: "missing", Type: researchspec.ArtifactTypeFile, Path: "missing.txt", Description: "Missing", Required: true},
+		{Name: "optional", Type: researchspec.ArtifactTypeFile, Path: "optional.txt", Description: "Optional"},
+		{Name: "empty_file", Type: researchspec.ArtifactTypeFile, Path: "empty.txt", Description: "Empty file", Required: true, NonEmpty: true},
+		{Name: "empty_file_allowed", Type: researchspec.ArtifactTypeFile, Path: "empty.txt", Description: "Allowed empty file", Required: true},
+		{Name: "wrong_file_type", Type: researchspec.ArtifactTypeFile, Path: "empty-dir", Description: "Wrong file type", Required: true},
+		{Name: "empty_directory", Type: researchspec.ArtifactTypeDirectory, Path: "empty-dir", Description: "Empty directory", Required: true, NonEmpty: true},
+		{Name: "empty_tree", Type: researchspec.ArtifactTypeDirectory, Path: "empty-tree", Description: "Empty tree", Required: true, NonEmpty: true},
+		{Name: "wrong_directory_type", Type: researchspec.ArtifactTypeDirectory, Path: "full.txt", Description: "Wrong directory type", Required: true},
+		{Name: "full_file", Type: researchspec.ArtifactTypeFile, Path: "full.txt", Description: "Full file", Required: true, NonEmpty: true},
+		{Name: "nested_directory", Type: researchspec.ArtifactTypeDirectory, Path: "nested-dir", Description: "Nested directory", Required: true, NonEmpty: true},
 	}
 	result, err := artifactpkg.Validate(workspace, artifacts)
 	require.NoError(t, err)
@@ -96,20 +96,20 @@ func TestValidateRejectsInvalidDeclarationsAndFilesystemErrors(t *testing.T) {
 	}{
 		{
 			name:          "invalid declaration",
-			artifacts:     []researchspec.Artifact{{Name: "report", Type: "other", Path: "report.txt"}},
+			artifacts:     []researchspec.Artifact{{Name: "report", Type: "other", Path: "report.txt", Description: "Report"}},
 			expectedError: "type must be file or directory",
 		},
 		{
 			name: "duplicate name",
 			artifacts: []researchspec.Artifact{
-				{Name: "report", Type: researchspec.ArtifactTypeFile, Path: "one.txt"},
-				{Name: "report", Type: researchspec.ArtifactTypeFile, Path: "two.txt"},
+				{Name: "report", Type: researchspec.ArtifactTypeFile, Path: "one.txt", Description: "One"},
+				{Name: "report", Type: researchspec.ArtifactTypeFile, Path: "two.txt", Description: "Two"},
 			},
 			expectedError: "duplicate artifact name",
 		},
 		{
 			name:          "filesystem error",
-			artifacts:     []researchspec.Artifact{{Name: "report", Type: researchspec.ArtifactTypeFile, Path: "bad\x00path", Required: true}},
+			artifacts:     []researchspec.Artifact{{Name: "report", Type: researchspec.ArtifactTypeFile, Path: "bad\x00path", Description: "Report", Required: true}},
 			expectedError: "artifact report",
 		},
 	}
@@ -129,10 +129,11 @@ func TestValidateReportsBlockedRequiredArtifactPathAsRepairable(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(workspace, "blocked"), []byte("file"), 0o600))
 
 	result, err := artifactpkg.Validate(workspace, []researchspec.Artifact{{
-		Name:     "report",
-		Type:     researchspec.ArtifactTypeFile,
-		Path:     filepath.Join("blocked", "missing", "report.txt"),
-		Required: true,
+		Name:        "report",
+		Type:        researchspec.ArtifactTypeFile,
+		Path:        filepath.Join("blocked", "missing", "report.txt"),
+		Description: "Blocked report",
+		Required:    true,
 	}})
 	require.NoError(t, err)
 	require.Len(t, result.Issues, 1)

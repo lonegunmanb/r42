@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"
 )
 
@@ -19,6 +20,17 @@ type NodeSpec struct {
 	Dependencies []string
 	Config       cty.Value
 	Module       *ModuleSpec
+	Origin       Origin
+}
+
+// Origin identifies the immutable HCL source captured for one planned block.
+type Origin struct {
+	Filename    string `json:"filename"`
+	StartLine   int    `json:"start_line"`
+	StartColumn int    `json:"start_column"`
+	EndLine     int    `json:"end_line"`
+	EndColumn   int    `json:"end_column"`
+	Source      string `json:"source"`
 }
 
 type ModuleSpec struct {
@@ -34,15 +46,28 @@ type OutputSpec struct {
 }
 
 type ToolSpec struct {
-	ID                   string   `json:"id"`
-	Address              string   `json:"address"`
-	Kind                 string   `json:"kind"`
-	Description          string   `json:"description"`
-	Source               string   `json:"source,omitempty"`
-	Program              []string `json:"program,omitempty"`
-	WorkingDir           string   `json:"working_dir,omitempty"`
-	InputTypeExpression  string   `json:"input_type_expression,omitempty"`
-	OutputTypeExpression string   `json:"output_type_expression,omitempty"`
+	ID                   string               `json:"id"`
+	Address              string               `json:"address"`
+	Kind                 string               `json:"kind"`
+	Description          string               `json:"description"`
+	Source               string               `json:"source,omitempty"`
+	Program              []string             `json:"program,omitempty"`
+	WorkingDir           string               `json:"working_dir,omitempty"`
+	InputTypeExpression  string               `json:"input_type_expression,omitempty"`
+	OutputTypeExpression string               `json:"output_type_expression,omitempty"`
+	Postconditions       []corespec.Condition `json:"postconditions,omitempty"`
+	Origin               Origin               `json:"origin,omitzero"`
+}
+
+type PreflightCheck struct {
+	CheckID string           `json:"check_id"`
+	Verdict string           `json:"verdict"`
+	Reason  string           `json:"reason"`
+	Issues  []corespec.Issue `json:"issues,omitempty"`
+}
+
+type PreflightReport struct {
+	Checks []PreflightCheck `json:"checks"`
 }
 
 type Plan struct {
@@ -53,6 +78,7 @@ type Plan struct {
 	context          map[string]cty.Value
 	localExpressions map[string]string
 	tools            map[string]ToolSpec
+	preflight        *PreflightReport
 }
 
 func NewWithContextAndLocals(
@@ -147,6 +173,27 @@ func (p *Plan) Tools() map[string]ToolSpec {
 	return cloneTools(p.tools)
 }
 
+func (p *Plan) SetPreflightReport(report PreflightReport) {
+	copyReport := report
+	copyReport.Checks = slices.Clone(report.Checks)
+	for index := range copyReport.Checks {
+		copyReport.Checks[index].Issues = slices.Clone(copyReport.Checks[index].Issues)
+	}
+	p.preflight = &copyReport
+}
+
+func (p *Plan) PreflightReport() *PreflightReport {
+	if p.preflight == nil {
+		return nil
+	}
+	copyReport := *p.preflight
+	copyReport.Checks = slices.Clone(p.preflight.Checks)
+	for index := range copyReport.Checks {
+		copyReport.Checks[index].Issues = slices.Clone(copyReport.Checks[index].Issues)
+	}
+	return &copyReport
+}
+
 func IsToolID(value string) bool {
 	return toolIDPattern.MatchString(value)
 }
@@ -231,7 +278,7 @@ func clonePlan(source *Plan) *Plan {
 	if source == nil {
 		return nil
 	}
-	return &Plan{
+	result := &Plan{
 		directory:        source.directory,
 		runDirectory:     source.runDirectory,
 		nodes:            cloneNodes(source.nodes),
@@ -240,12 +287,17 @@ func clonePlan(source *Plan) *Plan {
 		localExpressions: maps.Clone(source.localExpressions),
 		tools:            cloneTools(source.tools),
 	}
+	if source.preflight != nil {
+		result.SetPreflightReport(*source.preflight)
+	}
+	return result
 }
 
 func cloneTools(source map[string]ToolSpec) map[string]ToolSpec {
 	result := make(map[string]ToolSpec, len(source))
 	for id, tool := range source {
 		tool.Program = slices.Clone(tool.Program)
+		tool.Postconditions = slices.Clone(tool.Postconditions)
 		result[id] = tool
 	}
 	return result

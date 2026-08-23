@@ -10,6 +10,7 @@ import (
 
 	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"
+	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"
 )
 
@@ -48,6 +49,7 @@ type Config struct {
 	Retry                      provider.RetryOverride
 	Policy                     SessionPolicy
 	Artifacts                  []Artifact
+	ToolUses                   []ToolUse
 	QC                         *QCConfig
 	CollectionModelProvider    cty.Value
 	CollectionToolIDs          []string
@@ -57,6 +59,16 @@ type Config struct {
 	CollectionBatchSize        int
 	MaxCollectionRounds        *int
 	CollectionQC               *CollectionQCConfig
+}
+
+// ToolUse assigns typed-tool input fields to HCL or to the research agent.
+type ToolUse struct {
+	Name           string
+	ToolID         string
+	Terminate      bool
+	Input          cty.Value
+	InputFromAgent cty.Value
+	Validations    []corespec.Condition
 }
 
 func (c Config) ProfileName() string {
@@ -97,6 +109,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := validateOptionalToolID(c.TerminateToolID, "research terminate_tool_id"); err != nil {
+		return err
+	}
+	if err := validateToolUses(c.ToolUses); err != nil {
 		return err
 	}
 	if c.ReasoningEffort != nil && strings.TrimSpace(*c.ReasoningEffort) == "" {
@@ -141,6 +156,62 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validateToolUses(toolUses []ToolUse) error {
+	names := make(map[string]struct{}, len(toolUses))
+	tools := make(map[string]struct{}, len(toolUses))
+	terminateCount := 0
+	for _, toolUse := range toolUses {
+		if strings.TrimSpace(toolUse.Name) == "" {
+			return errors.New("tool_use name is required")
+		}
+		if _, exists := names[toolUse.Name]; exists {
+			return fmt.Errorf("tool_use %q is declared more than once", toolUse.Name)
+		}
+		names[toolUse.Name] = struct{}{}
+		if strings.TrimSpace(toolUse.ToolID) == "" {
+			return fmt.Errorf("tool_use %q tool_id is required", toolUse.Name)
+		}
+		if _, exists := tools[toolUse.ToolID]; exists {
+			return fmt.Errorf("typed tool %q is used more than once", toolUse.ToolID)
+		}
+		tools[toolUse.ToolID] = struct{}{}
+		input, err := toolUseObject(toolUse.Input, "input")
+		if err != nil {
+			return fmt.Errorf("tool_use %q: %w", toolUse.Name, err)
+		}
+		agent, err := toolUseObject(toolUse.InputFromAgent, "input_from_agent")
+		if err != nil {
+			return fmt.Errorf("tool_use %q: %w", toolUse.Name, err)
+		}
+		for field := range input.AsValueMap() {
+			if agent.Type().HasAttribute(field) {
+				return fmt.Errorf("tool_use %q input field %q has multiple owners", toolUse.Name, field)
+			}
+		}
+		if toolUse.Terminate {
+			terminateCount++
+		}
+	}
+	if terminateCount > 1 {
+		return errors.New("research must have at most one terminating tool_use")
+	}
+	return nil
+}
+
+func toolUseObject(value cty.Value, name string) (cty.Value, error) {
+	if value == cty.NilVal || value.Type().Equals(cty.NilType) || value.IsNull() {
+		return cty.EmptyObjectVal, nil
+	}
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.Type().IsObjectType() && !unmarked.Type().IsMapType() {
+		return cty.NilVal, fmt.Errorf("%s must be an object", name)
+	}
+	if unmarked.Type().IsMapType() {
+		return cty.ObjectVal(unmarked.AsValueMap()), nil
+	}
+	return unmarked, nil
 }
 
 type QCConfig struct {

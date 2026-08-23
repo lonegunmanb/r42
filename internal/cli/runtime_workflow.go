@@ -31,7 +31,7 @@ const (
 )
 
 const researchSnapshotProtocol = "Evidence protocol: snapshots cross research-block boundaries only by snapshot_id. " +
-	"Use r42_read_snapshot with an authorized snapshot_id to inspect source material. " +
+	"Use r42_read_snapshot with an authorized snapshot_id to inspect source material, and r42_search_snapshot to locate exact evidence text. " +
 	"Do not use snapshot paths as cross-block evidence references and do not read or copy snapshot files through the filesystem. " +
 	"Every citation carried into a downstream knowledge result must retain its snapshot_id."
 
@@ -108,6 +108,22 @@ func (f *runtimeFactory) newResearchBlock(
 	}()
 
 	executionAddress := f.CanonicalAddress(address)
+	artifactsRegistry := f.ensureArtifactRegistry()
+	artifactIDs := make(map[string]string, len(planned.Config.Artifacts))
+	currentArtifactIDs := make([]string, 0, len(planned.Config.Artifacts))
+	for _, declared := range planned.Config.Artifacts {
+		record, declareErr := artifactsRegistry.Declare(workspace, declared)
+		if declareErr != nil {
+			return nil, declareErr
+		}
+		artifactIDs[declared.Name] = record.ID
+		currentArtifactIDs = append(currentArtifactIDs, record.ID)
+	}
+	authorizedArtifactIDs := make([]string, 0, len(currentArtifactIDs)+len(artifactsRegistry.ReadyRecords()))
+	for _, record := range artifactsRegistry.ReadyRecords() {
+		authorizedArtifactIDs = append(authorizedArtifactIDs, record.ID)
+	}
+	authorizedArtifactIDs = append(authorizedArtifactIDs, currentArtifactIDs...)
 	var err error
 	researchPhaseRetry, err := researchRetry(planned.Provider, planned.Config.Retry)
 	if err != nil {
@@ -118,7 +134,9 @@ func (f *runtimeFactory) newResearchBlock(
 	if err != nil {
 		return nil, err
 	}
-	collectionContext := collection.NewContext(workspace, planned.Config.CollectionBatchSize, planned.Config.MaxCollectionRounds)
+	collectionContext := collection.NewContextWithArtifactRegistry(
+		workspace, planned.Config.CollectionBatchSize, planned.Config.MaxCollectionRounds, artifactsRegistry,
+	)
 	if err = collectionContext.BeginWorkflow(); err != nil {
 		return nil, err
 	}
@@ -172,7 +190,10 @@ func (f *runtimeFactory) newResearchBlock(
 	if err != nil {
 		return cleanupSetup(err)
 	}
-	collectionQCReadTools, err := evidenceTools(collectionContext.Registry, workspace, planned.Config.Artifacts, false)
+	collectionQCReadTools, err := evidenceToolsWithArtifactRegistry(
+		collectionContext.Registry, workspace, planned.Config.Artifacts, false,
+		artifactsRegistry, authorizedArtifactIDs,
+	)
 	if err != nil {
 		return cleanupSetup(err)
 	}
@@ -200,17 +221,23 @@ func (f *runtimeFactory) newResearchBlock(
 	if err != nil {
 		return cleanupSetup(err)
 	}
+	researchTools, err = applyToolUseBindings(researchTools, planned.Config.ToolUses)
+	if err != nil {
+		return cleanupSetup(err)
+	}
 	upstreamText := planned.Config.SystemPrompt
 	if planned.Config.Prompt != nil {
 		upstreamText += "\n" + *planned.Config.Prompt
 	}
 	upstream := f.snapshotCatalog.authorized(upstreamText)
-	readWriteTools, snapshotAccess, err := evidenceToolsWithUpstream(
+	readWriteTools, snapshotAccess, err := evidenceToolsWithUpstreamAndArtifacts(
 		collectionContext.Registry,
 		upstream,
 		workspace,
 		planned.Config.Artifacts,
 		true,
+		artifactsRegistry,
+		authorizedArtifactIDs,
 	)
 	if err != nil {
 		return cleanupSetup(err)
@@ -287,7 +314,7 @@ func (f *runtimeFactory) newResearchBlock(
 		Research: researchruntime.Config{
 			InitialPrompt: initialPrompt, TerminateToolName: terminateName,
 			MaxProtocolAttempts: planned.Config.MaxProtocolAttempts,
-			Workspace:           workspace, Artifacts: planned.Config.Artifacts,
+			Workspace:           workspace, Artifacts: planned.Config.Artifacts, ArtifactIDs: artifactIDs,
 		},
 		Observe: func(event coordinator.Event) {
 			_ = f.recorder.Record(debuglog.Event{
@@ -315,12 +342,14 @@ func (f *runtimeFactory) newResearchBlock(
 		if toolsErr != nil {
 			return cleanupSetup(toolsErr)
 		}
-		finalEvidenceTools, _, toolsErr := evidenceToolsWithUpstream(
+		finalEvidenceTools, _, toolsErr := evidenceToolsWithUpstreamAndArtifacts(
 			collectionContext.Registry,
 			upstream,
 			workspace,
 			planned.Config.Artifacts,
 			false,
+			artifactsRegistry,
+			authorizedArtifactIDs,
 		)
 		if toolsErr != nil {
 			return cleanupSetup(toolsErr)
@@ -365,8 +394,18 @@ func (f *runtimeFactory) newResearchBlock(
 	block := &researchApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: address,
 		config: workflowConfig.Research, publish: publish, cancel: blockCancel, workflowSessions: opened,
+		artifactRegistry: artifactsRegistry,
 		workflowRun: func(runContext context.Context) (researchruntime.Result, error) {
-			return workflowRunner.Run(runContext, workflowConfig)
+			result, runErr := workflowRunner.Run(runContext, workflowConfig)
+			if runErr != nil {
+				return researchruntime.Result{}, runErr
+			}
+			for _, item := range collectionContext.Registry.ReviewedSnapshots() {
+				result.Snapshots = append(result.Snapshots, researchspec.Snapshot{
+					ID: item.ID, Path: item.Path, Description: item.Description,
+				})
+			}
+			return result, nil
 		},
 		afterSuccess: func() {
 			f.snapshotCatalog.add(collectionContext.Registry.Snapshots())

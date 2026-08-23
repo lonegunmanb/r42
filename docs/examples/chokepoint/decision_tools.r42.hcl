@@ -1,5 +1,5 @@
 go_tool "submit_claim_cards" {
-  description = "Submit one through five atomic fact cards. `cards.status` allowed values: `confirmed`, `reported`, `inferred`. `confirmed` requires a direct authoritative primary source; `reported` requires a retained published source; `inferred` requires premise claim IDs and no direct quotation. Unknowns are gaps, not claim cards. All validation errors are returned together."
+  description = "Submit up to five atomic fact cards and optionally remove staged cards by ID. `cards.status` allowed values: `confirmed`, `reported`, `inferred`. `confirmed` requires a direct authoritative primary source; `reported` requires a retained published source; `inferred` requires premise claim IDs and no direct quotation. `remove_claim_ids` is idempotent: missing IDs are ignored. Unknowns are gaps, not claim cards. All validation errors are returned together."
 
   source = <<-GO
     import (
@@ -38,10 +38,12 @@ go_tool "submit_claim_cards" {
       WorkspaceDir string `json:"workspace_dir"`
       ClaimsPath string `json:"claims_path"`
       Cards []Card `json:"cards"`
+      RemoveClaimIDs []string `json:"remove_claim_ids"`
     }
     type Output struct {
       ClaimIDs []string `json:"claim_ids"`
       Staged int `json:"staged"`
+      Removed int `json:"removed"`
     }
 
     var cardID = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,127}$`)
@@ -52,8 +54,8 @@ go_tool "submit_claim_cards" {
       workspace, issues := cardWorkspace(input.WorkspaceDir, cwd)
       claimsPath, pathIssues := cardArtifactPath(input.ClaimsPath, workspace, "claims.json")
       issues = append(issues, pathIssues...)
-      if len(input.Cards) == 0 || len(input.Cards) > 5 {
-        issues = append(issues, cardIssue("batch_size", "cards", "cards must contain from one through five items"))
+      if len(input.Cards) == 0 && len(input.RemoveClaimIDs) == 0 || len(input.Cards) > 5 {
+        issues = append(issues, cardIssue("batch_size", "cards", "cards must contain from one through five items unless remove_claim_ids is provided"))
       }
       sources, err := cardSources(filepath.Join(workspace, ".evidence-draft", "sources"))
       if err != nil { return ToolResponse[Output]{}, fmt.Errorf("load source registry draft: %w", err) }
@@ -100,12 +102,22 @@ go_tool "submit_claim_cards" {
       }
       if workspace == "" || claimsPath == "" || len(issues) > 0 { return ToolResponse[Output]{Accepted:false, Issues:issues}, nil }
       directory := filepath.Join(workspace, ".decision-draft", "claims")
+      removed := 0
+      for _, rawID := range input.RemoveClaimIDs {
+        id := strings.TrimSpace(rawID)
+        if id == "" || !cardID.MatchString(id) { continue }
+        path := filepath.Join(directory, id+".json")
+        if _, statErr := os.Stat(path); statErr == nil {
+          if err = os.Remove(path); err != nil { return ToolResponse[Output]{}, fmt.Errorf("remove staged claim %q: %w", id, err) }
+          removed++
+        } else if !os.IsNotExist(statErr) { return ToolResponse[Output]{}, fmt.Errorf("inspect staged claim %q: %w", id, statErr) }
+      }
       ids := make([]string, 0, len(input.Cards))
       for _, card := range input.Cards {
         if err = cardWriteJSON(filepath.Join(directory, card.ID+".json"), card); err != nil { return ToolResponse[Output]{}, fmt.Errorf("stage claim card: %w", err) }
         ids = append(ids, card.ID)
       }
-      output := Output{ClaimIDs:ids, Staged:len(ids)}
+      output := Output{ClaimIDs:ids, Staged:len(ids), Removed:removed}
       return ToolResponse[Output]{Accepted:true, Output:&output}, nil
     }
 
@@ -134,7 +146,7 @@ go_tool "submit_claim_cards" {
 }
 
 go_tool "finalize_claim_cards" {
-  description = "Finalize staged atomic claim cards and the hidden source registry. Quote-to-snapshot and URL-to-snapshot matching are enforced when direct evidence is submitted; this tool validates duplicates, source references, dates, inference references, and cycles, and returns every problem together."
+  description = "Finalize the current staged atomic claim-card set and hidden source registry. Exact duplicate cards are automatically collapsed; different claims may share the same source, snapshot, and quote. Quote-to-snapshot matching, source references, dates, inference references, and cycles are validated and all problems are returned together. On success it writes claims.json and source-registry.json and returns only their paths and record counts; do not call it again to inspect or retrieve document content."
 
   source = <<-GO
     import (
@@ -166,17 +178,15 @@ go_tool "finalize_claim_cards" {
       if len(cards) == 0 && !input.AllowEmpty { issues = append(issues, finalCardIssue("claims", "claims", "submit at least one claim card")) }
       sourceByID := map[string]Source{}; usedSources := map[string]struct{}{}
       for _, source := range sources { sourceByID[source.ID] = source; published, parseErr := time.Parse("2006-01-02", strings.TrimSpace(source.PublicationDate)); if parseErr != nil { issues = append(issues, finalCardIssue("date", source.ID+".publication_date", "publication_date must use YYYY-MM-DD")) } else if dateErr == nil && published.After(cutoff) { issues = append(issues, finalCardIssue("source_after_as_of_date", source.ID, "source publication_date is later than as_of_date")) } }
-      cardByID := map[string]*Card{}; statementOwner := map[string]string{}; evidenceOwner := map[string]string{}
+      uniqueCards := make([]Card, 0, len(cards)); duplicateKeys := map[string]string{}; duplicateAliases := map[string]string{}
+      for _, card := range cards { key := finalCardDuplicateKey(card); if retainedID, exists := duplicateKeys[key]; exists { if strings.TrimSpace(card.ID) != "" && card.ID != retainedID { duplicateAliases[card.ID] = retainedID }; continue }; duplicateKeys[key] = card.ID; uniqueCards = append(uniqueCards, card) }
+      for index := range uniqueCards { for premiseIndex, premise := range uniqueCards[index].DerivedFrom { if retainedID, exists := duplicateAliases[premise]; exists { uniqueCards[index].DerivedFrom[premiseIndex] = retainedID } } }
+      cards = uniqueCards
+      cardByID := map[string]*Card{}
       for index := range cards {
         card := &cards[index]
         if _, exists := cardByID[card.ID]; exists { issues = append(issues, finalCardIssue("claim_id", card.ID, "claim IDs must be globally unique")) }
         cardByID[card.ID] = card
-        statementKey := strings.Join(strings.Fields(card.Statement), " ")
-        if owner, exists := statementOwner[statementKey]; statementKey != "" && exists { issues = append(issues, finalCardIssue("duplicate_claim", card.ID, "claim duplicates the normalized statement of "+owner)) } else if statementKey != "" { statementOwner[statementKey] = card.ID }
-        if card.Status != "inferred" {
-          evidenceKey := strings.TrimSpace(card.SourceID)+"\x00"+strings.TrimSpace(card.SnapshotID)+"\x00"+strings.Join(strings.Fields(card.ExactQuote), " ")
-          if owner, exists := evidenceOwner[evidenceKey]; strings.TrimSpace(card.ExactQuote) != "" && exists { issues = append(issues, finalCardIssue("duplicate_claim", card.ID, "direct claim reuses the same source, snapshot, and exact quote as "+owner+"; use the narrow quote for each distinct atomic fact")) } else if strings.TrimSpace(card.ExactQuote) != "" { evidenceOwner[evidenceKey] = card.ID }
-        }
       }
       for index := range cards {
         card := &cards[index]
@@ -196,9 +206,12 @@ go_tool "finalize_claim_cards" {
       registry := Registry{AsOfDate:strings.TrimSpace(input.AsOfDate), Sources:retained}
       if err = finalCardWriteJSON(claimsPath, claims); err != nil { return ToolResponse[Output]{}, fmt.Errorf("write claims: %w", err) }
       if err = finalCardWriteJSON(registryPath, registry); err != nil { return ToolResponse[Output]{}, fmt.Errorf("write source registry: %w", err) }
-      result, err := json.Marshal(map[string]any{"claims_path":claimsPath,"source_registry_path":registryPath,"claims":claims}); if err != nil { return ToolResponse[Output]{}, err }; output := Output(result)
+      summary, err := json.Marshal(map[string]any{"claims_path":claimsPath,"source_registry_path":registryPath,"claim_count":len(cards),"source_count":len(retained)})
+      if err != nil { return ToolResponse[Output]{}, fmt.Errorf("encode finalize summary: %w", err) }
+      output := Output(summary)
       return ToolResponse[Output]{Accepted:true, Output:&output}, nil
     }
+    func finalCardDuplicateKey(card Card) string { payload, _ := json.Marshal(struct { Statement, Status, Scope, AsOf, SourceID, SnapshotID, SourceURL, ExactQuote, Locator string; DerivedFrom []string }{strings.Join(strings.Fields(card.Statement), " "), strings.TrimSpace(card.Status), strings.Join(strings.Fields(card.Scope), " "), strings.TrimSpace(card.AsOf), strings.TrimSpace(card.SourceID), strings.TrimSpace(card.SnapshotID), strings.Join(strings.Fields(card.SourceURL), " "), strings.Join(strings.Fields(card.ExactQuote), " "), strings.Join(strings.Fields(card.Locator), " "), card.DerivedFrom}); return string(payload) }
     func finalCardRecords[T any](directory string) ([]T,error) { paths,err:=filepath.Glob(filepath.Join(directory,"*.json")); if err!=nil{return nil,err}; sort.Strings(paths); result:=make([]T,0,len(paths)); for _,path:=range paths { var item T; payload,readErr:=os.ReadFile(path); if readErr!=nil{return nil,readErr}; if readErr=json.Unmarshal(bytes.TrimPrefix(payload,[]byte{0xef,0xbb,0xbf}),&item);readErr!=nil{return nil,readErr}; result=append(result,item) }; return result,nil }
     func finalCardWorkspace(raw,cwd string)(string,[]Issue){path,err:=filepath.Abs(filepath.Clean(strings.TrimSpace(raw)));root:=finalCardBlocksRoot(cwd);if err!=nil||!filepath.IsAbs(raw)||root==""||!finalCardWithin(path,root){return "",[]Issue{finalCardIssue("workspace_dir","workspace_dir","workspace_dir must be an absolute directory inside the current run's blocks directory")}};return path,nil}
     func finalCardPath(raw,workspace,name,field string)(string,[]Issue){path,err:=filepath.Abs(filepath.Clean(strings.TrimSpace(raw)));if workspace==""||err!=nil||!filepath.IsAbs(raw)||filepath.Base(path)!=name||!finalCardWithin(path,workspace){return "",[]Issue{finalCardIssue("invalid_path",field,field+" must end in "+name+" under workspace_dir")}};return path,nil}

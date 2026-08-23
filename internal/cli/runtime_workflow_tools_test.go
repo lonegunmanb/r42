@@ -6,19 +6,23 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
 	sdk "github.com/github/copilot-sdk/go"
+	artifactpkg "github.com/lonegunmanb/r42/internal/artifact"
 	"github.com/lonegunmanb/r42/internal/collection"
 	"github.com/lonegunmanb/r42/internal/collectionqc"
 	"github.com/lonegunmanb/r42/internal/evidence"
 	researchruntime "github.com/lonegunmanb/r42/internal/research/runtime"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	"github.com/lonegunmanb/r42/internal/snapshot"
+	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/zclconf/go-cty/cty"
 )
 
 func TestClosedWorldDisallowedToolsIncludesAcquisitionAndArbitraryIO(t *testing.T) {
@@ -148,12 +152,20 @@ func TestCollectionProtocolToolsSaveSnapshotWithRequiredSource(t *testing.T) {
 	assert.ElementsMatch(t, []string{"snapshot_path", "content", "source"}, protocol[2].Parameters["required"])
 	assert.Contains(t, protocol[2].Description, "Do not call r42_register_snapshot")
 	assert.Contains(t, protocol[2].Description, "snapshot_id")
+	registerProperties, ok := protocol[0].Parameters["properties"].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, registerProperties, "description")
+	saveProperties, ok := protocol[2].Parameters["properties"].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, saveProperties, "description")
+	require.NotContains(t, protocol[2].Parameters["required"], "description")
 
 	path := filepath.Join(workspace, "snapshots", "source.md")
 	result, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
 		"snapshot_path": path,
 		"content":       "\n# Evidence\n\nCollected material.\n",
 		"source":        "local-record:42",
+		"description":   "Database record used for the baseline",
 	}})
 
 	require.NoError(t, err)
@@ -175,6 +187,312 @@ func TestCollectionProtocolToolsSaveSnapshotWithRequiredSource(t *testing.T) {
 	checkpoint, err := protocol[1].Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
 	require.NoError(t, err)
 	assert.Contains(t, checkpoint.TextResultForLLM, response.Output.SnapshotID)
+	require.Len(t, context.Registry.Snapshots(), 1)
+	assert.Equal(t, "Database record used for the baseline", context.Registry.Snapshots()[0].Description)
+}
+
+func TestEvidenceToolsExposeSnapshotPagingAndSearch(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := snapshot.NewRegistry(workspace)
+	path := filepath.Join(workspace, "source.md")
+	require.NoError(t, os.WriteFile(path, []byte("- Source: local-record:42\n\none\ntarget phrase\nthree\n"), 0o600))
+	registration, err := registry.RegisterPath(path)
+	require.NoError(t, err)
+	tools, err := evidenceTools(registry, workspace, nil, false)
+	require.NoError(t, err)
+
+	read := toolByName(t, tools, "r42_read_snapshot")
+	properties, ok := read.Parameters["properties"].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, properties, "offset_bytes")
+	search := toolByName(t, tools, "r42_search_snapshot")
+	searchProperties, ok := search.Parameters["properties"].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, searchProperties, "pattern")
+	assert.Contains(t, searchProperties, "context_lines")
+
+	page, err := read.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"id": registration.ID, "max_bytes": 5, "offset_bytes": 4,
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, page.TextResultForLLM, `"offset_bytes":4`)
+	assert.Contains(t, page.TextResultForLLM, `"next_offset_bytes":9`)
+
+	result, err := search.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"snapshot_id": registration.ID, "pattern": "target\\s+phrase", "max_matches": 5,
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"matched_text":"target phrase"`)
+}
+
+func TestEvidenceToolsExposeArtifactPaging(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := snapshot.NewRegistry(workspace)
+	artifactPath := filepath.Join(workspace, "claims.json")
+	require.NoError(t, os.WriteFile(artifactPath, []byte("0123456789"), 0o600))
+	artifacts := []researchspec.Artifact{{
+		Name: "claims", Type: researchspec.ArtifactTypeFile, Path: "claims.json", Description: "Claims fixture",
+	}}
+	runArtifacts := artifactpkg.NewRegistry()
+	record, err := runArtifacts.Declare(workspace, artifacts[0])
+	require.NoError(t, err)
+	tools, err := evidenceToolsWithArtifactRegistry(registry, workspace, artifacts, false, runArtifacts, []string{record.ID})
+	require.NoError(t, err)
+
+	read := toolByName(t, tools, "r42_read_artifact")
+	properties, ok := read.Parameters["properties"].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, properties, "offset_bytes")
+	assert.Contains(t, properties, "id")
+	assert.NotContains(t, properties, "name")
+	require.NotContains(t, read.Parameters["required"], "offset_bytes")
+
+	result, err := read.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"id": record.ID, "max_bytes": 3, "offset_bytes": 4,
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"content":"456"`)
+	assert.Contains(t, result.TextResultForLLM, `"next_offset_bytes":7`)
+
+	firstPage, err := read.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"id": record.ID, "max_bytes": 3,
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, firstPage.TextResultForLLM, `"content":"012"`)
+	assert.Contains(t, firstPage.TextResultForLLM, `"offset_bytes":0`)
+}
+
+func TestApplyToolUseBindingsInjectsHCLInputAndRestrictsModelSchema(t *testing.T) {
+	t.Parallel()
+
+	var received map[string]any
+	tools := []sdk.Tool{{
+		Name: "tool_finish",
+		Parameters: objectSchema(map[string]any{
+			"Workspace": map[string]any{"type": "string"},
+			"Claims":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"Note":      map[string]any{"type": "string"},
+		}, []string{"Workspace", "Claims"}),
+		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			received, _ = invocation.Arguments.(map[string]any)
+			return acceptedToolResult("done")
+		},
+	}}
+	bound, err := applyToolUseBindings(tools, []researchspec.ToolUse{{
+		Name: "finish", ToolID: "tool_finish", Terminate: true,
+		Input: cty.ObjectVal(map[string]cty.Value{"Workspace": cty.StringVal("D:/run/task")}),
+		InputFromAgent: cty.ObjectVal(map[string]cty.Value{
+			"Claims": cty.TupleVal([]cty.Value{cty.ObjectVal(map[string]cty.Value{
+				"id": cty.StringVal("artifact-1"), "path": cty.StringVal("claims.json"),
+				"description": cty.StringVal("Validated claims"),
+			})}),
+		}),
+	}})
+	require.NoError(t, err)
+	require.Len(t, bound, 1)
+	properties, ok := bound[0].Parameters["properties"].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, properties, "Workspace")
+	assert.Contains(t, properties, "Claims")
+	claimsProperties, ok := properties["Claims"].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, claimsProperties["description"], "Validated claims")
+	assert.ElementsMatch(t, []string{"Claims"}, bound[0].Parameters["required"])
+
+	_, err = bound[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"Claims": []any{"C-1"}, "Note": "optional",
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, "D:/run/task", received["Workspace"])
+	assert.Equal(t, []any{"C-1"}, received["Claims"])
+}
+
+func TestApplyToolUseBindingsRejectsValidationFailureBeforeHandler(t *testing.T) {
+	t.Parallel()
+
+	called := false
+	tools := []sdk.Tool{{
+		Name: "tool_finish",
+		Parameters: objectSchema(map[string]any{
+			"Claims": map[string]any{"type": "array"},
+		}, []string{"Claims"}),
+		Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
+			called = true
+			return acceptedToolResult("done")
+		},
+	}}
+	bound, err := applyToolUseBindings(tools, []researchspec.ToolUse{{
+		Name: "finish", ToolID: "tool_finish",
+		InputFromAgent: cty.ObjectVal(map[string]cty.Value{
+			"Claims": cty.EmptyTupleVal,
+		}),
+		Validations: []corespec.Condition{{
+			Expression: "input.Claims == null", ErrorMessage: "claims are required",
+		}},
+	}})
+	require.NoError(t, err)
+	_, err = bound[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{"Claims": []any{}}})
+	require.ErrorContains(t, err, "claims are required")
+	assert.False(t, called)
+}
+
+func TestEvaluateToolPostconditionsUsesTypedInputAndOutput(t *testing.T) {
+	t.Parallel()
+
+	condition := corespec.Condition{
+		Expression:   "input.name != \"\" && output.saved",
+		ErrorMessage: "tool output was not saved",
+	}
+	err := evaluateToolPostconditions(
+		cty.ObjectVal(map[string]cty.Value{"name": cty.StringVal("claim")}),
+		cty.ObjectVal(map[string]cty.Value{"saved": cty.BoolVal(false)}),
+		[]corespec.Condition{condition},
+	)
+	assert.ErrorContains(t, err, "tool output was not saved")
+}
+
+func TestReadArtifactDiscoversSnapshotApprovedAfterToolCreation(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	snapshots := snapshot.NewRegistry(workspace)
+	artifacts := artifactpkg.NewRegistry()
+	tools, err := evidenceToolsWithArtifactRegistry(
+		snapshots, workspace, nil, false, artifacts, nil,
+	)
+	require.NoError(t, err)
+
+	path := filepath.Join(workspace, "source.md")
+	require.NoError(t, os.WriteFile(path, []byte("approved source"), 0o600))
+	registered, err := snapshots.RegisterPathWithMetadata(path, "", "Approved source")
+	require.NoError(t, err)
+	_, err = artifacts.RegisterSnapshot(workspace, registered.ID, registered.Path, registered.Description)
+	require.NoError(t, err)
+	snapshots.MarkReviewed(registered.ID)
+	require.NoError(t, artifacts.MarkReady(registered.ID))
+
+	listed, err := toolByName(t, tools, "r42_list_artifacts").Handler(sdk.ToolInvocation{})
+	require.NoError(t, err)
+	assert.Contains(t, listed.TextResultForLLM, registered.ID)
+
+	read, err := toolByName(t, tools, "r42_read_artifact").Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"id": registered.ID, "max_bytes": 100,
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, read.TextResultForLLM, "approved source")
+}
+
+func TestSnapshotQuoteValidationIdentifiesClaimAndField(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := snapshot.NewRegistry(workspace)
+	path := filepath.Join(workspace, "source.md")
+	require.NoError(t, os.WriteFile(path, []byte("actual evidence\n"), 0o600))
+	registration, err := registry.RegisterPath(path)
+	require.NoError(t, err)
+	access, err := evidence.NewSnapshotAccessWithRegistry(registry)
+	require.NoError(t, err)
+	invalid, err := invalidSnapshotQuotes(map[string]any{
+		"cards": []any{map[string]any{
+			"id": "C-007", "snapshot_id": registration.ID, "exact_quote": "missing evidence",
+		}},
+	}, access)
+	require.NoError(t, err)
+	require.Len(t, invalid, 1)
+	assert.Contains(t, invalid[0], "claim_id=C-007")
+	assert.Contains(t, invalid[0], "snapshot_id="+registration.ID)
+	assert.Contains(t, invalid[0], "field=cards[0].exact_quote")
+	assert.Contains(t, invalid[0], `nearby_text="actual evidence"`)
+}
+
+func TestSnapshotQuoteValidationNearbyText(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		content           string
+		quote             string
+		container         string
+		recordID          string
+		expectedReference string
+		expectedNearby    string
+		expectsNearby     bool
+	}{
+		{
+			name: "three word phrase for claim", content: "prefix alpha beta gamma source suffix",
+			quote: "alpha beta gamma altered", container: "cards", recordID: "C-001",
+			expectedReference: "claim_id=C-001", expectedNearby: "alpha beta gamma", expectsNearby: true,
+		},
+		{
+			name: "single word fallback for quote", content: "prefix distinctive source suffix",
+			quote: "distinctive missing words", container: "quotes", recordID: "Q-001",
+			expectedReference: "quote_id=Q-001", expectedNearby: "distinctive", expectsNearby: true,
+		},
+		{
+			name: "nearby text is bounded", content: strings.Repeat("context ", 100) + "distinctive source suffix",
+			quote: "distinctive missing words", container: "cards", recordID: "C-003",
+			expectedReference: "claim_id=C-003", expectedNearby: "distinctive", expectsNearby: true,
+		},
+		{
+			name: "no nearby candidate", content: "actual evidence",
+			quote: "completely absent terms", container: "cards", recordID: "C-002",
+			expectedReference: "claim_id=C-002", expectsNearby: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			workspace := t.TempDir()
+			registry := snapshot.NewRegistry(workspace)
+			path := filepath.Join(workspace, "source.md")
+			require.NoError(t, os.WriteFile(path, []byte(tt.content), 0o600))
+			registration, err := registry.RegisterPath(path)
+			require.NoError(t, err)
+			access, err := evidence.NewSnapshotAccessWithRegistry(registry)
+			require.NoError(t, err)
+			invalid, err := invalidSnapshotQuotes(map[string]any{
+				tt.container: []any{map[string]any{
+					"id": tt.recordID, "snapshot_id": registration.ID, "exact_quote": tt.quote,
+				}},
+			}, access)
+			require.NoError(t, err)
+			require.Len(t, invalid, 1)
+			assert.Contains(t, invalid[0], tt.expectedReference)
+			assert.Contains(t, invalid[0], "field="+tt.container+"[0].exact_quote")
+			if tt.expectsNearby {
+				assert.Contains(t, invalid[0], tt.expectedNearby)
+				assert.Contains(t, invalid[0], "nearby_text=")
+				assert.LessOrEqual(t, len([]rune(nearbyTextFromFailure(t, invalid[0]))), 300)
+			} else {
+				assert.NotContains(t, invalid[0], "nearby_text=")
+			}
+		})
+	}
+}
+
+func toolByName(t *testing.T, tools []sdk.Tool, name string) sdk.Tool {
+	t.Helper()
+	for _, tool := range tools {
+		if tool.Name == name {
+			return tool
+		}
+	}
+	require.FailNow(t, "tool not found", name)
+	return sdk.Tool{}
+}
+
+func nearbyTextFromFailure(t *testing.T, failure string) string {
+	t.Helper()
+	_, encoded, found := strings.Cut(failure, "nearby_text=")
+	require.True(t, found)
+	value, err := strconv.Unquote(encoded)
+	require.NoError(t, err)
+	return value
 }
 
 func TestCollectionProtocolToolsRejectSnapshotWithoutSource(t *testing.T) {
@@ -366,17 +684,20 @@ func TestEvidenceToolsExposeIDsAndDeclaredArtifactNamesOnly(t *testing.T) {
 	artifacts := []researchspec.Artifact{
 		{
 			Name: "report", Type: researchspec.ArtifactTypeFile, Path: "report.md",
-			Required: true, NonEmpty: true,
+			Description: "Report fixture", Required: true, NonEmpty: true,
 		},
 		{
 			Name: "evidence", Type: researchspec.ArtifactTypeDirectory, Path: "evidence",
+			Description: "Evidence fixture",
 		},
 	}
 	tools, err := evidenceTools(context.Registry, workspace, artifacts, true)
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{
-		"r42_list_snapshots", "r42_read_snapshot", "r42_list_artifacts", "r42_read_artifact", "r42_write_markdown",
+		"r42_list_snapshots", "r42_read_snapshot", "r42_search_snapshot", "r42_list_artifacts", "r42_read_artifact",
+		"r42_read_artifact_json_schema", "r42_query_artifact_json",
+		"r42_write_markdown",
 	}, toolNames(tools))
 	read, err := tools[1].Handler(sdk.ToolInvocation{Arguments: map[string]any{"id": registered.Output.ID, "max_bytes": float64(100)}})
 	require.NoError(t, err)
@@ -391,20 +712,51 @@ func TestEvidenceToolsExposeIDsAndDeclaredArtifactNamesOnly(t *testing.T) {
 	assert.True(t, readResponse.Accepted)
 	assert.Equal(t, "- Source: local-record:42\n\nevidence", readResponse.Output.Content)
 	assert.Equal(t, "local-record:42", readResponse.Output.Source)
-	listed, err := tools[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+	listed, err := tools[3].Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
 	require.NoError(t, err)
-	assert.JSONEq(t, `{
-		"accepted": true,
-		"output": [
-			{"name":"report","type":"file","path":"report.md","required":true,"non_empty":true},
-			{"name":"evidence","type":"directory","path":"evidence","required":false,"non_empty":false}
-		]
-	}`, listed.TextResultForLLM)
-	assert.Contains(t, tools[3].Description, "r42_list_artifacts")
-	assert.Contains(t, tools[3].Description, "name")
-	write, err := tools[4].Handler(sdk.ToolInvocation{Arguments: map[string]any{"name": "unknown", "content": "# no"}})
+	var listedResponse struct {
+		Accepted bool                 `json:"accepted"`
+		Output   []artifactpkg.Record `json:"output"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(listed.TextResultForLLM), &listedResponse))
+	assert.True(t, listedResponse.Accepted)
+	require.Len(t, listedResponse.Output, 2)
+	assert.Regexp(t, `^artifact-[0-9a-f-]{36}$`, listedResponse.Output[0].ID)
+	assert.Equal(t, "report", listedResponse.Output[0].Name)
+	assert.Equal(t, "Report fixture", listedResponse.Output[0].Description)
+	assert.Equal(t, filepath.Join(workspace, "report.md"), listedResponse.Output[0].Path)
+	assert.Contains(t, tools[4].Description, "r42_list_artifacts")
+	assert.Contains(t, tools[4].Description, "ID")
+	writeTool := toolByName(t, tools, "r42_write_markdown")
+	write, err := writeTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"name": "unknown", "content": "# no"}})
 	require.NoError(t, err)
 	assert.Contains(t, write.TextResultForLLM, `"accepted":false`)
+}
+
+func TestJSONArtifactToolsReturnSchemaAndJQProjection(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	snapshots := snapshot.NewRegistry(workspace)
+	registry := artifactpkg.NewRegistry()
+	record, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "claims", Type: researchspec.ArtifactTypeFile, Path: "claims.json", Description: "Claims",
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(record.Path, []byte(`{"claims":[{"id":"C-1","text":"one"}]}`), 0o600))
+	tools, err := evidenceToolsWithArtifactRegistry(snapshots, workspace, nil, false, registry, []string{record.ID})
+	require.NoError(t, err)
+	schemaTool := toolByName(t, tools, "r42_read_artifact_json_schema")
+	schema, err := schemaTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"id": record.ID}})
+	require.NoError(t, err)
+	assert.Contains(t, schema.TextResultForLLM, `"claims"`)
+
+	queryTool := toolByName(t, tools, "r42_query_artifact_json")
+	projection, err := queryTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"id": record.ID, "query": ".claims[0].id",
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, projection.TextResultForLLM, `"C-1"`)
 }
 
 func TestResearchSnapshotProtocolUsesIDsInsteadOfPaths(t *testing.T) {
@@ -414,6 +766,7 @@ func TestResearchSnapshotProtocolUsesIDsInsteadOfPaths(t *testing.T) {
 
 	assert.Contains(t, prompt, "snapshot_id")
 	assert.Contains(t, prompt, "r42_read_snapshot")
+	assert.Contains(t, prompt, "r42_search_snapshot")
 	assert.Contains(t, prompt, "Do not use snapshot paths as cross-block evidence references")
 	assert.True(t, strings.HasSuffix(prompt, "Configured instructions."))
 }
@@ -428,6 +781,7 @@ func TestResearchEvidenceToolsDoNotExposeSnapshotListing(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, toolNames(tools), "r42_list_snapshots")
 	assert.Contains(t, toolNames(tools), "r42_read_snapshot")
+	assert.Contains(t, toolNames(tools), "r42_search_snapshot")
 }
 
 func TestResearchTypedToolsRejectUnknownSnapshotIDs(t *testing.T) {

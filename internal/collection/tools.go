@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	artifactpkg "github.com/lonegunmanb/r42/internal/artifact"
 	"github.com/lonegunmanb/r42/internal/snapshot"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/lonegunmanb/r42/internal/workflow"
@@ -20,6 +21,7 @@ type Context struct {
 	Workspace string
 	State     *workflow.State
 	Registry  *snapshot.Registry
+	Artifacts *artifactpkg.Registry
 	batchSize int
 
 	mu           sync.Mutex
@@ -29,6 +31,16 @@ type Context struct {
 // NewContext creates a Collection protocol context with default batch size 10
 // and unlimited collection rounds.
 func NewContext(workspace string, batchSize int, maxCollectionRounds *int) *Context {
+	return NewContextWithArtifactRegistry(workspace, batchSize, maxCollectionRounds, nil)
+}
+
+// NewContextWithArtifactRegistry shares snapshot metadata with the run artifact registry.
+func NewContextWithArtifactRegistry(
+	workspace string,
+	batchSize int,
+	maxCollectionRounds *int,
+	artifacts *artifactpkg.Registry,
+) *Context {
 	if batchSize == 0 {
 		batchSize = workflow.DefaultBatchSize
 	}
@@ -36,9 +48,19 @@ func NewContext(workspace string, batchSize int, maxCollectionRounds *int) *Cont
 		Workspace:    workspace,
 		State:        workflow.New(workflow.Config{MaxCollectionRounds: maxCollectionRounds, BatchSize: batchSize}),
 		Registry:     snapshot.NewRegistry(workspace),
+		Artifacts:    artifacts,
 		batchSize:    batchSize,
 		checkpointed: make(map[string]struct{}),
 	}
+}
+
+// MarkSnapshotReviewed publishes one mechanically valid, Collection-QC-reviewed snapshot.
+func (c *Context) MarkSnapshotReviewed(id string) error {
+	c.Registry.MarkReviewed(id)
+	if c.Artifacts == nil {
+		return nil
+	}
+	return c.Artifacts.MarkReady(id)
 }
 
 // Validate verifies the context configuration without mutating workflow
@@ -85,12 +107,14 @@ type RegisterArgs struct {
 	Path             string `json:"path"`
 	SourceToolCallID string `json:"source_tool_call_id"`
 	Source           string `json:"source"`
+	Description      string `json:"description"`
 }
 
 // RegistrationOutput is the model-facing output of a successful registration.
 type RegistrationOutput struct {
-	ID   string `json:"id"`
-	Path string `json:"path"`
+	ID          string `json:"id"`
+	Path        string `json:"path"`
+	Description string `json:"description"`
 }
 
 // RegisterHandler owns the mandatory snapshot registration tool.
@@ -126,19 +150,30 @@ func (h *RegisterHandler) Register(args RegisterArgs) corespec.ToolResponse[Regi
 	var registration snapshot.Registration
 	var err error
 	if hasPath {
-		registration, err = h.context.Registry.RegisterPathWithSource(args.Path, args.Source)
+		registration, err = h.context.Registry.RegisterPathWithMetadata(args.Path, args.Source, args.Description)
 	} else {
-		registration, err = h.context.Registry.RegisterToolResultWithSource(args.SourceToolCallID, args.Source)
+		registration, err = h.context.Registry.RegisterToolResultWithMetadata(
+			args.SourceToolCallID, args.Source, args.Description,
+		)
 	}
 	if err != nil {
 		return rejection[RegistrationOutput]("invalid_snapshot_source", err.Error())
+	}
+	if h.context.Artifacts != nil {
+		if _, err = h.context.Artifacts.RegisterSnapshot(
+			h.context.Workspace, registration.ID, registration.Path, registration.Description,
+		); err != nil {
+			return infrastructureRejection[RegistrationOutput]("artifact_registry", err)
+		}
 	}
 	if registration.New {
 		if err = h.context.State.RegisterSnapshot(); err != nil {
 			return infrastructureRejection[RegistrationOutput]("state_update", err)
 		}
 	}
-	output := RegistrationOutput{ID: registration.ID, Path: registration.Path}
+	output := RegistrationOutput{
+		ID: registration.ID, Path: registration.Path, Description: registration.Description,
+	}
 	return corespec.ToolResponse[RegistrationOutput]{Accepted: true, Output: &output}
 }
 

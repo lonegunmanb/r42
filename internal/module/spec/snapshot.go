@@ -4,17 +4,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/ext/typeexpr"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/config"
 	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
+	"github.com/lonegunmanb/r42/internal/tool/gotool"
 	toolspec "github.com/lonegunmanb/r42/internal/tool/spec"
 	"github.com/zclconf/go-cty/cty"
+	"github.com/zclconf/go-cty/cty/convert"
+	ctyjson "github.com/zclconf/go-cty/cty/json"
 )
 
 type ResearchPlan struct {
@@ -40,6 +49,7 @@ type researchSnapshot struct {
 	Retry                      provider.RetryOverride       `json:"retry"`
 	Policy                     policySnapshot               `json:"policy"`
 	Artifacts                  []researchspec.Artifact      `json:"artifacts"`
+	ToolUses                   []toolUseSnapshot            `json:"tool_uses,omitempty"`
 	QC                         *qcSnapshot                  `json:"qc,omitempty"`
 	Provider                   *providerSnapshot            `json:"provider,omitempty"`
 	CollectionProvider         *providerSnapshot            `json:"collection_provider,omitempty"`
@@ -53,6 +63,20 @@ type researchSnapshot struct {
 	MaxCollectionRounds        *int                         `json:"max_collection_rounds,omitempty"`
 	CollectionQC               *collectionQCSnapshot        `json:"collection_qc,omitempty"`
 	CollectionQCProvider       *providerSnapshot            `json:"collection_qc_provider,omitempty"`
+}
+
+type toolUseSnapshot struct {
+	Name           string               `json:"name"`
+	ToolID         string               `json:"tool_id"`
+	Terminate      bool                 `json:"terminate,omitempty"`
+	Input          encodedCTYValue      `json:"input"`
+	InputFromAgent encodedCTYValue      `json:"input_from_agent"`
+	Validations    []corespec.Condition `json:"validations,omitempty"`
+}
+
+type encodedCTYValue struct {
+	Type  string          `json:"type"`
+	Value json.RawMessage `json:"value"`
 }
 
 type collectionQCSnapshot struct {
@@ -93,6 +117,7 @@ type qcSnapshot struct {
 type providerSnapshot struct {
 	Type           provider.Type          `json:"type"`
 	Endpoint       string                 `json:"endpoint"`
+	PreflightModel *string                `json:"preflight_model,omitempty"`
 	WireAPI        *provider.WireAPI      `json:"wire_api,omitempty"`
 	Transport      *provider.Transport    `json:"transport,omitempty"`
 	Headers        map[string]string      `json:"headers,omitempty"`
@@ -157,6 +182,12 @@ func EncodeResearchPlan(
 		CollectionBatchSize:        config.CollectionBatchSize,
 		MaxCollectionRounds:        clonePointer(config.MaxCollectionRounds),
 	}
+	var toolUseSensitive bool
+	snapshot.ToolUses, toolUseSensitive, err = snapshotToolUses(config.ToolUses)
+	if err != nil {
+		return cty.NilVal, err
+	}
+	sensitive = sensitive || toolUseSensitive
 	var collectionSensitive bool
 	snapshot.CollectionProvider, collectionSensitive, err = resolveProvider(config.CollectionModelProvider, planning)
 	if err != nil {
@@ -253,6 +284,11 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 		CollectionSkills:           slices.Clone(snapshot.CollectionSkills),
 		CollectionDisabledSkills:   slices.Clone(snapshot.CollectionDisabledSkills),
 	}
+	toolUses, err := restoreToolUses(snapshot.ToolUses)
+	if err != nil {
+		return ResearchPlan{}, err
+	}
+	configValue.ToolUses = toolUses
 	if snapshot.CollectionBatchSize > 0 {
 		configValue.CollectionBatchSize = snapshot.CollectionBatchSize
 	}
@@ -287,6 +323,85 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 		QCProvider:           restoreProvider(snapshot.QCProvider),
 		CollectionQCProvider: restoreProvider(snapshot.CollectionQCProvider),
 	}, nil
+}
+
+func snapshotToolUses(toolUses []researchspec.ToolUse) ([]toolUseSnapshot, bool, error) {
+	result := make([]toolUseSnapshot, len(toolUses))
+	sensitive := false
+	for index, toolUse := range toolUses {
+		input, inputSensitive, err := encodeCTYValue(toolUse.Input)
+		if err != nil {
+			return nil, false, fmt.Errorf("encode tool_use %q input: %w", toolUse.Name, err)
+		}
+		agent, agentSensitive, err := encodeCTYValue(toolUse.InputFromAgent)
+		if err != nil {
+			return nil, false, fmt.Errorf("encode tool_use %q input_from_agent: %w", toolUse.Name, err)
+		}
+		result[index] = toolUseSnapshot{
+			Name: toolUse.Name, ToolID: toolUse.ToolID, Terminate: toolUse.Terminate,
+			Input: input, InputFromAgent: agent,
+			Validations: slices.Clone(toolUse.Validations),
+		}
+		sensitive = sensitive || inputSensitive || agentSensitive
+	}
+	return result, sensitive, nil
+}
+
+func restoreToolUses(snapshots []toolUseSnapshot) ([]researchspec.ToolUse, error) {
+	result := make([]researchspec.ToolUse, len(snapshots))
+	for index, item := range snapshots {
+		input, err := decodeCTYValue(item.Input)
+		if err != nil {
+			return nil, fmt.Errorf("decode tool_use %q input: %w", item.Name, err)
+		}
+		agent, err := decodeCTYValue(item.InputFromAgent)
+		if err != nil {
+			return nil, fmt.Errorf("decode tool_use %q input_from_agent: %w", item.Name, err)
+		}
+		result[index] = researchspec.ToolUse{
+			Name: item.Name, ToolID: item.ToolID, Terminate: item.Terminate,
+			Input: input, InputFromAgent: agent,
+			Validations: slices.Clone(item.Validations),
+		}
+	}
+	return result, nil
+}
+
+func encodeCTYValue(value cty.Value) (encodedCTYValue, bool, error) {
+	if value == cty.NilVal || value.Type().Equals(cty.NilType) || value.IsNull() {
+		value = cty.EmptyObjectVal
+	}
+	sensitive := corespec.IsSensitive(value)
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.IsWhollyKnown() {
+		return encodedCTYValue{}, false, fmt.Errorf("value must be wholly known")
+	}
+	encoded, err := ctyjson.Marshal(unmarked, unmarked.Type())
+	if err != nil {
+		return encodedCTYValue{}, false, err
+	}
+	return encodedCTYValue{Type: typeexpr.TypeString(unmarked.Type()), Value: encoded}, sensitive, nil
+}
+
+func decodeCTYValue(encoded encodedCTYValue) (cty.Value, error) {
+	if encoded.Type == "" {
+		return cty.EmptyObjectVal, nil
+	}
+	expression, diagnostics := hclsyntax.ParseExpression(
+		[]byte(encoded.Type), "saved-tool-use-type", hcl.InitialPos,
+	)
+	if diagnostics.HasErrors() {
+		return cty.NilVal, diagnostics
+	}
+	typeValue, diagnostics := typeexpr.Type(expression)
+	if diagnostics.HasErrors() {
+		return cty.NilVal, diagnostics
+	}
+	value, err := ctyjson.Unmarshal(encoded.Value, typeValue)
+	if err != nil {
+		return cty.NilVal, err
+	}
+	return value, nil
 }
 
 func (p ResearchPlan) Resolve(config researchspec.Config) (ResearchPlan, error) {
@@ -324,7 +439,7 @@ func snapshotProviderConfig(configValue provider.Config) (*providerSnapshot, boo
 		return nil, false, err
 	}
 	return &providerSnapshot{
-		Type: configValue.Type, Endpoint: configValue.Endpoint, WireAPI: clonePointer(configValue.WireAPI),
+		Type: configValue.Type, Endpoint: configValue.Endpoint, PreflightModel: clonePointer(configValue.PreflightModel), WireAPI: clonePointer(configValue.WireAPI),
 		Transport: clonePointer(configValue.Transport), Headers: headers,
 		HasHeaders: !configValue.Headers.Type().Equals(cty.NilType), APIKey: clonePointer(configValue.APIKey),
 		APIKeyRef: clonePointer(configValue.APIKeyRef), BearerToken: clonePointer(configValue.BearerToken),
@@ -341,6 +456,7 @@ func BuildToolRegistry(
 		definition := internalplan.ToolSpec{
 			ID: block.Id(), Address: block.CanonicalAddress(), Kind: string(config.AddressKindGo),
 			Description: block.Description, Source: block.Source,
+			Postconditions: slices.Clone(block.Postconditions), Origin: BlockOrigin(block.HclBlock()),
 		}
 		registry[definition.ID] = definition
 	}
@@ -350,6 +466,7 @@ func BuildToolRegistry(
 			Description: block.Description, Program: slices.Clone(block.Program), WorkingDir: block.WorkingDir,
 			InputTypeExpression:  block.HclBlock().Attributes()["input_type"].ExprString(),
 			OutputTypeExpression: block.HclBlock().Attributes()["output_type"].ExprString(),
+			Postconditions:       slices.Clone(block.Postconditions), Origin: BlockOrigin(block.HclBlock()),
 		}
 		registry[definition.ID] = definition
 	}
@@ -369,6 +486,34 @@ func BuildToolRegistry(
 	return registry
 }
 
+func planOrigin(block *hclsyntax.Block) internalplan.Origin {
+	if block == nil {
+		return internalplan.Origin{}
+	}
+	rangeValue := block.Range()
+	filename := filepath.ToSlash(rangeValue.Filename)
+	source := ""
+	if raw, err := os.ReadFile(rangeValue.Filename); err == nil {
+		start := max(0, rangeValue.Start.Byte-1)
+		end := min(len(raw), rangeValue.End.Byte)
+		if start < end {
+			source = strings.TrimSpace(string(raw[start:end]))
+		}
+	}
+	return internalplan.Origin{
+		Filename: filename, StartLine: rangeValue.Start.Line, StartColumn: rangeValue.Start.Column,
+		EndLine: rangeValue.End.Line, EndColumn: rangeValue.End.Column, Source: source,
+	}
+}
+
+// BlockOrigin captures the HCL source needed by preflight without rereading files.
+func BlockOrigin(block *golden.HclBlock) internalplan.Origin {
+	if block == nil {
+		return internalplan.Origin{}
+	}
+	return planOrigin(block.Block)
+}
+
 func ValidateResearchToolIDs(config researchspec.Config, registry map[string]internalplan.ToolSpec) error {
 	if err := validateConfiguredToolIDs(config.Policy.ToolIDs, registry, "research tool_ids"); err != nil {
 		return err
@@ -377,6 +522,9 @@ func ValidateResearchToolIDs(config researchspec.Config, registry map[string]int
 		if err := validateConfiguredToolIDs([]string{*config.TerminateToolID}, registry, "research terminate_tool_id"); err != nil {
 			return err
 		}
+	}
+	if err := validateToolUseOwnership(config.ToolUses, registry); err != nil {
+		return err
 	}
 	if err := validateConfiguredToolIDs(config.CollectionToolIDs, registry, "research collection_tool_ids"); err != nil {
 		return err
@@ -403,6 +551,85 @@ func ValidateResearchToolIDs(config researchspec.Config, registry map[string]int
 		return err
 	}
 	return validateToolFilters(config.QC.DisallowedTools, registry, "qc disallowed_tools")
+}
+
+func validateToolUseOwnership(
+	toolUses []researchspec.ToolUse,
+	registry map[string]internalplan.ToolSpec,
+) error {
+	for _, toolUse := range toolUses {
+		definition, ok := registry[toolUse.ToolID]
+		if !ok {
+			continue
+		}
+		inputType, err := plannedToolInputType(definition)
+		if err != nil {
+			return fmt.Errorf("tool_use %q input type: %w", toolUse.Name, err)
+		}
+		if !inputType.IsObjectType() {
+			return fmt.Errorf("tool_use %q typed tool input must be an object", toolUse.Name)
+		}
+		hclOwned := toolUseValueMap(toolUse.Input)
+		agentOwned := toolUseValueMap(toolUse.InputFromAgent)
+		for field, value := range hclOwned {
+			if !inputType.HasAttribute(field) {
+				return fmt.Errorf("tool_use %q input field %q is not declared by the typed tool", toolUse.Name, field)
+			}
+			unmarked, _ := value.UnmarkDeep()
+			if _, err = convert.Convert(unmarked, inputType.AttributeType(field)); err != nil {
+				return fmt.Errorf("tool_use %q input field %q does not match typed tool input: %w", toolUse.Name, field, err)
+			}
+		}
+		for field := range agentOwned {
+			if !inputType.HasAttribute(field) {
+				return fmt.Errorf("tool_use %q input_from_agent field %q is not declared by the typed tool", toolUse.Name, field)
+			}
+		}
+		for field := range inputType.AttributeTypes() {
+			if inputType.AttributeOptional(field) {
+				continue
+			}
+			_, fromHCL := hclOwned[field]
+			_, fromAgent := agentOwned[field]
+			if !fromHCL && !fromAgent {
+				return fmt.Errorf("tool_use %q required input field %q has no owner", toolUse.Name, field)
+			}
+		}
+	}
+	return nil
+}
+
+func plannedToolInputType(definition internalplan.ToolSpec) (cty.Type, error) {
+	switch definition.Kind {
+	case string(config.AddressKindGo):
+		analysis, err := gotool.Analyze(definition.Source)
+		if err != nil {
+			return cty.NilType, err
+		}
+		return analysis.InputType, nil
+	case string(config.AddressKindExternal):
+		expression, diagnostics := hclsyntax.ParseExpression(
+			[]byte(definition.InputTypeExpression), "saved-tool-input-type", hcl.InitialPos,
+		)
+		if diagnostics.HasErrors() {
+			return cty.NilType, diagnostics
+		}
+		inputType, _, diagnostics := typeexpr.TypeConstraintWithDefaults(expression)
+		if diagnostics.HasErrors() {
+			return cty.NilType, diagnostics
+		}
+		return inputType, nil
+	default:
+		return cty.NilType, fmt.Errorf("typed tool kind %q is not supported", definition.Kind)
+	}
+}
+
+func toolUseValueMap(value cty.Value) map[string]cty.Value {
+	if value == cty.NilVal || value.Type().Equals(cty.NilType) || value.IsNull() {
+		return nil
+	}
+	unmarked, _ := value.UnmarkDeep()
+	return unmarked.AsValueMap()
 }
 
 func validatePlannedToolCallQuota(
@@ -494,7 +721,7 @@ func restoreProvider(snapshot *providerSnapshot) *provider.Config {
 		}
 	}
 	return &provider.Config{
-		Type: snapshot.Type, Endpoint: snapshot.Endpoint, WireAPI: clonePointer(snapshot.WireAPI),
+		Type: snapshot.Type, Endpoint: snapshot.Endpoint, PreflightModel: clonePointer(snapshot.PreflightModel), WireAPI: clonePointer(snapshot.WireAPI),
 		Transport: clonePointer(snapshot.Transport), Headers: headers, APIKey: clonePointer(snapshot.APIKey),
 		APIKeyRef: clonePointer(snapshot.APIKeyRef), BearerToken: clonePointer(snapshot.BearerToken),
 		BearerTokenRef: clonePointer(snapshot.BearerTokenRef), Retry: snapshot.Retry,

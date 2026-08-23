@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/debuglog"
+	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"
 )
 
@@ -161,6 +162,9 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 	if block.ToolIDs, err = dynamicStringList(unmarked, "tool_ids"); err != nil {
 		return Config{}, err
 	}
+	if block.ToolUseBlocks, err = dynamicToolUseBlocks(unmarked); err != nil {
+		return Config{}, err
+	}
 	if block.ToolCallQuota, err = dynamicIntMap(unmarked, "tool_call_quota"); err != nil {
 		return Config{}, err
 	}
@@ -237,6 +241,80 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 		return Config{}, err
 	}
 	return config, nil
+}
+
+func dynamicToolUseBlocks(object cty.Value) ([]ToolUseBlock, error) {
+	value, ok := dynamicAttribute(object, "tool_uses")
+	if !ok || value.IsNull() {
+		return nil, nil
+	}
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.Type().IsListType() && !unmarked.Type().IsTupleType() {
+		return nil, fmt.Errorf("tool_uses must be a list")
+	}
+	result := make([]ToolUseBlock, 0, unmarked.LengthInt())
+	iterator := unmarked.ElementIterator()
+	for index := 0; iterator.Next(); index++ {
+		_, item := iterator.Element()
+		name, err := dynamicRequiredString(item, "name")
+		if err != nil {
+			return nil, fmt.Errorf("tool_use %d: %w", index, err)
+		}
+		toolID, err := dynamicRequiredString(item, "tool_id")
+		if err != nil {
+			return nil, fmt.Errorf("tool_use %d: %w", index, err)
+		}
+		terminate, err := dynamicOptionalBool(item, "terminate")
+		if err != nil {
+			return nil, fmt.Errorf("tool_use %d: %w", index, err)
+		}
+		input, err := dynamicOptionalValue(item, "input")
+		if err != nil {
+			return nil, fmt.Errorf("tool_use %d: %w", index, err)
+		}
+		agent, err := dynamicOptionalValue(item, "input_from_agent")
+		if err != nil {
+			return nil, fmt.Errorf("tool_use %d: %w", index, err)
+		}
+		validations, err := dynamicValidations(item)
+		if err != nil {
+			return nil, fmt.Errorf("tool_use %d: %w", index, err)
+		}
+		result = append(result, ToolUseBlock{
+			Name: name, ToolID: toolID, Terminate: terminate, Input: input, InputFromAgent: agent,
+			validations: validations,
+		})
+	}
+	return result, nil
+}
+
+func dynamicValidations(object cty.Value) ([]corespec.Condition, error) {
+	value, ok := dynamicAttribute(object, "validation")
+	if !ok || value.IsNull() {
+		return nil, nil
+	}
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.Type().IsListType() && !unmarked.Type().IsTupleType() {
+		return nil, fmt.Errorf("validation must be a list")
+	}
+	result := make([]corespec.Condition, 0, unmarked.LengthInt())
+	iterator := unmarked.ElementIterator()
+	for index := 0; iterator.Next(); index++ {
+		_, item := iterator.Element()
+		condition, err := dynamicRequiredString(item, "condition")
+		if err != nil {
+			return nil, fmt.Errorf("validation %d: %w", index, err)
+		}
+		errorMessage, err := dynamicRequiredString(item, "error_message")
+		if err != nil {
+			return nil, fmt.Errorf("validation %d: %w", index, err)
+		}
+		if err = validateConditionRoots(condition, "input"); err != nil {
+			return nil, fmt.Errorf("validation %d: %w", index, err)
+		}
+		result = append(result, corespec.Condition{Expression: condition, ErrorMessage: errorMessage})
+	}
+	return result, nil
 }
 
 func dynamicOptionalValue(object cty.Value, name string) (cty.Value, error) {
@@ -389,6 +467,10 @@ func dynamicArtifactBlocks(object cty.Value) ([]ArtifactBlock, error) {
 		if err != nil {
 			return nil, fmt.Errorf("artifact %d: %w", index, err)
 		}
+		description, err := dynamicRequiredString(artifact, "description")
+		if err != nil {
+			return nil, fmt.Errorf("artifact %d: %w", index, err)
+		}
 		required, err := dynamicOptionalBool(artifact, "required")
 		if err != nil {
 			return nil, fmt.Errorf("artifact %d: %w", index, err)
@@ -398,7 +480,8 @@ func dynamicArtifactBlocks(object cty.Value) ([]ArtifactBlock, error) {
 			return nil, fmt.Errorf("artifact %d: %w", index, err)
 		}
 		result = append(result, ArtifactBlock{
-			Name: name, ArtifactType: artifactType, Path: path, Required: required, NonEmpty: nonEmpty,
+			Name: name, ArtifactType: artifactType, Path: path, Description: description,
+			Required: required, NonEmpty: nonEmpty,
 		})
 	}
 	return result, nil
@@ -531,6 +614,7 @@ func dynamicAttribute(object cty.Value, name string) (cty.Value, bool) {
 func plannedDynamicTaskValue(task cty.Value, config Config) cty.Value {
 	values, marks := dynamicTaskValuesWithProfile(task)
 	values["artifacts"] = ArtifactsValue(config.Artifacts, nil)
+	values["snapshots"] = cty.UnknownVal(cty.List(snapshotValueType))
 	if config.TerminateToolID != nil {
 		values["result"] = cty.UnknownVal(cty.String)
 	}
@@ -562,6 +646,9 @@ func AppliedDynamicTaskValue(task, result cty.Value) cty.Value {
 	if artifacts, ok := resultValues["artifact"]; ok {
 		values["artifacts"] = artifacts
 	}
+	if snapshots, ok := resultValues["snapshots"]; ok {
+		values["snapshots"] = snapshots
+	}
 	if value, ok := resultValues["result"]; ok {
 		values["result"] = value
 	}
@@ -592,6 +679,7 @@ func dynamicTaskOutputType(taskType cty.Type) cty.Type {
 	attributes := taskType.AttributeTypes()
 	attributes["profile"] = cty.String
 	attributes["artifacts"] = cty.List(artifactValueType)
+	attributes["snapshots"] = cty.List(snapshotValueType)
 	if taskType.HasAttribute("terminate_tool_id") {
 		attributes["result"] = cty.String
 	}

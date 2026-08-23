@@ -137,6 +137,9 @@ func TestPlanRoundTripPreservesImmutableToolRegistry(t *testing.T) {
 			Kind:        "external",
 			Description: "Look up evidence",
 			Program:     []string{"lookup", "--json"},
+			Postconditions: []corespec.Condition{{
+				Expression: "output.found", ErrorMessage: "lookup must find evidence",
+			}},
 		},
 	}
 	planned, err := plan.NewForRunWithTools("D:/research", "", nil, nil, nil, nil, tools)
@@ -159,6 +162,27 @@ func TestPlanRoundTripPreservesImmutableToolRegistry(t *testing.T) {
 	require.Contains(t, actual, "tool_external_tool_lookup_12345678-1234-8234-9234-123456789abc")
 	assert.Equal(t, "module.parent.external_tool.lookup", actual["tool_external_tool_lookup_12345678-1234-8234-9234-123456789abc"].Address)
 	assert.Equal(t, []string{"lookup", "--json"}, actual["tool_external_tool_lookup_12345678-1234-8234-9234-123456789abc"].Program)
+	assert.Equal(t, "output.found", actual["tool_external_tool_lookup_12345678-1234-8234-9234-123456789abc"].Postconditions[0].Expression)
+}
+
+func TestPlanRoundTripPreservesBlockOrigin(t *testing.T) {
+	t.Parallel()
+
+	origin := plan.Origin{
+		Filename: "main.r42.hcl", StartLine: 12, StartColumn: 1,
+		EndLine: 18, EndColumn: 2, Source: "research \"static\" \"baseline\" { ... }",
+	}
+	planned, err := plan.NewForRun("D:/research", "D:/run", []plan.NodeSpec{{
+		Address: "research.static.baseline", Kind: "research", Config: cty.EmptyObjectVal, Origin: origin,
+	}}, nil, nil, nil)
+	require.NoError(t, err)
+
+	encoded, err := plan.Marshal(planned)
+	require.NoError(t, err)
+	decoded, err := plan.Unmarshal(encoded)
+	require.NoError(t, err)
+	require.Len(t, decoded.Nodes(), 1)
+	assert.Equal(t, origin, decoded.Nodes()[0].Origin)
 }
 
 func TestPlanRejectsInvalidToolRegistry(t *testing.T) {
@@ -377,6 +401,26 @@ func TestPlanUnknownValuesRoundTripAsKnownAfterApply(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, display, "<unknown>")
 	assert.Contains(t, display, "<sensitive>")
+}
+
+func TestPlanPreflightReportRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals(
+		".", nil, nil, nil, nil,
+	)
+	require.NoError(t, err)
+	report := plan.PreflightReport{Checks: []plan.PreflightCheck{{
+		CheckID: "research.static.source/tool_use/finish/input_from_agent/claims",
+		Verdict: "sufficient", Reason: "claims are available",
+	}}}
+	planned.SetPreflightReport(report)
+	encoded, err := plan.Marshal(planned)
+	require.NoError(t, err)
+	restored, err := plan.Unmarshal(encoded)
+	require.NoError(t, err)
+	require.NotNil(t, restored.PreflightReport())
+	assert.Equal(t, report, *restored.PreflightReport())
 }
 
 func TestPlanDynamicUnknownOutputRoundTrips(t *testing.T) {

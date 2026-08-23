@@ -33,11 +33,14 @@ func TestPlanDynamicTasksPreservesTaskShape(t *testing.T) {
 	require.True(t, task.Type().HasAttribute("prompt"))
 	require.True(t, task.Type().HasAttribute("result"))
 	require.True(t, task.Type().HasAttribute("artifacts"))
+	require.True(t, task.Type().HasAttribute("snapshots"))
 	assert.Equal(t, "alpha", task.GetAttr("topic").AsString())
 	assert.Equal(t, "alpha", task.GetAttr("prompt").AsString())
 	assert.Equal(t, "test-model", task.GetAttr("profile").AsString())
 	assert.False(t, task.GetAttr("result").IsKnown())
 	assert.True(t, task.GetAttr("artifacts").Type().IsListType())
+	assert.True(t, task.GetAttr("snapshots").Type().IsListType())
+	assert.False(t, task.GetAttr("snapshots").IsKnown())
 }
 
 func TestDecodeDynamicTaskResolvesProfile(t *testing.T) {
@@ -127,6 +130,7 @@ func TestPlanDynamicTasksPreservesUnknownShape(t *testing.T) {
 	assert.True(t, elementType.HasAttribute("prompt"))
 	assert.True(t, elementType.HasAttribute("result"))
 	assert.True(t, elementType.HasAttribute("artifacts"))
+	assert.True(t, elementType.HasAttribute("snapshots"))
 }
 
 func TestPlanDynamicTasksKeepsUnconstrainedUnknownDynamic(t *testing.T) {
@@ -193,6 +197,28 @@ func TestAppliedDynamicTaskWithoutTerminateToolDoesNotGainResult(t *testing.T) {
 	}))
 
 	assert.False(t, applied.Type().HasAttribute("result"))
+}
+
+func TestAppliedDynamicTaskPublishesSnapshots(t *testing.T) {
+	t.Parallel()
+
+	task := cty.ObjectVal(map[string]cty.Value{
+		"model": cty.StringVal("test-model"), "system_prompt": cty.StringVal("Research."),
+		"artifacts": cty.EmptyTupleVal, "retry": cty.NullVal(cty.DynamicPseudoType),
+		"qc": cty.NullVal(cty.DynamicPseudoType),
+	})
+	snapshots := researchspec.SnapshotsValue([]researchspec.Snapshot{{
+		ID: "snapshot-1", Path: "C:/run/source.md", Description: "Primary source",
+	}})
+	applied := researchspec.AppliedDynamicTaskValue(task, cty.ObjectVal(map[string]cty.Value{
+		"artifact": cty.EmptyTupleVal, "snapshots": snapshots,
+	}))
+
+	require.True(t, applied.Type().HasAttribute("snapshots"))
+	items := applied.GetAttr("snapshots").AsValueSlice()
+	require.Len(t, items, 1)
+	assert.Equal(t, "snapshot-1", items[0].GetAttr("id").AsString())
+	assert.Equal(t, "Primary source", items[0].GetAttr("description").AsString())
 }
 
 func TestAppliedDynamicTaskPreservesSensitiveFields(t *testing.T) {

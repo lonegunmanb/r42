@@ -61,6 +61,7 @@ func displayPlan(planned *Plan) (map[string]any, error) {
 			"kind":         node.Kind,
 			"dependencies": node.Dependencies,
 			"config":       config,
+			"origin":       node.Origin,
 		}
 		if node.Module != nil {
 			child, err := displayPlan(node.Module.Plan)

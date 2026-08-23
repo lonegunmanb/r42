@@ -86,6 +86,7 @@ research "static" "source" {
   artifact "report" {
     type = "file"
     path = "${cwd()}/report.md"
+	description = "Plan report fixture"
   }
 }
 

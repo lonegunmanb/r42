@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/hcl/v2/gohcl"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/lonegunmanb/golden"
+	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"
 )
 
@@ -25,12 +26,19 @@ var researchAttributeNames = map[string]struct{}{
 func (b *ResearchBlock) Decode(block *golden.HclBlock, context *hcl.EvalContext) error {
 	b.deferredTaskExpression = ""
 	b.plannedTaskValue = cty.NilVal
-	expanded, err := block.ExpandDynamicBlocks(context)
-	if err != nil {
-		return err
+	expanded := block
+	var err error
+	if researchHasDynamicBlocks(block) {
+		expanded, err = block.ExpandDynamicBlocks(context)
+		if err != nil {
+			return err
+		}
 	}
 	diagnostics := gohcl.DecodeBody(researchDecodeBody(expanded), context, b)
 	if !diagnostics.HasErrors() {
+		if err := decodeToolUseValidations(expanded, context, b); err != nil {
+			return err
+		}
 		return nil
 	}
 	expression, err := staticResearchTaskExpression(expanded)
@@ -55,6 +63,18 @@ func (b *ResearchBlock) Decode(block *golden.HclBlock, context *hcl.EvalContext)
 	return nil
 }
 
+func researchHasDynamicBlocks(block *golden.HclBlock) bool {
+	if block == nil {
+		return false
+	}
+	for _, nested := range block.NestedBlocks() {
+		if nested.Type == "dynamic" || researchHasDynamicBlocks(nested) {
+			return true
+		}
+	}
+	return false
+}
+
 func researchDecodeBody(block *golden.HclBlock) *hclsyntax.Body {
 	body := &hclsyntax.Body{Attributes: make(hclsyntax.Attributes)}
 	for name, attribute := range block.Body.Attributes {
@@ -67,9 +87,93 @@ func researchDecodeBody(block *golden.HclBlock) *hclsyntax.Body {
 		if golden.MetaNestedBlockNames.Contains(nested.Type) {
 			continue
 		}
-		body.Blocks = append(body.Blocks, nested)
+		if nested.Type != "tool_use" {
+			body.Blocks = append(body.Blocks, nested)
+			continue
+		}
+		copyBlock := *nested
+		copyBody := *nested.Body
+		copyBody.Blocks = make(hclsyntax.Blocks, 0, len(nested.Body.Blocks))
+		for _, child := range nested.Body.Blocks {
+			if child.Type != "validation" {
+				copyBody.Blocks = append(copyBody.Blocks, child)
+			}
+		}
+		copyBlock.Body = &copyBody
+		body.Blocks = append(body.Blocks, &copyBlock)
 	}
 	return body
+}
+
+func decodeToolUseValidations(
+	block *golden.HclBlock,
+	context *hcl.EvalContext,
+	research *ResearchBlock,
+) error {
+	toolBlocks := nestedBlocks(block, "tool_use")
+	if len(toolBlocks) != len(research.ToolUseBlocks) {
+		return fmt.Errorf("tool_use validation decoding lost block alignment")
+	}
+	for index, toolBlock := range toolBlocks {
+		validations, err := decodeValidationBlocks(toolBlock, context)
+		if err != nil {
+			return fmt.Errorf("tool_use %q validation: %w", research.ToolUseBlocks[index].Name, err)
+		}
+		research.ToolUseBlocks[index].validations = validations
+	}
+	return nil
+}
+
+func decodeValidationBlocks(block *golden.HclBlock, context *hcl.EvalContext) ([]corespec.Condition, error) {
+	result := make([]corespec.Condition, 0)
+	for _, nested := range block.NestedBlocks() {
+		if nested.Type != "validation" {
+			return nil, fmt.Errorf("unsupported block type %q", nested.Type)
+		}
+		for name := range nested.Attributes() {
+			if name != "condition" && name != "error_message" {
+				return nil, fmt.Errorf("unsupported validation argument %q", name)
+			}
+		}
+		conditionAttribute, ok := nested.Attributes()["condition"]
+		if !ok {
+			return nil, fmt.Errorf("condition is required")
+		}
+		errorAttribute, ok := nested.Attributes()["error_message"]
+		if !ok {
+			return nil, fmt.Errorf("error_message is required")
+		}
+		errorValue, diagnostics := errorAttribute.Expr.Value(context)
+		if diagnostics.HasErrors() {
+			return nil, diagnostics
+		}
+		errorValue, _ = errorValue.UnmarkDeep()
+		if !errorValue.IsWhollyKnown() || errorValue.IsNull() || !errorValue.Type().Equals(cty.String) {
+			return nil, fmt.Errorf("error_message must be a known string")
+		}
+		condition := corespec.Condition{
+			Expression:   conditionAttribute.ExprString(),
+			ErrorMessage: errorValue.AsString(),
+		}
+		if err := validateConditionRoots(condition.Expression, "input"); err != nil {
+			return nil, err
+		}
+		result = append(result, condition)
+	}
+	return result, nil
+}
+
+func validateConditionRoots(source, allowedRoot string) error {
+	expression, diagnostics := hclsyntax.ParseExpression([]byte(source), "validation", hcl.InitialPos)
+	if diagnostics.HasErrors() {
+		return fmt.Errorf("parse condition: %w", diagnostics)
+	}
+	for _, traversal := range expression.Variables() {
+		if traversal.RootName() != allowedRoot {
+			return fmt.Errorf("condition may only reference %s; found %q", allowedRoot, traversal.RootName())
+		}
+	}
+	return nil
 }
 
 func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
@@ -101,7 +205,7 @@ func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
 	}
 	for _, nested := range block.NestedBlocks() {
 		if nested.Type == "retry" || nested.Type == "artifact" || nested.Type == "qc" ||
-			nested.Type == "collection_qc" || golden.MetaNestedBlockNames.Contains(nested.Type) {
+			nested.Type == "collection_qc" || nested.Type == "tool_use" || golden.MetaNestedBlockNames.Contains(nested.Type) {
 			continue
 		}
 		return "", fmt.Errorf("unsupported block type %q in research block", nested.Type)
@@ -127,6 +231,18 @@ func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
 		})
 		result.WriteString(",\n")
 	}
+	result.WriteString("]\n")
+	result.WriteString("tool_uses = [\n")
+	for _, toolUse := range nestedBlocks(block, "tool_use") {
+		name := ""
+		if len(toolUse.Labels) > 0 {
+			name = toolUse.Labels[len(toolUse.Labels)-1]
+		}
+		writeToolUseObject(&result, toolUse, map[string]string{
+			"name": strconv.Quote(name), "terminate": "false", "input": "{}", "input_from_agent": "{}",
+		})
+		result.WriteString(",\n")
+	}
 	result.WriteString("]\nqc = ")
 	if len(qcBlocks) == 0 {
 		result.WriteString("null\n")
@@ -145,6 +261,31 @@ func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
 	}
 	result.WriteString("}\n")
 	return result.String(), nil
+}
+
+func writeToolUseObject(result *strings.Builder, block *golden.HclBlock, defaults map[string]string) {
+	result.WriteString("{\n")
+	for _, name := range sortedKeys(defaults) {
+		if _, exists := block.Attributes()[name]; !exists {
+			fmt.Fprintf(result, "%s = %s\n", name, defaults[name])
+		}
+	}
+	writeExpressionAttributes(result, block.Attributes(), nil)
+	validations := nestedBlocks(block, "validation")
+	if len(validations) > 0 {
+		result.WriteString("validation = [\n")
+		for _, validation := range validations {
+			condition, conditionOK := validation.Attributes()["condition"]
+			errorMessage, errorOK := validation.Attributes()["error_message"]
+			if !conditionOK || !errorOK {
+				continue
+			}
+			fmt.Fprintf(result, "{ condition = %s, error_message = %s },\n",
+				strconv.Quote(condition.ExprString()), errorMessage.ExprString())
+		}
+		result.WriteString("]\n")
+	}
+	result.WriteString("}\n")
 }
 
 func nestedBlocks(block *golden.HclBlock, blockType string) []*golden.HclBlock {
@@ -251,7 +392,7 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 		"skill_directories": cty.EmptyTupleVal, "skills": cty.EmptyTupleVal,
 		"disabled_skills": cty.EmptyTupleVal, "permission": cty.NullVal(cty.String),
 		"max_protocol_attempts": cty.NullVal(cty.Number), "timeout": cty.NullVal(cty.String),
-		"retry": cty.EmptyTupleVal, "artifact": cty.EmptyTupleVal, "qc": cty.EmptyTupleVal,
+		"retry": cty.EmptyTupleVal, "artifact": cty.EmptyTupleVal, "tool_use": cty.EmptyTupleVal, "qc": cty.EmptyTupleVal,
 		"collection_model_provider":    cty.NullVal(cty.EmptyObject),
 		"collection_tool_ids":          cty.EmptyTupleVal,
 		"collection_skill_directories": cty.EmptyTupleVal,
@@ -266,6 +407,8 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 			switch name {
 			case "artifacts":
 				values["artifact"] = value
+			case "tool_uses":
+				values["tool_use"] = value
 			case "retry", "qc", "collection_qc":
 				if !value.IsNull() {
 					values[name] = cty.TupleVal([]cty.Value{value})

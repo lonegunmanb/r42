@@ -480,6 +480,7 @@ research "static" "source" {
   artifact "report" {
     type = "file"
     path = "${cwd()}/report.md"
+	description = "Saved report fixture"
   }
 }
 
@@ -824,6 +825,7 @@ research "static" "market" {
   artifact "report" {
     type      = "file"
     path      = "report.md"
+	description = "Saved report fixture"
     required  = true
     non_empty = true
   }
@@ -877,6 +879,96 @@ research "static" "market" {
 		reconstructed.Config.QC.ToolIDs[0]: 2,
 		"web_search":                       3,
 	}, reconstructed.Config.QC.ToolCallQuota)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchToolUseRequiresOwnershipForEveryRequiredInput(t *testing.T) {
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+go_tool "finish" {
+  description = "Finish"
+  source = <<-GO
+    import "context"
+    type Input struct {
+      Workspace string
+      Claims    []string
+      Note      *string
+    }
+    type Output string
+    func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+      output := Output("done")
+      return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+    }
+  GO
+}
+
+research "static" "source" {
+  model         = "test-model"
+  system_prompt = "Research."
+  tool_use "finish" {
+    tool_id   = go_tool.finish.id
+    terminate = true
+    input = { Workspace = block_wd() }
+  }
+}
+`)
+
+	_, err := planSource(directory, executor.ResearchConfigOptions{})
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `tool_use "finish" required input field "Claims" has no owner`)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestSavedResearchConfigPreservesToolUseOwnership(t *testing.T) {
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+go_tool "finish" {
+  description = "Finish"
+  source = <<-GO
+    import "context"
+    type Input struct {
+      Workspace string
+      Claims    []string
+    }
+    type Output string
+    func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+      output := Output("done")
+      return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+    }
+  GO
+}
+research "static" "source" {
+  model         = "test-model"
+  system_prompt = "Research."
+  tool_use "finish" {
+    tool_id   = go_tool.finish.id
+    terminate = true
+    input = { Workspace = block_wd() }
+    input_from_agent = {
+      Claims = [{
+        id          = "artifact-upstream"
+        path        = "claims.json"
+        description = "Validated claims"
+      }]
+    }
+  }
+}
+`)
+
+	planned, err := planSource(directory, executor.ResearchConfigOptions{})
+	require.NoError(t, err)
+	reconstructed, err := modulespec.DecodeResearchPlan(planned.Saved.Nodes()[0].Config)
+	require.NoError(t, err)
+
+	require.Len(t, reconstructed.Config.ToolUses, 1)
+	toolUse := reconstructed.Config.ToolUses[0]
+	assert.Equal(t, "finish", toolUse.Name)
+	assert.True(t, toolUse.Terminate)
+	assert.Equal(t, "research.static.source", planned.Saved.Nodes()[0].Address)
+	assert.True(t, toolUse.Input.Type().HasAttribute("Workspace"))
+	assert.Equal(t, "Validated claims",
+		toolUse.InputFromAgent.GetAttr("Claims").Index(cty.NumberIntVal(0)).GetAttr("description").AsString())
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

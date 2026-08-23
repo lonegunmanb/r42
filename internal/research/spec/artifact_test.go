@@ -15,12 +15,13 @@ func TestArtifactValidate(t *testing.T) {
 		artifact      researchspec.Artifact
 		expectedError string
 	}{
-		{name: "file", artifact: researchspec.Artifact{Name: "report", Type: researchspec.ArtifactTypeFile, Path: "report.md", Required: true, NonEmpty: true}},
-		{name: "directory with escaping path", artifact: researchspec.Artifact{Name: "dataset", Type: researchspec.ArtifactTypeDirectory, Path: "../shared"}},
-		{name: "absolute path", artifact: researchspec.Artifact{Name: "dataset", Type: researchspec.ArtifactTypeDirectory, Path: `D:\shared`}},
-		{name: "missing name", artifact: researchspec.Artifact{Type: researchspec.ArtifactTypeFile, Path: "report.md"}, expectedError: "artifact name is required"},
-		{name: "invalid type", artifact: researchspec.Artifact{Name: "report", Type: "archive", Path: "report.zip"}, expectedError: "artifact report type must be file or directory"},
-		{name: "missing path", artifact: researchspec.Artifact{Name: "report", Type: researchspec.ArtifactTypeFile}, expectedError: "artifact report path is required"},
+		{name: "file", artifact: researchspec.Artifact{Name: "report", Type: researchspec.ArtifactTypeFile, Path: "report.md", Description: "Report", Required: true, NonEmpty: true}},
+		{name: "directory with escaping path", artifact: researchspec.Artifact{Name: "dataset", Type: researchspec.ArtifactTypeDirectory, Path: "../shared", Description: "Dataset"}},
+		{name: "absolute path", artifact: researchspec.Artifact{Name: "dataset", Type: researchspec.ArtifactTypeDirectory, Path: `D:\shared`, Description: "Dataset"}},
+		{name: "missing name", artifact: researchspec.Artifact{Type: researchspec.ArtifactTypeFile, Path: "report.md", Description: "Report"}, expectedError: "artifact name is required"},
+		{name: "invalid type", artifact: researchspec.Artifact{Name: "report", Type: "archive", Path: "report.zip", Description: "Report"}, expectedError: "artifact report type must be file or directory"},
+		{name: "missing path", artifact: researchspec.Artifact{Name: "report", Type: researchspec.ArtifactTypeFile, Description: "Report"}, expectedError: "artifact report path is required"},
+		{name: "missing description", artifact: researchspec.Artifact{Name: "report", Type: researchspec.ArtifactTypeFile, Path: "report.md"}, expectedError: "artifact report description is required"},
 	}
 
 	for _, tt := range tests {

@@ -14,6 +14,7 @@ import (
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/provider"
+	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
 	"github.com/zclconf/go-cty/cty/function"
@@ -47,6 +48,7 @@ type ResearchBlock struct {
 	Timeout                    *string             `hcl:"timeout,optional"`
 	RetryBlocks                []RetryBlock        `hcl:"retry,block"`
 	ArtifactBlocks             []ArtifactBlock     `hcl:"artifact,block"`
+	ToolUseBlocks              []ToolUseBlock      `hcl:"tool_use,block"`
 	QCBlocks                   []QCBlock           `hcl:"qc,block"`
 	CollectionModelProvider    cty.Value           `hcl:"collection_model_provider,optional"`
 	CollectionToolIDs          []string            `hcl:"collection_tool_ids,optional"`
@@ -84,6 +86,10 @@ func (b *ResearchBlock) EvalContext() *hcl.EvalContext {
 
 func researchBlockEvalContext(block *golden.BaseBlock) *hcl.EvalContext {
 	context := block.EvalContext()
+	context.Variables = maps.Clone(context.Variables)
+	if _, exists := context.Variables["input"]; !exists {
+		context.Variables["input"] = cty.DynamicVal
+	}
 	context.Functions = maps.Clone(context.Functions)
 	if context.Functions == nil {
 		context.Functions = make(map[string]function.Function)
@@ -168,7 +174,7 @@ func (b *ResearchBlock) validateNativeStringFields() error {
 				return err
 			}
 		case "artifact":
-			if err := validateStringAttributes(nested, b.EvalContext(), "artifact", []string{"type", "path"}); err != nil {
+			if err := validateStringAttributes(nested, b.EvalContext(), "artifact", []string{"type", "path", "description"}); err != nil {
 				return err
 			}
 			if err := validateBoolAttributes(nested, b.EvalContext(), "artifact", []string{"required", "non_empty"}); err != nil {
@@ -339,6 +345,8 @@ func (b *ResearchBlock) Values() map[string]cty.Value {
 		"timeout":                      optionalStringValue(b.Timeout),
 		"retry":                        retryBlockValues(b.RetryBlocks),
 		"artifact":                     ArtifactsValue(b.planned.Artifacts, nil),
+		"tool_use":                     toolUseValues(b.planned.ToolUses),
+		"snapshots":                    cty.UnknownVal(cty.List(snapshotValueType)),
 		"qc":                           qcBlockValues(b.QCBlocks),
 		"collection_model_provider":    optionalObjectValue(b.CollectionModelProvider),
 		"collection_tool_ids":          stringListValue(b.CollectionToolIDs),
@@ -524,8 +532,18 @@ type ArtifactBlock struct {
 	Name         string `hcl:"name,label"`
 	ArtifactType string `hcl:"type"`
 	Path         string `hcl:"path"`
+	Description  string `hcl:"description"`
 	Required     bool   `hcl:"required,optional"`
 	NonEmpty     bool   `hcl:"non_empty,optional"`
+}
+
+type ToolUseBlock struct {
+	Name           string    `hcl:"name,label"`
+	ToolID         string    `hcl:"tool_id"`
+	Terminate      bool      `hcl:"terminate,optional"`
+	Input          cty.Value `hcl:"input,optional"`
+	InputFromAgent cty.Value `hcl:"input_from_agent,optional"`
+	validations    []corespec.Condition
 }
 
 type QCBlock struct {
@@ -622,6 +640,20 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 	for index, block := range b.ArtifactBlocks {
 		config.Artifacts[index] = block.toArtifact()
 	}
+	if len(b.ToolUseBlocks) > 0 {
+		if len(b.ToolIDs) > 0 || b.TerminateToolID != nil {
+			return Config{}, errors.New("tool_use cannot be combined with tool_ids or terminate_tool_id")
+		}
+		config.ToolUses = make([]ToolUse, len(b.ToolUseBlocks))
+		for index, block := range b.ToolUseBlocks {
+			config.ToolUses[index] = block.toToolUse()
+			config.Policy.ToolIDs = append(config.Policy.ToolIDs, block.ToolID)
+			if block.Terminate {
+				toolID := block.ToolID
+				config.TerminateToolID = &toolID
+			}
+		}
+	}
 	if len(b.QCBlocks) == 1 {
 		config.QC, err = b.QCBlocks[0].toConfig()
 		if err != nil {
@@ -635,6 +667,30 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 		}
 	}
 	return config, nil
+}
+
+func (b ToolUseBlock) toToolUse() ToolUse {
+	return ToolUse{
+		Name: b.Name, ToolID: b.ToolID, Terminate: b.Terminate,
+		Input: b.Input, InputFromAgent: b.InputFromAgent,
+		Validations: slices.Clone(b.validations),
+	}
+}
+
+func toolUseValues(toolUses []ToolUse) cty.Value {
+	if len(toolUses) == 0 {
+		return cty.EmptyTupleVal
+	}
+	values := make([]cty.Value, len(toolUses))
+	for index, toolUse := range toolUses {
+		input, _ := toolUseObject(toolUse.Input, "input")
+		agent, _ := toolUseObject(toolUse.InputFromAgent, "input_from_agent")
+		values[index] = cty.ObjectVal(map[string]cty.Value{
+			"name": cty.StringVal(toolUse.Name), "tool_id": cty.StringVal(toolUse.ToolID),
+			"terminate": cty.BoolVal(toolUse.Terminate), "input": input, "input_from_agent": agent,
+		})
+	}
+	return cty.TupleVal(values)
 }
 
 func resolveProfile(model string, profile *string) (string, error) {
@@ -667,11 +723,12 @@ func (b RetryBlock) override() (provider.RetryOverride, error) {
 
 func (b ArtifactBlock) toArtifact() Artifact {
 	return Artifact{
-		Name:     b.Name,
-		Type:     ArtifactType(b.ArtifactType),
-		Path:     b.Path,
-		Required: b.Required,
-		NonEmpty: b.NonEmpty,
+		Name:        b.Name,
+		Type:        ArtifactType(b.ArtifactType),
+		Path:        b.Path,
+		Description: b.Description,
+		Required:    b.Required,
+		NonEmpty:    b.NonEmpty,
 	}
 }
 
@@ -806,16 +863,28 @@ func clonePointer[T any](value *T) *T {
 }
 
 var artifactValueType = cty.Object(map[string]cty.Type{
-	"name": cty.String, "type": cty.String, "path": cty.String,
-	"required": cty.Bool, "non_empty": cty.Bool,
+	"id": cty.String, "name": cty.String, "type": cty.String, "path": cty.String,
+	"description": cty.String, "required": cty.Bool, "non_empty": cty.Bool,
 })
 
 func ArtifactsValue(artifacts []Artifact, resolvedPaths map[string]string) cty.Value {
+	return ArtifactsValueWithIDs(artifacts, resolvedPaths, nil)
+}
+
+func ArtifactsValueWithIDs(
+	artifacts []Artifact,
+	resolvedPaths map[string]string,
+	ids map[string]string,
+) cty.Value {
 	if len(artifacts) == 0 {
 		return cty.ListValEmpty(artifactValueType)
 	}
 	values := make([]cty.Value, len(artifacts))
 	for index, artifact := range artifacts {
+		id := cty.UnknownVal(cty.String)
+		if resolved, ok := ids[artifact.Name]; ok {
+			id = cty.StringVal(resolved)
+		}
 		path := cty.UnknownVal(cty.String)
 		if filepath.IsAbs(artifact.Path) {
 			path = cty.StringVal(artifact.Path)
@@ -824,11 +893,39 @@ func ArtifactsValue(artifacts []Artifact, resolvedPaths map[string]string) cty.V
 			path = cty.StringVal(resolved)
 		}
 		values[index] = cty.ObjectVal(map[string]cty.Value{
-			"name":      cty.StringVal(artifact.Name),
-			"type":      cty.StringVal(string(artifact.Type)),
-			"path":      path,
-			"required":  cty.BoolVal(artifact.Required),
-			"non_empty": cty.BoolVal(artifact.NonEmpty),
+			"id":          id,
+			"name":        cty.StringVal(artifact.Name),
+			"type":        cty.StringVal(string(artifact.Type)),
+			"path":        path,
+			"description": cty.StringVal(artifact.Description),
+			"required":    cty.BoolVal(artifact.Required),
+			"non_empty":   cty.BoolVal(artifact.NonEmpty),
+		})
+	}
+	return cty.ListVal(values)
+}
+
+// Snapshot describes one Collection snapshot published by a research result.
+type Snapshot struct {
+	ID          string
+	Path        string
+	Description string
+}
+
+var snapshotValueType = cty.Object(map[string]cty.Type{
+	"id": cty.String, "path": cty.String, "description": cty.String,
+})
+
+// SnapshotsValue converts snapshot outputs into their HCL representation.
+func SnapshotsValue(snapshots []Snapshot) cty.Value {
+	if len(snapshots) == 0 {
+		return cty.ListValEmpty(snapshotValueType)
+	}
+	values := make([]cty.Value, len(snapshots))
+	for index, item := range snapshots {
+		values[index] = cty.ObjectVal(map[string]cty.Value{
+			"id": cty.StringVal(item.ID), "path": cty.StringVal(item.Path),
+			"description": cty.StringVal(item.Description),
 		})
 	}
 	return cty.ListVal(values)

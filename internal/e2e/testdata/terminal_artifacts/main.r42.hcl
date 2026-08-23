@@ -24,6 +24,7 @@ research "static" "source" {
   artifact "report" {
     type      = "file"
     path      = "report.md"
+	description = "Research report fixture"
     required  = true
     non_empty = true
   }
@@ -31,6 +32,7 @@ research "static" "source" {
   artifact "evidence" {
     type      = "directory"
     path      = "evidence"
+	description = "Evidence directory fixture"
     required  = true
     non_empty = true
   }

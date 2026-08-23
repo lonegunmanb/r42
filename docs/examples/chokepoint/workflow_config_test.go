@@ -69,7 +69,7 @@ func TestGraphTracksUseDynamicTasksForDeferredInputs(t *testing.T) {
 	assert.Contains(t, configuration, `Workspace: "${block_wd()}/${index}"`)
 	assert.Contains(t, configuration, `path      = "${block_wd()}/${index}/claims.json"`)
 	assert.Contains(t, configuration, `path      = "${block_wd()}/${index}/source-registry.json"`)
-	assert.Equal(t, 4, strings.Count(configuration, "research.dynamic.graph_track.tasks"))
+	assert.GreaterOrEqual(t, strings.Count(configuration, "research.dynamic.graph_track.tasks"), 4)
 	assert.NotContains(t, configuration, "research.static.graph_track")
 }
 

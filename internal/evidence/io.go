@@ -12,9 +12,19 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/lonegunmanb/r42/internal/snapshot"
+)
+
+const (
+	maxSnapshotSearchBytes        = 32 << 20
+	maxSnapshotSearchMatchRunes   = 2000
+	maxSnapshotSearchExcerptRunes = 4000
 )
 
 // SnapshotInfo is a listable snapshot projection.
@@ -29,6 +39,28 @@ type SnapshotAccess struct {
 	registry          *snapshot.Registry
 	upstream          map[string]string
 	reviewedLocalOnly bool
+}
+
+// SnapshotPage is a bounded byte range from a snapshot.
+type SnapshotPage struct {
+	Content         string `json:"content"`
+	OffsetBytes     int    `json:"offset_bytes"`
+	NextOffsetBytes int    `json:"next_offset_bytes"`
+	TotalBytes      int    `json:"total_bytes"`
+	Truncated       bool   `json:"truncated"`
+}
+
+// SnapshotSearchMatch is one normalized-text match and its source context.
+type SnapshotSearchMatch struct {
+	Line        int    `json:"line"`
+	MatchedText string `json:"matched_text"`
+	Excerpt     string `json:"excerpt"`
+}
+
+// SnapshotSearchResult is a bounded set of snapshot matches.
+type SnapshotSearchResult struct {
+	Matches   []SnapshotSearchMatch `json:"matches"`
+	Truncated bool                  `json:"truncated"`
 }
 
 // NewSnapshotAccess creates snapshot read access over a registry rooted at the
@@ -87,14 +119,144 @@ func (a *SnapshotAccess) ListSnapshots() ([]SnapshotInfo, error) {
 
 // ReadSnapshot reads up to maxBytes of a registered snapshot's content.
 func (a *SnapshotAccess) ReadSnapshot(id string, maxBytes int) (string, error) {
+	page, err := a.ReadSnapshotPage(id, 0, maxBytes)
+	return page.Content, err
+}
+
+// ReadSnapshotPage reads a bounded byte range from a registered snapshot.
+func (a *SnapshotAccess) ReadSnapshotPage(id string, offsetBytes, maxBytes int) (SnapshotPage, error) {
+	if offsetBytes < 0 {
+		return SnapshotPage{}, errors.New("snapshot offset must not be negative")
+	}
 	if maxBytes <= 0 {
-		return "", errors.New("read bound must be positive")
+		return SnapshotPage{}, errors.New("read bound must be positive")
 	}
 	path, err := a.authorizedPath(id)
 	if err != nil {
-		return "", err
+		return SnapshotPage{}, err
 	}
-	return readBounded(path, maxBytes)
+	file, err := os.Open(path)
+	if err != nil {
+		return SnapshotPage{}, fmt.Errorf("open snapshot %q: %w", id, err)
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return SnapshotPage{}, fmt.Errorf("stat snapshot %q: %w", id, err)
+	}
+	totalBytes := int(info.Size())
+	if offsetBytes > totalBytes {
+		return SnapshotPage{}, fmt.Errorf("snapshot offset %d exceeds total bytes %d", offsetBytes, totalBytes)
+	}
+	if offsetBytes < totalBytes {
+		boundary := make([]byte, 1)
+		if _, err = file.ReadAt(boundary, int64(offsetBytes)); err != nil {
+			return SnapshotPage{}, fmt.Errorf("read snapshot %q offset: %w", id, err)
+		}
+		if !utf8.RuneStart(boundary[0]) {
+			return SnapshotPage{}, fmt.Errorf("snapshot offset %d is not a utf-8 character boundary", offsetBytes)
+		}
+	}
+	if _, err = file.Seek(int64(offsetBytes), io.SeekStart); err != nil {
+		return SnapshotPage{}, fmt.Errorf("seek snapshot %q: %w", id, err)
+	}
+	content, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)))
+	if err != nil {
+		return SnapshotPage{}, fmt.Errorf("read snapshot %q: %w", id, err)
+	}
+	for len(content) > 0 && !utf8.Valid(content) {
+		content = content[:len(content)-1]
+	}
+	if len(content) == 0 && offsetBytes < totalBytes {
+		return SnapshotPage{}, fmt.Errorf("max_bytes %d is too small for the next utf-8 character", maxBytes)
+	}
+	nextOffset := offsetBytes + len(content)
+	return SnapshotPage{
+		Content:         string(content),
+		OffsetBytes:     offsetBytes,
+		NextOffsetBytes: nextOffset,
+		TotalBytes:      totalBytes,
+		Truncated:       nextOffset < totalBytes,
+	}, nil
+}
+
+// SearchSnapshot searches Unicode-whitespace-normalized snapshot text with a
+// RE2 pattern and returns bounded source context.
+func (a *SnapshotAccess) SearchSnapshot(
+	id, pattern string,
+	caseSensitive bool,
+	maxMatches, contextLines int,
+) (SnapshotSearchResult, error) {
+	if strings.TrimSpace(pattern) == "" {
+		return SnapshotSearchResult{}, errors.New("snapshot search pattern is required")
+	}
+	if maxMatches <= 0 || maxMatches > 100 {
+		return SnapshotSearchResult{}, errors.New("snapshot search max matches must be between 1 and 100")
+	}
+	if contextLines < 0 || contextLines > 20 {
+		return SnapshotSearchResult{}, errors.New("snapshot search context lines must be between 0 and 20")
+	}
+	path, err := a.authorizedPath(id)
+	if err != nil {
+		return SnapshotSearchResult{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return SnapshotSearchResult{}, fmt.Errorf("stat snapshot %q: %w", id, err)
+	}
+	if err = validateSnapshotSearchSize(info.Size()); err != nil {
+		return SnapshotSearchResult{}, err
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return SnapshotSearchResult{}, fmt.Errorf("read snapshot %q: %w", id, err)
+	}
+	normalized, lineStarts := normalizeWhitespaceWithLines(string(content))
+	expression := pattern
+	if !caseSensitive {
+		expression = "(?i:" + pattern + ")"
+	}
+	compiled, err := regexp.Compile(expression)
+	if err != nil {
+		return SnapshotSearchResult{}, fmt.Errorf("compile snapshot search pattern: %w", err)
+	}
+	if compiled.MatchString("") {
+		return SnapshotSearchResult{}, errors.New("snapshot search pattern must not match empty text")
+	}
+	indices := compiled.FindAllStringIndex(normalized, maxMatches+1)
+	for _, index := range indices {
+		if index[0] == index[1] {
+			return SnapshotSearchResult{}, errors.New("snapshot search pattern produced a zero-width match")
+		}
+		if utf8.RuneCountInString(normalized[index[0]:index[1]]) > maxSnapshotSearchMatchRunes {
+			return SnapshotSearchResult{}, fmt.Errorf(
+				"snapshot search match exceeds maximum %d characters",
+				maxSnapshotSearchMatchRunes,
+			)
+		}
+	}
+	isTruncated := len(indices) > maxMatches
+	if isTruncated {
+		indices = indices[:maxMatches]
+	}
+	matches := make([]SnapshotSearchMatch, 0, len(indices))
+	for _, index := range indices {
+		lineIndex := sort.Search(len(lineStarts), func(i int) bool { return lineStarts[i].normalizedByte > index[0] }) - 1
+		line := lineStarts[lineIndex].sourceLine
+		startLine := max(1, line-contextLines)
+		endLine := line + contextLines
+		excerptStart, excerptEnd := normalizedLineRange(lineStarts, startLine, endLine, len(normalized))
+		matches = append(matches, SnapshotSearchMatch{
+			Line:        line,
+			MatchedText: normalized[index[0]:index[1]],
+			Excerpt: boundedSnapshotExcerpt(
+				normalized[excerptStart:excerptEnd],
+				index[0]-excerptStart,
+				index[1]-excerptStart,
+			),
+		})
+	}
+	return SnapshotSearchResult{Matches: matches, Truncated: isTruncated}, nil
 }
 
 // HasSnapshot reports whether an ID is available through this authorized view.
@@ -173,10 +335,87 @@ func normalizeWhitespace(value string) string {
 	return strings.Join(strings.Fields(value), " ")
 }
 
+type normalizedLineStart struct {
+	normalizedByte int
+	sourceLine     int
+}
+
+func normalizeWhitespaceWithLines(value string) (string, []normalizedLineStart) {
+	var normalized strings.Builder
+	lineStarts := make([]normalizedLineStart, 0)
+	line := 1
+	hasPendingSpace := false
+	lastMappedLine := 0
+	for _, character := range value {
+		if character == '\n' {
+			line++
+		}
+		if unicode.IsSpace(character) {
+			hasPendingSpace = normalized.Len() > 0
+			continue
+		}
+		if hasPendingSpace {
+			normalized.WriteByte(' ')
+			hasPendingSpace = false
+		}
+		if line != lastMappedLine {
+			lineStarts = append(lineStarts, normalizedLineStart{normalizedByte: normalized.Len(), sourceLine: line})
+			lastMappedLine = line
+		}
+		normalized.WriteRune(character)
+	}
+	return normalized.String(), lineStarts
+}
+
+func normalizedLineRange(lineStarts []normalizedLineStart, startLine, endLine, totalBytes int) (int, int) {
+	startIndex := sort.Search(len(lineStarts), func(i int) bool { return lineStarts[i].sourceLine >= startLine })
+	start := totalBytes
+	if startIndex < len(lineStarts) {
+		start = lineStarts[startIndex].normalizedByte
+	}
+	endIndex := sort.Search(len(lineStarts), func(i int) bool { return lineStarts[i].sourceLine > endLine })
+	end := totalBytes
+	if endIndex < len(lineStarts) {
+		end = lineStarts[endIndex].normalizedByte
+	}
+	return start, end
+}
+
+func boundedSnapshotExcerpt(text string, matchStartByte, matchEndByte int) string {
+	runes := []rune(text)
+	if len(runes) <= maxSnapshotSearchExcerptRunes {
+		return text
+	}
+	matchStart := utf8.RuneCountInString(text[:matchStartByte])
+	matchEnd := matchStart + utf8.RuneCountInString(text[matchStartByte:matchEndByte])
+	availableContext := maxSnapshotSearchExcerptRunes - (matchEnd - matchStart)
+	start := max(0, matchStart-availableContext/2)
+	if start+maxSnapshotSearchExcerptRunes > len(runes) {
+		start = len(runes) - maxSnapshotSearchExcerptRunes
+	}
+	return string(runes[start : start+maxSnapshotSearchExcerptRunes])
+}
+
+func validateSnapshotSearchSize(size int64) error {
+	if size > maxSnapshotSearchBytes {
+		return fmt.Errorf("snapshot search size %d exceeds maximum %d bytes", size, maxSnapshotSearchBytes)
+	}
+	return nil
+}
+
 // ArtifactAccess provides read-only access to declared candidate artifacts.
 // Artifact paths are constrained to the block workspace.
 type ArtifactAccess struct {
 	workspace string
+}
+
+// ArtifactPage is a bounded byte range from a declared artifact.
+type ArtifactPage struct {
+	Content         string `json:"content"`
+	OffsetBytes     int    `json:"offset_bytes"`
+	NextOffsetBytes int    `json:"next_offset_bytes"`
+	TotalBytes      int    `json:"total_bytes"`
+	Truncated       bool   `json:"truncated"`
 }
 
 // NewArtifactAccess creates candidate-artifact read access.
@@ -189,14 +428,62 @@ func NewArtifactAccess(workspace string) (*ArtifactAccess, error) {
 
 // ReadArtifact reads up to maxBytes of a declared artifact by name and path.
 func (a *ArtifactAccess) ReadArtifact(name, path string, maxBytes int) (string, error) {
+	page, err := a.ReadArtifactPage(name, path, 0, maxBytes)
+	return page.Content, err
+}
+
+// ReadArtifactPage reads a bounded byte range from a declared artifact.
+func (a *ArtifactAccess) ReadArtifactPage(name, path string, offsetBytes, maxBytes int) (ArtifactPage, error) {
+	if offsetBytes < 0 {
+		return ArtifactPage{}, errors.New("artifact offset must not be negative")
+	}
 	if maxBytes <= 0 {
-		return "", errors.New("read bound must be positive")
+		return ArtifactPage{}, errors.New("read bound must be positive")
 	}
 	resolved, err := a.resolve(name, path)
 	if err != nil {
-		return "", err
+		return ArtifactPage{}, err
 	}
-	return readBounded(resolved, maxBytes)
+	file, err := os.Open(resolved)
+	if err != nil {
+		return ArtifactPage{}, fmt.Errorf("open artifact %q: %w", name, err)
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil {
+		return ArtifactPage{}, fmt.Errorf("stat artifact %q: %w", name, err)
+	}
+	totalBytes := int(info.Size())
+	if offsetBytes > totalBytes {
+		return ArtifactPage{}, fmt.Errorf("artifact offset %d exceeds total bytes %d", offsetBytes, totalBytes)
+	}
+	if offsetBytes < totalBytes {
+		boundary := make([]byte, 1)
+		if _, err = file.ReadAt(boundary, int64(offsetBytes)); err != nil {
+			return ArtifactPage{}, fmt.Errorf("read artifact %q offset: %w", name, err)
+		}
+		if !utf8.RuneStart(boundary[0]) {
+			return ArtifactPage{}, fmt.Errorf("artifact offset %d is not a utf-8 character boundary", offsetBytes)
+		}
+	}
+	if _, err = file.Seek(int64(offsetBytes), io.SeekStart); err != nil {
+		return ArtifactPage{}, fmt.Errorf("seek artifact %q: %w", name, err)
+	}
+	content, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)))
+	if err != nil {
+		return ArtifactPage{}, fmt.Errorf("read artifact %q: %w", name, err)
+	}
+	for len(content) > 0 && !utf8.Valid(content) {
+		content = content[:len(content)-1]
+	}
+	if len(content) == 0 && offsetBytes < totalBytes {
+		return ArtifactPage{}, fmt.Errorf("max_bytes %d is too small for the next utf-8 character", maxBytes)
+	}
+	nextOffset := offsetBytes + len(content)
+	return ArtifactPage{
+		Content: string(content), OffsetBytes: offsetBytes, NextOffsetBytes: nextOffset,
+		TotalBytes: totalBytes, Truncated: nextOffset < totalBytes,
+	}, nil
 }
 
 func (a *ArtifactAccess) resolve(name, path string) (string, error) {
@@ -377,19 +664,6 @@ func resolveWithin(workspace, path, kind string) (string, error) {
 		return "", fmt.Errorf("%s artifact path is outside the block workspace", kind)
 	}
 	return resolvedTarget, nil
-}
-
-func readBounded(path string, maxBytes int) (string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("open %s: %w", path, err)
-	}
-	defer func() { _ = file.Close() }()
-	content, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)))
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
-	}
-	return string(content), nil
 }
 
 func withinWorkspace(root, path string) bool {

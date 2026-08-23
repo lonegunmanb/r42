@@ -90,8 +90,16 @@ research "static" "plan" {
     ${go_tool.submit_research_plan.id}. Do not finish with prose or a JSON code
     block; the accepted typed-tool call is the only valid completion.
   PROMPT
-  tool_ids          = [go_tool.submit_research_plan.id]
-  terminate_tool_id = go_tool.submit_research_plan.id
+  tool_use "submit_plan" {
+    tool_id   = go_tool.submit_research_plan.id
+    terminate = true
+    input_from_agent = {
+      topic                   = "The research topic supplied to this planning block."
+      parallel_tasks          = "The independently executable tasks for the parallel group."
+      independent_serial_tasks = "The independently executable tasks for the serial group."
+      final_serial_tasks      = "The tasks that wait for both earlier groups."
+    }
+  }
   disallowed_tools  = local.offline_disallowed_tools
   permission        = "approve_all"
 
@@ -149,14 +157,26 @@ research "dynamic" "parallel_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      tool_ids          = [go_tool.submit_knowledge.id]
+      tool_uses = [{
+        name      = "submit_knowledge"
+        tool_id   = go_tool.submit_knowledge.id
+        terminate = true
+        input = {
+          artifact_path = "${block_wd()}/${index}/${task.id}/knowledge.json"
+          subquestion   = task.subquestion
+        }
+        input_from_agent = {
+          knowledge = "Atomic knowledge claims for the assigned subquestion, supported by the collected quotes."
+          quotes    = "Exact quote records read from the authorized snapshots."
+        }
+      }]
       tool_call_quota   = local.deep_dive_tool_call_quota
-      terminate_tool_id = go_tool.submit_knowledge.id
       permission        = "approve_all"
       artifacts = [{
         name      = "knowledge"
         type      = "file"
         path      = "${block_wd()}/${index}/${task.id}/knowledge.json"
+		description = "Validated claims and exact quotes for this parallel subquestion"
         required  = true
         non_empty = true
       }]
@@ -219,14 +239,26 @@ research "dynamic" "independent_serial_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      tool_ids          = [go_tool.submit_knowledge.id]
+      tool_uses = [{
+        name      = "submit_knowledge"
+        tool_id   = go_tool.submit_knowledge.id
+        terminate = true
+        input = {
+          artifact_path = "${block_wd()}/${index}/${task.id}/knowledge.json"
+          subquestion   = task.subquestion
+        }
+        input_from_agent = {
+          knowledge = "Atomic knowledge claims for the assigned subquestion, supported by the collected quotes."
+          quotes    = "Exact quote records read from the authorized snapshots."
+        }
+      }]
       tool_call_quota   = local.deep_dive_tool_call_quota
-      terminate_tool_id = go_tool.submit_knowledge.id
       permission        = "approve_all"
       artifacts = [{
         name      = "knowledge"
         type      = "file"
         path      = "${block_wd()}/${index}/${task.id}/knowledge.json"
+		description = "Validated claims and exact quotes for this independent serial subquestion"
         required  = true
         non_empty = true
       }]
@@ -304,14 +336,26 @@ research "dynamic" "final_serial_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      tool_ids          = [go_tool.submit_knowledge.id]
+      tool_uses = [{
+        name      = "submit_knowledge"
+        tool_id   = go_tool.submit_knowledge.id
+        terminate = true
+        input = {
+          artifact_path = "${block_wd()}/${index}/${task.id}/knowledge.json"
+          subquestion   = task.subquestion
+        }
+        input_from_agent = {
+          knowledge = "New atomic knowledge claims supported by the authorized snapshots and validated upstream JSON."
+          quotes    = "Exact quote records for newly collected evidence."
+        }
+      }]
       tool_call_quota   = local.deep_dive_tool_call_quota
-      terminate_tool_id = go_tool.submit_knowledge.id
       permission        = "approve_all"
       artifacts = [{
         name      = "knowledge"
         type      = "file"
         path      = "${block_wd()}/${index}/${task.id}/knowledge.json"
+		description = "Validated claims and exact quotes for this dependent serial subquestion"
         required  = true
         non_empty = true
       }]
@@ -381,14 +425,30 @@ research "static" "resolve_conflicts" {
     final writer. An empty conflicts list is valid only after an explicit
     cross-file comparison.
   PROMPT
-  tool_ids          = [go_tool.submit_conflict_resolution.id]
-  terminate_tool_id = go_tool.submit_conflict_resolution.id
+  tool_use "submit_conflict_resolution" {
+    tool_id   = go_tool.submit_conflict_resolution.id
+    terminate = true
+    input = {
+      artifact_path = "${block_wd()}/resolution.json"
+      topic         = var.topic
+      reviewed_artifacts = concat(
+        [for item in research.dynamic.parallel_deep_dive.tasks : one(item.artifacts).path],
+        [for item in research.dynamic.independent_serial_deep_dive.tasks : one(item.artifacts).path],
+        [for item in research.dynamic.final_serial_deep_dive.tasks : one(item.artifacts).path],
+      )
+    }
+    input_from_agent = {
+      conflicts          = "Every detected cross-subquestion conflict and its evidence-backed decision."
+      synthesis_guidance = "Guidance for the final writer, including unresolved uncertainty."
+    }
+  }
   disallowed_tools  = local.offline_disallowed_tools
   permission        = "approve_all"
 
   artifact "resolution" {
     type      = "file"
     path      = "${block_wd()}/resolution.json"
+	description = "Structured decisions resolving or preserving conflicts across knowledge artifacts"
     required  = true
     non_empty = true
   }
@@ -483,6 +543,7 @@ research "static" "synthesize" {
   artifact "report" {
     type      = "file"
     path      = "${block_wd()}/report.md"
+	description = "Final synthesis report grounded in validated knowledge and conflict decisions"
     required  = true
     non_empty = true
   }

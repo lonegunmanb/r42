@@ -109,11 +109,12 @@ func TestRunnerRepairsRequiredArtifactsBeforeCompleting(t *testing.T) {
 		MaxProtocolAttempts: 10,
 		Workspace:           workspace,
 		Artifacts: []researchspec.Artifact{{
-			Name:     "report",
-			Type:     researchspec.ArtifactTypeFile,
-			Path:     "report.md",
-			Required: true,
-			NonEmpty: true,
+			Name:        "report",
+			Type:        researchspec.ArtifactTypeFile,
+			Path:        "report.md",
+			Description: "Report fixture",
+			Required:    true,
+			NonEmpty:    true,
 		}},
 	})
 
@@ -141,10 +142,11 @@ func TestRunnerRepairsRequiredArtifactsWithoutTerminalTool(t *testing.T) {
 		MaxProtocolAttempts: 10,
 		Workspace:           workspace,
 		Artifacts: []researchspec.Artifact{{
-			Name:     "notes",
-			Type:     researchspec.ArtifactTypeFile,
-			Path:     "notes.md",
-			Required: true,
+			Name:        "notes",
+			Type:        researchspec.ArtifactTypeFile,
+			Path:        "notes.md",
+			Description: "Notes fixture",
+			Required:    true,
 		}},
 	})
 
@@ -291,27 +293,27 @@ func TestRunnerReportsArtifactValidationErrors(t *testing.T) {
 		{
 			name:       "no terminal invalid declaration",
 			maximum:    10,
-			artifacts:  []researchspec.Artifact{{Name: "bad", Type: "unknown", Path: "bad"}},
+			artifacts:  []researchspec.Artifact{{Name: "bad", Type: "unknown", Path: "bad", Description: "Bad fixture"}},
 			errorMatch: "validate research artifacts",
 		},
 		{
 			name:       "terminal invalid declaration",
 			terminal:   true,
 			maximum:    10,
-			artifacts:  []researchspec.Artifact{{Name: "bad", Type: "unknown", Path: "bad"}},
+			artifacts:  []researchspec.Artifact{{Name: "bad", Type: "unknown", Path: "bad", Description: "Bad fixture"}},
 			errorMatch: "validate research artifacts",
 		},
 		{
 			name:       "no terminal repair budget exhausted",
 			maximum:    1,
-			artifacts:  []researchspec.Artifact{{Name: "missing", Type: researchspec.ArtifactTypeFile, Path: "missing", Required: true}},
+			artifacts:  []researchspec.Artifact{{Name: "missing", Type: researchspec.ArtifactTypeFile, Path: "missing", Description: "Missing fixture", Required: true}},
 			errorMatch: "protocol attempts exhausted",
 		},
 		{
 			name:       "terminal repair budget exhausted",
 			terminal:   true,
 			maximum:    1,
-			artifacts:  []researchspec.Artifact{{Name: "missing", Type: researchspec.ArtifactTypeFile, Path: "missing", Required: true}},
+			artifacts:  []researchspec.Artifact{{Name: "missing", Type: researchspec.ArtifactTypeFile, Path: "missing", Description: "Missing fixture", Required: true}},
 			errorMatch: "protocol attempts exhausted",
 		},
 	}
