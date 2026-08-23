@@ -863,7 +863,7 @@ func clonePointer[T any](value *T) *T {
 }
 
 var artifactValueType = cty.Object(map[string]cty.Type{
-	"id": cty.String, "name": cty.String, "type": cty.String, "path": cty.String,
+	"id": cty.String, "name": cty.String, "kind": cty.String, "type": cty.String, "path": cty.String,
 	"description": cty.String, "required": cty.Bool, "non_empty": cty.Bool,
 })
 
@@ -895,6 +895,7 @@ func ArtifactsValueWithIDs(
 		values[index] = cty.ObjectVal(map[string]cty.Value{
 			"id":          id,
 			"name":        cty.StringVal(artifact.Name),
+			"kind":        cty.StringVal("artifact"),
 			"type":        cty.StringVal(string(artifact.Type)),
 			"path":        path,
 			"description": cty.StringVal(artifact.Description),
@@ -912,9 +913,7 @@ type Snapshot struct {
 	Description string
 }
 
-var snapshotValueType = cty.Object(map[string]cty.Type{
-	"id": cty.String, "path": cty.String, "description": cty.String,
-})
+var snapshotValueType = artifactValueType
 
 // SnapshotsValue converts snapshot outputs into their HCL representation.
 func SnapshotsValue(snapshots []Snapshot) cty.Value {
@@ -924,8 +923,14 @@ func SnapshotsValue(snapshots []Snapshot) cty.Value {
 	values := make([]cty.Value, len(snapshots))
 	for index, item := range snapshots {
 		values[index] = cty.ObjectVal(map[string]cty.Value{
-			"id": cty.StringVal(item.ID), "path": cty.StringVal(item.Path),
+			"id":          cty.StringVal(item.ID),
+			"name":        cty.StringVal(item.ID),
+			"kind":        cty.StringVal("snapshot"),
+			"type":        cty.StringVal("file"),
+			"path":        cty.StringVal(item.Path),
 			"description": cty.StringVal(item.Description),
+			"required":    cty.BoolVal(false),
+			"non_empty":   cty.BoolVal(true),
 		})
 	}
 	return cty.ListVal(values)

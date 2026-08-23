@@ -946,11 +946,19 @@ research "static" "source" {
     terminate = true
     input = { Workspace = block_wd() }
     input_from_agent = {
-      Claims = [{
-        id          = "artifact-upstream"
-        path        = "claims.json"
-        description = "Validated claims"
-      }]
+      Claims = {
+        desc = "Validated claims"
+        sources = [{
+          id          = "artifact-upstream"
+          name        = "claims"
+          kind        = "artifact"
+          type        = "file"
+          path        = "claims.json"
+          description = "Validated claims"
+          required    = true
+          non_empty   = true
+        }]
+      }
     }
   }
 }
@@ -968,7 +976,7 @@ research "static" "source" {
 	assert.Equal(t, "research.static.source", planned.Saved.Nodes()[0].Address)
 	assert.True(t, toolUse.Input.Type().HasAttribute("Workspace"))
 	assert.Equal(t, "Validated claims",
-		toolUse.InputFromAgent.GetAttr("Claims").Index(cty.NumberIntVal(0)).GetAttr("description").AsString())
+		toolUse.InputFromAgent.GetAttr("Claims").GetAttr("sources").Index(cty.NumberIntVal(0)).GetAttr("description").AsString())
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

@@ -185,6 +185,9 @@ func validateToolUses(toolUses []ToolUse) error {
 		if err != nil {
 			return fmt.Errorf("tool_use %q: %w", toolUse.Name, err)
 		}
+		if err := validateAgentInputFields(agent); err != nil {
+			return fmt.Errorf("tool_use %q %w", toolUse.Name, err)
+		}
 		for field := range input.AsValueMap() {
 			if agent.Type().HasAttribute(field) {
 				return fmt.Errorf("tool_use %q input field %q has multiple owners", toolUse.Name, field)
@@ -196,6 +199,56 @@ func validateToolUses(toolUses []ToolUse) error {
 	}
 	if terminateCount > 1 {
 		return errors.New("research must have at most one terminating tool_use")
+	}
+	return nil
+}
+
+func validateAgentInputFields(fields cty.Value) error {
+	for name, field := range fields.AsValueMap() {
+		unmarked, _ := field.UnmarkDeep()
+		if !unmarked.Type().IsObjectType() || !unmarked.Type().HasAttribute("desc") || !unmarked.Type().HasAttribute("sources") {
+			return fmt.Errorf("input_from_agent field %q must be an object with desc and sources", name)
+		}
+		description := unmarked.GetAttr("desc")
+		if !description.Type().Equals(cty.String) || !description.IsKnown() || description.IsNull() || strings.TrimSpace(description.AsString()) == "" {
+			return fmt.Errorf("input_from_agent field %q desc must be a non-empty string", name)
+		}
+		sources := unmarked.GetAttr("sources")
+		if !sources.Type().IsListType() && !sources.Type().IsTupleType() {
+			return fmt.Errorf("input_from_agent field %q sources must be a list of artifact or snapshot objects", name)
+		}
+		if !sources.IsKnown() {
+			continue
+		}
+		for _, source := range sources.AsValueSlice() {
+			if !source.Type().IsObjectType() {
+				return fmt.Errorf("input_from_agent field %q sources must contain artifact or snapshot objects", name)
+			}
+			for _, attribute := range []string{"id", "name", "kind", "type", "path", "description"} {
+				if !source.Type().HasAttribute(attribute) {
+					return fmt.Errorf("input_from_agent field %q source is missing %q", name, attribute)
+				}
+				if !source.GetAttr(attribute).Type().Equals(cty.String) {
+					return fmt.Errorf("input_from_agent field %q source field %q must be a string", name, attribute)
+				}
+			}
+			for _, attribute := range []string{"required", "non_empty"} {
+				if !source.Type().HasAttribute(attribute) {
+					return fmt.Errorf("input_from_agent field %q source is missing %q", name, attribute)
+				}
+				if !source.GetAttr(attribute).Type().Equals(cty.Bool) {
+					return fmt.Errorf("input_from_agent field %q source field %q must be a bool", name, attribute)
+				}
+			}
+			kind := source.GetAttr("kind")
+			if kind.IsKnown() && !kind.IsNull() && kind.AsString() != "artifact" && kind.AsString() != "snapshot" {
+				return fmt.Errorf("input_from_agent field %q source kind must be artifact or snapshot", name)
+			}
+			artifactType := source.GetAttr("type")
+			if artifactType.IsKnown() && !artifactType.IsNull() && artifactType.AsString() != "file" && artifactType.AsString() != "directory" {
+				return fmt.Errorf("input_from_agent field %q source type must be file or directory", name)
+			}
+		}
 	}
 	return nil
 }

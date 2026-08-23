@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -76,6 +77,64 @@ func (c *runSnapshotCatalog) authorized(text ...string) map[string]string {
 	return result
 }
 
+func (c *runSnapshotCatalog) authorizedToolUseSnapshots(uses []researchspec.ToolUse) map[string]string {
+	ids := make([]string, 0)
+	for _, use := range uses {
+		fields, err := toolUseObjectMap(use.InputFromAgent)
+		if err != nil {
+			continue
+		}
+		for _, field := range fields {
+			unmarked, _ := field.UnmarkDeep()
+			if !unmarked.Type().IsObjectType() || !unmarked.Type().HasAttribute("sources") || !unmarked.GetAttr("sources").IsKnown() {
+				continue
+			}
+			for _, source := range unmarked.GetAttr("sources").AsValueSlice() {
+				if !source.Type().IsObjectType() || !source.Type().HasAttribute("id") || !source.Type().HasAttribute("kind") {
+					continue
+				}
+				id, kind := source.GetAttr("id"), source.GetAttr("kind")
+				if id.IsKnown() && !id.IsNull() && kind.IsKnown() && !kind.IsNull() && kind.AsString() == "snapshot" {
+					ids = append(ids, id.AsString())
+				}
+			}
+		}
+	}
+	return c.authorized(strings.Join(ids, "\n"))
+}
+
+func toolUseArtifactIDs(uses []researchspec.ToolUse) []string {
+	ids := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, use := range uses {
+		fields, err := toolUseObjectMap(use.InputFromAgent)
+		if err != nil {
+			continue
+		}
+		for _, field := range fields {
+			unmarked, _ := field.UnmarkDeep()
+			if !unmarked.Type().IsObjectType() || !unmarked.Type().HasAttribute("sources") || !unmarked.GetAttr("sources").IsKnown() {
+				continue
+			}
+			for _, source := range unmarked.GetAttr("sources").AsValueSlice() {
+				if !source.Type().IsObjectType() || !source.Type().HasAttribute("id") || !source.Type().HasAttribute("kind") {
+					continue
+				}
+				id, kind := source.GetAttr("id"), source.GetAttr("kind")
+				if !id.IsKnown() || id.IsNull() || !kind.IsKnown() || kind.IsNull() || kind.AsString() != "artifact" {
+					continue
+				}
+				if _, exists := seen[id.AsString()]; exists {
+					continue
+				}
+				seen[id.AsString()] = struct{}{}
+				ids = append(ids, id.AsString())
+			}
+		}
+	}
+	return ids
+}
+
 func closedResearchSystemPrompt(configured string) string {
 	return "You are the closed Research synthesis phase. Read registered evidence only through r42 typed tools. " +
 		"Do not acquire new evidence or use network, shell, generic file, edit, task, or user-input tools.\n\n" +
@@ -119,11 +178,8 @@ func (f *runtimeFactory) newResearchBlock(
 		artifactIDs[declared.Name] = record.ID
 		currentArtifactIDs = append(currentArtifactIDs, record.ID)
 	}
-	authorizedArtifactIDs := make([]string, 0, len(currentArtifactIDs)+len(artifactsRegistry.ReadyRecords()))
-	for _, record := range artifactsRegistry.ReadyRecords() {
-		authorizedArtifactIDs = append(authorizedArtifactIDs, record.ID)
-	}
-	authorizedArtifactIDs = append(authorizedArtifactIDs, currentArtifactIDs...)
+	authorizedArtifactIDs := slices.Clone(currentArtifactIDs)
+	authorizedArtifactIDs = append(authorizedArtifactIDs, toolUseArtifactIDs(planned.Config.ToolUses)...)
 	var err error
 	researchPhaseRetry, err := researchRetry(planned.Provider, planned.Config.Retry)
 	if err != nil {
@@ -230,6 +286,7 @@ func (f *runtimeFactory) newResearchBlock(
 		upstreamText += "\n" + *planned.Config.Prompt
 	}
 	upstream := f.snapshotCatalog.authorized(upstreamText)
+	maps.Copy(upstream, f.snapshotCatalog.authorizedToolUseSnapshots(planned.Config.ToolUses))
 	readWriteTools, snapshotAccess, err := evidenceToolsWithUpstreamAndArtifacts(
 		collectionContext.Registry,
 		upstream,

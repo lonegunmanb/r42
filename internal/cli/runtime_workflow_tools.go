@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	sdk "github.com/github/copilot-sdk/go"
@@ -463,11 +464,61 @@ func toolUseObjectMap(value cty.Value) (map[string]cty.Value, error) {
 
 func describeToolUseSources(value cty.Value) string {
 	unmarked, _ := value.UnmarkDeep()
+	if unmarked.Type().IsObjectType() && unmarked.Type().HasAttribute("desc") && unmarked.Type().HasAttribute("sources") {
+		description := ""
+		if desc := unmarked.GetAttr("desc"); desc.IsKnown() && !desc.IsNull() && desc.Type().Equals(cty.String) {
+			description = strings.TrimSpace(desc.AsString())
+		}
+		instructions := make([]string, 0)
+		sources := unmarked.GetAttr("sources")
+		if sources.IsKnown() && !sources.IsNull() && (sources.Type().IsTupleType() || sources.Type().IsListType()) {
+			for _, source := range sources.AsValueSlice() {
+				if !source.Type().IsObjectType() || !source.IsKnown() {
+					continue
+				}
+				id, kind, artifactType, summary := toolUseSourceStrings(source)
+				switch {
+				case kind == "snapshot":
+					instructions = append(instructions, fmt.Sprintf("Snapshot %s (%s): use r42_read_snapshot or r42_search_snapshot by ID.", id, summary))
+				case artifactType == "directory":
+					instructions = append(instructions, fmt.Sprintf("Directory artifact %s (%s): call r42_list_artifact_files, then read returned child IDs with r42_read_artifact.", id, summary))
+				default:
+					instructions = append(instructions, fmt.Sprintf("File artifact %s (%s): use r42_read_artifact; for JSON, r42_read_artifact_json_schema or r42_query_artifact_json.", id, summary))
+				}
+			}
+		}
+		if len(instructions) == 0 {
+			instructions = append(instructions, "No upstream artifact is declared. Use only the current phase's authorized snapshots supplied by r42 with r42_read_snapshot or r42_search_snapshot.")
+		} else {
+			instructions = append(instructions, "Current phase snapshots remain available with r42_read_snapshot or r42_search_snapshot.")
+		}
+		return strings.TrimSpace(description + " Sources: " + strings.Join(instructions, " "))
+	}
 	encoded, err := ctyjson.Marshal(unmarked, unmarked.Type())
 	if err != nil {
 		return ""
 	}
 	return "Construct this field using these authorized artifact or snapshot sources: " + string(encoded) + "."
+}
+
+func toolUseSourceStrings(value cty.Value) (id, kind, artifactType, description string) {
+	for _, field := range []struct {
+		name   string
+		target *string
+	}{
+		{name: "id", target: &id},
+		{name: "kind", target: &kind},
+		{name: "type", target: &artifactType},
+		{name: "description", target: &description},
+	} {
+		if value.Type().HasAttribute(field.name) {
+			item := value.GetAttr(field.name)
+			if item.IsKnown() && !item.IsNull() && item.Type().Equals(cty.String) {
+				*field.target = strings.TrimSpace(item.AsString())
+			}
+		}
+	}
+	return id, kind, artifactType, description
 }
 
 func anyString(value any) string {
@@ -580,20 +631,29 @@ func evidenceToolsWithAccess(
 	for _, id := range artifactIDs {
 		authorizedArtifacts[id] = struct{}{}
 	}
+	var authorizedArtifactsMu sync.RWMutex
+	isAuthorizedArtifact := func(id string) bool {
+		authorizedArtifactsMu.RLock()
+		if _, ok := authorizedArtifacts[id]; ok {
+			authorizedArtifactsMu.RUnlock()
+			return true
+		}
+		authorizedArtifactsMu.RUnlock()
+		record, recordErr := artifactsRegistry.Record(id)
+		return recordErr == nil && record.Ready && record.Kind == artifactpkg.KindSnapshot && snapshots.HasSnapshot(id)
+	}
 	listedArtifacts := func() ([]artifactpkg.Record, error) {
-		fixed, listErr := artifactsRegistry.Records(artifactIDs)
-		if listErr != nil {
-			return nil, listErr
+		records, err := artifactsRegistry.Records(artifactIDs)
+		if err != nil {
+			return nil, err
 		}
-		seen := maps.Clone(authorizedArtifacts)
+		records = slices.DeleteFunc(records, func(record artifactpkg.Record) bool { return !record.Ready })
 		for _, record := range artifactsRegistry.ReadyRecords() {
-			if _, exists := seen[record.ID]; exists {
-				continue
+			if record.Kind == artifactpkg.KindSnapshot && snapshots.HasSnapshot(record.ID) {
+				records = append(records, record)
 			}
-			fixed = append(fixed, record)
-			seen[record.ID] = struct{}{}
 		}
-		return fixed, nil
+		return records, nil
 	}
 
 	tools := []sdk.Tool{
@@ -683,6 +743,32 @@ func evidenceToolsWithAccess(
 			},
 		},
 		{
+			Name: "r42_list_artifact_files", Description: "List regular files inside an authorized directory artifact by ID. " +
+				"Use each returned child artifact ID with r42_read_artifact; paths are never accepted.",
+			Parameters: objectSchema(map[string]any{
+				"id": map[string]any{"type": "string", "description": "Authorized run-scoped directory artifact ID"},
+			}, []string{"id"}),
+			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+				args, decodeErr := decodeArguments[artifactJSONArgs](invocation.Arguments)
+				if decodeErr != nil {
+					return rejectedToolResult("invalid_arguments", decodeErr.Error())
+				}
+				if !isAuthorizedArtifact(args.ID) {
+					return rejectedToolResult("unknown_artifact", fmt.Sprintf("unknown artifact %q", args.ID))
+				}
+				files, listErr := artifactsRegistry.ListDirectoryFiles(args.ID)
+				if listErr != nil {
+					return rejectedToolResult("artifact_directory_read_failed", listErr.Error())
+				}
+				authorizedArtifactsMu.Lock()
+				for _, file := range files {
+					authorizedArtifacts[file.ID] = struct{}{}
+				}
+				authorizedArtifactsMu.Unlock()
+				return acceptedToolResult(files)
+			},
+		},
+		{
 			Name: "r42_read_artifact", Description: "Read a bounded page from an authorized run-scoped artifact by ID. " +
 				"Use offset_bytes=0 for the first page, then continue with next_offset_bytes while truncated is true. " +
 				"If the artifact ID is uncertain, call r42_list_artifacts to list valid IDs for the current block or dynamic task.",
@@ -696,11 +782,8 @@ func evidenceToolsWithAccess(
 				if decodeErr != nil {
 					return rejectedToolResult("invalid_arguments", decodeErr.Error())
 				}
-				if _, ok := authorizedArtifacts[args.ID]; !ok {
-					record, recordErr := artifactsRegistry.Record(args.ID)
-					if recordErr != nil || !record.Ready {
-						return rejectedToolResult("unknown_artifact", fmt.Sprintf("unknown artifact %q", args.ID))
-					}
+				if !isAuthorizedArtifact(args.ID) {
+					return rejectedToolResult("unknown_artifact", fmt.Sprintf("unknown artifact %q", args.ID))
 				}
 				page, readErr := artifactsRegistry.ReadPage(args.ID, args.OffsetBytes, args.MaxBytes)
 				if readErr != nil {
@@ -720,7 +803,7 @@ func evidenceToolsWithAccess(
 				if decodeErr != nil {
 					return rejectedToolResult("invalid_arguments", decodeErr.Error())
 				}
-				value, readErr := readArtifactJSONValue(artifactsRegistry, authorizedArtifacts, args.ID)
+				value, readErr := readArtifactJSONValue(artifactsRegistry, isAuthorizedArtifact, args.ID)
 				if readErr != nil {
 					return rejectedToolResult("artifact_json_read_failed", readErr.Error())
 				}
@@ -739,7 +822,7 @@ func evidenceToolsWithAccess(
 				if decodeErr != nil {
 					return rejectedToolResult("invalid_arguments", decodeErr.Error())
 				}
-				value, readErr := readArtifactJSONValue(artifactsRegistry, authorizedArtifacts, args.ID)
+				value, readErr := readArtifactJSONValue(artifactsRegistry, isAuthorizedArtifact, args.ID)
 				if readErr != nil {
 					return rejectedToolResult("artifact_json_read_failed", readErr.Error())
 				}
@@ -1185,17 +1268,14 @@ const maxJSONArtifactBytes = 4 * 1024 * 1024
 
 func readArtifactJSONValue(
 	registry *artifactpkg.Registry,
-	authorized map[string]struct{},
+	authorized func(string) bool,
 	id string,
 ) (any, error) {
 	if registry == nil {
 		return nil, errors.New("artifact registry is required")
 	}
-	if _, ok := authorized[id]; !ok {
-		record, err := registry.Record(id)
-		if err != nil || !record.Ready {
-			return nil, fmt.Errorf("unknown artifact %q", id)
-		}
+	if !authorized(id) {
+		return nil, fmt.Errorf("unknown artifact %q", id)
 	}
 	page, err := registry.ReadPage(id, 0, maxJSONArtifactBytes)
 	if err != nil {

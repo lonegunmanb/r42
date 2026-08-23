@@ -87,7 +87,10 @@ func TestDocumentIncludesDynamicTaskToolUseChecks(t *testing.T) {
 		"terminate": cty.BoolVal(true),
 		"input":     cty.EmptyObjectVal,
 		"input_from_agent": cty.ObjectVal(map[string]cty.Value{
-			"summary": cty.StringVal("task output"),
+			"summary": cty.ObjectVal(map[string]cty.Value{
+				"desc":    cty.StringVal("task output"),
+				"sources": cty.EmptyTupleVal,
+			}),
 		}),
 	})
 	task := cty.ObjectVal(map[string]cty.Value{

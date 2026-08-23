@@ -58,17 +58,50 @@ research "static" "primary_source_baseline" {
       ledger_path   = "${block_wd()}/evidence-ledger.json"
     }
     input_from_agent = {
-      url              = "The URL recorded in the authorized snapshot."
-      canonical_url    = "Optional publication identity URL."
-      title            = "The retained source title."
-      publisher        = "The source publisher."
-      publication_date = "The source publication date in YYYY-MM-DD format."
-      accessed_at      = "The date the source was accessed in YYYY-MM-DD format."
-      source_type      = "The source classification from the values listed in the tool description."
-      reporting_basis  = "The reporting basis from the values listed in the tool description."
-      provenance       = "The provenance from the values listed in the tool description."
-      snapshot_id      = "The snapshot_id returned by r42_save_snapshot or supplied by r42."
-      named_entities   = "Named entities relevant to this source."
+      url = {
+        desc = "The URL recorded in the authorized snapshot."
+        sources = []
+      }
+      canonical_url = {
+        desc = "Optional publication identity URL."
+        sources = []
+      }
+      title = {
+        desc = "The retained source title."
+        sources = []
+      }
+      publisher = {
+        desc = "The source publisher."
+        sources = []
+      }
+      publication_date = {
+        desc = "The source publication date in YYYY-MM-DD format."
+        sources = []
+      }
+      accessed_at = {
+        desc = "The date the source was accessed in YYYY-MM-DD format."
+        sources = []
+      }
+      source_type = {
+        desc = "The source classification from the values listed in the tool description."
+        sources = []
+      }
+      reporting_basis = {
+        desc = "The reporting basis from the values listed in the tool description."
+        sources = []
+      }
+      provenance = {
+        desc = "The provenance from the values listed in the tool description."
+        sources = []
+      }
+      snapshot_id = {
+        desc = "The snapshot_id returned by r42_save_snapshot or supplied by r42."
+        sources = []
+      }
+      named_entities = {
+        desc = "Named entities relevant to this source."
+        sources = []
+      }
     }
   }
   tool_use "submit_claims" {
@@ -78,8 +111,14 @@ research "static" "primary_source_baseline" {
       claims_path   = "${block_wd()}/claims.json"
     }
     input_from_agent = {
-      cards           = "Atomic claim cards supported by the registered sources."
-      remove_claim_ids = "IDs of earlier staged cards that should be removed during revision."
+      cards = {
+        desc = "Atomic claim cards supported by the registered sources."
+        sources = []
+      }
+      remove_claim_ids = {
+        desc = "IDs of earlier staged cards that should be removed during revision."
+        sources = []
+      }
     }
   }
   tool_use "finalize_claims" {
@@ -175,14 +214,38 @@ research "static" "brainstorm" {
       topic         = var.topic
     }
     input_from_agent = {
-      focal_product       = "The exact focal product or system boundary."
-      product_variants    = "Material product variants and branches."
-      expected_components = "Expected components within the declared boundary."
-      expected_stages     = "Expected manufacturing, testing, qualification, and integration stages."
-      upstream_boundaries = "The upstream boundary of the study."
-      downstream_boundary = "The downstream boundary of the study."
-      coverage_items      = "Coverage items assigned to one of the five track values listed in the tool description."
-      open_questions      = "Material scope questions that remain unresolved."
+      focal_product = {
+        desc = "The exact focal product or system boundary."
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+      }
+      product_variants = {
+        desc = "Material product variants and branches."
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+      }
+      expected_components = {
+        desc = "Expected components within the declared boundary."
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+      }
+      expected_stages = {
+        desc = "Expected manufacturing, testing, qualification, and integration stages."
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+      }
+      upstream_boundaries = {
+        desc = "The upstream boundary of the study."
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+      }
+      downstream_boundary = {
+        desc = "The downstream boundary of the study."
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+      }
+      coverage_items = {
+        desc = "Coverage items assigned to one of the five track values listed in the tool description."
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+      }
+      open_questions = {
+        desc = "Material scope questions that remain unresolved."
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+      }
     }
   }
   tool_call_quota   = local.pplx_tool_call_quota
@@ -275,17 +338,50 @@ research "dynamic" "graph_track" {
             ledger_path   = "${block_wd()}/${index}/evidence-ledger.json"
           }
           input_from_agent = {
-            url              = "The URL recorded in the authorized snapshot."
-            canonical_url    = "Optional publication identity URL."
-            title            = "The retained source title."
-            publisher        = "The source publisher."
-            publication_date = "The source publication date in YYYY-MM-DD format."
-            accessed_at      = "The access date in YYYY-MM-DD format."
-            source_type      = "The source classification from the values listed in the tool description."
-            reporting_basis  = "The reporting basis from the values listed in the tool description."
-            provenance       = "The provenance from the values listed in the tool description."
-            snapshot_id      = "The snapshot_id returned by r42_save_snapshot or supplied by r42."
-            named_entities   = "Named entities relevant to this source."
+            url = {
+              desc = "The URL recorded in the authorized snapshot."
+              sources = []
+            }
+            canonical_url = {
+              desc = "Optional publication identity URL."
+              sources = []
+            }
+            title = {
+              desc = "The retained source title."
+              sources = []
+            }
+            publisher = {
+              desc = "The source publisher."
+              sources = []
+            }
+            publication_date = {
+              desc = "The source publication date in YYYY-MM-DD format."
+              sources = []
+            }
+            accessed_at = {
+              desc = "The access date in YYYY-MM-DD format."
+              sources = []
+            }
+            source_type = {
+              desc = "The source classification from the values listed in the tool description."
+              sources = []
+            }
+            reporting_basis = {
+              desc = "The reporting basis from the values listed in the tool description."
+              sources = []
+            }
+            provenance = {
+              desc = "The provenance from the values listed in the tool description."
+              sources = []
+            }
+            snapshot_id = {
+              desc = "The snapshot_id returned by r42_save_snapshot or supplied by r42."
+              sources = []
+            }
+            named_entities = {
+              desc = "Named entities relevant to this source."
+              sources = []
+            }
           }
         },
         {
@@ -296,8 +392,19 @@ research "dynamic" "graph_track" {
             claims_path   = "${block_wd()}/${index}/claims.json"
           }
           input_from_agent = {
-            cards            = "Atomic claim cards supported by the registered sources."
-            remove_claim_ids = "IDs of earlier staged cards to remove during revision."
+            cards = {
+              desc = "Atomic claim cards for this track, grounded in current registered sources and the validated upstream scope and baseline."
+              sources = concat(
+                research.static.brainstorm.artifact,
+                research.static.brainstorm.snapshots,
+                research.static.primary_source_baseline.artifact,
+                research.static.primary_source_baseline.snapshots,
+              )
+            }
+            remove_claim_ids = {
+              desc = "IDs of earlier staged cards to remove during revision."
+              sources = []
+            }
           }
         },
         {
@@ -401,10 +508,38 @@ research "static" "build_supply_chain" {
       )
     }
     input_from_agent = {
-      nodes              = "Reference supply-chain nodes with their stages, branches, claim IDs, and unknowns."
-      edges              = "Reference supply-chain edges with their relation and supporting claim IDs."
-      assessment_targets = "Nodes that warrant a separate continuity-risk assessment."
-      unknowns           = "Evidence gaps and unresolved map questions."
+      nodes = {
+        desc = "Reference supply-chain nodes with their stages, branches, claim IDs, and unknowns."
+        sources = flatten([
+          research.static.brainstorm.artifact,
+          research.static.primary_source_baseline.artifact,
+          [for task in research.dynamic.graph_track.tasks : task.artifacts],
+        ])
+      }
+      edges = {
+        desc = "Reference supply-chain edges with their relation and supporting claim IDs."
+        sources = flatten([
+          research.static.brainstorm.artifact,
+          research.static.primary_source_baseline.artifact,
+          [for task in research.dynamic.graph_track.tasks : task.artifacts],
+        ])
+      }
+      assessment_targets = {
+        desc = "Nodes that warrant a separate continuity-risk assessment."
+        sources = flatten([
+          research.static.brainstorm.artifact,
+          research.static.primary_source_baseline.artifact,
+          [for task in research.dynamic.graph_track.tasks : task.artifacts],
+        ])
+      }
+      unknowns = {
+        desc = "Evidence gaps and unresolved map questions."
+        sources = flatten([
+          research.static.brainstorm.artifact,
+          research.static.primary_source_baseline.artifact,
+          [for task in research.dynamic.graph_track.tasks : task.artifacts],
+        ])
+      }
     }
   }
   disallowed_tools  = local.offline_disallowed_tools
@@ -485,16 +620,46 @@ research "dynamic" "assess_nodes" {
           node_name = target.node_name
         }
         input_from_agent = {
-          risk_scope             = "Whether this assessment applies globally or only to a branch."
-          branch                 = "The applicable product branch when risk_scope is branch."
-          scenarios              = "Scenarios selected from current_production, expansion_upgrade, and product_branch."
-          actual_dependency      = "Evidence-backed description of the target's actual dependency on this node."
-          qualified_alternatives = "Known qualified alternatives and usable capacity."
-          switching_vs_buffer    = "Comparison of switching and recovery constraints with known buffers."
-          conclusion              = "Conclusion selected from confirmed, candidate, or not_proven."
-          claim_ids               = "Claim IDs supporting this node assessment."
-          unknowns                = "Material unknowns that prevent a stronger conclusion."
-          falsification_conditions = "Evidence that would falsify or materially change this assessment."
+          risk_scope = {
+            desc = "Whether this assessment applies globally or only to a branch."
+            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+          }
+          branch = {
+            desc = "The applicable product branch when risk_scope is branch."
+            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+          }
+          scenarios = {
+            desc = "Scenarios selected from current_production, expansion_upgrade, and product_branch."
+            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+          }
+          actual_dependency = {
+            desc = "Evidence-backed description of the target's actual dependency on this node."
+            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+          }
+          qualified_alternatives = {
+            desc = "Known qualified alternatives and usable capacity."
+            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+          }
+          switching_vs_buffer = {
+            desc = "Comparison of switching and recovery constraints with known buffers."
+            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+          }
+          conclusion = {
+            desc = "Conclusion selected from confirmed, candidate, or not_proven."
+            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+          }
+          claim_ids = {
+            desc = "Claim IDs supporting this node assessment."
+            sources = flatten([research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+          }
+          unknowns = {
+            desc = "Material unknowns that prevent a stronger conclusion."
+            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+          }
+          falsification_conditions = {
+            desc = "Evidence that would falsify or materially change this assessment."
+            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+          }
         }
       }]
       disallowed_tools  = local.offline_disallowed_tools
@@ -599,17 +764,50 @@ research "dynamic" "prioritize_companies" {
             ledger_path   = "${block_wd()}/${index}/evidence-ledger.json"
           }
           input_from_agent = {
-            url              = "The URL recorded in the authorized snapshot."
-            canonical_url    = "Optional publication identity URL."
-            title            = "The retained source title."
-            publisher        = "The source publisher."
-            publication_date = "The source publication date in YYYY-MM-DD format."
-            accessed_at      = "The access date in YYYY-MM-DD format."
-            source_type      = "The source classification from the values listed in the tool description."
-            reporting_basis  = "The reporting basis from the values listed in the tool description."
-            provenance       = "The provenance from the values listed in the tool description."
-            snapshot_id      = "The snapshot_id returned by r42_save_snapshot or supplied by r42."
-            named_entities   = "Named entities relevant to this source."
+            url = {
+              desc = "The URL recorded in the authorized snapshot."
+              sources = []
+            }
+            canonical_url = {
+              desc = "Optional publication identity URL."
+              sources = []
+            }
+            title = {
+              desc = "The retained source title."
+              sources = []
+            }
+            publisher = {
+              desc = "The source publisher."
+              sources = []
+            }
+            publication_date = {
+              desc = "The source publication date in YYYY-MM-DD format."
+              sources = []
+            }
+            accessed_at = {
+              desc = "The access date in YYYY-MM-DD format."
+              sources = []
+            }
+            source_type = {
+              desc = "The source classification from the values listed in the tool description."
+              sources = []
+            }
+            reporting_basis = {
+              desc = "The reporting basis from the values listed in the tool description."
+              sources = []
+            }
+            provenance = {
+              desc = "The provenance from the values listed in the tool description."
+              sources = []
+            }
+            snapshot_id = {
+              desc = "The snapshot_id returned by r42_save_snapshot or supplied by r42."
+              sources = []
+            }
+            named_entities = {
+              desc = "Named entities relevant to this source."
+              sources = []
+            }
           }
         },
         {
@@ -620,8 +818,20 @@ research "dynamic" "prioritize_companies" {
             claims_path   = "${block_wd()}/${index}/claims.json"
           }
           input_from_agent = {
-            cards            = "Atomic relationship and economic-exposure claim cards."
-            remove_claim_ids = "IDs of earlier staged cards to remove during revision."
+            cards = {
+              desc = "Atomic relationship and economic-exposure claim cards grounded in current registered sources and the assessed node context."
+              sources = flatten([
+                assessment.artifacts,
+                research.static.primary_source_baseline.artifact,
+                research.static.primary_source_baseline.snapshots,
+                [for task in research.dynamic.graph_track.tasks : task.artifacts],
+                [for task in research.dynamic.graph_track.tasks : task.snapshots],
+              ])
+            }
+            remove_claim_ids = {
+              desc = "IDs of earlier staged cards to remove during revision."
+              sources = []
+            }
           }
         },
         {
@@ -650,8 +860,22 @@ research "dynamic" "prioritize_companies" {
             )
           }
           input_from_agent = {
-            companies  = "Companies prioritized against the exact assessed node, with role, priority, evidence claim IDs, unknowns, and next checks."
-            conclusion = "The concise conclusion for this node's company-priority list."
+          companies = {
+            desc = "Companies prioritized against the exact assessed node, with role, priority, evidence claim IDs, unknowns, and next checks."
+            sources = flatten([
+              assessment.artifacts,
+              research.static.primary_source_baseline.artifact,
+              [for task in research.dynamic.graph_track.tasks : task.artifacts],
+            ])
+            }
+          conclusion = {
+            desc = "The concise conclusion for this node's company-priority list."
+            sources = flatten([
+              assessment.artifacts,
+              research.static.primary_source_baseline.artifact,
+              [for task in research.dynamic.graph_track.tasks : task.artifacts],
+            ])
+            }
           }
         },
       ]

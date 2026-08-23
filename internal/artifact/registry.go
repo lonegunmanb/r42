@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -17,34 +18,39 @@ import (
 type Kind string
 
 const (
-	KindArtifact Kind = "artifact"
-	KindSnapshot Kind = "snapshot"
+	KindArtifact     Kind = "artifact"
+	KindArtifactFile Kind = "artifact_file"
+	KindSnapshot     Kind = "snapshot"
 )
 
 // Record is one run-scoped readable artifact capability.
 type Record struct {
-	ID          string `json:"id"`
-	Name        string `json:"name,omitempty"`
-	Path        string `json:"path"`
-	Description string `json:"description"`
-	Kind        Kind   `json:"kind"`
-	Ready       bool   `json:"-"`
+	ID          string                    `json:"id"`
+	Name        string                    `json:"name,omitempty"`
+	Path        string                    `json:"path"`
+	Description string                    `json:"description"`
+	Kind        Kind                      `json:"kind"`
+	Type        researchspec.ArtifactType `json:"type"`
+	Ready       bool                      `json:"-"`
 }
 
 type entry struct {
 	Record
-	workspace string
+	workspace     string
+	directoryRoot string
+	relativePath  string
 }
 
 // Registry owns opaque artifact IDs for one apply run.
 type Registry struct {
-	mu      sync.RWMutex
-	entries map[string]entry
-	order   []string
+	mu       sync.RWMutex
+	entries  map[string]entry
+	order    []string
+	children map[string]string
 }
 
 func NewRegistry() *Registry {
-	return &Registry{entries: make(map[string]entry)}
+	return &Registry{entries: make(map[string]entry), children: make(map[string]string)}
 }
 
 // Declare allocates an opaque ID for a configured research artifact.
@@ -61,7 +67,7 @@ func (r *Registry) Declare(workspace string, declared researchspec.Artifact) (Re
 	}
 	record := Record{
 		ID: "artifact-" + uuid.NewString(), Name: declared.Name, Path: path,
-		Description: strings.TrimSpace(declared.Description), Kind: KindArtifact,
+		Description: strings.TrimSpace(declared.Description), Kind: KindArtifact, Type: declared.Type,
 	}
 	r.mu.Lock()
 	r.entries[record.ID] = entry{Record: record, workspace: workspace}
@@ -95,11 +101,75 @@ func (r *Registry) RegisterSnapshot(workspace, id, path, description string) (Re
 		return existing.Record, nil
 	}
 	record := Record{
-		ID: id, Path: resolved, Description: strings.TrimSpace(description), Kind: KindSnapshot,
+		ID: id, Path: resolved, Description: strings.TrimSpace(description), Kind: KindSnapshot, Type: researchspec.ArtifactTypeFile,
 	}
 	r.entries[id] = entry{Record: record, workspace: workspace}
 	r.order = append(r.order, id)
 	return record, nil
+}
+
+// ListDirectoryFiles registers regular files below a ready directory artifact
+// as read-only child capabilities. Symlinks are deliberately excluded.
+func (r *Registry) ListDirectoryFiles(id string) ([]Record, error) {
+	if r == nil {
+		return nil, errors.New("artifact registry is required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	parent, ok := r.entries[id]
+	if !ok {
+		return nil, fmt.Errorf("unknown artifact %q", id)
+	}
+	if !parent.Ready {
+		return nil, fmt.Errorf("artifact %q is not ready", id)
+	}
+	if parent.Kind != KindArtifact || parent.Type != researchspec.ArtifactTypeDirectory {
+		return nil, fmt.Errorf("artifact %q is not a directory", id)
+	}
+	result := make([]Record, 0)
+	err := filepath.WalkDir(parent.Path, func(path string, item os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if item.Type()&os.ModeSymlink != 0 {
+			if item.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if item.IsDir() || !item.Type().IsRegular() {
+			return nil
+		}
+		relative, err := filepath.Rel(parent.Path, path)
+		if err != nil {
+			return err
+		}
+		key := id + "\x00" + filepath.Clean(relative)
+		childID, exists := r.children[key]
+		if !exists {
+			childID = "artifact-" + uuid.NewString()
+			record := Record{
+				ID: childID, Name: filepath.ToSlash(relative), Path: path,
+				Description: "File from directory artifact " + parent.Name + ": " + filepath.ToSlash(relative),
+				Kind:        KindArtifactFile, Type: researchspec.ArtifactTypeFile, Ready: true,
+			}
+			r.entries[childID] = entry{
+				Record:        record,
+				workspace:     parent.workspace,
+				directoryRoot: parent.Path,
+				relativePath:  filepath.Clean(relative),
+			}
+			r.order = append(r.order, childID)
+			r.children[key] = childID
+		}
+		result = append(result, r.entries[childID].Record)
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list directory artifact %q: %w", id, err)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result, nil
 }
 
 func (r *Registry) Record(id string) (Record, error) {
@@ -173,13 +243,36 @@ func (r *Registry) ReadPage(id string, offsetBytes, maxBytes int) (Page, error) 
 	if maxBytes <= 0 {
 		return Page{}, errors.New("read bound must be positive")
 	}
-	record, err := r.Record(id)
-	if err != nil {
-		return Page{}, err
+	r.mu.RLock()
+	item, ok := r.entries[id]
+	r.mu.RUnlock()
+	if !ok {
+		return Page{}, fmt.Errorf("unknown artifact %q", id)
 	}
-	file, err := os.Open(record.Path)
+	if !item.Ready {
+		return Page{}, fmt.Errorf("artifact %q is not ready", id)
+	}
+	var root *os.Root
+	var file *os.File
+	var err error
+	if item.directoryRoot != "" {
+		root, err = os.OpenRoot(item.directoryRoot)
+		if err != nil {
+			return Page{}, fmt.Errorf("open artifact %q: %w", id, err)
+		}
+		file, err = root.Open(item.relativePath)
+		if err != nil {
+			_ = root.Close()
+			return Page{}, fmt.Errorf("open artifact %q: %w", id, err)
+		}
+	} else {
+		file, err = os.Open(item.Path)
+	}
 	if err != nil {
 		return Page{}, fmt.Errorf("open artifact %q: %w", id, err)
+	}
+	if root != nil {
+		defer func() { _ = root.Close() }()
 	}
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()

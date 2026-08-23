@@ -93,11 +93,22 @@ research "static" "plan" {
   tool_use "submit_plan" {
     tool_id   = go_tool.submit_research_plan.id
     terminate = true
+    input = {
+      topic = var.topic
+    }
     input_from_agent = {
-      topic                   = "The research topic supplied to this planning block."
-      parallel_tasks          = "The independently executable tasks for the parallel group."
-      independent_serial_tasks = "The independently executable tasks for the serial group."
-      final_serial_tasks      = "The tasks that wait for both earlier groups."
+      parallel_tasks = {
+        desc = "The independently executable tasks for the parallel group."
+        sources = []
+      }
+      independent_serial_tasks = {
+        desc = "The independently executable tasks for the serial group."
+        sources = []
+      }
+      final_serial_tasks = {
+        desc = "The tasks that wait for both earlier groups."
+        sources = []
+      }
     }
   }
   disallowed_tools  = local.offline_disallowed_tools
@@ -166,8 +177,14 @@ research "dynamic" "parallel_deep_dive" {
           subquestion   = task.subquestion
         }
         input_from_agent = {
-          knowledge = "Atomic knowledge claims for the assigned subquestion, supported by the collected quotes."
-          quotes    = "Exact quote records read from the authorized snapshots."
+          knowledge = {
+            desc = "Atomic knowledge claims for the assigned subquestion, supported by the collected quotes."
+            sources = []
+          }
+          quotes = {
+            desc = "Exact quote records read from the authorized snapshots."
+            sources = []
+          }
         }
       }]
       tool_call_quota   = local.deep_dive_tool_call_quota
@@ -248,8 +265,14 @@ research "dynamic" "independent_serial_deep_dive" {
           subquestion   = task.subquestion
         }
         input_from_agent = {
-          knowledge = "Atomic knowledge claims for the assigned subquestion, supported by the collected quotes."
-          quotes    = "Exact quote records read from the authorized snapshots."
+          knowledge = {
+            desc = "Atomic knowledge claims for the assigned subquestion, supported by the collected quotes."
+            sources = []
+          }
+          quotes = {
+            desc = "Exact quote records read from the authorized snapshots."
+            sources = []
+          }
         }
       }]
       tool_call_quota   = local.deep_dive_tool_call_quota
@@ -345,8 +368,22 @@ research "dynamic" "final_serial_deep_dive" {
           subquestion   = task.subquestion
         }
         input_from_agent = {
-          knowledge = "New atomic knowledge claims supported by the authorized snapshots and validated upstream JSON."
-          quotes    = "Exact quote records for newly collected evidence."
+          knowledge = {
+            desc = "New atomic knowledge claims supported by the authorized snapshots and validated upstream JSON."
+            sources = flatten([
+              [for item in research.dynamic.parallel_deep_dive.tasks : item.artifacts],
+              [for item in research.dynamic.independent_serial_deep_dive.tasks : item.artifacts],
+              [for item in research.dynamic.parallel_deep_dive.tasks : item.snapshots],
+              [for item in research.dynamic.independent_serial_deep_dive.tasks : item.snapshots],
+            ])
+          }
+          quotes = {
+            desc = "Exact quote records for newly collected evidence."
+            sources = flatten([
+              [for item in research.dynamic.parallel_deep_dive.tasks : item.snapshots],
+              [for item in research.dynamic.independent_serial_deep_dive.tasks : item.snapshots],
+            ])
+          }
         }
       }]
       tool_call_quota   = local.deep_dive_tool_call_quota
@@ -438,8 +475,22 @@ research "static" "resolve_conflicts" {
       )
     }
     input_from_agent = {
-      conflicts          = "Every detected cross-subquestion conflict and its evidence-backed decision."
-      synthesis_guidance = "Guidance for the final writer, including unresolved uncertainty."
+      conflicts = {
+        desc = "Every detected cross-subquestion conflict and its evidence-backed decision."
+        sources = flatten([
+          [for item in research.dynamic.parallel_deep_dive.tasks : item.artifacts],
+          [for item in research.dynamic.independent_serial_deep_dive.tasks : item.artifacts],
+          [for item in research.dynamic.final_serial_deep_dive.tasks : item.artifacts],
+        ])
+      }
+      synthesis_guidance = {
+        desc = "Guidance for the final writer, including unresolved uncertainty."
+        sources = flatten([
+          [for item in research.dynamic.parallel_deep_dive.tasks : item.artifacts],
+          [for item in research.dynamic.independent_serial_deep_dive.tasks : item.artifacts],
+          [for item in research.dynamic.final_serial_deep_dive.tasks : item.artifacts],
+        ])
+      }
     }
   }
   disallowed_tools  = local.offline_disallowed_tools

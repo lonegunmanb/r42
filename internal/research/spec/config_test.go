@@ -162,6 +162,61 @@ func TestConfigValidateRequiredFields(t *testing.T) {
 	}
 }
 
+func TestConfigValidateRejectsLegacyAgentInputDescription(t *testing.T) {
+	t.Parallel()
+
+	config := researchspec.Config{
+		Model: "model", SystemPrompt: "research", CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
+		Policy: researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+		ToolUses: []researchspec.ToolUse{{Name: "submit", ToolID: "tool", InputFromAgent: cty.ObjectVal(map[string]cty.Value{
+			"claims": cty.StringVal("legacy description"),
+		})}},
+	}
+	err := config.Validate()
+	assert.EqualError(t, err, "tool_use \"submit\" input_from_agent field \"claims\" must be an object with desc and sources")
+}
+
+func TestConfigValidateRejectsMalformedAgentSource(t *testing.T) {
+	t.Parallel()
+
+	config := researchspec.Config{
+		Model: "model", SystemPrompt: "research", CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
+		Policy: researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+		ToolUses: []researchspec.ToolUse{{Name: "submit", ToolID: "tool", InputFromAgent: cty.ObjectVal(map[string]cty.Value{
+			"claims": cty.ObjectVal(map[string]cty.Value{
+				"desc": cty.StringVal("Claims"),
+				"sources": cty.TupleVal([]cty.Value{cty.ObjectVal(map[string]cty.Value{
+					"id": cty.StringVal("artifact-claims"), "name": cty.StringVal("claims"), "kind": cty.NumberIntVal(1), "type": cty.StringVal("file"),
+					"path": cty.StringVal("claims.json"), "description": cty.StringVal("Claims"), "required": cty.BoolVal(true), "non_empty": cty.BoolVal(true),
+				})}),
+			}),
+		})}},
+	}
+	err := config.Validate()
+	assert.EqualError(t, err, "tool_use \"submit\" input_from_agent field \"claims\" source field \"kind\" must be a string")
+}
+
+func TestConfigValidateRejectsIncompleteAgentSource(t *testing.T) {
+	t.Parallel()
+
+	config := researchspec.Config{
+		Model: "model", SystemPrompt: "research", CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
+		Policy: researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+		ToolUses: []researchspec.ToolUse{{Name: "submit", ToolID: "tool", InputFromAgent: cty.ObjectVal(map[string]cty.Value{
+			"claims": cty.ObjectVal(map[string]cty.Value{
+				"desc": cty.StringVal("Claims"),
+				"sources": cty.TupleVal([]cty.Value{cty.ObjectVal(map[string]cty.Value{
+					"id": cty.StringVal("artifact-claims"), "kind": cty.StringVal("artifact"), "type": cty.StringVal("file"),
+					"path": cty.StringVal("claims.json"), "description": cty.StringVal("Claims"),
+				})}),
+			}),
+		})}},
+	}
+
+	err := config.Validate()
+	assert.EqualError(t, err, "tool_use \"submit\" input_from_agent field \"claims\" source is missing \"name\"")
+}
+
 func TestQCConfigRejectsInvalidToolCallQuota(t *testing.T) {
 	t.Parallel()
 

@@ -240,6 +240,7 @@ func TestEvidenceToolsExposeArtifactPaging(t *testing.T) {
 	runArtifacts := artifactpkg.NewRegistry()
 	record, err := runArtifacts.Declare(workspace, artifacts[0])
 	require.NoError(t, err)
+	require.NoError(t, runArtifacts.MarkReady(record.ID))
 	tools, err := evidenceToolsWithArtifactRegistry(registry, workspace, artifacts, false, runArtifacts, []string{record.ID})
 	require.NoError(t, err)
 
@@ -340,6 +341,62 @@ func TestApplyToolUseBindingsRejectsValidationFailureBeforeHandler(t *testing.T)
 	assert.False(t, called)
 }
 
+func TestApplyToolUseBindingsDescribesTypedSources(t *testing.T) {
+	t.Parallel()
+
+	tools := []sdk.Tool{{
+		Name: "tool_finish", Parameters: objectSchema(map[string]any{"claims": map[string]any{"type": "array"}}, []string{"claims"}),
+		Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) { return acceptedToolResult("done") },
+	}}
+	bound, err := applyToolUseBindings(tools, []researchspec.ToolUse{{
+		Name: "finish", ToolID: "tool_finish", InputFromAgent: cty.ObjectVal(map[string]cty.Value{
+			"claims": cty.ObjectVal(map[string]cty.Value{
+				"desc": cty.StringVal("Claim IDs required for the map."),
+				"sources": cty.TupleVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("artifact-file"), "kind": cty.StringVal("artifact"), "type": cty.StringVal("file"), "description": cty.StringVal("Claims JSON")}),
+					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("artifact-directory"), "kind": cty.StringVal("artifact"), "type": cty.StringVal("directory"), "description": cty.StringVal("Evidence directory")}),
+					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("snapshot-0123456789abcdef0123456789abcdef"), "kind": cty.StringVal("snapshot"), "type": cty.StringVal("file"), "description": cty.StringVal("Primary source")}),
+				}),
+			}),
+		}),
+	}})
+	require.NoError(t, err)
+	properties, ok := bound[0].Parameters["properties"].(map[string]any)
+	require.True(t, ok)
+	claims, ok := properties["claims"].(map[string]any)
+	require.True(t, ok)
+	description, ok := claims["description"].(string)
+	require.True(t, ok)
+	assert.Contains(t, description, "Claim IDs required for the map.")
+	assert.Contains(t, description, "r42_read_artifact")
+	assert.Contains(t, description, "r42_list_artifact_files")
+	assert.Contains(t, description, "r42_read_snapshot")
+	assert.Contains(t, description, "Current phase snapshots remain available")
+}
+
+func TestApplyToolUseBindingsDescribesCurrentSnapshotsWithoutUpstreamSources(t *testing.T) {
+	t.Parallel()
+
+	tools := []sdk.Tool{{
+		Name: "tool_finish", Parameters: objectSchema(map[string]any{"quote": map[string]any{"type": "string"}}, []string{"quote"}),
+		Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) { return acceptedToolResult("done") },
+	}}
+	bound, err := applyToolUseBindings(tools, []researchspec.ToolUse{{
+		Name: "finish", ToolID: "tool_finish", InputFromAgent: cty.ObjectVal(map[string]cty.Value{
+			"quote": cty.ObjectVal(map[string]cty.Value{"desc": cty.StringVal("Exact evidence quote."), "sources": cty.EmptyTupleVal}),
+		}),
+	}})
+	require.NoError(t, err)
+	properties, ok := bound[0].Parameters["properties"].(map[string]any)
+	require.True(t, ok)
+	quote, ok := properties["quote"].(map[string]any)
+	require.True(t, ok)
+	description, ok := quote["description"].(string)
+	require.True(t, ok)
+	assert.Contains(t, description, "No upstream artifact is declared")
+	assert.Contains(t, description, "r42_read_snapshot")
+}
+
 func TestEvaluateToolPostconditionsUsesTypedInputAndOutput(t *testing.T) {
 	t.Parallel()
 
@@ -384,6 +441,30 @@ func TestReadArtifactDiscoversSnapshotApprovedAfterToolCreation(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	assert.Contains(t, read.TextResultForLLM, "approved source")
+}
+
+func TestReadArtifactRejectsUnreviewedSnapshot(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	snapshots := snapshot.NewRegistry(workspace)
+	artifacts := artifactpkg.NewRegistry()
+	tools, err := evidenceToolsWithArtifactRegistry(snapshots, workspace, nil, false, artifacts, nil)
+	require.NoError(t, err)
+
+	path := filepath.Join(workspace, "pending.md")
+	require.NoError(t, os.WriteFile(path, []byte("pending source"), 0o600))
+	registered, err := snapshots.RegisterPath(path)
+	require.NoError(t, err)
+	_, err = artifacts.RegisterSnapshot(workspace, registered.ID, registered.Path, registered.Description)
+	require.NoError(t, err)
+
+	read, err := toolByName(t, tools, "r42_read_artifact").Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"id": registered.ID, "max_bytes": 100,
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, read.TextResultForLLM, `"accepted":false`)
+	assert.Contains(t, read.TextResultForLLM, "unknown_artifact")
 }
 
 func TestSnapshotQuoteValidationIdentifiesClaimAndField(t *testing.T) {
@@ -695,7 +776,7 @@ func TestEvidenceToolsExposeIDsAndDeclaredArtifactNamesOnly(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{
-		"r42_list_snapshots", "r42_read_snapshot", "r42_search_snapshot", "r42_list_artifacts", "r42_read_artifact",
+		"r42_list_snapshots", "r42_read_snapshot", "r42_search_snapshot", "r42_list_artifacts", "r42_list_artifact_files", "r42_read_artifact",
 		"r42_read_artifact_json_schema", "r42_query_artifact_json",
 		"r42_write_markdown",
 	}, toolNames(tools))
@@ -720,13 +801,10 @@ func TestEvidenceToolsExposeIDsAndDeclaredArtifactNamesOnly(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal([]byte(listed.TextResultForLLM), &listedResponse))
 	assert.True(t, listedResponse.Accepted)
-	require.Len(t, listedResponse.Output, 2)
-	assert.Regexp(t, `^artifact-[0-9a-f-]{36}$`, listedResponse.Output[0].ID)
-	assert.Equal(t, "report", listedResponse.Output[0].Name)
-	assert.Equal(t, "Report fixture", listedResponse.Output[0].Description)
-	assert.Equal(t, filepath.Join(workspace, "report.md"), listedResponse.Output[0].Path)
-	assert.Contains(t, tools[4].Description, "r42_list_artifacts")
-	assert.Contains(t, tools[4].Description, "ID")
+	assert.Empty(t, listedResponse.Output)
+	readArtifactTool := toolByName(t, tools, "r42_read_artifact")
+	assert.Contains(t, readArtifactTool.Description, "r42_list_artifacts")
+	assert.Contains(t, readArtifactTool.Description, "ID")
 	writeTool := toolByName(t, tools, "r42_write_markdown")
 	write, err := writeTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"name": "unknown", "content": "# no"}})
 	require.NoError(t, err)
@@ -744,6 +822,7 @@ func TestJSONArtifactToolsReturnSchemaAndJQProjection(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(record.Path, []byte(`{"claims":[{"id":"C-1","text":"one"}]}`), 0o600))
+	require.NoError(t, registry.MarkReady(record.ID))
 	tools, err := evidenceToolsWithArtifactRegistry(snapshots, workspace, nil, false, registry, []string{record.ID})
 	require.NoError(t, err)
 	schemaTool := toolByName(t, tools, "r42_read_artifact_json_schema")
@@ -757,6 +836,147 @@ func TestJSONArtifactToolsReturnSchemaAndJQProjection(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	assert.Contains(t, projection.TextResultForLLM, `"C-1"`)
+}
+
+func TestArtifactDirectoryToolListsReadableChildIDs(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	directory := filepath.Join(workspace, "evidence")
+	require.NoError(t, os.MkdirAll(directory, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "source.json"), []byte(`{"source":true}`), 0o600))
+	registry := artifactpkg.NewRegistry()
+	parent, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "evidence", Type: researchspec.ArtifactTypeDirectory, Path: "evidence", Description: "Source documents",
+	})
+	require.NoError(t, err)
+	require.NoError(t, registry.MarkReady(parent.ID))
+	tools, err := evidenceToolsWithArtifactRegistry(snapshot.NewRegistry(workspace), workspace, nil, false, registry, []string{parent.ID})
+	require.NoError(t, err)
+
+	listed, err := toolByName(t, tools, "r42_list_artifact_files").Handler(sdk.ToolInvocation{Arguments: map[string]any{"id": parent.ID}})
+	require.NoError(t, err)
+	var listedResponse struct {
+		Output []artifactpkg.Record `json:"output"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(listed.TextResultForLLM), &listedResponse))
+	require.Len(t, listedResponse.Output, 1)
+	assert.Equal(t, "source.json", listedResponse.Output[0].Name)
+	child, err := toolByName(t, tools, "r42_read_artifact").Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"id": listedResponse.Output[0].ID, "max_bytes": 100,
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, child.TextResultForLLM, `\"source\":true`)
+}
+
+func TestArtifactDirectoryToolSynchronizesListedChildCapabilities(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	directory := filepath.Join(workspace, "evidence")
+	require.NoError(t, os.MkdirAll(directory, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "source.json"), []byte(`{"source":true}`), 0o600))
+	registry := artifactpkg.NewRegistry()
+	parent, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "evidence", Type: researchspec.ArtifactTypeDirectory, Path: "evidence", Description: "Source documents",
+	})
+	require.NoError(t, err)
+	require.NoError(t, registry.MarkReady(parent.ID))
+	tools, err := evidenceToolsWithArtifactRegistry(snapshot.NewRegistry(workspace), workspace, nil, false, registry, []string{parent.ID})
+	require.NoError(t, err)
+
+	listTool := toolByName(t, tools, "r42_list_artifact_files")
+	initial, err := listTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"id": parent.ID}})
+	require.NoError(t, err)
+	var listedResponse struct {
+		Output []artifactpkg.Record `json:"output"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(initial.TextResultForLLM), &listedResponse))
+	require.Len(t, listedResponse.Output, 1)
+	childID := listedResponse.Output[0].ID
+	readTool := toolByName(t, tools, "r42_read_artifact")
+
+	const workers = 32
+	start := make(chan struct{})
+	errs := make(chan error, workers*2)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			<-start
+			_, listErr := listTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"id": parent.ID}})
+			if listErr != nil {
+				errs <- listErr
+				return
+			}
+			_, readErr := readTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"id": childID, "max_bytes": 100}})
+			if readErr != nil {
+				errs <- readErr
+			}
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for handlerErr := range errs {
+		require.NoError(t, handlerErr)
+	}
+}
+
+func TestArtifactToolsRejectReadyArtifactsOutsideCurrentCapability(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	allowed, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "allowed", Type: researchspec.ArtifactTypeFile, Path: "allowed.json", Description: "Allowed data",
+	})
+	require.NoError(t, err)
+	forbidden, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "forbidden", Type: researchspec.ArtifactTypeFile, Path: "forbidden.json", Description: "Other task data",
+	})
+	require.NoError(t, err)
+	for _, record := range []artifactpkg.Record{allowed, forbidden} {
+		require.NoError(t, os.WriteFile(record.Path, []byte(`{"id":"`+record.Name+`"}`), 0o600))
+		require.NoError(t, registry.MarkReady(record.ID))
+	}
+	tools, err := evidenceToolsWithArtifactRegistry(snapshot.NewRegistry(workspace), workspace, nil, false, registry, []string{allowed.ID})
+	require.NoError(t, err)
+
+	listed, err := toolByName(t, tools, "r42_list_artifacts").Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+	require.NoError(t, err)
+	assert.Contains(t, listed.TextResultForLLM, allowed.ID)
+	assert.NotContains(t, listed.TextResultForLLM, forbidden.ID)
+
+	read, err := toolByName(t, tools, "r42_read_artifact").Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"id": forbidden.ID, "max_bytes": 100,
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, read.TextResultForLLM, `"accepted":false`)
+	assert.Contains(t, read.TextResultForLLM, "unknown_artifact")
+}
+
+func TestArtifactToolsRejectDeclaredArtifactsUntilReady(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	record, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "pending", Type: researchspec.ArtifactTypeFile, Path: "pending.json", Description: "Pending output",
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(record.Path, []byte(`{"id":"pending"}`), 0o600))
+	tools, err := evidenceToolsWithArtifactRegistry(snapshot.NewRegistry(workspace), workspace, nil, false, registry, []string{record.ID})
+	require.NoError(t, err)
+
+	read, err := toolByName(t, tools, "r42_read_artifact").Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"id": record.ID, "max_bytes": 100,
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, read.TextResultForLLM, `"accepted":false`)
+	assert.Contains(t, read.TextResultForLLM, "is not ready")
+	listed, err := toolByName(t, tools, "r42_list_artifacts").Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+	require.NoError(t, err)
+	assert.NotContains(t, listed.TextResultForLLM, record.ID)
 }
 
 func TestResearchSnapshotProtocolUsesIDsInsteadOfPaths(t *testing.T) {
@@ -1026,4 +1246,44 @@ func TestRunSnapshotCatalogPublishesOnlyReviewedSnapshots(t *testing.T) {
 	authorized := catalog.authorized(items[0].ID + " " + items[1].ID)
 
 	assert.Equal(t, map[string]string{items[0].ID: items[0].Path}, authorized)
+}
+
+func TestRunSnapshotCatalogAuthorizesDescriptorSnapshotSources(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := snapshot.NewRegistry(workspace)
+	path := filepath.Join(workspace, "reviewed.md")
+	require.NoError(t, os.WriteFile(path, []byte("content"), 0o600))
+	registered, err := registry.RegisterPath(path)
+	require.NoError(t, err)
+	registry.MarkReviewed(registered.ID)
+	catalog := newRunSnapshotCatalog()
+	catalog.add(registry.Snapshots())
+	uses := []researchspec.ToolUse{{InputFromAgent: cty.ObjectVal(map[string]cty.Value{
+		"quote": cty.ObjectVal(map[string]cty.Value{
+			"desc":    cty.StringVal("Evidence quote"),
+			"sources": researchspec.SnapshotsValue([]researchspec.Snapshot{{ID: registered.ID, Path: path, Description: "Reviewed source"}}),
+		}),
+	})}}
+
+	assert.Equal(t, map[string]string{registered.ID: path}, catalog.authorizedToolUseSnapshots(uses))
+}
+
+func TestToolUseArtifactIDsIncludesOnlyArtifactSources(t *testing.T) {
+	t.Parallel()
+
+	uses := []researchspec.ToolUse{
+		{InputFromAgent: cty.ObjectVal(map[string]cty.Value{
+			"claims": cty.ObjectVal(map[string]cty.Value{
+				"desc": cty.StringVal("Claims"),
+				"sources": cty.TupleVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("artifact-claims"), "kind": cty.StringVal("artifact"), "type": cty.StringVal("file"), "path": cty.StringVal("claims.json"), "description": cty.StringVal("Claims")}),
+					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("snapshot-0123456789abcdef0123456789abcdef"), "kind": cty.StringVal("snapshot"), "type": cty.StringVal("file"), "path": cty.StringVal("source.md"), "description": cty.StringVal("Source")}),
+				}),
+			}),
+		})},
+	}
+
+	assert.Equal(t, []string{"artifact-claims"}, toolUseArtifactIDs(uses))
 }

@@ -24,7 +24,10 @@ func TestSelectPreflightSelectionResolvesDynamicResearchProvider(t *testing.T) {
 		"terminate": cty.BoolVal(true),
 		"input":     cty.EmptyObjectVal,
 		"input_from_agent": cty.ObjectVal(map[string]cty.Value{
-			"summary": cty.StringVal("the task result"),
+			"summary": cty.ObjectVal(map[string]cty.Value{
+				"desc":    cty.StringVal("the task result"),
+				"sources": cty.EmptyTupleVal,
+			}),
 		}),
 	})
 	task := cty.ObjectVal(map[string]cty.Value{

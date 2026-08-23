@@ -1082,6 +1082,22 @@ func TestArtifactDescriptionIsRequiredAndPublished(t *testing.T) {
 	require.ErrorContains(t, artifact.Validate(), "description is required")
 }
 
+func TestSnapshotOutputsShareArtifactObjectType(t *testing.T) {
+	t.Parallel()
+
+	artifacts := researchspec.ArtifactsValue([]researchspec.Artifact{{
+		Name: "claims", Type: researchspec.ArtifactTypeFile, Path: "claims.json", Description: "Validated claims",
+	}}, nil)
+	snapshots := researchspec.SnapshotsValue([]researchspec.Snapshot{{
+		ID: "snapshot-0123456789abcdef0123456789abcdef", Path: "source.md", Description: "Primary source",
+	}})
+
+	assert.True(t, artifacts.Type().Equals(snapshots.Type()))
+	snapshot := snapshots.Index(cty.NumberIntVal(0))
+	assert.Equal(t, "snapshot", snapshot.GetAttr("kind").AsString())
+	assert.Equal(t, "file", snapshot.GetAttr("type").AsString())
+}
+
 //nolint:paralleltest // Golden's block registry is process-global.
 func TestResearchBlockPlansToolUseFieldOwnership(t *testing.T) {
 	registerResearchSchemaBlocks()
@@ -1098,11 +1114,19 @@ research "static" "owned" {
       workspace = block_wd()
     }
     input_from_agent = {
-      claims = [{
-        id          = "artifact-upstream"
-        path        = "claims.json"
-        description = "Upstream claims"
-      }]
+      claims = {
+        desc = "Upstream claims"
+        sources = [{
+          id          = "artifact-upstream"
+          name        = "claims"
+          kind        = "artifact"
+          type        = "file"
+          path        = "claims.json"
+          description = "Upstream claims"
+          required    = true
+          non_empty   = true
+        }]
+      }
     }
   }
 }
@@ -1134,7 +1158,7 @@ research "static" "fixture" {
   tool_use "finish" {
     tool_id = fixture_tool.finish.id
     terminate = true
-    input_from_agent = { claims = [] }
+    input_from_agent = { claims = { desc = "Claims", sources = [] } }
     validation {
       condition = length(input.claims) > 0
       error_message = "at least one claim is required"
@@ -1163,7 +1187,7 @@ research "static" "fixture" {
   tool_use "finish" {
     tool_id = fixture_tool.finish.id
     terminate = true
-    input_from_agent = { claims = [] }
+    input_from_agent = { claims = { desc = "Claims", sources = [] } }
     validation {
       condition = output.ok
       error_message = "must be valid"
@@ -1188,7 +1212,7 @@ research "static" "mixed" {
   tool_use "submit" {
     tool_id   = fixture_tool.finish.id
     terminate = true
-    input_from_agent = { value = [] }
+    input_from_agent = { value = { desc = "Value", sources = [] } }
   }
 }
 `)
