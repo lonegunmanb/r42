@@ -48,6 +48,7 @@ type ResearchBlock struct {
 	Timeout                    *string             `hcl:"timeout,optional"`
 	RetryBlocks                []RetryBlock        `hcl:"retry,block"`
 	ArtifactBlocks             []ArtifactBlock     `hcl:"artifact,block"`
+	SnapshotBlocks             []ArtifactBlock     `hcl:"snapshot,block"`
 	ToolUseBlocks              []ToolUseBlock      `hcl:"tool_use,block"`
 	QCBlocks                   []QCBlock           `hcl:"qc,block"`
 	CollectionModelProvider    cty.Value           `hcl:"collection_model_provider,optional"`
@@ -63,6 +64,8 @@ type ResearchBlock struct {
 	deferredTaskExpression string
 	plannedTaskValue       cty.Value
 }
+
+const dynamicSelfSnapshotPath = "__r42_dynamic_self_snapshot_path__"
 
 type blockApplier interface {
 	ApplyBlock(string) error
@@ -109,7 +112,60 @@ func researchBlockEvalContext(block *golden.BaseBlock) *hcl.EvalContext {
 			return cty.StringVal(directory), nil
 		},
 	})
+	context.Variables["self"] = cty.ObjectVal(map[string]cty.Value{
+		"artifact": declaredSelfSources(block, "artifact", "artifact", context),
+		"snapshot": declaredSelfSources(block, "snapshot", "snapshot", context),
+	})
 	return context
+}
+
+// DynamicTaskSelfValue permits a dynamic task to reference the path of its
+// single declared snapshot with one(self.snapshot).path. The placeholder is
+// resolved after the task object has been decoded.
+func DynamicTaskSelfValue() cty.Value {
+	return cty.ObjectVal(map[string]cty.Value{
+		"artifact": cty.ListVal([]cty.Value{dynamicSelfSource("artifact", "__r42_dynamic_self_artifact_path__")}),
+		"snapshot": cty.ListVal([]cty.Value{dynamicSelfSource("snapshot", dynamicSelfSnapshotPath)}),
+	})
+}
+
+func dynamicSelfSource(kind, path string) cty.Value {
+	return cty.ObjectVal(map[string]cty.Value{
+		"id": cty.StringVal("self:" + kind + ":__dynamic__"), "name": cty.StringVal("__dynamic__"),
+		"kind": cty.StringVal(kind), "type": cty.StringVal("directory"), "path": cty.StringVal(path),
+		"description": cty.StringVal("Current task declared " + kind), "required": cty.BoolVal(false), "non_empty": cty.BoolVal(false),
+	})
+}
+
+func declaredSelfSources(block *golden.BaseBlock, blockType, kind string, context *hcl.EvalContext) cty.Value {
+	declarations := make([]cty.Value, 0)
+	for _, nested := range block.HclBlock().NestedBlocks() {
+		if nested.Type != blockType || len(nested.Labels) == 0 {
+			continue
+		}
+		values := map[string]cty.Value{
+			"id":   cty.StringVal("self:" + kind + ":" + nested.Labels[len(nested.Labels)-1]),
+			"name": cty.StringVal(nested.Labels[len(nested.Labels)-1]),
+			"kind": cty.StringVal(kind), "type": cty.UnknownVal(cty.String),
+			"path": cty.UnknownVal(cty.String), "description": cty.UnknownVal(cty.String),
+			"required": cty.BoolVal(false), "non_empty": cty.BoolVal(false),
+		}
+		for _, name := range []string{"type", "path", "description"} {
+			attribute, ok := nested.Attributes()[name]
+			if !ok {
+				continue
+			}
+			value, diagnostics := attribute.Expr.Value(context)
+			if !diagnostics.HasErrors() && value.Type().Equals(cty.String) {
+				values[name] = value
+			}
+		}
+		declarations = append(declarations, cty.ObjectVal(values))
+	}
+	if len(declarations) == 0 {
+		return cty.ListValEmpty(artifactValueType)
+	}
+	return cty.ListVal(declarations)
 }
 
 func (b *ResearchBlock) ExecuteDuringPlan() error {
@@ -178,6 +234,10 @@ func (b *ResearchBlock) validateNativeStringFields() error {
 				return err
 			}
 			if err := validateBoolAttributes(nested, b.EvalContext(), "artifact", []string{"required", "non_empty"}); err != nil {
+				return err
+			}
+		case "snapshot":
+			if err := validateStringAttributes(nested, b.EvalContext(), "snapshot", []string{"type", "path", "description"}); err != nil {
 				return err
 			}
 		case "qc":
@@ -345,6 +405,7 @@ func (b *ResearchBlock) Values() map[string]cty.Value {
 		"timeout":                      optionalStringValue(b.Timeout),
 		"retry":                        retryBlockValues(b.RetryBlocks),
 		"artifact":                     ArtifactsValue(b.planned.Artifacts, nil),
+		"snapshot":                     ArtifactsValue(b.planned.Snapshots, nil),
 		"tool_use":                     toolUseValues(b.planned.ToolUses),
 		"snapshots":                    cty.UnknownVal(cty.List(snapshotValueType)),
 		"qc":                           qcBlockValues(b.QCBlocks),
@@ -639,6 +700,10 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 	config.Artifacts = make([]Artifact, len(b.ArtifactBlocks))
 	for index, block := range b.ArtifactBlocks {
 		config.Artifacts[index] = block.toArtifact()
+	}
+	config.Snapshots = make([]Artifact, len(b.SnapshotBlocks))
+	for index, block := range b.SnapshotBlocks {
+		config.Snapshots[index] = block.toArtifact()
 	}
 	if len(b.ToolUseBlocks) > 0 {
 		if len(b.ToolIDs) > 0 || b.TerminateToolID != nil {
@@ -960,6 +1025,7 @@ func cloneConfig(config Config) Config {
 	result.CollectionDisabledSkills = slices.Clone(config.CollectionDisabledSkills)
 	result.MaxCollectionRounds = clonePointer(config.MaxCollectionRounds)
 	result.Artifacts = slices.Clone(config.Artifacts)
+	result.Snapshots = slices.Clone(config.Snapshots)
 	if config.QC != nil {
 		qc := *config.QC
 		qc.Model = cloneStringPointer(config.QC.Model)

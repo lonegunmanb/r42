@@ -30,6 +30,26 @@ func TestRegistryRegisterPath(t *testing.T) {
 	assert.Equal(t, 1, registry.PendingCount())
 }
 
+func TestRegistryReservesSnapshotIDBeforeFileExists(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "snapshots", "source.md")
+	registry := NewRegistry(workspace)
+
+	reserved, err := registry.Reserve(path, "Primary source material")
+	require.NoError(t, err)
+	assert.Regexp(t, `^snapshot-[0-9a-f-]{36}$`, reserved.ID)
+	assert.Equal(t, path, reserved.Path)
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.NoError(t, os.WriteFile(path, []byte("source"), 0o600))
+	registered, err := registry.RegisterPath(path)
+	require.NoError(t, err)
+	assert.Equal(t, reserved.ID, registered.ID)
+	assert.Equal(t, "Primary source material", registered.Description)
+}
+
 func TestRegistryPreservesSnapshotDescription(t *testing.T) {
 	t.Parallel()
 
@@ -175,7 +195,7 @@ func TestRegistryRegisterToolResultWithDifferentSourcesKeepsBothSnapshots(t *tes
 	assert.Equal(t, "- Source: source:second\n\nevidence", string(secondContent))
 }
 
-func TestRegistryDeduplicatesContent(t *testing.T) {
+func TestRegistryKeepsDistinctSnapshotsWithIdenticalContent(t *testing.T) {
 	t.Parallel()
 
 	workspace := t.TempDir()
@@ -192,15 +212,16 @@ func TestRegistryDeduplicatesContent(t *testing.T) {
 
 	secondRegistration, err := registry.RegisterPath(second)
 	require.NoError(t, err)
-	assert.False(t, secondRegistration.New)
-	assert.Equal(t, firstRegistration.ID, secondRegistration.ID)
-	assert.Equal(t, 1, registry.PendingCount())
+	assert.True(t, secondRegistration.New)
+	assert.NotEqual(t, firstRegistration.ID, secondRegistration.ID)
+	assert.Equal(t, 2, registry.PendingCount())
 
 	require.NoError(t, registry.RetainToolResult("call-1", "same content"))
 	toolRegistration, err := registry.RegisterToolResult("call-1")
 	require.NoError(t, err)
-	assert.Equal(t, firstRegistration.ID, toolRegistration.ID)
-	assert.Equal(t, 1, registry.PendingCount())
+	assert.NotEqual(t, firstRegistration.ID, toolRegistration.ID)
+	assert.NotEqual(t, secondRegistration.ID, toolRegistration.ID)
+	assert.Equal(t, 3, registry.PendingCount())
 }
 
 func TestRegistryPathOwnershipAndExclusivity(t *testing.T) {
@@ -367,7 +388,7 @@ func TestRegistryRejectsSymlinkEscape(t *testing.T) {
 	assert.ErrorContains(t, err, "outside the block workspace")
 }
 
-func TestRegistryConcurrentToolResultDedup(t *testing.T) {
+func TestRegistryConcurrentToolResultsKeepDistinctSnapshots(t *testing.T) {
 	t.Parallel()
 
 	workspace := t.TempDir()
@@ -389,12 +410,12 @@ func TestRegistryConcurrentToolResultDedup(t *testing.T) {
 
 	require.NoError(t, errors[0])
 	require.NoError(t, errors[1])
-	assert.Equal(t, results[0].ID, results[1].ID)
-	assert.Equal(t, 1, registry.PendingCount())
+	assert.NotEqual(t, results[0].ID, results[1].ID)
+	assert.Equal(t, 2, registry.PendingCount())
 
 	managedFiles, err := os.ReadDir(filepath.Join(workspace, ".r42-snapshots"))
 	require.NoError(t, err)
-	assert.Len(t, managedFiles, 1)
+	assert.Len(t, managedFiles, 2)
 }
 
 func TestRegistryConcurrentToolResultWithDifferentSourcesKeepsBothSnapshots(t *testing.T) {

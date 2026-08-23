@@ -153,7 +153,7 @@ research "dynamic" "parallel_deep_dive" {
 
         During Collection, research this subquestion independently. Save the
         complete material returned by every retained source as Markdown under
-        "${block_wd()}/${index}/snapshots/" by calling r42_save_snapshot with
+        "${one(self.snapshot).path}" by calling r42_save_snapshot with
         source set to the source URL. Use the returned snapshot_id directly;
         do not call r42_register_snapshot for the returned path. Submit a
         collection checkpoint once the evidence is sufficient.
@@ -168,6 +168,12 @@ research "dynamic" "parallel_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
+      snapshots = [{
+        name        = "sources"
+        type        = "directory"
+        path        = "${block_wd()}/${index}/snapshots"
+        description = "Source material collected for this parallel subquestion."
+      }]
       tool_uses = [{
         name      = "submit_knowledge"
         tool_id   = go_tool.submit_knowledge.id
@@ -179,11 +185,11 @@ research "dynamic" "parallel_deep_dive" {
         input_from_agent = {
           knowledge = {
             desc = "Atomic knowledge claims for the assigned subquestion, supported by the collected quotes."
-            sources = []
+            sources = self.snapshot
           }
           quotes = {
             desc = "Exact quote records read from the authorized snapshots."
-            sources = []
+            sources = self.snapshot
           }
         }
       }]
@@ -241,7 +247,7 @@ research "dynamic" "independent_serial_deep_dive" {
         result.
 
         During Collection, save the complete material returned by every
-        retained source as Markdown under "${block_wd()}/${index}/snapshots/" by calling
+        retained source as Markdown under "${one(self.snapshot).path}" by calling
         r42_save_snapshot with source set to the source URL. Use the returned
         snapshot_id directly; do not call r42_register_snapshot for the returned
         path. Submit a collection checkpoint once the evidence is sufficient.
@@ -256,6 +262,12 @@ research "dynamic" "independent_serial_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
+      snapshots = [{
+        name        = "sources"
+        type        = "directory"
+        path        = "${block_wd()}/${index}/snapshots"
+        description = "Source material collected for this serial subquestion."
+      }]
       tool_uses = [{
         name      = "submit_knowledge"
         tool_id   = go_tool.submit_knowledge.id
@@ -267,11 +279,11 @@ research "dynamic" "independent_serial_deep_dive" {
         input_from_agent = {
           knowledge = {
             desc = "Atomic knowledge claims for the assigned subquestion, supported by the collected quotes."
-            sources = []
+            sources = self.snapshot
           }
           quotes = {
             desc = "Exact quote records read from the authorized snapshots."
-            sources = []
+            sources = self.snapshot
           }
         }
       }]
@@ -342,7 +354,7 @@ research "dynamic" "final_serial_deep_dive" {
 
         During Collection, collect only evidence needed beyond the validated
         upstream JSON. Save each retained source as Markdown under
-        "${block_wd()}/${index}/snapshots/" with r42_save_snapshot, passing the
+        "${one(self.snapshot).path}" with r42_save_snapshot, passing the
         source URL in source. Use the returned snapshot_id directly; do not call
         r42_register_snapshot for the returned path. Submit a collection checkpoint.
         If the upstream JSON is sufficient, submit an empty
@@ -359,6 +371,12 @@ research "dynamic" "final_serial_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
+      snapshots = [{
+        name        = "sources"
+        type        = "directory"
+        path        = "${block_wd()}/${index}/snapshots"
+        description = "Source material collected for this final subquestion."
+      }]
       tool_uses = [{
         name      = "submit_knowledge"
         tool_id   = go_tool.submit_knowledge.id
@@ -375,6 +393,7 @@ research "dynamic" "final_serial_deep_dive" {
               [for item in research.dynamic.independent_serial_deep_dive.tasks : item.artifacts],
               [for item in research.dynamic.parallel_deep_dive.tasks : item.snapshots],
               [for item in research.dynamic.independent_serial_deep_dive.tasks : item.snapshots],
+              self.snapshot,
             ])
           }
           quotes = {
@@ -382,6 +401,7 @@ research "dynamic" "final_serial_deep_dive" {
             sources = flatten([
               [for item in research.dynamic.parallel_deep_dive.tasks : item.snapshots],
               [for item in research.dynamic.independent_serial_deep_dive.tasks : item.snapshots],
+              self.snapshot,
             ])
           }
         }

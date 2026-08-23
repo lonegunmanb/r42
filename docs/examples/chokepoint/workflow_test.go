@@ -45,6 +45,11 @@ func TestRegisterEvidenceSourceUsesSnapshotID(t *testing.T) {
 	assert.NotContains(t, source, "snapshot_sha256")
 	assert.NotContains(t, source, "content_fingerprint")
 
+	input["snapshot_id"] = "snapshot-123e4567-e89b-12d3-a456-426614174000"
+	uuidResponse, err := program.Invoke(t.Context(), marshalInput(t, input), workspace)
+	require.NoError(t, err)
+	assert.True(t, uuidResponse.Accepted, "issues: %#v", uuidResponse.Issues)
+
 	input["snapshot_id"] = filepath.Join(workspace, "sources", "official.md")
 	rejected, err := program.Invoke(t.Context(), marshalInput(t, input), workspace)
 	require.NoError(t, err)

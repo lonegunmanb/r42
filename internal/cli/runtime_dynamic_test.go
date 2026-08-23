@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -316,6 +317,45 @@ research "dynamic" "followups" {
 		workspace := filepath.ToSlash(config.WorkingDirectory)
 		topic := map[string]string{"0": "alpha", "1": "beta"}[filepath.Base(workspace)]
 		assert.Contains(t, opener.Prompts(), workspace+"/"+topic)
+	}
+}
+
+func TestProductionRuntimeDynamicTaskSelfSnapshotPathResolves(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+research "dynamic" "followups" {
+  tasks = [for index, topic in ["alpha", "beta"] : {
+    model         = "test-model"
+    system_prompt = "Save source material under ${one(self.snapshot).path}."
+    prompt        = topic
+    artifacts     = []
+    snapshots = [{
+      name        = "sources"
+      type        = "directory"
+      path        = "${block_wd()}/${index}/collected"
+      description = "Collected source material"
+    }]
+    retry = null
+    qc    = null
+  }]
+}
+`), 0o600))
+
+	opener := &dynamicTestOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 2})
+
+	require.NoError(t, err)
+	for _, config := range opener.Configs() {
+		if strings.Contains(config.SystemPrompt, "Save source material under") {
+			assert.NotContains(t, config.SystemPrompt, "__r42_dynamic_self_snapshot_path__")
+			assert.Contains(t, config.SystemPrompt, filepath.ToSlash(filepath.Join(config.WorkingDirectory, "collected")))
+		}
 	}
 }
 

@@ -82,6 +82,7 @@ research "static" "fact" {
 	description = "Answer fixture"
   }
 }
+
 `)
 
 	require.NoError(t, config.RunPlan())
@@ -114,6 +115,30 @@ research "static" "fact" {
 		"research.static.fact[001]": "workspace/research.static.fact[001]/answer.md",
 		"research.static.fact[002]": "workspace/research.static.fact[002]/answer.md",
 	}, plannedPaths)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockSelfSnapshotExposesDeclaredSaveTarget(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+research "static" "collect" {
+  model = "model"
+  system_prompt = "Save source material under ${self.snapshot[0].path}."
+
+  snapshot "sources" {
+    type = "directory"
+    path = "${block_wd()}/snapshots"
+    description = "Collected source material"
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	block := golden.Blocks[*researchspec.ResearchBlock](config)[0]
+	assert.Equal(t, "Save source material under workspace/research.static.collect/snapshots.", block.ResearchConfig().SystemPrompt)
+	require.Len(t, block.ResearchConfig().Snapshots, 1)
+	assert.Equal(t, researchspec.ArtifactTypeDirectory, block.ResearchConfig().Snapshots[0].Type)
+	assert.Equal(t, "workspace/research.static.collect/snapshots", block.ResearchConfig().Snapshots[0].Path)
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -240,6 +265,50 @@ research "static" "summary" {
 	require.Equal(t, 2, artifacts.LengthInt())
 	assert.Equal(t, "report", artifacts.Index(cty.NumberIntVal(0)).GetAttr("name").AsString())
 	assert.Equal(t, "evidence", artifacts.Index(cty.NumberIntVal(1)).GetAttr("name").AsString())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestDeferredStaticResearchExposesResultForTerminatingToolUse(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+fixture_tool "finish" {}
+
+research "static" "baseline" {
+  model             = "model"
+  system_prompt     = "baseline"
+  terminate_tool_id = fixture_tool.finish.id
+}
+
+research "static" "scope" {
+  model         = "model"
+  system_prompt = "scope"
+  prompt        = research.static.baseline.result
+
+  snapshot "sources" {
+    type        = "directory"
+    path        = "snapshots/sources"
+    description = "Scope source material"
+  }
+
+  tool_use "finish" {
+    tool_id   = fixture_tool.finish.id
+    terminate = true
+  }
+}
+
+research "static" "consumer" {
+  model         = "model"
+  system_prompt = "consumer"
+  prompt        = jsonencode(research.static.scope.snapshots)
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	value := config.EvalContext().Variables["research"].GetAttr("static").GetAttr("scope")
+	require.True(t, value.Type().HasAttribute("result"))
+	assert.False(t, value.GetAttr("result").IsKnown())
+	require.True(t, value.Type().HasAttribute("snapshots"))
+	assert.False(t, value.GetAttr("snapshots").IsKnown())
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

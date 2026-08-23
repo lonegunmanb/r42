@@ -36,7 +36,7 @@ const researchSnapshotProtocol = "Evidence protocol: snapshots cross research-bl
 	"Do not use snapshot paths as cross-block evidence references and do not read or copy snapshot files through the filesystem. " +
 	"Every citation carried into a downstream knowledge result must retain its snapshot_id."
 
-var snapshotIDPattern = regexp.MustCompile(`snapshot-[0-9a-f]{32}`)
+var snapshotIDPattern = regexp.MustCompile(`snapshot-(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
 
 type runSnapshotCatalog struct {
 	mu    sync.RWMutex
@@ -121,7 +121,11 @@ func toolUseArtifactIDs(uses []researchspec.ToolUse) []string {
 					continue
 				}
 				id, kind := source.GetAttr("id"), source.GetAttr("kind")
-				if !id.IsKnown() || id.IsNull() || !kind.IsKnown() || kind.IsNull() || kind.AsString() != "artifact" {
+				if !id.IsKnown() || id.IsNull() || !kind.IsKnown() || kind.IsNull() {
+					continue
+				}
+				artifactType := source.GetAttr("type")
+				if kind.AsString() != "artifact" && (!artifactType.IsKnown() || artifactType.IsNull() || artifactType.AsString() != "directory") {
 					continue
 				}
 				if _, exists := seen[id.AsString()]; exists {
@@ -133,6 +137,65 @@ func toolUseArtifactIDs(uses []researchspec.ToolUse) []string {
 		}
 	}
 	return ids
+}
+
+func materializeSelfToolUseSources(
+	uses []researchspec.ToolUse,
+	artifactIDs, snapshotIDs map[string]string,
+) []researchspec.ToolUse {
+	result := slices.Clone(uses)
+	for useIndex := range result {
+		fields, err := toolUseObjectMap(result[useIndex].InputFromAgent)
+		if err != nil {
+			continue
+		}
+		for name, field := range fields {
+			unmarked, _ := field.UnmarkDeep()
+			if !unmarked.Type().IsObjectType() || !unmarked.Type().HasAttribute("sources") {
+				continue
+			}
+			sources := unmarked.GetAttr("sources")
+			if !sources.IsKnown() || sources.IsNull() || (!sources.Type().IsListType() && !sources.Type().IsTupleType()) {
+				continue
+			}
+			items := sources.AsValueSlice()
+			for index, source := range items {
+				if !source.Type().IsObjectType() || !source.Type().HasAttribute("id") {
+					continue
+				}
+				id := source.GetAttr("id")
+				if !id.IsKnown() || id.IsNull() || !id.Type().Equals(cty.String) {
+					continue
+				}
+				parts := strings.Split(id.AsString(), ":")
+				if len(parts) != 3 || parts[0] != "self" {
+					continue
+				}
+				replacement := ""
+				switch parts[1] {
+				case "artifact":
+					replacement = artifactIDs[parts[2]]
+				case "snapshot":
+					replacement = snapshotIDs[parts[2]]
+				}
+				if replacement == "" {
+					continue
+				}
+				attributes := source.AsValueMap()
+				attributes["id"] = cty.StringVal(replacement)
+				items[index] = cty.ObjectVal(attributes)
+			}
+			values := unmarked.AsValueMap()
+			if sources.Type().IsListType() {
+				values["sources"] = cty.ListVal(items)
+			} else {
+				values["sources"] = cty.TupleVal(items)
+			}
+			fields[name] = cty.ObjectVal(values)
+		}
+		result[useIndex].InputFromAgent = cty.ObjectVal(fields)
+	}
+	return result
 }
 
 func closedResearchSystemPrompt(configured string) string {
@@ -178,6 +241,24 @@ func (f *runtimeFactory) newResearchBlock(
 		artifactIDs[declared.Name] = record.ID
 		currentArtifactIDs = append(currentArtifactIDs, record.ID)
 	}
+	collectionContext := collection.NewContextWithArtifactRegistry(
+		workspace, planned.Config.CollectionBatchSize, planned.Config.MaxCollectionRounds, artifactsRegistry,
+	)
+	snapshotIDs := make(map[string]string, len(planned.Config.Snapshots))
+	for _, declared := range planned.Config.Snapshots {
+		reserved, reserveErr := collectionContext.Registry.Reserve(declared.Path, declared.Description)
+		if reserveErr != nil {
+			return nil, reserveErr
+		}
+		if targetErr := collectionContext.AddSnapshotTarget(declared.Path, declared.Type == researchspec.ArtifactTypeDirectory); targetErr != nil {
+			return nil, targetErr
+		}
+		if _, declareErr := artifactsRegistry.DeclareSnapshot(workspace, reserved.ID, declared); declareErr != nil {
+			return nil, declareErr
+		}
+		snapshotIDs[declared.Name] = reserved.ID
+	}
+	planned.Config.ToolUses = materializeSelfToolUseSources(planned.Config.ToolUses, artifactIDs, snapshotIDs)
 	authorizedArtifactIDs := slices.Clone(currentArtifactIDs)
 	authorizedArtifactIDs = append(authorizedArtifactIDs, toolUseArtifactIDs(planned.Config.ToolUses)...)
 	var err error
@@ -190,9 +271,6 @@ func (f *runtimeFactory) newResearchBlock(
 	if err != nil {
 		return nil, err
 	}
-	collectionContext := collection.NewContextWithArtifactRegistry(
-		workspace, planned.Config.CollectionBatchSize, planned.Config.MaxCollectionRounds, artifactsRegistry,
-	)
 	if err = collectionContext.BeginWorkflow(); err != nil {
 		return nil, err
 	}

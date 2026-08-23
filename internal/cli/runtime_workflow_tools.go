@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -34,7 +35,7 @@ var closedWorldBuiltIns = []string{
 
 var collectionBlockedBuiltIns = []string{"task", "powershell", "curl"}
 
-var validSnapshotIDPattern = regexp.MustCompile(`^snapshot-[0-9a-f]{32}$`)
+var validSnapshotIDPattern = regexp.MustCompile(`^snapshot-(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`)
 
 func collectionDisallowedTools(configured []string) []string {
 	result := slices.Clone(configured)
@@ -188,12 +189,12 @@ type saveSnapshotOutput struct {
 func collectionSaveSnapshotTool(context *collection.Context) sdk.Tool {
 	return sdk.Tool{
 		Name: "r42_save_snapshot",
-		Description: "Save and register complete source material as Markdown under the current Collection workspace snapshots directory, " +
+		Description: "Save and register complete source material as Markdown at a declared snapshot file target or below a declared snapshot directory target, " +
 			"then return path and snapshot_id. source is required and may be a URL or any other source identifier; it is written to the snapshot header. " +
 			"Provide description when possible to summarize the snapshot's semantic contents for downstream research planning. " +
 			"After a successful call, use the returned snapshot_id directly. Do not call r42_register_snapshot for the returned path.",
 		Parameters: objectSchema(map[string]any{
-			"snapshot_path": map[string]any{"type": "string", "description": "Absolute or workspace-relative .md path under the snapshots directory"},
+			"snapshot_path": map[string]any{"type": "string", "description": "Absolute or workspace-relative .md path at a declared snapshot file target or below a declared snapshot directory target"},
 			"content":       map[string]any{"type": "string", "description": "Complete source material in Markdown"},
 			"source":        map[string]any{"type": "string", "description": "Non-empty source identifier; may be a URL or a non-URL value"},
 			"description":   map[string]any{"type": "string", "description": "Optional concise semantic summary of what the saved source material contains"},
@@ -214,10 +215,10 @@ func saveCollectionSnapshot(context *collection.Context, args saveSnapshotArgs) 
 	if context != nil {
 		workspace = context.Workspace
 	}
-	path, validPath := collectionSnapshotPath(workspace, args.SnapshotPath)
+	path, validPath := collectionSnapshotPath(context, args.SnapshotPath)
 	if !validPath {
 		issues = append(issues, corespec.Issue{
-			Code: "snapshot_path", Message: "snapshot_path must be a .md path under the current Collection workspace snapshots directory",
+			Code: "snapshot_path", Message: "snapshot_path must be a .md path at a declared snapshot file target or below a declared snapshot directory target",
 		})
 	}
 	source := strings.Join(strings.Fields(args.Source), " ")
@@ -255,10 +256,11 @@ func saveCollectionSnapshot(context *collection.Context, args saveSnapshotArgs) 
 	return acceptedToolResult(output)
 }
 
-func collectionSnapshotPath(workspace, raw string) (string, bool) {
-	if strings.TrimSpace(workspace) == "" || strings.TrimSpace(raw) == "" {
+func collectionSnapshotPath(context *collection.Context, raw string) (string, bool) {
+	if context == nil || strings.TrimSpace(context.Workspace) == "" || strings.TrimSpace(raw) == "" {
 		return "", false
 	}
+	workspace := context.Workspace
 	path := filepath.Clean(strings.TrimSpace(raw))
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(workspace, path)
@@ -267,8 +269,7 @@ func collectionSnapshotPath(workspace, raw string) (string, bool) {
 	if err != nil || !strings.HasSuffix(strings.ToLower(path), ".md") {
 		return "", false
 	}
-	root, err := filepath.Abs(filepath.Join(workspace, "snapshots"))
-	return path, err == nil && pathWithinWorkspace(root, path)
+	return path, context.AllowsSnapshotPath(path)
 }
 
 func collectionQCVerdictTool(verdicts *collectionqc.VerdictRecorder) sdk.Tool {
@@ -325,13 +326,13 @@ func applyToolUseBindings(tools []sdk.Tool, toolUses []researchspec.ToolUse) ([]
 				continue
 			}
 			property = maps.Clone(property)
-			description := strings.TrimSpace(anyString(property["description"]))
-			sourceDescription := describeToolUseSources(sources)
-			if description != "" && sourceDescription != "" {
-				description += " "
+			if description := describeToolUseSources(sources); description != "" {
+				property["description"] = description
 			}
-			property["description"] = description + sourceDescription
 			properties[field] = property
+		}
+		if sourceGuidance := groupedToolUseSourceGuidance(agent); sourceGuidance != "" {
+			result[index].Description = strings.TrimSpace(result[index].Description + "\n\n" + sourceGuidance)
 		}
 		parameters["properties"] = properties
 		required, _ := parameters["required"].([]string)
@@ -462,38 +463,128 @@ func toolUseObjectMap(value cty.Value) (map[string]cty.Value, error) {
 	return unmarked.AsValueMap(), nil
 }
 
-func describeToolUseSources(value cty.Value) string {
+func toolUseFieldDescription(value cty.Value) string {
 	unmarked, _ := value.UnmarkDeep()
 	if unmarked.Type().IsObjectType() && unmarked.Type().HasAttribute("desc") && unmarked.Type().HasAttribute("sources") {
-		description := ""
 		if desc := unmarked.GetAttr("desc"); desc.IsKnown() && !desc.IsNull() && desc.Type().Equals(cty.String) {
-			description = strings.TrimSpace(desc.AsString())
+			return strings.TrimSpace(desc.AsString())
 		}
-		instructions := make([]string, 0)
-		sources := unmarked.GetAttr("sources")
-		if sources.IsKnown() && !sources.IsNull() && (sources.Type().IsTupleType() || sources.Type().IsListType()) {
-			for _, source := range sources.AsValueSlice() {
-				if !source.Type().IsObjectType() || !source.IsKnown() {
-					continue
-				}
-				id, kind, artifactType, summary := toolUseSourceStrings(source)
-				switch {
-				case kind == "snapshot":
-					instructions = append(instructions, fmt.Sprintf("Snapshot %s (%s): use r42_read_snapshot or r42_search_snapshot by ID.", id, summary))
-				case artifactType == "directory":
-					instructions = append(instructions, fmt.Sprintf("Directory artifact %s (%s): call r42_list_artifact_files, then read returned child IDs with r42_read_artifact.", id, summary))
-				default:
-					instructions = append(instructions, fmt.Sprintf("File artifact %s (%s): use r42_read_artifact; for JSON, r42_read_artifact_json_schema or r42_query_artifact_json.", id, summary))
-				}
-			}
-		}
-		if len(instructions) == 0 {
-			instructions = append(instructions, "No upstream artifact is declared. Use only the current phase's authorized snapshots supplied by r42 with r42_read_snapshot or r42_search_snapshot.")
-		} else {
-			instructions = append(instructions, "Current phase snapshots remain available with r42_read_snapshot or r42_search_snapshot.")
-		}
-		return strings.TrimSpace(description + " Sources: " + strings.Join(instructions, " "))
 	}
+	return ""
+}
+
+type toolUseSource struct {
+	id           string
+	kind         string
+	artifactType string
+	description  string
+}
+
+func (s toolUseSource) key() string {
+	return strings.Join([]string{s.id, s.kind, s.artifactType, s.description}, "\x00")
+}
+
+func groupedToolUseSourceGuidance(agent map[string]cty.Value) string {
+	type sourceGroup struct {
+		fields  []string
+		sources []toolUseSource
+	}
+	groups := map[string]*sourceGroup{}
+	for field, value := range agent {
+		sources := normalizedToolUseSources(value)
+		keyParts := make([]string, len(sources))
+		for index, source := range sources {
+			keyParts[index] = source.key()
+		}
+		key := strings.Join(keyParts, "\x01")
+		group := groups[key]
+		if group == nil {
+			group = &sourceGroup{fields: []string{}, sources: sources}
+			groups[key] = group
+		}
+		group.fields = append(group.fields, field)
+	}
+	if len(groups) == 0 {
+		return ""
+	}
+	ordered := make([]*sourceGroup, 0, len(groups))
+	for _, group := range groups {
+		sort.Strings(group.fields)
+		ordered = append(ordered, group)
+	}
+	sort.Slice(ordered, func(left, right int) bool {
+		return strings.Join(ordered[left].fields, "\x00") < strings.Join(ordered[right].fields, "\x00")
+	})
+
+	var builder strings.Builder
+	builder.WriteString("Agent-provided field sources:")
+	for _, group := range ordered {
+		builder.WriteString("\n- ")
+		builder.WriteString(strings.Join(group.fields, ", "))
+		builder.WriteString(": ")
+		if len(group.sources) == 0 {
+			builder.WriteString("No declared readable source. Construct these fields from task instructions or data returned directly by prior typed-tool calls in this session.")
+			continue
+		}
+		instructions := make([]string, len(group.sources))
+		for index, source := range group.sources {
+			instructions[index] = describeToolUseSource(source)
+		}
+		builder.WriteString(strings.Join(instructions, " "))
+	}
+	return builder.String()
+}
+
+func normalizedToolUseSources(value cty.Value) []toolUseSource {
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.Type().IsObjectType() || !unmarked.Type().HasAttribute("sources") {
+		return []toolUseSource{}
+	}
+	sources := unmarked.GetAttr("sources")
+	if !sources.IsKnown() || sources.IsNull() || (!sources.Type().IsTupleType() && !sources.Type().IsListType()) {
+		return []toolUseSource{}
+	}
+	seen := map[string]struct{}{}
+	result := make([]toolUseSource, 0, len(sources.AsValueSlice()))
+	for _, sourceValue := range sources.AsValueSlice() {
+		if !sourceValue.IsKnown() || !sourceValue.Type().IsObjectType() {
+			continue
+		}
+		id, kind, artifactType, description := toolUseSourceStrings(sourceValue)
+		source := toolUseSource{id: id, kind: kind, artifactType: artifactType, description: description}
+		if _, duplicate := seen[source.key()]; duplicate {
+			continue
+		}
+		seen[source.key()] = struct{}{}
+		result = append(result, source)
+	}
+	sort.Slice(result, func(left, right int) bool { return result[left].key() < result[right].key() })
+	return result
+}
+
+func describeToolUseSource(source toolUseSource) string {
+	summary := source.description
+	if summary == "" {
+		summary = "no description"
+	}
+	if source.artifactType == "directory" {
+		kind := "artifact"
+		if source.kind == "snapshot" {
+			kind = "snapshot"
+		}
+		return fmt.Sprintf("Directory %s %s (%s): call r42_list_artifact_files, then read returned child IDs with r42_read_artifact.", kind, source.id, summary)
+	}
+	if source.kind == "snapshot" {
+		return fmt.Sprintf("Snapshot %s (%s): use r42_read_snapshot or r42_search_snapshot by ID.", source.id, summary)
+	}
+	return fmt.Sprintf("File artifact %s (%s): use r42_read_artifact; for JSON, r42_read_artifact_json_schema or r42_query_artifact_json.", source.id, summary)
+}
+
+func describeToolUseSources(value cty.Value) string {
+	if description := toolUseFieldDescription(value); description != "" {
+		return description
+	}
+	unmarked, _ := value.UnmarkDeep()
 	encoded, err := ctyjson.Marshal(unmarked, unmarked.Type())
 	if err != nil {
 		return ""
@@ -519,11 +610,6 @@ func toolUseSourceStrings(value cty.Value) (id, kind, artifactType, description 
 		}
 	}
 	return id, kind, artifactType, description
-}
-
-func anyString(value any) string {
-	result, _ := value.(string)
-	return result
 }
 
 func evidenceTools(
@@ -892,7 +978,7 @@ func enforceSnapshotIDReferences(
 			if len(invalidIDs) > 0 {
 				return rejectedSnapshotReferenceResult(toolName, terminalToolName, terminal,
 					"invalid_snapshot_id",
-					"snapshot_id must use snapshot- plus 32 lowercase hexadecimal characters, not a filesystem path: "+
+					"snapshot_id must use a registered snapshot- ID, not a filesystem path: "+
 						strings.Join(invalidIDs, ", "),
 				)
 			}

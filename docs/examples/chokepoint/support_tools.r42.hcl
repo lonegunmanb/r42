@@ -61,7 +61,7 @@ go_tool "register_evidence_source" {
       NamedEntities   []string `json:"named_entities"`
     }
 
-    var evidenceSnapshotID = regexp.MustCompile(`^snapshot-[0-9a-f]{32}$`)
+    var evidenceSnapshotID = regexp.MustCompile(`^snapshot-(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`)
 
     func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
       currentDirectory, err := os.Getwd()
@@ -104,7 +104,7 @@ go_tool "register_evidence_source" {
       }
       snapshotID := strings.TrimSpace(input.SnapshotID)
       if !evidenceSnapshotID.MatchString(snapshotID) {
-        issues = append(issues, evidenceIssue("snapshot_id", "snapshot_id", "snapshot_id must use the registered snapshot- plus 32 lowercase hexadecimal characters format, not a filesystem path"))
+        issues = append(issues, evidenceIssue("snapshot_id", "snapshot_id", "snapshot_id must use a registered snapshot ID, either snapshot- plus 32 lowercase hexadecimal characters or a UUID, not a filesystem path"))
       }
       if len(issues) > 0 {
         return ToolResponse[Output]{Accepted: false, Issues: issues}, nil

@@ -146,18 +146,23 @@ func TestCollectionProtocolToolsSaveSnapshotWithRequiredSource(t *testing.T) {
 
 	workspace := t.TempDir()
 	context := collection.NewContext(workspace, 10, nil)
+	require.NoError(t, context.AddSnapshotTarget(filepath.Join(workspace, "snapshots"), true))
 	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
 	assert.Equal(t, []string{"r42_register_snapshot", "r42_collection_checkpoint", "r42_save_snapshot"}, toolNames(protocol))
 	assert.Contains(t, phaseAllowedTools([]string{"web_fetch"}, toolNames(protocol)), "r42_save_snapshot")
 	assert.ElementsMatch(t, []string{"snapshot_path", "content", "source"}, protocol[2].Parameters["required"])
 	assert.Contains(t, protocol[2].Description, "Do not call r42_register_snapshot")
 	assert.Contains(t, protocol[2].Description, "snapshot_id")
+	assert.NotContains(t, protocol[2].Description, "default Collection snapshots directory")
 	registerProperties, ok := protocol[0].Parameters["properties"].(map[string]any)
 	require.True(t, ok)
 	assert.Contains(t, registerProperties, "description")
 	saveProperties, ok := protocol[2].Parameters["properties"].(map[string]any)
 	require.True(t, ok)
 	assert.Contains(t, saveProperties, "description")
+	snapshotPath, ok := saveProperties["snapshot_path"].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, snapshotPath["description"], "default snapshots directory")
 	require.NotContains(t, protocol[2].Parameters["required"], "description")
 
 	path := filepath.Join(workspace, "snapshots", "source.md")
@@ -179,7 +184,7 @@ func TestCollectionProtocolToolsSaveSnapshotWithRequiredSource(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(result.TextResultForLLM), &response))
 	assert.True(t, response.Accepted)
 	assert.Equal(t, path, response.Output.Path)
-	assert.Regexp(t, `^snapshot-[0-9a-f]{32}$`, response.Output.SnapshotID)
+	assert.Regexp(t, `^snapshot-[0-9a-f-]{36}$`, response.Output.SnapshotID)
 	content, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "- Source: local-record:42\n\n\n# Evidence\n\nCollected material.\n", string(content))
@@ -189,6 +194,71 @@ func TestCollectionProtocolToolsSaveSnapshotWithRequiredSource(t *testing.T) {
 	assert.Contains(t, checkpoint.TextResultForLLM, response.Output.SnapshotID)
 	require.Len(t, context.Registry.Snapshots(), 1)
 	assert.Equal(t, "Database record used for the baseline", context.Registry.Snapshots()[0].Description)
+}
+
+func TestCollectionProtocolToolsRejectsUndeclaredSnapshotPath(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	context := collection.NewContext(workspace, 10, nil)
+	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
+
+	result, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"snapshot_path": filepath.Join(workspace, "snapshots", "source.md"),
+		"content":       "# Evidence",
+		"source":        "local-record:42",
+	}})
+
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"code":"snapshot_path"`)
+}
+
+func TestCollectionProtocolToolsSaveSnapshotBelowDeclaredDirectoryTarget(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	context := collection.NewContext(workspace, 10, nil)
+	directory := filepath.Join(workspace, "collected")
+	require.NoError(t, context.AddSnapshotTarget(directory, true))
+	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
+
+	result, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"snapshot_path": filepath.Join(directory, "source.md"),
+		"content":       "# Evidence",
+		"source":        "local-record:42",
+	}})
+
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"accepted":true`)
+}
+
+func TestCollectionProtocolToolsSaveSnapshotToDeclaredFileTarget(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	context := collection.NewContext(workspace, 10, nil)
+	path := filepath.Join(workspace, "collected", "primary.md")
+	reserved, err := context.Registry.Reserve(path, "Primary source")
+	require.NoError(t, err)
+	require.NoError(t, context.AddSnapshotTarget(path, false))
+	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
+
+	result, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"snapshot_path": path,
+		"content":       "# Evidence\n\nCollected material.",
+		"source":        "local-record:42",
+	}})
+
+	require.NoError(t, err)
+	var response struct {
+		Accepted bool `json:"accepted"`
+		Output   struct {
+			SnapshotID string `json:"snapshot_id"`
+		} `json:"output"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(result.TextResultForLLM), &response))
+	assert.True(t, response.Accepted)
+	assert.Equal(t, reserved.ID, response.Output.SnapshotID)
 }
 
 func TestEvidenceToolsExposeSnapshotPagingAndSearch(t *testing.T) {
@@ -345,15 +415,36 @@ func TestApplyToolUseBindingsDescribesTypedSources(t *testing.T) {
 	t.Parallel()
 
 	tools := []sdk.Tool{{
-		Name: "tool_finish", Parameters: objectSchema(map[string]any{"claims": map[string]any{"type": "array"}}, []string{"claims"}),
+		Name: "tool_finish", Description: "Submit validated fields.", Parameters: objectSchema(map[string]any{
+			"canonical_url": map[string]any{"type": "string"},
+			"title":         map[string]any{"type": "string"},
+			"url":           map[string]any{"type": "string"},
+		}, []string{"canonical_url", "title", "url"}),
 		Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) { return acceptedToolResult("done") },
 	}}
 	bound, err := applyToolUseBindings(tools, []researchspec.ToolUse{{
 		Name: "finish", ToolID: "tool_finish", InputFromAgent: cty.ObjectVal(map[string]cty.Value{
-			"claims": cty.ObjectVal(map[string]cty.Value{
-				"desc": cty.StringVal("Claim IDs required for the map."),
+			"url": cty.ObjectVal(map[string]cty.Value{
+				"desc": cty.StringVal("The URL recorded in the authorized snapshot."),
+				"sources": cty.TupleVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("artifact-directory"), "kind": cty.StringVal("artifact"), "type": cty.StringVal("directory"), "description": cty.StringVal("Evidence directory")}),
+					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("artifact-file"), "kind": cty.StringVal("artifact"), "type": cty.StringVal("file"), "description": cty.StringVal("Claims JSON")}),
+					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("snapshot-0123456789abcdef0123456789abcdef"), "kind": cty.StringVal("snapshot"), "type": cty.StringVal("file"), "description": cty.StringVal("Primary source")}),
+				}),
+			}),
+			"canonical_url": cty.ObjectVal(map[string]cty.Value{
+				"desc": cty.StringVal("Optional publication identity URL."),
+				"sources": cty.TupleVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("snapshot-0123456789abcdef0123456789abcdef"), "kind": cty.StringVal("snapshot"), "type": cty.StringVal("file"), "description": cty.StringVal("Primary source")}),
+					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("artifact-file"), "kind": cty.StringVal("artifact"), "type": cty.StringVal("file"), "description": cty.StringVal("Claims JSON")}),
+					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("artifact-directory"), "kind": cty.StringVal("artifact"), "type": cty.StringVal("directory"), "description": cty.StringVal("Evidence directory")}),
+				}),
+			}),
+			"title": cty.ObjectVal(map[string]cty.Value{
+				"desc": cty.StringVal("The retained source title."),
 				"sources": cty.TupleVal([]cty.Value{
 					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("artifact-file"), "kind": cty.StringVal("artifact"), "type": cty.StringVal("file"), "description": cty.StringVal("Claims JSON")}),
+					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("artifact-directory"), "kind": cty.StringVal("artifact"), "type": cty.StringVal("directory"), "description": cty.StringVal("Evidence directory")}),
 					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("artifact-directory"), "kind": cty.StringVal("artifact"), "type": cty.StringVal("directory"), "description": cty.StringVal("Evidence directory")}),
 					cty.ObjectVal(map[string]cty.Value{"id": cty.StringVal("snapshot-0123456789abcdef0123456789abcdef"), "kind": cty.StringVal("snapshot"), "type": cty.StringVal("file"), "description": cty.StringVal("Primary source")}),
 				}),
@@ -363,18 +454,20 @@ func TestApplyToolUseBindingsDescribesTypedSources(t *testing.T) {
 	require.NoError(t, err)
 	properties, ok := bound[0].Parameters["properties"].(map[string]any)
 	require.True(t, ok)
-	claims, ok := properties["claims"].(map[string]any)
+	url, ok := properties["url"].(map[string]any)
 	require.True(t, ok)
-	description, ok := claims["description"].(string)
+	description, ok := url["description"].(string)
 	require.True(t, ok)
-	assert.Contains(t, description, "Claim IDs required for the map.")
-	assert.Contains(t, description, "r42_read_artifact")
-	assert.Contains(t, description, "r42_list_artifact_files")
-	assert.Contains(t, description, "r42_read_snapshot")
-	assert.Contains(t, description, "Current phase snapshots remain available")
+	assert.Equal(t, "The URL recorded in the authorized snapshot.", description)
+	assert.NotContains(t, description, "r42_read_artifact")
+	assert.Contains(t, bound[0].Description, "Agent-provided field sources:")
+	assert.Contains(t, bound[0].Description, "canonical_url, title, url:")
+	assert.Equal(t, 1, strings.Count(bound[0].Description, "Evidence directory"))
+	assert.Less(t, strings.Index(bound[0].Description, "artifact-directory"), strings.Index(bound[0].Description, "artifact-file"))
+	assert.Less(t, strings.Index(bound[0].Description, "artifact-file"), strings.Index(bound[0].Description, "snapshot-0123456789abcdef0123456789abcdef"))
 }
 
-func TestApplyToolUseBindingsDescribesCurrentSnapshotsWithoutUpstreamSources(t *testing.T) {
+func TestApplyToolUseBindingsDescribesEmptySourcesAccurately(t *testing.T) {
 	t.Parallel()
 
 	tools := []sdk.Tool{{
@@ -393,8 +486,10 @@ func TestApplyToolUseBindingsDescribesCurrentSnapshotsWithoutUpstreamSources(t *
 	require.True(t, ok)
 	description, ok := quote["description"].(string)
 	require.True(t, ok)
-	assert.Contains(t, description, "No upstream artifact is declared")
-	assert.Contains(t, description, "r42_read_snapshot")
+	assert.Equal(t, "Exact evidence quote.", description)
+	assert.Contains(t, bound[0].Description, "No declared readable source")
+	assert.Contains(t, bound[0].Description, "task instructions or data returned directly by prior typed-tool calls")
+	assert.NotContains(t, bound[0].Description, "current phase")
 }
 
 func TestEvaluateToolPostconditionsUsesTypedInputAndOutput(t *testing.T) {
@@ -581,10 +676,9 @@ func TestCollectionProtocolToolsRejectSnapshotWithoutSource(t *testing.T) {
 
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, "snapshots", "source.md")
-	protocol := collectionProtocolTools(
-		collection.NewContext(workspace, 10, nil),
-		collection.NewCheckpointRecorder(),
-	)
+	context := collection.NewContext(workspace, 10, nil)
+	require.NoError(t, context.AddSnapshotTarget(filepath.Join(workspace, "snapshots"), true))
+	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
 
 	result, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
 		"snapshot_path": path,
@@ -600,10 +694,9 @@ func TestCollectionProtocolToolsRejectInvalidSnapshotPaths(t *testing.T) {
 	t.Parallel()
 
 	workspace := t.TempDir()
-	protocol := collectionProtocolTools(
-		collection.NewContext(workspace, 10, nil),
-		collection.NewCheckpointRecorder(),
-	)
+	context := collection.NewContext(workspace, 10, nil)
+	require.NoError(t, context.AddSnapshotTarget(filepath.Join(workspace, "snapshots"), true))
+	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
 	tests := []struct {
 		name string
 		path string
@@ -641,10 +734,9 @@ func TestCollectionProtocolToolsRejectSnapshotSymlinkOutsideWorkspace(t *testing
 	if err := os.Symlink(target, path); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	protocol := collectionProtocolTools(
-		collection.NewContext(workspace, 10, nil),
-		collection.NewCheckpointRecorder(),
-	)
+	context := collection.NewContext(workspace, 10, nil)
+	require.NoError(t, context.AddSnapshotTarget(filepath.Join(workspace, "snapshots"), true))
+	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
 
 	result, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
 		"snapshot_path": path,
@@ -664,10 +756,9 @@ func TestCollectionProtocolToolsDoNotOverwriteSavedSnapshot(t *testing.T) {
 
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, "snapshots", "source.md")
-	protocol := collectionProtocolTools(
-		collection.NewContext(workspace, 10, nil),
-		collection.NewCheckpointRecorder(),
-	)
+	context := collection.NewContext(workspace, 10, nil)
+	require.NoError(t, context.AddSnapshotTarget(filepath.Join(workspace, "snapshots"), true))
+	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
 	first, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
 		"snapshot_path": path,
 		"content":       "original evidence",
@@ -695,6 +786,7 @@ func TestCollectionProtocolToolsConcurrentSaveDoesNotOverwriteSnapshot(t *testin
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, "snapshots", "source.md")
 	context := collection.NewContext(workspace, 10, nil)
+	require.NoError(t, context.AddSnapshotTarget(filepath.Join(workspace, "snapshots"), true))
 	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
 	contents := []string{"first evidence", "second evidence"}
 	sources := []string{"source:first", "source:second"}
@@ -1248,6 +1340,23 @@ func TestRunSnapshotCatalogPublishesOnlyReviewedSnapshots(t *testing.T) {
 	assert.Equal(t, map[string]string{items[0].ID: items[0].Path}, authorized)
 }
 
+func TestRunSnapshotCatalogAuthorizesDeclaredSnapshotIDs(t *testing.T) {
+	t.Parallel()
+
+	catalog := newRunSnapshotCatalog()
+	catalog.add([]snapshot.Snapshot{{
+		ID:       "snapshot-123e4567-e89b-12d3-a456-426614174000",
+		Path:     "C:/run/source.md",
+		Reviewed: true,
+	}})
+
+	authorized := catalog.authorized("Use snapshot-123e4567-e89b-12d3-a456-426614174000 as evidence.")
+
+	assert.Equal(t, map[string]string{
+		"snapshot-123e4567-e89b-12d3-a456-426614174000": "C:/run/source.md",
+	}, authorized)
+}
+
 func TestRunSnapshotCatalogAuthorizesDescriptorSnapshotSources(t *testing.T) {
 	t.Parallel()
 
@@ -1286,4 +1395,29 @@ func TestToolUseArtifactIDsIncludesOnlyArtifactSources(t *testing.T) {
 	}
 
 	assert.Equal(t, []string{"artifact-claims"}, toolUseArtifactIDs(uses))
+}
+
+func TestMaterializeSelfToolUseSourcesReplacesReservedIDs(t *testing.T) {
+	t.Parallel()
+
+	sources := cty.TupleVal([]cty.Value{
+		cty.ObjectVal(map[string]cty.Value{
+			"id": cty.StringVal("self:artifact:claims"), "name": cty.StringVal("claims"), "kind": cty.StringVal("artifact"),
+			"type": cty.StringVal("file"), "path": cty.StringVal("claims.json"), "description": cty.StringVal("Claims"),
+			"required": cty.BoolVal(true), "non_empty": cty.BoolVal(true),
+		}),
+		cty.ObjectVal(map[string]cty.Value{
+			"id": cty.StringVal("self:snapshot:sources"), "name": cty.StringVal("sources"), "kind": cty.StringVal("snapshot"),
+			"type": cty.StringVal("directory"), "path": cty.StringVal("snapshots"), "description": cty.StringVal("Sources"),
+			"required": cty.BoolVal(false), "non_empty": cty.BoolVal(false),
+		}),
+	})
+	uses := []researchspec.ToolUse{{InputFromAgent: cty.ObjectVal(map[string]cty.Value{
+		"claims": cty.ObjectVal(map[string]cty.Value{"desc": cty.StringVal("Claims"), "sources": sources}),
+	})}}
+
+	materialized := materializeSelfToolUseSources(uses, map[string]string{"claims": "artifact-claims"}, map[string]string{"sources": "snapshot-sources"})
+	resolved := materialized[0].InputFromAgent.GetAttr("claims").GetAttr("sources").AsValueSlice()
+	assert.Equal(t, "artifact-claims", resolved[0].GetAttr("id").AsString())
+	assert.Equal(t, "snapshot-sources", resolved[1].GetAttr("id").AsString())
 }

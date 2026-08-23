@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"math/big"
+	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/lonegunmanb/golden"
@@ -35,7 +36,9 @@ func (*DynamicResearchBlock) AddressLength() int { return 3 }
 func (*DynamicResearchBlock) CanExecutePrePlan() bool { return false }
 
 func (b *DynamicResearchBlock) EvalContext() *hcl.EvalContext {
-	return researchBlockEvalContext(b.BaseBlock)
+	context := researchBlockEvalContext(b.BaseBlock)
+	context.Variables["self"] = DynamicTaskSelfValue()
+	return context
 }
 
 func (b *DynamicResearchBlock) ExecuteDuringPlan() error {
@@ -94,7 +97,7 @@ func PlanDynamicTasks(value cty.Value) (cty.Value, error) {
 	for index := 0; iterator.Next(); index++ {
 		_, task := iterator.Element()
 		if !task.IsWhollyKnown() {
-			result = append(result, cty.UnknownVal(dynamicTaskOutputType(task.Type())))
+			result = append(result, cty.UnknownVal(dynamicTaskOutputType(task.Type(), taskHasTerminatingTool(task))))
 			continue
 		}
 		config, err := DecodeDynamicTask(task)
@@ -206,6 +209,9 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 	if block.ArtifactBlocks, err = dynamicArtifactBlocks(unmarked); err != nil {
 		return Config{}, err
 	}
+	if block.SnapshotBlocks, err = dynamicSnapshotBlocks(unmarked); err != nil {
+		return Config{}, err
+	}
 	if block.QCBlocks, err = dynamicQCBlocks(unmarked); err != nil {
 		return Config{}, err
 	}
@@ -241,6 +247,33 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 		return Config{}, err
 	}
 	return config, nil
+}
+
+// ResolveDynamicTaskSelfReferences resolves dynamic self placeholders after a
+// task object's snapshot declarations are available.
+func ResolveDynamicTaskSelfReferences(config Config) (Config, error) {
+	usesSnapshotPath := strings.Contains(config.SystemPrompt, dynamicSelfSnapshotPath) ||
+		(config.Prompt != nil && strings.Contains(*config.Prompt, dynamicSelfSnapshotPath))
+	if !usesSnapshotPath {
+		return config, nil
+	}
+	path, err := dynamicSelfSnapshotPathFor(config.Snapshots)
+	if err != nil {
+		return Config{}, err
+	}
+	config.SystemPrompt = strings.ReplaceAll(config.SystemPrompt, dynamicSelfSnapshotPath, path)
+	if config.Prompt != nil {
+		prompt := strings.ReplaceAll(*config.Prompt, dynamicSelfSnapshotPath, path)
+		config.Prompt = &prompt
+	}
+	return config, nil
+}
+
+func dynamicSelfSnapshotPathFor(snapshots []Artifact) (string, error) {
+	if len(snapshots) != 1 {
+		return "", fmt.Errorf("one(self.snapshot).path requires exactly one declared dynamic snapshot")
+	}
+	return snapshots[0].Path, nil
 }
 
 func dynamicToolUseBlocks(object cty.Value) ([]ToolUseBlock, error) {
@@ -443,13 +476,21 @@ func dynamicRetryBlocks(object cty.Value) ([]RetryBlock, error) {
 }
 
 func dynamicArtifactBlocks(object cty.Value) ([]ArtifactBlock, error) {
-	value, ok := dynamicAttribute(object, "artifacts")
+	return dynamicNamedArtifactBlocks(object, "artifacts")
+}
+
+func dynamicSnapshotBlocks(object cty.Value) ([]ArtifactBlock, error) {
+	return dynamicNamedArtifactBlocks(object, "snapshots")
+}
+
+func dynamicNamedArtifactBlocks(object cty.Value, attribute string) ([]ArtifactBlock, error) {
+	value, ok := dynamicAttribute(object, attribute)
 	if !ok || value.IsNull() {
 		return nil, nil
 	}
 	unmarked, _ := value.UnmarkDeep()
 	if !unmarked.Type().IsListType() && !unmarked.Type().IsTupleType() {
-		return nil, fmt.Errorf("artifacts must be a list")
+		return nil, fmt.Errorf("%s must be a list", attribute)
 	}
 	result := make([]ArtifactBlock, 0, unmarked.LengthInt())
 	iterator := unmarked.ElementIterator()
@@ -660,11 +701,11 @@ func dynamicTasksOutputType(tasksType cty.Type) (cty.Type, error) {
 	case tasksType.Equals(cty.DynamicPseudoType):
 		return cty.DynamicPseudoType, nil
 	case tasksType.IsListType():
-		return cty.List(dynamicTaskOutputType(tasksType.ElementType())), nil
+		return cty.List(dynamicTaskOutputType(tasksType.ElementType(), false)), nil
 	case tasksType.IsTupleType():
 		elementTypes := tasksType.TupleElementTypes()
 		for index := range elementTypes {
-			elementTypes[index] = dynamicTaskOutputType(elementTypes[index])
+			elementTypes[index] = dynamicTaskOutputType(elementTypes[index], false)
 		}
 		return cty.Tuple(elementTypes), nil
 	default:
@@ -672,7 +713,7 @@ func dynamicTasksOutputType(tasksType cty.Type) (cty.Type, error) {
 	}
 }
 
-func dynamicTaskOutputType(taskType cty.Type) cty.Type {
+func dynamicTaskOutputType(taskType cty.Type, hasTerminatingToolUse bool) cty.Type {
 	if !taskType.IsObjectType() {
 		return cty.DynamicPseudoType
 	}
@@ -680,7 +721,7 @@ func dynamicTaskOutputType(taskType cty.Type) cty.Type {
 	attributes["profile"] = cty.String
 	attributes["artifacts"] = cty.List(artifactValueType)
 	attributes["snapshots"] = cty.List(snapshotValueType)
-	if taskType.HasAttribute("terminate_tool_id") {
+	if taskType.HasAttribute("terminate_tool_id") || hasTerminatingToolUse {
 		attributes["result"] = cty.String
 	}
 	attributes["collection_batch_size"] = cty.Number

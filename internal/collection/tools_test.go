@@ -191,7 +191,7 @@ func TestRegisterToolHandler(t *testing.T) {
 		require.True(t, handler.Context().State.CheckpointPending())
 	})
 
-	t.Run("duplicate content does not advance pending count", func(t *testing.T) {
+	t.Run("identical content remains distinct evidence", func(t *testing.T) {
 		t.Parallel()
 
 		workspace := t.TempDir()
@@ -211,7 +211,7 @@ func TestRegisterToolHandler(t *testing.T) {
 				first = false
 			}
 		}
-		assert.Equal(t, 1, handler.Context().State.UnreviewedSnapshotCount())
+		assert.Equal(t, 3, handler.Context().State.UnreviewedSnapshotCount())
 	})
 
 	t.Run("default batch size ten enforces checkpoint pending", func(t *testing.T) {

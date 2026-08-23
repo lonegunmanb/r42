@@ -46,6 +46,11 @@ func (f *runtimeFactory) newDynamicResearchBlock(
 	}
 	resolved := make([]modulespec.ResearchPlan, len(configs))
 	for index, taskConfig := range configs {
+		taskConfig, err = researchspec.ResolveDynamicTaskSelfReferences(taskConfig)
+		if err != nil {
+			return nil, fmt.Errorf("dynamic research task %d: %w", index, err)
+		}
+		configs[index] = taskConfig
 		resolved[index], err = planned.Resolve(taskConfig)
 		if err != nil {
 			return nil, fmt.Errorf("dynamic research task %d: %w", index, err)
@@ -79,6 +84,7 @@ func (f *runtimeFactory) evaluateResearchExpression(address, source, description
 		return cty.NilVal, fmt.Errorf("parse %s: %w", description, diagnostics)
 	}
 	contextValues := maps.Clone(f.contextValues)
+	contextValues["self"] = researchspec.DynamicTaskSelfValue()
 	f.mu.Lock()
 	for resultAddress, result := range f.results {
 		setBlockResult(contextValues, resultAddress, result)

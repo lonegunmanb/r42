@@ -49,6 +49,7 @@ type Config struct {
 	Retry                      provider.RetryOverride
 	Policy                     SessionPolicy
 	Artifacts                  []Artifact
+	Snapshots                  []Artifact
 	ToolUses                   []ToolUse
 	QC                         *QCConfig
 	CollectionModelProvider    cty.Value
@@ -144,6 +145,16 @@ func (c Config) Validate() error {
 			return fmt.Errorf("artifact %s is declared more than once", artifact.Name)
 		}
 		artifactNames[artifact.Name] = struct{}{}
+	}
+	snapshotNames := make(map[string]struct{}, len(c.Snapshots))
+	for _, snapshot := range c.Snapshots {
+		if err := snapshot.Validate(); err != nil {
+			return fmt.Errorf("snapshot: %w", err)
+		}
+		if _, exists := snapshotNames[snapshot.Name]; exists {
+			return fmt.Errorf("snapshot %s is declared more than once", snapshot.Name)
+		}
+		snapshotNames[snapshot.Name] = struct{}{}
 	}
 	if c.QC != nil {
 		if err := c.QC.Validate(); err != nil {

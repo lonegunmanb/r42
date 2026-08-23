@@ -20,14 +20,14 @@ research "static" "primary_source_baseline" {
     Topic: ${var.topic}
     Evidence cutoff: ${var.as_of_date}
     ${local.source_tool_guidance}
-    ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
+    ${var.use_pplx ? format("Perplexity snapshot_dir: %s", one(self.snapshot).path) : ""}
     Workspace: "${block_wd()}"
 
     During Collection, find the newest official filings, regulator records,
     product specifications, customer or contract disclosures, and applicable
     rules available by the cutoff. Save every retained source as a Markdown
-    snapshot, register its path or retained source tool call ID with
-    r42_register_snapshot, and submit a collection checkpoint when the primary
+    snapshot at a unique .md path under "${one(self.snapshot).path}" by calling r42_save_snapshot,
+    then submit a collection checkpoint when the primary
     corpus is sufficient.
 
     During closed Research, do not search or fetch. Use the authorized snapshot_id
@@ -51,6 +51,11 @@ research "static" "primary_source_baseline" {
     "${var.as_of_date}", and allow_empty false.
   PROMPT
   collection_tool_ids = local.pplx_tool_ids
+  snapshot "sources" {
+    type        = "directory"
+    path        = "${block_wd()}/snapshots/sources"
+    description = "Primary-source material collected for the baseline."
+  }
   tool_use "register_source" {
     tool_id = go_tool.register_evidence_source.id
     input = {
@@ -60,47 +65,47 @@ research "static" "primary_source_baseline" {
     input_from_agent = {
       url = {
         desc = "The URL recorded in the authorized snapshot."
-        sources = []
+        sources = self.snapshot
       }
       canonical_url = {
         desc = "Optional publication identity URL."
-        sources = []
+        sources = self.snapshot
       }
       title = {
         desc = "The retained source title."
-        sources = []
+        sources = self.snapshot
       }
       publisher = {
         desc = "The source publisher."
-        sources = []
+        sources = self.snapshot
       }
       publication_date = {
         desc = "The source publication date in YYYY-MM-DD format."
-        sources = []
+        sources = self.snapshot
       }
       accessed_at = {
         desc = "The date the source was accessed in YYYY-MM-DD format."
-        sources = []
+        sources = self.snapshot
       }
       source_type = {
         desc = "The source classification from the values listed in the tool description."
-        sources = []
+        sources = self.snapshot
       }
       reporting_basis = {
         desc = "The reporting basis from the values listed in the tool description."
-        sources = []
+        sources = self.snapshot
       }
       provenance = {
         desc = "The provenance from the values listed in the tool description."
-        sources = []
+        sources = self.snapshot
       }
       snapshot_id = {
         desc = "The snapshot_id returned by r42_save_snapshot or supplied by r42."
-        sources = []
+        sources = self.snapshot
       }
       named_entities = {
         desc = "Named entities relevant to this source."
-        sources = []
+        sources = self.snapshot
       }
     }
   }
@@ -113,7 +118,7 @@ research "static" "primary_source_baseline" {
     input_from_agent = {
       cards = {
         desc = "Atomic claim cards supported by the registered sources."
-        sources = []
+        sources = self.snapshot
       }
       remove_claim_ids = {
         desc = "IDs of earlier staged cards that should be removed during revision."
@@ -184,11 +189,11 @@ research "static" "brainstorm" {
     Validated primary-source baseline JSON:
     ${research.static.primary_source_baseline.result}
     ${local.source_tool_guidance}
-    ${var.use_pplx ? format("Perplexity snapshot_dir: %s/sources", block_wd()) : ""}
+    ${var.use_pplx ? format("Perplexity snapshot_dir: %s", one(self.snapshot).path) : ""}
 
     During Collection, acquire only evidence needed beyond the validated
-    baseline. Register every retained path or source tool call ID with
-    r42_register_snapshot and submit a collection checkpoint. If the baseline
+    baseline. Save every retained source at a unique .md path under
+    "${one(self.snapshot).path}" with r42_save_snapshot and submit a collection checkpoint. If the baseline
     is sufficient for scope design, submit an empty collection checkpoint.
 
     During closed Research, do not search or fetch. Use the authorized snapshot_id
@@ -206,6 +211,11 @@ research "static" "brainstorm" {
     assigned to one or more coverage items and exactly one of the five tracks.
   PROMPT
   collection_tool_ids = local.pplx_tool_ids
+  snapshot "sources" {
+    type        = "directory"
+    path        = "${block_wd()}/snapshots/sources"
+    description = "Additional source material used to define study scope."
+  }
   tool_use "submit_scope" {
     tool_id   = go_tool.submit_supply_chain_scope.id
     terminate = true
@@ -216,35 +226,35 @@ research "static" "brainstorm" {
     input_from_agent = {
       focal_product = {
         desc = "The exact focal product or system boundary."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
       }
       product_variants = {
         desc = "Material product variants and branches."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
       }
       expected_components = {
         desc = "Expected components within the declared boundary."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
       }
       expected_stages = {
         desc = "Expected manufacturing, testing, qualification, and integration stages."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
       }
       upstream_boundaries = {
         desc = "The upstream boundary of the study."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
       }
       downstream_boundary = {
         desc = "The downstream boundary of the study."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
       }
       coverage_items = {
         desc = "Coverage items assigned to one of the five track values listed in the tool description."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
       }
       open_questions = {
         desc = "Material scope questions that remain unresolved."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots)
+        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
       }
     }
   }
@@ -299,14 +309,14 @@ research "dynamic" "graph_track" {
         Validated primary-source baseline JSON:
         ${research.static.primary_source_baseline.result}
         ${local.source_tool_guidance}
-        ${var.use_pplx ? format("Perplexity snapshot_dir: %s/%d/sources", block_wd(), index) : ""}
+        ${var.use_pplx ? format("Perplexity snapshot_dir: %s", one(self.snapshot).path) : ""}
         Workspace: "${block_wd()}/${index}"
 
         During Collection, research only this track and address every assigned
         coverage item. Preserve product variants and distinguish generic-chain facts
-        from target facts. Save every retained source under snapshots/sources,
-        register its path or retained source tool call ID with
-        r42_register_snapshot, and submit a collection checkpoint when sufficient.
+        from target facts. Save every retained source at a unique .md path under
+        "${one(self.snapshot).path}" with r42_save_snapshot, then submit a
+        collection checkpoint when sufficient.
 
         During closed Research, do not search or fetch. Use the authorized snapshot_id
         values supplied to this phase with r42_read_snapshot. Register every retained
@@ -329,6 +339,13 @@ research "dynamic" "graph_track" {
         "${var.as_of_date}", and allow_empty false.
       PROMPT
       collection_tool_ids = local.pplx_tool_ids
+
+      snapshots = [{
+        name        = "sources"
+        type        = "directory"
+        path        = "${block_wd()}/${index}/snapshots/sources"
+        description = "Source material collected for this graph track."
+      }]
       tool_uses = [
         {
           name = "register_source"
@@ -340,47 +357,47 @@ research "dynamic" "graph_track" {
           input_from_agent = {
             url = {
               desc = "The URL recorded in the authorized snapshot."
-              sources = []
+              sources = self.snapshot
             }
             canonical_url = {
               desc = "Optional publication identity URL."
-              sources = []
+              sources = self.snapshot
             }
             title = {
               desc = "The retained source title."
-              sources = []
+              sources = self.snapshot
             }
             publisher = {
               desc = "The source publisher."
-              sources = []
+              sources = self.snapshot
             }
             publication_date = {
               desc = "The source publication date in YYYY-MM-DD format."
-              sources = []
+              sources = self.snapshot
             }
             accessed_at = {
               desc = "The access date in YYYY-MM-DD format."
-              sources = []
+              sources = self.snapshot
             }
             source_type = {
               desc = "The source classification from the values listed in the tool description."
-              sources = []
+              sources = self.snapshot
             }
             reporting_basis = {
               desc = "The reporting basis from the values listed in the tool description."
-              sources = []
+              sources = self.snapshot
             }
             provenance = {
               desc = "The provenance from the values listed in the tool description."
-              sources = []
+              sources = self.snapshot
             }
             snapshot_id = {
               desc = "The snapshot_id returned by r42_save_snapshot or supplied by r42."
-              sources = []
+              sources = self.snapshot
             }
             named_entities = {
               desc = "Named entities relevant to this source."
-              sources = []
+              sources = self.snapshot
             }
           }
         },
@@ -399,6 +416,7 @@ research "dynamic" "graph_track" {
                 research.static.brainstorm.snapshots,
                 research.static.primary_source_baseline.artifact,
                 research.static.primary_source_baseline.snapshots,
+                self.snapshot,
               )
             }
             remove_claim_ids = {
@@ -708,14 +726,15 @@ research "dynamic" "prioritize_companies" {
         ${join("\n", [for item in research.dynamic.graph_track.tasks : item.result])}
         Task workspace: "${block_wd()}/${index}"
         ${local.source_tool_guidance}
-        ${var.use_pplx ? format("Perplexity snapshot_dir: %s/%d/sources", block_wd(), index) : ""}
+        ${var.use_pplx ? format("Perplexity snapshot_dir: %s", one(self.snapshot).path) : ""}
 
         During Collection, investigate whether any public company deserves more
         research because of this exact assessed node. Investigate at most
         ${var.max_candidates_per_chokepoint} companies. For each, distinguish an
         existing supplier, qualified alternative, related-product-only company,
-        or unverified lead. Verify the exact legal entity and security. Register
-        every retained path or source tool call ID with r42_register_snapshot,
+        or unverified lead. Verify the exact legal entity and security. Save
+        every retained source at a unique .md path under "${one(self.snapshot).path}"
+        with r42_save_snapshot,
         then submit a collection checkpoint. If no new evidence is needed,
         submit an empty collection checkpoint.
 
@@ -755,6 +774,12 @@ research "dynamic" "prioritize_companies" {
         research priorities, never investment ratings. An empty list is valid.
       PROMPT
       collection_tool_ids = local.pplx_tool_ids
+      snapshots = [{
+        name        = "sources"
+        type        = "directory"
+        path        = "${block_wd()}/${index}/snapshots/sources"
+        description = "Company-specific source material for this node assessment."
+      }]
       tool_uses = [
         {
           name = "register_source"
@@ -766,47 +791,47 @@ research "dynamic" "prioritize_companies" {
           input_from_agent = {
             url = {
               desc = "The URL recorded in the authorized snapshot."
-              sources = []
+              sources = self.snapshot
             }
             canonical_url = {
               desc = "Optional publication identity URL."
-              sources = []
+              sources = self.snapshot
             }
             title = {
               desc = "The retained source title."
-              sources = []
+              sources = self.snapshot
             }
             publisher = {
               desc = "The source publisher."
-              sources = []
+              sources = self.snapshot
             }
             publication_date = {
               desc = "The source publication date in YYYY-MM-DD format."
-              sources = []
+              sources = self.snapshot
             }
             accessed_at = {
               desc = "The access date in YYYY-MM-DD format."
-              sources = []
+              sources = self.snapshot
             }
             source_type = {
               desc = "The source classification from the values listed in the tool description."
-              sources = []
+              sources = self.snapshot
             }
             reporting_basis = {
               desc = "The reporting basis from the values listed in the tool description."
-              sources = []
+              sources = self.snapshot
             }
             provenance = {
               desc = "The provenance from the values listed in the tool description."
-              sources = []
+              sources = self.snapshot
             }
             snapshot_id = {
               desc = "The snapshot_id returned by r42_save_snapshot or supplied by r42."
-              sources = []
+              sources = self.snapshot
             }
             named_entities = {
               desc = "Named entities relevant to this source."
-              sources = []
+              sources = self.snapshot
             }
           }
         },
@@ -826,6 +851,7 @@ research "dynamic" "prioritize_companies" {
                 research.static.primary_source_baseline.snapshots,
                 [for task in research.dynamic.graph_track.tasks : task.artifacts],
                 [for task in research.dynamic.graph_track.tasks : task.snapshots],
+                self.snapshot,
               ])
             }
             remove_claim_ids = {
@@ -866,6 +892,8 @@ research "dynamic" "prioritize_companies" {
               assessment.artifacts,
               research.static.primary_source_baseline.artifact,
               [for task in research.dynamic.graph_track.tasks : task.artifacts],
+              [for item in self.artifact : item if item.name == "claims"],
+              self.snapshot,
             ])
             }
           conclusion = {
@@ -874,6 +902,8 @@ research "dynamic" "prioritize_companies" {
               assessment.artifacts,
               research.static.primary_source_baseline.artifact,
               [for task in research.dynamic.graph_track.tasks : task.artifacts],
+              [for item in self.artifact : item if item.name == "claims"],
+              self.snapshot,
             ])
             }
           }

@@ -6,6 +6,8 @@ package collection
 
 import (
 	"errors"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -26,6 +28,12 @@ type Context struct {
 
 	mu           sync.Mutex
 	checkpointed map[string]struct{}
+	targets      []snapshotTarget
+}
+
+type snapshotTarget struct {
+	path      string
+	directory bool
 }
 
 // NewContext creates a Collection protocol context with default batch size 10
@@ -90,6 +98,56 @@ func (c *Context) BeginWorkflow() error {
 // tools.
 func (c *Context) Gate() *AcquisitionGate {
 	return &AcquisitionGate{state: c.State}
+}
+
+// AddSnapshotTarget permits r42_save_snapshot to write to a declared file or
+// to a new Markdown file below a declared directory.
+func (c *Context) AddSnapshotTarget(path string, directory bool) error {
+	if c == nil {
+		return errors.New("collection context is required")
+	}
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve snapshot target: %w", err)
+	}
+	workspace, err := filepath.Abs(c.Workspace)
+	if err != nil {
+		return fmt.Errorf("resolve collection workspace: %w", err)
+	}
+	if !pathWithin(workspace, resolved) {
+		return fmt.Errorf("snapshot target %q is outside the collection workspace", path)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.targets = append(c.targets, snapshotTarget{path: resolved, directory: directory})
+	return nil
+}
+
+// AllowsSnapshotPath reports whether a path is inside a configured directory
+// target or exactly matches a configured file target.
+func (c *Context) AllowsSnapshotPath(path string) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, target := range c.targets {
+		if target.directory && pathWithin(target.path, path) {
+			return true
+		}
+		if !target.directory && filepath.Clean(target.path) == filepath.Clean(path) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathWithin(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 // AcquisitionGate rejects new acquisition calls while a checkpoint is pending.

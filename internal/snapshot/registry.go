@@ -4,14 +4,14 @@
 package snapshot
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 // Registration describes one registered snapshot source.
@@ -19,9 +19,7 @@ type Registration struct {
 	ID          string
 	Path        string
 	Description string
-	// New reports whether this registration created a fresh unique snapshot.
-	// A duplicate-content registration returns the existing snapshot with
-	// New=false.
+	// New reports whether this registration created a fresh snapshot.
 	New bool
 }
 
@@ -46,9 +44,10 @@ type Registry struct {
 	registered map[string]string
 	// descriptions stores optional semantic descriptions by snapshot ID.
 	descriptions map[string]string
-	// contentHashes maps content hashes to the first snapshot ID that
-	// registered them, enabling deduplication.
-	contentHashes map[string]string
+	// reserved maps declared absolute paths to IDs allocated before Collection.
+	reserved map[string]string
+	// toolResults maps a retained tool-call and source combination to its ID.
+	toolResults map[string]string
 	// reviewed tracks snapshot IDs that received a valid Collection-QC
 	// verdict.
 	reviewed map[string]struct{}
@@ -60,14 +59,33 @@ type Registry struct {
 // tool-result files are written under <workspace>/.r42-snapshots.
 func NewRegistry(workspace string) *Registry {
 	return &Registry{
-		workspace:     workspace,
-		managedDir:    filepath.Join(workspace, ".r42-snapshots"),
-		retained:      make(map[string]string),
-		registered:    make(map[string]string),
-		descriptions:  make(map[string]string),
-		contentHashes: make(map[string]string),
-		reviewed:      make(map[string]struct{}),
+		workspace:    workspace,
+		managedDir:   filepath.Join(workspace, ".r42-snapshots"),
+		retained:     make(map[string]string),
+		registered:   make(map[string]string),
+		descriptions: make(map[string]string),
+		reserved:     make(map[string]string),
+		toolResults:  make(map[string]string),
+		reviewed:     make(map[string]struct{}),
 	}
+}
+
+// Reserve allocates a run-scoped ID for a declared snapshot path before its
+// source file is written. RegisterPath later reuses the reserved ID.
+func (r *Registry) Reserve(path, description string) (Registration, error) {
+	clean, err := r.resolveReservedPath(path)
+	if err != nil {
+		return Registration{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if id, ok := r.reserved[clean]; ok {
+		return Registration{ID: id, Path: clean, Description: r.descriptions[id]}, nil
+	}
+	id := "snapshot-" + uuid.NewString()
+	r.reserved[clean] = id
+	r.descriptions[id] = strings.TrimSpace(description)
+	return Registration{ID: id, Path: clean, Description: r.descriptions[id]}, nil
 }
 
 // RetainToolResult stores a successful acquisition result by tool-call ID for
@@ -125,8 +143,8 @@ func (r *Registry) RegisterToolResultWithMetadata(toolCallID, source, descriptio
 		return Registration{}, fmt.Errorf("tool call %q was not retained", toolCallID)
 	}
 	content := withSourceHeader([]byte(result), source)
-	hash := contentHash(content)
-	if existing, dup := r.contentHashes[hash]; dup {
+	key := toolResultKey(toolCallID, source)
+	if existing, registered := r.toolResults[key]; registered {
 		r.mergeDescription(existing, description)
 		path := r.registered[existing]
 		description = r.descriptions[existing]
@@ -139,13 +157,10 @@ func (r *Registry) RegisterToolResultWithMetadata(toolCallID, source, descriptio
 	if err != nil {
 		return Registration{}, err
 	}
-	registration, err := r.registerContent(path, hash, description)
+	registration, err := r.registerContent(path, description, key)
 	if err != nil {
 		return Registration{}, err
 	}
-	// A concurrent registration of identical content may have claimed this
-	// hash first; registerContent then returns the claimed registration whose
-	// path differs from the managed file we just wrote, which is redundant.
 	if registration.Path != path {
 		r.mu.Lock()
 		_ = os.Remove(path)
@@ -300,9 +315,8 @@ func (r *Registry) registerPath(path, source, description string) (Registration,
 		if err = os.WriteFile(clean, prepared, info.Mode().Perm()); err != nil {
 			return Registration{}, fmt.Errorf("write snapshot source header %q: %w", path, err)
 		}
-		content = prepared
 	}
-	return r.registerContent(clean, contentHash(content), description)
+	return r.registerContent(clean, description, "")
 }
 
 func withSourceHeader(content []byte, source string) []byte {
@@ -331,21 +345,57 @@ func hasSourceHeader(content string) bool {
 	return false
 }
 
-func (r *Registry) registerContent(path, hash, description string) (Registration, error) {
+func (r *Registry) registerContent(path, description, toolResultKey string) (Registration, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if existing, dup := r.contentHashes[hash]; dup {
-		r.mergeDescription(existing, description)
-		return Registration{
-			ID: existing, Path: r.registered[existing], Description: r.descriptions[existing],
-		}, nil
+	if id, reserved := r.reserved[path]; reserved {
+		if registered, exists := r.registered[id]; exists {
+			return Registration{ID: id, Path: registered, Description: r.descriptions[id]}, nil
+		}
+		r.mergeDescription(id, description)
+		r.registered[id] = path
+		r.order = append(r.order, id)
+		return Registration{ID: id, Path: path, Description: r.descriptions[id], New: true}, nil
 	}
-	id := newSnapshotID(r.workspace, hash)
-	r.contentHashes[hash] = id
+	if toolResultKey != "" {
+		if id, exists := r.toolResults[toolResultKey]; exists {
+			r.mergeDescription(id, description)
+			return Registration{ID: id, Path: r.registered[id], Description: r.descriptions[id]}, nil
+		}
+	}
+	for id, registered := range r.registered {
+		if registered == path {
+			r.mergeDescription(id, description)
+			return Registration{ID: id, Path: registered, Description: r.descriptions[id]}, nil
+		}
+	}
+	id := "snapshot-" + uuid.NewString()
+	if toolResultKey != "" {
+		r.toolResults[toolResultKey] = id
+	}
 	r.registered[id] = path
 	r.descriptions[id] = strings.TrimSpace(description)
 	r.order = append(r.order, id)
 	return Registration{ID: id, Path: path, Description: r.descriptions[id], New: true}, nil
+}
+
+func toolResultKey(toolCallID, source string) string {
+	return toolCallID + "\x00" + strings.Join(strings.Fields(source), " ")
+}
+
+func (r *Registry) resolveReservedPath(path string) (string, error) {
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve snapshot path: %w", err)
+	}
+	workspace, err := filepath.Abs(r.workspace)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace: %w", err)
+	}
+	if !isWithin(workspace, clean) {
+		return "", fmt.Errorf("snapshot path %q is outside the block workspace", path)
+	}
+	return clean, nil
 }
 
 func (r *Registry) mergeDescription(id, description string) {
@@ -373,16 +423,6 @@ func (r *Registry) writeManaged(toolCallID string, content []byte) (string, erro
 		return "", fmt.Errorf("close managed snapshot: %w", err)
 	}
 	return path, nil
-}
-
-func contentHash(content []byte) string {
-	sum := sha256.Sum256(content)
-	return hex.EncodeToString(sum[:])
-}
-
-func newSnapshotID(workspace, contentHash string) string {
-	sum := sha256.Sum256([]byte("r42/snapshot/v1:" + workspace + ":" + contentHash))
-	return "snapshot-" + hex.EncodeToString(sum[:16])
 }
 
 func isWithin(root, path string) bool {

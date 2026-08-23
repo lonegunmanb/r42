@@ -43,6 +43,36 @@ func TestPlanDynamicTasksPreservesTaskShape(t *testing.T) {
 	assert.False(t, task.GetAttr("snapshots").IsKnown())
 }
 
+func TestPlanDynamicTasksExposesResultForPartialTaskWithTerminatingToolUse(t *testing.T) {
+	t.Parallel()
+
+	planned, err := researchspec.PlanDynamicTasks(cty.TupleVal([]cty.Value{
+		cty.ObjectVal(map[string]cty.Value{
+			"model":         cty.StringVal("test-model"),
+			"system_prompt": cty.StringVal("Research the topic."),
+			"prompt":        cty.UnknownVal(cty.String),
+			"artifacts":     cty.EmptyTupleVal,
+			"snapshots":     cty.EmptyTupleVal,
+			"retry":         cty.NullVal(cty.DynamicPseudoType),
+			"qc":            cty.NullVal(cty.DynamicPseudoType),
+			"tool_uses": cty.TupleVal([]cty.Value{
+				cty.ObjectVal(map[string]cty.Value{
+					"name":             cty.StringVal("finish"),
+					"tool_id":          cty.StringVal("tool_finish"),
+					"terminate":        cty.BoolVal(true),
+					"input":            cty.EmptyObjectVal,
+					"input_from_agent": cty.EmptyObjectVal,
+				}),
+			}),
+		}),
+	}))
+	require.NoError(t, err)
+
+	task := planned.Index(cty.NumberIntVal(0))
+	require.True(t, task.Type().HasAttribute("result"))
+	assert.False(t, task.GetAttr("result").IsKnown())
+}
+
 func TestDecodeDynamicTaskResolvesProfile(t *testing.T) {
 	t.Parallel()
 
@@ -72,6 +102,33 @@ func TestDecodeDynamicTaskResolvesProfile(t *testing.T) {
 			assert.Equal(t, tt.expected, config.Profile)
 		})
 	}
+}
+
+func TestDecodeDynamicTaskDecodesDeclaredSnapshots(t *testing.T) {
+	t.Parallel()
+
+	config, err := researchspec.DecodeDynamicTask(cty.ObjectVal(map[string]cty.Value{
+		"model":         cty.StringVal("test-model"),
+		"system_prompt": cty.StringVal("Collect and synthesize."),
+		"artifacts":     cty.EmptyTupleVal,
+		"snapshots": cty.TupleVal([]cty.Value{
+			cty.ObjectVal(map[string]cty.Value{
+				"name":        cty.StringVal("sources"),
+				"type":        cty.StringVal("directory"),
+				"path":        cty.StringVal("snapshots/sources"),
+				"description": cty.StringVal("Collected source material"),
+			}),
+		}),
+		"retry": cty.NullVal(cty.DynamicPseudoType),
+		"qc":    cty.NullVal(cty.DynamicPseudoType),
+	}))
+
+	require.NoError(t, err)
+	require.Len(t, config.Snapshots, 1)
+	assert.Equal(t, researchspec.Artifact{
+		Name: "sources", Type: researchspec.ArtifactTypeDirectory,
+		Path: "snapshots/sources", Description: "Collected source material",
+	}, config.Snapshots[0])
 }
 
 func TestDecodeDynamicTaskRejectsEmptyProfile(t *testing.T) {

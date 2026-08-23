@@ -108,6 +108,37 @@ func (r *Registry) RegisterSnapshot(workspace, id, path, description string) (Re
 	return record, nil
 }
 
+// DeclareSnapshot reserves an ID-backed Collection snapshot target before its
+// file or directory exists. File targets become ready after Collection QC;
+// directory targets are readable containers immediately.
+func (r *Registry) DeclareSnapshot(workspace, id string, declared researchspec.Artifact) (Record, error) {
+	if r == nil {
+		return Record{}, errors.New("artifact registry is required")
+	}
+	if strings.TrimSpace(id) == "" {
+		return Record{}, errors.New("snapshot id is required")
+	}
+	if err := declared.Validate(); err != nil {
+		return Record{}, err
+	}
+	path, err := absoluteArtifactPath(workspace, declared.Path)
+	if err != nil {
+		return Record{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if existing, ok := r.entries[id]; ok {
+		return existing.Record, nil
+	}
+	record := Record{
+		ID: id, Name: declared.Name, Path: path, Description: strings.TrimSpace(declared.Description),
+		Kind: KindSnapshot, Type: declared.Type, Ready: declared.Type == researchspec.ArtifactTypeDirectory,
+	}
+	r.entries[id] = entry{Record: record, workspace: workspace}
+	r.order = append(r.order, id)
+	return record, nil
+}
+
 // ListDirectoryFiles registers regular files below a ready directory artifact
 // as read-only child capabilities. Symlinks are deliberately excluded.
 func (r *Registry) ListDirectoryFiles(id string) ([]Record, error) {
@@ -123,7 +154,7 @@ func (r *Registry) ListDirectoryFiles(id string) ([]Record, error) {
 	if !parent.Ready {
 		return nil, fmt.Errorf("artifact %q is not ready", id)
 	}
-	if parent.Kind != KindArtifact || parent.Type != researchspec.ArtifactTypeDirectory {
+	if (parent.Kind != KindArtifact && parent.Kind != KindSnapshot) || parent.Type != researchspec.ArtifactTypeDirectory {
 		return nil, fmt.Errorf("artifact %q is not a directory", id)
 	}
 	result := make([]Record, 0)

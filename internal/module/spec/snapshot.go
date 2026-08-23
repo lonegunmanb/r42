@@ -49,6 +49,7 @@ type researchSnapshot struct {
 	Retry                      provider.RetryOverride       `json:"retry"`
 	Policy                     policySnapshot               `json:"policy"`
 	Artifacts                  []researchspec.Artifact      `json:"artifacts"`
+	Snapshots                  []researchspec.Artifact      `json:"snapshots,omitempty"`
 	ToolUses                   []toolUseSnapshot            `json:"tool_uses,omitempty"`
 	QC                         *qcSnapshot                  `json:"qc,omitempty"`
 	Provider                   *providerSnapshot            `json:"provider,omitempty"`
@@ -173,6 +174,7 @@ func EncodeResearchPlan(
 		Retry:                      config.Retry,
 		Policy:                     snapshotPolicy(config.Policy),
 		Artifacts:                  slices.Clone(config.Artifacts),
+		Snapshots:                  slices.Clone(config.Snapshots),
 		Provider:                   providerConfig,
 		TerminateToolID:            clonePointer(config.TerminateToolID),
 		CollectionToolIDs:          slices.Clone(config.CollectionToolIDs),
@@ -276,6 +278,7 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 		MaxProtocolAttempts: snapshot.MaxProtocolAttempts, Timeout: nanosecondsDuration(snapshot.TimeoutNanoseconds),
 		Retry: snapshot.Retry, Policy: restorePolicy(snapshot.Policy),
 		Artifacts:                  slices.Clone(snapshot.Artifacts),
+		Snapshots:                  slices.Clone(snapshot.Snapshots),
 		TerminateToolID:            clonePointer(snapshot.TerminateToolID),
 		CollectionBatchSize:        researchspec.DefaultCollectionBatchSize,
 		MaxCollectionRounds:        clonePointer(snapshot.MaxCollectionRounds),

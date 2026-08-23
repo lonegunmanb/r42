@@ -204,7 +204,7 @@ func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
 		return "", fmt.Errorf("research supports at most one collection_qc block")
 	}
 	for _, nested := range block.NestedBlocks() {
-		if nested.Type == "retry" || nested.Type == "artifact" || nested.Type == "qc" ||
+		if nested.Type == "retry" || nested.Type == "artifact" || nested.Type == "snapshot" || nested.Type == "qc" ||
 			nested.Type == "collection_qc" || nested.Type == "tool_use" || golden.MetaNestedBlockNames.Contains(nested.Type) {
 			continue
 		}
@@ -227,6 +227,18 @@ func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
 			name = artifact.Labels[len(artifact.Labels)-1]
 		}
 		writeObject(&result, artifact, map[string]string{
+			"name": strconv.Quote(name), "required": "false", "non_empty": "false",
+		})
+		result.WriteString(",\n")
+	}
+	result.WriteString("]\n")
+	result.WriteString("snapshots = [\n")
+	for _, snapshot := range nestedBlocks(block, "snapshot") {
+		name := ""
+		if len(snapshot.Labels) > 0 {
+			name = snapshot.Labels[len(snapshot.Labels)-1]
+		}
+		writeObject(&result, snapshot, map[string]string{
 			"name": strconv.Quote(name), "required": "false", "non_empty": "false",
 		})
 		result.WriteString(",\n")
@@ -392,7 +404,8 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 		"skill_directories": cty.EmptyTupleVal, "skills": cty.EmptyTupleVal,
 		"disabled_skills": cty.EmptyTupleVal, "permission": cty.NullVal(cty.String),
 		"max_protocol_attempts": cty.NullVal(cty.Number), "timeout": cty.NullVal(cty.String),
-		"retry": cty.EmptyTupleVal, "artifact": cty.EmptyTupleVal, "tool_use": cty.EmptyTupleVal, "qc": cty.EmptyTupleVal,
+		"retry": cty.EmptyTupleVal, "artifact": cty.EmptyTupleVal, "snapshot": cty.EmptyTupleVal,
+		"snapshots": cty.UnknownVal(cty.List(snapshotValueType)), "tool_use": cty.EmptyTupleVal, "qc": cty.EmptyTupleVal,
 		"collection_model_provider":    cty.NullVal(cty.EmptyObject),
 		"collection_tool_ids":          cty.EmptyTupleVal,
 		"collection_skill_directories": cty.EmptyTupleVal,
@@ -407,6 +420,8 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 			switch name {
 			case "artifacts":
 				values["artifact"] = value
+			case "snapshots":
+				values["snapshot"] = value
 			case "tool_uses":
 				values["tool_use"] = value
 			case "retry", "qc", "collection_qc":
@@ -421,8 +436,36 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 			values["profile"] = values["model"]
 		}
 	}
-	if _, exists := task.Type().AttributeTypes()["terminate_tool_id"]; exists {
+	if taskHasTerminatingTool(task) {
 		values["result"] = cty.UnknownVal(cty.String)
 	}
 	return values
+}
+
+func taskHasTerminatingTool(task cty.Value) bool {
+	unmarked, _ := task.UnmarkDeep()
+	if !unmarked.Type().IsObjectType() {
+		return false
+	}
+	if unmarked.Type().HasAttribute("terminate_tool_id") {
+		return true
+	}
+	if !unmarked.Type().HasAttribute("tool_uses") {
+		return false
+	}
+	toolUses := unmarked.GetAttr("tool_uses")
+	if !toolUses.IsKnown() || toolUses.IsNull() ||
+		(!toolUses.Type().IsListType() && !toolUses.Type().IsTupleType()) {
+		return false
+	}
+	for _, toolUse := range toolUses.AsValueSlice() {
+		if !toolUse.Type().IsObjectType() || !toolUse.Type().HasAttribute("terminate") {
+			continue
+		}
+		terminate, _ := toolUse.GetAttr("terminate").Unmark()
+		if terminate.IsKnown() && !terminate.IsNull() && terminate.Type().Equals(cty.Bool) && terminate.True() {
+			return true
+		}
+	}
+	return false
 }
