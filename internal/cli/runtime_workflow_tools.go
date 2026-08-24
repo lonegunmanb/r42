@@ -29,10 +29,12 @@ import (
 
 var closedWorldBuiltIns = []string{
 	"web_search", "web_fetch", "bash", "powershell", "read_powershell", "list_powershell",
-	"shell", "view", "edit", "create", "glob", "task", "ask_user",
+	"shell", "edit", "create", "glob", "task", "ask_user",
 }
 
 var collectionBlockedBuiltIns = []string{"task", "powershell", "curl"}
+
+var readOnlyFileBuiltIns = []string{"view", "grep", "head", "tail"}
 
 func collectionDisallowedTools(configured []string) []string {
 	result := slices.Clone(configured)
@@ -42,6 +44,13 @@ func collectionDisallowedTools(configured []string) []string {
 		}
 	}
 	return result
+}
+
+func collectionAllowedTools(configured, mandatory []string) []string {
+	if configured == nil {
+		return nil
+	}
+	return phaseAllowedTools(configured, append(slices.Clone(readOnlyFileBuiltIns), mandatory...))
 }
 
 func closedWorldDisallowedTools(configured []string) []string {
@@ -55,10 +64,13 @@ func closedWorldDisallowedTools(configured []string) []string {
 }
 
 func closedWorldAllowedTools(configured, mandatory []string) []string {
-	if configured == nil {
-		return slices.Clone(mandatory)
+	result := slices.Clone(configured)
+	for _, name := range readOnlyFileBuiltIns {
+		if !slices.Contains(result, name) {
+			result = append(result, name)
+		}
 	}
-	return phaseAllowedTools(configured, mandatory)
+	return phaseAllowedTools(result, mandatory)
 }
 
 func collectionBuiltInHooks(quota *toolCallQuota, gate *collection.AcquisitionGate) *sdk.SessionHooks {

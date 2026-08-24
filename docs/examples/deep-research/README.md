@@ -79,8 +79,9 @@ used, it decides how many tasks belong to each group. It must use globally
 unique, filesystem-safe task IDs and provide a subquestion plus concrete
 instructions for every task. If a later task needs an earlier artifact, the
 planner must say so in that task's instructions. Validated typed-tool JSON
-results are injected directly into downstream prompts; closed Research never
-uses general file or shell tools to inspect upstream paths.
+results are injected directly into downstream prompts. Closed Research may use
+read-only file tools, but never shell or write/edit tools, to inspect upstream
+paths.
 
 ## Evidence pipeline
 

@@ -366,7 +366,8 @@ There is no default allowlist. When present, `allowed_tools` first narrows the
 available set. `disallowed_tools` is then applied and always wins. Collection is
 the only open-world phase, but it always denies `task`, `powershell`, and `curl`
 to prevent delegation and command-line network fallbacks. Research always adds a fixed denylist for obvious
-network, shell, generic file, edit, task/sub-agent, and user-input built-ins.
+network, shell, write/edit, glob, task/sub-agent, and user-input built-ins.
+Read-only `view`, `grep`, `head`, and `tail` file tools remain available.
 Explicit custom typed tools remain an author trust boundary.
 
 `approve_all` automatically approves every otherwise valid tool call.
@@ -616,9 +617,10 @@ retrying a verdict does not consume a Collection round.
 Research is closed-world synthesis. It can read all registered evidence artifacts by ID,
 read declared candidate artifacts, write only declared Markdown file artifacts,
 use explicitly configured trusted `tool_ids`, and call its optional termination
-tool. Obvious network, shell, generic file, edit, task/sub-agent, and user-input
-built-ins are always denied. Protocol and artifact failures are repairable in
-the same persistent Research session.
+tool. Obvious network, shell, write/edit, glob, task/sub-agent, and user-input
+built-ins are always denied; read-only `view`, `grep`, `head`, and `tail`
+remain available. Protocol and artifact failures are repairable in the same
+persistent Research session.
 
 Final QC exists only when `qc` is configured. It receives the original task,
 non-empty `criteria`, candidate result, declared artifact metadata, and read-only

@@ -29,18 +29,25 @@ func TestClosedWorldDisallowedToolsIncludesAcquisitionAndArbitraryIO(t *testing.
 
 	for _, name := range []string{
 		"web_search", "web_fetch", "bash", "powershell", "read_powershell", "list_powershell",
-		"shell", "view", "edit", "create", "glob", "task", "ask_user",
+		"shell", "edit", "create", "glob", "task", "ask_user",
 	} {
 		assert.Contains(t, tools, name)
 	}
+	for _, name := range []string{"view", "grep", "head", "tail"} {
+		assert.NotContains(t, tools, name)
+	}
 }
 
-func TestClosedWorldAllowedToolsDefaultsToMountedTypedTools(t *testing.T) {
+func TestClosedWorldAllowedToolsIncludesReadOnlyFileTools(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, []string{"r42_read_artifact", "submit"}, closedWorldAllowedTools(
+	assert.Equal(t, []string{"view", "grep", "head", "tail", "r42_read_artifact", "submit"}, closedWorldAllowedTools(
 		nil,
 		[]string{"r42_read_artifact", "submit"},
+	))
+	assert.Equal(t, []string{"custom_tool", "view", "grep", "head", "tail", "submit"}, closedWorldAllowedTools(
+		[]string{"custom_tool", "view"},
+		[]string{"submit"},
 	))
 }
 
@@ -67,9 +74,25 @@ func TestCollectionDisallowedToolsBlocksDelegationAndShellFallbacks(t *testing.T
 			tools := collectionDisallowedTools(input)
 
 			assert.ElementsMatch(t, tt.expected, tools)
+			for _, name := range []string{"view", "grep", "head", "tail"} {
+				assert.NotContains(t, tools, name)
+			}
 			assert.Equal(t, tt.configured, input)
 		})
 	}
+}
+
+func TestCollectionAllowedToolsPreservesReadOnlyFileTools(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, collectionAllowedTools(nil, []string{"r42_collection_checkpoint"}))
+	assert.Equal(t,
+		[]string{"web_fetch", "view", "grep", "head", "tail", "r42_collection_checkpoint"},
+		collectionAllowedTools(
+			[]string{"web_fetch", "view"},
+			[]string{"r42_collection_checkpoint"},
+		),
+	)
 }
 
 func TestCollectionBuiltInHooksEnforceCheckpointGate(t *testing.T) {
@@ -1289,6 +1312,10 @@ func TestResearchArtifactProtocolUsesIDsInsteadOfPaths(t *testing.T) {
 
 	prompt := closedResearchSystemPrompt("Configured instructions.")
 
+	for _, name := range []string{"view", "grep", "head", "tail"} {
+		assert.Contains(t, prompt, name)
+	}
+	assert.NotContains(t, prompt, "only through r42 typed tools")
 	assert.Contains(t, prompt, "artifact_id")
 	assert.Contains(t, prompt, "r42_read_artifact")
 	assert.Contains(t, prompt, "r42_search_artifact")

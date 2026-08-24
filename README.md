@@ -469,7 +469,7 @@ that depend on its successful completion are not run.
 | `tool_call_quota` | No | `map(number)` of non-negative per-session call limits. It may name configured Collection or Research typed tools, the terminate tool, or Copilot built-ins. Collection and Research keep separate counters. |
 | `terminate_tool_id` | No | Typed tool that must return an accepted response before the stage can finish. Its output must be string-compatible and becomes `research.static.<name>.result`. Without it, a normal assistant completion ends the stage. |
 | `allowed_tools` | No | SDK tool-name allowlist shared by Collection and Research. Mandatory r42 protocol tools are added even when omitted. |
-| `disallowed_tools` | No | SDK tool-name denylist shared by Collection and Research. Research additionally blocks obvious network, shell, generic file, edit, task, and user-input built-ins. |
+| `disallowed_tools` | No | SDK tool-name denylist shared by Collection and Research. Research additionally blocks obvious network, shell, write/edit, glob, task, and user-input built-ins; read-only `view`, `grep`, `head`, and `tail` remain available. |
 | `collection_skill_directories` | No | Skill roots available only during Collection. |
 | `collection_skills` | No | Skills eagerly loaded only during Collection. |
 | `collection_disabled_skills` | No | Skills disabled only during Collection. |
@@ -680,12 +680,12 @@ authorized directories, is enforced by every read operation.
 | `r42_qc_verdict` | Final QC, when configured | Return `pass`, `revise_research`, or `reopen_collection` with semantic QC issues. |
 
 Collection is the only open-world phase: it can acquire evidence through the
-configured collection tools and save/register it. Collection QC and Final QC
-have read-only built-in artifact capabilities. Closed Research cannot use shell,
-PowerShell, generic file viewers, or network acquisition; it must use the
-mounted artifact readers and the declared typed tools. Built-in tools return
-structured rejection issues so the model can correct an invocation without
-guessing paths or IDs.
+configured collection tools and save/register it. Collection QC, Research, and
+Final QC can use the read-only `view`, `grep`, `head`, and `tail` file tools in
+addition to the built-in artifact tools. Closed Research still cannot use
+shell, PowerShell, write/edit tools, or network acquisition. Built-in typed
+tools return structured rejection issues so the model can correct an
+invocation without guessing paths or IDs.
 
 ### `collection_qc`
 
@@ -726,7 +726,7 @@ snapshots. Omitting `qc` completes the block after Research succeeds.
 | `tool_ids` | No | Typed tools available only to QC. Research tools are not inherited. |
 | `tool_call_quota` | No | QC-only `map(number)` of non-negative call limits. Typed-tool ID keys must also appear in this QC block's `tool_ids`; ordinary keys limit Copilot built-in tools. |
 | `allowed_tools` | No | QC SDK tool allowlist. The research allowlist is not inherited. |
-| `disallowed_tools` | No | Additional Final-QC denylist. Final QC always blocks obvious network, shell, generic file, edit, task, and user-input built-ins. |
+| `disallowed_tools` | No | Additional Final-QC denylist. Final QC always blocks obvious network, shell, write/edit, glob, task, and user-input built-ins; read-only `view`, `grep`, `head`, and `tail` remain available. |
 | `skill_directories` | No | Skill roots available only to QC; research skill roots are not inherited. |
 | `skills` | No | Skills selected only for QC. |
 | `disabled_skills` | No | Skills disabled only for QC. |

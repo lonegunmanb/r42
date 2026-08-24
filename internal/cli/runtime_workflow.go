@@ -32,7 +32,7 @@ const (
 const researchArtifactProtocol = "Evidence protocol: evidence crosses research-block boundaries only by artifact_id. " +
 	"Use r42_read_artifact with an authorized artifact_id to inspect source material, r42_search_artifact to locate exact evidence text, " +
 	"and r42_search_artifacts to find text across all authorized artifacts. " +
-	"Do not use artifact paths as cross-block evidence references and do not read or copy artifact files through the filesystem. " +
+	"Read-only view, grep, head, and tail may inspect files by path. Do not use artifact paths as cross-block evidence references. " +
 	"Every citation carried into a downstream knowledge result must retain its artifact_id."
 
 func toolUseArtifactIDs(uses []researchspec.ToolUse) []string {
@@ -175,8 +175,9 @@ func materializeArtifactReferenceIDs(value cty.Value, artifactIDs map[string]str
 }
 
 func closedResearchSystemPrompt(configured string) string {
-	return "You are the closed Research synthesis phase. Read registered evidence only through r42 typed tools. " +
-		"Do not acquire new evidence or use network, shell, generic file, edit, task, or user-input tools.\n\n" +
+	return "You are the closed Research synthesis phase. Use r42 typed tools when artifact identity or structured access matters. " +
+		"Read-only view, grep, head, and tail are also available for unrestricted file inspection. " +
+		"Do not acquire new evidence or use network, shell, write/edit, task, or user-input tools.\n\n" +
 		researchArtifactProtocol + "\n\n" + configured
 }
 
@@ -280,7 +281,9 @@ func (f *runtimeFactory) newResearchBlock(
 		Provider: collectionProvider,
 		Retry:    collectionRetry, Model: planned.Config.Model, Profile: planned.Config.ProfileName(),
 		ReasoningEffort: pointerValue(planned.Config.ReasoningEffort), SystemPrompt: collectionPrompt, WorkingDirectory: workspace,
-		Tools: collectionTools, AvailableTools: phaseAllowedTools(planned.Config.Policy.AllowedTools, toolNames(collectionTools)),
+		Tools: collectionTools, AvailableTools: collectionAllowedTools(
+			planned.Config.Policy.AllowedTools, toolNames(collectionTools),
+		),
 		ExcludedTools:    collectionDisallowedTools(planned.Config.Policy.DisallowedTools),
 		SkillDirectories: slices.Clone(planned.Config.CollectionSkillDirectories), Skills: slices.Clone(planned.Config.CollectionSkills),
 		DisabledSkills: slices.Clone(planned.Config.CollectionDisabledSkills),
@@ -314,7 +317,7 @@ func (f *runtimeFactory) newResearchBlock(
 		Provider: collectionQCProvider,
 		Retry:    effectiveCollectionQC.Retry, Model: effectiveCollectionQC.Model,
 		Profile: effectiveCollectionQC.Profile, ReasoningEffort: pointerValue(effectiveCollectionQC.ReasoningEffort),
-		SystemPrompt:     "You are Collection QC. Semantically assess whether registered evidence artifacts are sufficient. Use only r42 read tools and submit a typed verdict.",
+		SystemPrompt:     "You are Collection QC. Semantically assess whether registered evidence artifacts are sufficient. Use r42 read tools or read-only view, grep, head, and tail, then submit a typed verdict.",
 		WorkingDirectory: workspace, Tools: collectionQCReadTools,
 		ExcludedTools: closedWorldDisallowedTools(nil),
 	})
@@ -455,7 +458,7 @@ func (f *runtimeFactory) newResearchBlock(
 			Retry:    effectiveFinalQC.Retry, Model: effectiveFinalQC.Model, Profile: effectiveFinalQC.Profile,
 			ReasoningEffort: pointerValue(effectiveFinalQC.ReasoningEffort),
 			SystemPrompt: appendBuiltInToolCallQuotaPrompt(
-				"You are Final QC. Review only authorized evidence artifacts by artifact_id and candidate artifacts, then submit pass, revise_research, or reopen_collection. "+researchArtifactProtocol,
+				"You are Final QC. Review evidence artifacts and candidate files with r42 read tools or read-only view, grep, head, and tail, then submit pass, revise_research, or reopen_collection. "+researchArtifactProtocol,
 				finalBuiltInQuota,
 			),
 			WorkingDirectory: workspace, Tools: finalTools,
