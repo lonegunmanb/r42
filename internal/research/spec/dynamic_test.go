@@ -51,7 +51,7 @@ func TestPlanDynamicTasksExposesResultForPartialTaskWithTerminatingToolUse(t *te
 			"artifact":      cty.EmptyObjectVal,
 			"retry":         cty.NullVal(cty.DynamicPseudoType),
 			"qc":            cty.NullVal(cty.DynamicPseudoType),
-			"tool_uses": cty.MapVal(map[string]cty.Value{
+			"tool_use": cty.MapVal(map[string]cty.Value{
 				"finish": cty.ObjectVal(map[string]cty.Value{
 					"tool_id":          cty.StringVal("tool_finish"),
 					"terminate":        cty.BoolVal(true),
@@ -137,7 +137,7 @@ func TestDecodeDynamicTaskDecodesMapImportsAndToolUses(t *testing.T) {
 				"sources": cty.EmptyTupleVal,
 			}),
 		}),
-		"tool_uses": cty.MapVal(map[string]cty.Value{
+		"tool_use": cty.MapVal(map[string]cty.Value{
 			"submit": cty.ObjectVal(map[string]cty.Value{
 				"tool_id":          cty.StringVal("tool_submit"),
 				"input":            cty.EmptyObjectVal,
@@ -174,11 +174,11 @@ func TestDecodeDynamicTaskRejectsListImportsAndToolUses(t *testing.T) {
 		},
 		{
 			name:      "tool uses",
-			attribute: "tool_uses",
+			attribute: "tool_use",
 			value: cty.TupleVal([]cty.Value{cty.ObjectVal(map[string]cty.Value{
 				"name": cty.StringVal("submit"), "tool_id": cty.StringVal("tool_submit"),
 			})}),
-			want: "tool_uses must be an object or map",
+			want: "tool_use must be an object or map",
 		},
 	}
 
@@ -199,6 +199,21 @@ func TestDecodeDynamicTaskRejectsListImportsAndToolUses(t *testing.T) {
 			require.EqualError(t, err, tt.want)
 		})
 	}
+}
+
+func TestDecodeDynamicTaskRejectsPluralToolUses(t *testing.T) {
+	t.Parallel()
+
+	_, err := researchspec.DecodeDynamicTask(cty.ObjectVal(map[string]cty.Value{
+		"model":         cty.StringVal("test-model"),
+		"system_prompt": cty.StringVal("Collect and synthesize."),
+		"artifact":      cty.EmptyObjectVal,
+		"tool_uses":     cty.EmptyObjectVal,
+		"retry":         cty.NullVal(cty.DynamicPseudoType),
+		"qc":            cty.NullVal(cty.DynamicPseudoType),
+	}))
+
+	require.EqualError(t, err, "tool_uses has been renamed to tool_use")
 }
 
 func TestDecodeDynamicTaskRejectsListArtifacts(t *testing.T) {

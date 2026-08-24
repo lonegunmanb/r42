@@ -249,13 +249,16 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 }
 
 func dynamicToolUseBlocks(object cty.Value) ([]ToolUseBlock, error) {
-	value, ok := dynamicAttribute(object, "tool_uses")
+	if _, legacy := dynamicAttribute(object, "tool_uses"); legacy {
+		return nil, fmt.Errorf("tool_uses has been renamed to tool_use")
+	}
+	value, ok := dynamicAttribute(object, "tool_use")
 	if !ok || value.IsNull() {
 		return nil, nil
 	}
 	unmarked, _ := value.UnmarkDeep()
 	if !unmarked.Type().IsMapType() && !unmarked.Type().IsObjectType() {
-		return nil, fmt.Errorf("tool_uses must be an object or map")
+		return nil, fmt.Errorf("tool_use must be an object or map")
 	}
 	result := make([]ToolUseBlock, 0, unmarked.LengthInt())
 	iterator := unmarked.ElementIterator()

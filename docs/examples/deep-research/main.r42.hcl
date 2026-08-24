@@ -154,7 +154,7 @@ research "dynamic" "parallel_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      tool_uses = {
+      tool_use = {
         submit_knowledge = {
           tool_id   = go_tool.submit_knowledge.id
           terminate = true
@@ -239,7 +239,7 @@ research "dynamic" "independent_serial_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      tool_uses = {
+      tool_use = {
         submit_knowledge = {
           tool_id   = go_tool.submit_knowledge.id
           terminate = true
@@ -349,7 +349,7 @@ research "dynamic" "final_serial_deep_dive" {
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      tool_uses = {
+      tool_use = {
         submit_knowledge = {
           tool_id   = go_tool.submit_knowledge.id
           terminate = true

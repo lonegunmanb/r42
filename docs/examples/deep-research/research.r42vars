@@ -1,9 +1,0 @@
-topic = "investigate financial and strategic forecast for NVIDIA's Q2 FY2027 earnings release (scheduled for late August 2026), synthesizing consensus sell-side expectations, buy-side whisper numbers, segment-level revenue projections (Data Center, Gaming, ProViz, Automotive), gross margin trajectories, and forward guidance for Q3 FY2027 based strictly on information available up to the August 22, 2026 cutoff."
-model            = "deepseek-v4-flash"
-reasoning_effort = "low"
-web_fetch_tool_call_quota = null
-model_provider = {
-  endpoint = "https://api.deepseek.com"
-  wire_api = "responses"
-  api_key_ref = "DEEPSEEK_KEY"
-}

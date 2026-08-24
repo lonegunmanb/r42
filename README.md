@@ -267,20 +267,21 @@ locals {
 
 research "static" "summary" {
   model         = "gpt-5.6-sol"
-  system_prompt = "Produce a concise, evidence-based summary."
-  prompt        = "Research ${local.normalized_topic} and write ${block_wd()}/summary.md."
+  system_prompt = "Produce a concise, evidence-based summary and save it to ${artifact(\"summary\").path}."
+  prompt        = "Research ${local.normalized_topic}; write the Markdown report with r42_write_markdown."
 
   artifact "summary" {
-    type      = "file"
-    path      = "summary.md"
-    required  = true
-    non_empty = true
+    type        = "file"
+    path        = "summary.md"
+    description = "Final Markdown research summary"
+    required    = true
+    non_empty   = true
   }
 }
 
 output "summary_path" {
   description = "Validated Markdown summary."
-  value       = one(research.static.summary.artifact).path
+  value       = research.static.summary.artifact.summary.path
 }
 ```
 
@@ -339,13 +340,15 @@ research "dynamic" "followups" {
       model         = var.model
       system_prompt = "Investigate one accepted follow-up question."
       prompt        = question
-      artifacts = [{
-        name      = "report"
-        type      = "file"
-        path      = "${block_wd()}/${index}/report.md"
-        required  = true
-        non_empty = true
-      }]
+      artifact = {
+        report = {
+          type        = "file"
+          path        = "${block_wd()}/${index}/report.md"
+          description = "Markdown answer for this follow-up question"
+          required    = true
+          non_empty   = true
+        }
+      }
       retry = null
       qc    = null
     }
@@ -356,8 +359,8 @@ research "dynamic" "followups" {
 There are no block-level defaults for dynamic tasks: each object carries the
 same Collection, Collection QC, Research, tool, quota, artifact, retry, and
 Final-QC fields needed by that task, including all `collection_*` fields.
-Within a task, `retry` and `qc` are an object or `null`, while `artifacts` is a
-list of objects. The `tasks` expression may be unknown in the saved Plan, but it
+Within a task, `retry` and `qc` are an object or `null`, while `artifact` is a
+map of named objects. The `tasks` expression may be unknown in the saved Plan, but it
 must be wholly known when the block starts Apply. Empty tasks succeed
 immediately. Materialized tasks run concurrently under the same global and
 module parallelism budgets as static research; one exhausted task failure fails
@@ -370,7 +373,7 @@ serialize the whole DAG, so other ready research blocks may still run under the
 shared parallelism budget.
 
 All task objects remain available through `research.dynamic.<name>.tasks` and
-retain their declared fields plus resolved `artifacts` and, when a terminate
+retain their declared fields plus resolved `artifact` values and, when a terminate
 tool is configured, `result`. Tasks share the parent `block_wd()`; use a `for`
 index or another stable key when separate subdirectories are required. The TUI
 keeps the dynamic block as one DAG node but expands its task rows and research
@@ -403,17 +406,18 @@ research "static" "collect" {
   prompt        = "Write the evidence to ${block_wd()}/evidence.md."
 
   artifact "evidence" {
-    type      = "file"
-    path      = "evidence.md"
-    required  = true
-    non_empty = true
+    type        = "file"
+    path        = "evidence.md"
+    description = "Collected primary evidence"
+    required    = true
+    non_empty   = true
   }
 }
 
 research "static" "summarize" {
   model         = "gpt-5.6-sol"
   system_prompt = "Summarize only the supplied evidence."
-  prompt        = "Read ${one(research.static.collect.artifact).path} and summarize it."
+  prompt        = "Read ${research.static.collect.artifact.evidence.path} and summarize it."
 }
 ```
 
@@ -593,16 +597,19 @@ provider value.
 Authentication errors, invalid schemas, unsupported model parameters, explicit
 cancellation, and deadline expiry are permanent failures and are not retried.
 
-### `artifact "name"`
+### `artifact "name"` and `artifact("name")`
 
 An artifact declares a file or directory that the session is expected to
 produce. A research block may declare multiple uniquely named artifacts.
+The declaration is also the source of the artifact metadata exposed to the
+block's sessions and to downstream blocks.
 
 | Field | Required | Purpose |
 | --- | --- | --- |
-| label `name` | Yes | Stable artifact name exposed through `research.static.<name>.artifact`. |
+| label `name` | Yes | Unique name used as `research.static.<block>.artifact.<name>` and by `artifact("name")`. |
 | `type` | Yes | Either `file` or `directory`. |
 | `path` | Yes | Expected path. Relative paths are based on `block_wd()`; absolute paths and `..` are allowed. |
+| `description` | Yes | Semantic description of the artifact's contents. It is shown to models and helps them choose what to read. |
 | `required` | No | When `true`, the path must exist before QC or block completion. Defaults to `false`. |
 | `non_empty` | No | When `true`, a file must contain bytes or a directory must recursively contain a regular file. Defaults to `false`. |
 
@@ -618,6 +625,67 @@ session. Artifact metadata and normalized paths are also provided to QC.
 > r42 then reports the artifact problem back to the same session for repair; if
 > the model continues to ignore it, this can look like a loop until
 > `max_protocol_attempts` is exhausted and the block fails.
+
+Inside a static research block, `artifact("name")` returns the declared
+artifact object. Its fields are `id`, `name`, `kind`, `type`, `path`,
+`description`, `required`, and `non_empty`:
+
+```hcl
+research "static" "collect" {
+  model = "gpt-5.6-sol"
+  system_prompt = "Save source material under ${artifact("sources").path}."
+
+  artifact "sources" {
+    type        = "directory"
+    path        = "sources"
+    description = "Markdown copies of retained primary sources"
+    required    = true
+  }
+}
+```
+
+Use `.path` for prompt text or a typed-tool input that expects a path, and
+`.id` for a typed-tool input that expects an artifact ID. The `type` and
+`description` fields tell the model whether it should read a file directly or
+enumerate a directory first. `artifact("name")` refers only to an artifact
+declared by the current block or dynamic task; use
+`research.static.<block>.artifact.<name>` (or an `import_artifact` declaration)
+when consuming another block's artifact. A reference to another block creates
+the normal implicit DAG dependency. The function is resolved during Plan for
+static blocks and after dynamic task materialization for dynamic tasks; its
+run-scoped ID is assigned during Apply.
+
+### Built-in artifact typed tools
+
+r42 mounts these typed tools automatically. They are available in addition to
+user-configured `go_tool` and `external_tool` tools, and they never accept
+filesystem paths where an artifact ID is required. The current block or task's
+authorization, including imported artifacts and discovered files inside
+authorized directories, is enforced by every read operation.
+
+| Tool | Available in | Purpose |
+| --- | --- | --- |
+| `r42_list_artifacts` | Collection, Collection QC, Research, Final QC | List authorized artifacts and their IDs, paths, types, and descriptions. Call this when an ID is uncertain. |
+| `r42_list_artifact_files` | Collection, Collection QC, Research, Final QC | Enumerate regular files inside an authorized directory; use each returned child ID with a reader. |
+| `r42_read_artifact` | Collection, Collection QC, Research, Final QC | Read a bounded page by ID. Use `offset_bytes` and `next_offset_bytes` to continue when `truncated` is true. |
+| `r42_search_artifact` | Collection, Collection QC, Research, Final QC | Search one authorized artifact with a Go RE2 regular expression and return matched text plus context. |
+| `r42_search_artifacts` | Collection, Collection QC, Research, Final QC | Search all authorized readable artifacts, including imported artifacts and directory children; each match includes its artifact ID. |
+| `r42_read_artifact_json_schema` | Collection, Collection QC, Research, Final QC | Infer the JSON shape of one complete JSON artifact. |
+| `r42_query_artifact_json` | Collection, Collection QC, Research, Final QC | Run a read-only jq query such as `.claims[0].id` against a JSON artifact. |
+| `r42_write_markdown` | Collection and Research | Write content to a declared file artifact using `artifact_id`; it does not accept a path or artifact name. |
+| `r42_save_artifact` | Collection | Save Markdown source material, add its `source` header, register it, and return `path` plus `artifact_id`. The source can be a URL or any non-empty identifier. |
+| `r42_register_artifact` | Collection | Register an existing workspace file or retained typed-tool result; optional `source` and `description` can supply missing metadata. Do not call it after `r42_save_artifact`. |
+| `r42_collection_checkpoint` | Collection | Submit newly registered evidence to Collection QC, or report that collection is exhausted. |
+| `r42_collection_qc_verdict` | Collection QC | Return `sufficient` or `needs_more` with semantic QC issues. |
+| `r42_qc_verdict` | Final QC, when configured | Return `pass`, `revise_research`, or `reopen_collection` with semantic QC issues. |
+
+Collection is the only open-world phase: it can acquire evidence through the
+configured collection tools and save/register it. Collection QC and Final QC
+have read-only built-in artifact capabilities. Closed Research cannot use shell,
+PowerShell, generic file viewers, or network acquisition; it must use the
+mounted artifact readers and the declared typed tools. Built-in tools return
+structured rejection issues so the model can correct an invocation without
+guessing paths or IDs.
 
 ### `collection_qc`
 
@@ -770,10 +838,11 @@ research "static" "exchange_rate" {
   }
 
   artifact "report" {
-    type      = "file"
-    path      = "report.md"
-    required  = true
-    non_empty = true
+    type        = "file"
+    path        = "report.md"
+    description = "USD/JPY exchange-rate research report"
+    required    = true
+    non_empty   = true
   }
 
   qc {
@@ -883,6 +952,102 @@ collection_tool_ids = [external_tool.search.id]
 tool_ids = [go_tool.build_report.id]
 terminate_tool_id = go_tool.submit_report.id
 ```
+
+### `tool_use`
+
+`tool_use` binds one configured typed tool to a research stage. It is the
+preferred form when a tool needs a mixture of workflow-owned inputs and values
+that the model must construct from authorized artifacts. A configured
+`tool_use` replaces `tool_ids` and `terminate_tool_id` for that research block:
+do not combine the two forms.
+
+In a static research block, declare one nested block per tool. `input` fixes
+fields from HCL and removes them from the JSON Schema shown to the model.
+`input_from_agent` leaves named fields for the model and supplies a semantic
+description plus the authorized artifact sources it should read. A field has
+exactly one owner: it cannot appear in both maps.
+
+```hcl
+research "static" "write_report" {
+  model         = "gpt-5.6-sol"
+  system_prompt = "Write the report from the supplied evidence."
+
+  artifact "report" {
+    type        = "file"
+    path        = "report.md"
+    description = "Final Markdown report"
+    required    = true
+    non_empty   = true
+  }
+
+  import_artifact "evidence" {
+    desc    = "Primary evidence collected by the upstream block"
+    sources = [research.static.collect.artifact.evidence]
+  }
+
+  tool_use "submit_report" {
+    tool_id   = go_tool.submit_report.id
+    terminate = true
+
+    input = {
+      report_id = artifact("report").id
+      topic     = var.topic
+    }
+
+    input_from_agent = {
+      summary = {
+        desc    = "Evidence-based report summary"
+        sources = [research.static.collect.artifact.evidence]
+      }
+    }
+
+    validation {
+      condition     = length(trimspace(input.summary)) > 0
+      error_message = "summary must not be empty"
+    }
+  }
+}
+```
+
+`tool_id` is required. `terminate = true` is optional, but at most one
+`tool_use` can terminate a stage. Its accepted string-compatible output becomes
+the block's `.result`. `validation` blocks are optional; they can reference
+only the special `input` object, run after fixed values are injected, and fail
+the invocation when their condition is false.
+
+Dynamic tasks use the same singular name and field semantics, expressed as a
+map because each task is an HCL object rather than a block body:
+
+```hcl
+tool_use = {
+  submit_report = {
+    tool_id   = go_tool.submit_report.id
+    terminate = true
+    input = {
+      report_id = artifact("report").id
+      topic     = var.topic
+    }
+    input_from_agent = {
+      summary = {
+        desc    = "Evidence-based report summary"
+        sources = [research.static.collect.artifact.evidence]
+      }
+    }
+    validation = [{
+      condition     = "length(trimspace(input.summary)) > 0"
+      error_message = "summary must not be empty"
+    }]
+  }
+}
+```
+
+The dynamic spelling is `tool_use`, not `tool_uses`. Its `validation` entries
+are objects because dynamic task configuration is data. When a source is a
+directory artifact, r42's generated prompt tells the model to call
+`r42_list_artifact_files` and then read child IDs; for file artifacts it tells
+the model to use the artifact readers or JSON query tools. Fields not listed in
+`input_from_agent` are constructed from the current task's declared artifacts
+when the tool schema requires them.
 
 ### `go_tool`
 

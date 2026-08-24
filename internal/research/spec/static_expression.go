@@ -247,7 +247,7 @@ func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
 		result.WriteString("\n")
 	}
 	result.WriteString("}\n")
-	result.WriteString("tool_uses = {\n")
+	result.WriteString("tool_use = {\n")
 	for _, toolUse := range nestedBlocks(block, "tool_use") {
 		name := ""
 		if len(toolUse.Labels) > 0 {
@@ -426,7 +426,7 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 				values["artifact"] = artifactMapValue(value)
 			case "import_artifact":
 				// Imports authorize runtime access but are not an output value.
-			case "tool_uses":
+			case "tool_use":
 				values["tool_use"] = toolUseListValue(value)
 			case "retry", "qc", "collection_qc":
 				if !value.IsNull() {
@@ -492,10 +492,10 @@ func taskHasTerminatingTool(task cty.Value) bool {
 	if unmarked.Type().HasAttribute("terminate_tool_id") {
 		return true
 	}
-	if !unmarked.Type().HasAttribute("tool_uses") {
+	if !unmarked.Type().HasAttribute("tool_use") {
 		return false
 	}
-	toolUses := unmarked.GetAttr("tool_uses")
+	toolUses := unmarked.GetAttr("tool_use")
 	if !toolUses.IsKnown() || toolUses.IsNull() ||
 		(!toolUses.Type().IsMapType() && !toolUses.Type().IsObjectType()) {
 		return false

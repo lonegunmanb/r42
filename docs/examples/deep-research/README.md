@@ -39,8 +39,21 @@ Install r42 once:
 go install github.com/lonegunmanb/r42/cmd/r42@latest
 ```
 
-From the repository root, initialize the example, then create and apply a
-saved plan:
+From the repository root, initialize the example. Then create a local
+`research.r42vars` beside this README. It is ignored by Git and must never be
+committed. At minimum it needs the required topic and provider configuration:
+
+```hcl
+topic = "Investigate the question to answer"
+
+model_provider = {
+  api_key_ref = "OPENROUTER_API_KEY"
+}
+```
+
+Set the named environment variable without placing its value in the variable
+file. You may also set a different provider endpoint, model, or reasoning
+effort in that local file. Then create and apply a saved plan:
 
 ```powershell
 r42 init ./docs/examples/deep-research
@@ -58,14 +71,7 @@ r42 apply `
   --parallelism 10
 ```
 
-The checked-in `research.r42vars` selects DeepSeek, so provide the referenced
-key before Apply:
-
-```powershell
-$env:DEEPSEEK_KEY = Read-Host -MaskInput "DeepSeek API key"
-```
-
-Edit `research.r42vars` to change the topic, model, or reasoning effort. To
+Edit the local `research.r42vars` to change the topic, model, or reasoning effort. To
 provide a fixed plan, add `research_plan = ["...", "..."]`; a non-empty value
 skips the planner and creates one parallel task per list element. A null or
 empty value keeps the planner-driven three-group flow. When the planner is

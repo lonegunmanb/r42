@@ -182,11 +182,20 @@ Install r42 and ensure GitHub Copilot CLI is installed:
 
     go install github.com/lonegunmanb/r42/cmd/r42@latest
 
-The checked-in research.r42vars is analogous to terraform.tfvars. It sets the
-topic, fixed evidence cutoff, market, research limits, models, provider, and
-secret environment-variable references.
+Create a local `research.r42vars` in this directory before planning. It is
+analogous to `terraform.tfvars`, is ignored by Git, and must never be
+committed. It must provide the required topic, evidence cutoff, and provider
+configuration; the remaining variables have defaults:
 
-    $env:DEEPSEEK_KEY = Read-Host -MaskInput "DeepSeek API key"
+    topic      = "The technology or industrial system to study"
+    as_of_date = "2026-08-25"
+    model_provider = {
+      api_key_ref = "OPENROUTER_API_KEY"
+    }
+
+Set the referenced environment variable separately. For example:
+
+    $env:OPENROUTER_API_KEY = Read-Host -MaskInput "OpenRouter API key"
 
 When use_pplx is true, also set PPLX_API_KEY.
 

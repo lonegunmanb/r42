@@ -295,7 +295,7 @@ research "dynamic" "graph_track" {
           sources = values(research.static.brainstorm.artifact)
         }
       }
-      tool_uses = {
+      tool_use = {
         register_source = {
           tool_id = go_tool.register_evidence_source.id
           input = {
@@ -527,7 +527,7 @@ research "dynamic" "assess_nodes" {
           sources = flatten([for task in research.dynamic.graph_track.tasks : values(task.artifact)])
         }
       }
-      tool_uses = {
+      tool_use = {
         submit_node_assessment = {
         tool_id   = go_tool.submit_node_assessment.id
         terminate = true
@@ -694,7 +694,7 @@ research "dynamic" "prioritize_companies" {
           sources = flatten([for task in research.dynamic.graph_track.tasks : values(task.artifact)])
         }
       }
-      tool_uses = {
+      tool_use = {
         register_source = {
           tool_id = go_tool.register_evidence_source.id
           input = {
