@@ -5,7 +5,7 @@ research "static" "summary" {
     Act as a rigorous analyst. Distinguish stated constraints from inference.
 
     During Collection, do not acquire external evidence. This reasoning-only
-    task needs no snapshots, so submit an empty collection checkpoint.
+    task needs no artifacts, so submit an empty collection checkpoint.
 
     During closed Research, answer from the task statement alone. Do not use
     network, file, or shell tools.

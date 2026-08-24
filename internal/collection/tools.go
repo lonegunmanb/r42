@@ -1,5 +1,5 @@
 // Package collection implements the mandatory Collection protocol tools:
-// snapshot registration, checkpoint submission, and the acquisition gate.
+// evidence-artifact registration, checkpoint submission, and the acquisition gate.
 // The tools return structured ToolResponse envelopes so the model can repair
 // rejections, while infrastructure failures surface as Go errors.
 package collection
@@ -12,26 +12,26 @@ import (
 	"sync"
 
 	artifactpkg "github.com/lonegunmanb/r42/internal/artifact"
-	"github.com/lonegunmanb/r42/internal/snapshot"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/lonegunmanb/r42/internal/workflow"
 )
 
-// Context wires the workflow state machine and snapshot registry for one
-// Collection phase.
+// Context wires the workflow state machine and Artifact Registry for one
+// Collection phase. Checkpoint and review state are deliberately transient.
 type Context struct {
 	Workspace string
 	State     *workflow.State
-	Registry  *snapshot.Registry
 	Artifacts *artifactpkg.Registry
 	batchSize int
 
 	mu           sync.Mutex
+	evidence     []string
+	reviewed     map[string]struct{}
 	checkpointed map[string]struct{}
-	targets      []snapshotTarget
+	targets      []artifactTarget
 }
 
-type snapshotTarget struct {
+type artifactTarget struct {
 	path      string
 	directory bool
 }
@@ -42,7 +42,8 @@ func NewContext(workspace string, batchSize int, maxCollectionRounds *int) *Cont
 	return NewContextWithArtifactRegistry(workspace, batchSize, maxCollectionRounds, nil)
 }
 
-// NewContextWithArtifactRegistry shares snapshot metadata with the run artifact registry.
+// NewContextWithArtifactRegistry uses the run artifact registry as the only
+// evidence metadata store.
 func NewContextWithArtifactRegistry(
 	workspace string,
 	batchSize int,
@@ -52,23 +53,54 @@ func NewContextWithArtifactRegistry(
 	if batchSize == 0 {
 		batchSize = workflow.DefaultBatchSize
 	}
+	if artifacts == nil {
+		artifacts = artifactpkg.NewRegistry()
+	}
 	return &Context{
 		Workspace:    workspace,
 		State:        workflow.New(workflow.Config{MaxCollectionRounds: maxCollectionRounds, BatchSize: batchSize}),
-		Registry:     snapshot.NewRegistry(workspace),
 		Artifacts:    artifacts,
 		batchSize:    batchSize,
+		reviewed:     make(map[string]struct{}),
 		checkpointed: make(map[string]struct{}),
 	}
 }
 
-// MarkSnapshotReviewed publishes one mechanically valid, Collection-QC-reviewed snapshot.
-func (c *Context) MarkSnapshotReviewed(id string) error {
-	c.Registry.MarkReviewed(id)
-	if c.Artifacts == nil {
+// MarkEvidenceReviewed records temporary Collection-QC protocol state.
+func (c *Context) MarkEvidenceReviewed(id string) error {
+	if c == nil {
+		return errors.New("collection context is required")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reviewed[id] = struct{}{}
+	return nil
+}
+
+// EvidenceArtifactIDs returns all registered evidence in registration order.
+func (c *Context) EvidenceArtifactIDs() []string {
+	if c == nil {
 		return nil
 	}
-	return c.Artifacts.MarkReady(id)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.evidence...)
+}
+
+// ReviewedEvidenceArtifactIDs returns reviewed evidence IDs in registration order.
+func (c *Context) ReviewedEvidenceArtifactIDs() []string {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	result := make([]string, 0)
+	for _, id := range c.evidence {
+		if _, ok := c.reviewed[id]; ok {
+			result = append(result, id)
+		}
+	}
+	return result
 }
 
 // Validate verifies the context configuration without mutating workflow
@@ -100,32 +132,32 @@ func (c *Context) Gate() *AcquisitionGate {
 	return &AcquisitionGate{state: c.State}
 }
 
-// AddSnapshotTarget permits r42_save_snapshot to write to a declared file or
+// AddArtifactTarget permits r42_save_artifact to write to a declared file or
 // to a new Markdown file below a declared directory.
-func (c *Context) AddSnapshotTarget(path string, directory bool) error {
+func (c *Context) AddArtifactTarget(path string, directory bool) error {
 	if c == nil {
 		return errors.New("collection context is required")
 	}
 	resolved, err := filepath.Abs(path)
 	if err != nil {
-		return fmt.Errorf("resolve snapshot target: %w", err)
+		return fmt.Errorf("resolve artifact target: %w", err)
 	}
 	workspace, err := filepath.Abs(c.Workspace)
 	if err != nil {
 		return fmt.Errorf("resolve collection workspace: %w", err)
 	}
 	if !pathWithin(workspace, resolved) {
-		return fmt.Errorf("snapshot target %q is outside the collection workspace", path)
+		return fmt.Errorf("artifact target %q is outside the collection workspace", path)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.targets = append(c.targets, snapshotTarget{path: resolved, directory: directory})
+	c.targets = append(c.targets, artifactTarget{path: resolved, directory: directory})
 	return nil
 }
 
-// AllowsSnapshotPath reports whether a path is inside a configured directory
+// AllowsArtifactPath reports whether a path is inside a configured directory
 // target or exactly matches a configured file target.
-func (c *Context) AllowsSnapshotPath(path string) bool {
+func (c *Context) AllowsArtifactPath(path string) bool {
 	if c == nil {
 		return false
 	}
@@ -160,7 +192,7 @@ func (g *AcquisitionGate) Acquire() error {
 	return g.state.AcquireGate()
 }
 
-// RegisterArgs is the model-facing input of the snapshot registration tool.
+// RegisterArgs is the model-facing input of the evidence-artifact registration tool.
 type RegisterArgs struct {
 	Path             string `json:"path"`
 	SourceToolCallID string `json:"source_tool_call_id"`
@@ -175,7 +207,7 @@ type RegistrationOutput struct {
 	Description string `json:"description"`
 }
 
-// RegisterHandler owns the mandatory snapshot registration tool.
+// RegisterHandler owns the mandatory evidence-artifact registration tool.
 type RegisterHandler struct {
 	context *Context
 }
@@ -188,7 +220,7 @@ func NewRegisterHandler(context *Context) *RegisterHandler {
 // Context exposes the handler's protocol context.
 func (h *RegisterHandler) Context() *Context { return h.context }
 
-// Register performs one snapshot registration, returning a structured
+// Register performs one evidence-artifact registration, returning a structured
 // ToolResponse so rejections are repairable.
 func (h *RegisterHandler) Register(args RegisterArgs) corespec.ToolResponse[RegistrationOutput] {
 	if h.context == nil {
@@ -205,32 +237,29 @@ func (h *RegisterHandler) Register(args RegisterArgs) corespec.ToolResponse[Regi
 	if hasPath == hasToolCall {
 		return rejection[RegistrationOutput]("exactly_one_source", "provide exactly one of path or source_tool_call_id")
 	}
-	var registration snapshot.Registration
+	var record artifactpkg.Record
+	var created bool
 	var err error
 	if hasPath {
-		registration, err = h.context.Registry.RegisterPathWithMetadata(args.Path, args.Source, args.Description)
+		record, created, err = h.context.Artifacts.RegisterEvidence(
+			h.context.Workspace, args.Path, args.Source, args.Description,
+		)
 	} else {
-		registration, err = h.context.Registry.RegisterToolResultWithMetadata(
-			args.SourceToolCallID, args.Source, args.Description,
+		record, created, err = h.context.Artifacts.RegisterRetainedEvidence(
+			h.context.Workspace, args.SourceToolCallID, args.Source, args.Description,
 		)
 	}
 	if err != nil {
-		return rejection[RegistrationOutput]("invalid_snapshot_source", err.Error())
+		return rejection[RegistrationOutput]("invalid_evidence_artifact", err.Error())
 	}
-	if h.context.Artifacts != nil {
-		if _, err = h.context.Artifacts.RegisterSnapshot(
-			h.context.Workspace, registration.ID, registration.Path, registration.Description,
-		); err != nil {
-			return infrastructureRejection[RegistrationOutput]("artifact_registry", err)
-		}
-	}
-	if registration.New {
-		if err = h.context.State.RegisterSnapshot(); err != nil {
+	if created {
+		if err = h.context.State.RegisterEvidenceArtifact(); err != nil {
 			return infrastructureRejection[RegistrationOutput]("state_update", err)
 		}
+		h.context.evidence = append(h.context.evidence, record.ID)
 	}
 	output := RegistrationOutput{
-		ID: registration.ID, Path: registration.Path, Description: registration.Description,
+		ID: record.ID, Path: record.Path, Description: record.Description,
 	}
 	return corespec.ToolResponse[RegistrationOutput]{Accepted: true, Output: &output}
 }
@@ -241,9 +270,9 @@ type CheckpointArgs struct {
 	CollectionExhausted bool   `json:"collection_exhausted"`
 }
 
-// CheckpointOutput lists the snapshot IDs submitted for review.
+// CheckpointOutput lists the evidence artifact IDs submitted for review.
 type CheckpointOutput struct {
-	SnapshotIDs         []string `json:"snapshot_ids"`
+	ArtifactIDs         []string `json:"artifact_ids"`
 	EmptyReason         string   `json:"empty_reason,omitempty"`
 	CollectionExhausted bool     `json:"collection_exhausted,omitempty"`
 }
@@ -258,7 +287,7 @@ func NewCheckpointHandler(context *Context) *CheckpointHandler {
 	return &CheckpointHandler{context: context}
 }
 
-// Submit submits every unreviewed snapshot. An empty checkpoint requires a
+// Submit submits every unreviewed evidence artifact. An empty checkpoint requires a
 // non-empty reason.
 func (h *CheckpointHandler) Submit(args CheckpointArgs) corespec.ToolResponse[CheckpointOutput] {
 	if h.context == nil {
@@ -271,19 +300,19 @@ func (h *CheckpointHandler) Submit(args CheckpointArgs) corespec.ToolResponse[Ch
 		return infrastructureRejection[CheckpointOutput]("context_validation", err)
 	}
 	pending := make([]string, 0)
-	for _, registered := range h.context.Registry.Snapshots() {
-		if _, submitted := h.context.checkpointed[registered.ID]; !submitted {
-			pending = append(pending, registered.ID)
+	for _, id := range h.context.evidence {
+		if _, submitted := h.context.checkpointed[id]; !submitted {
+			pending = append(pending, id)
 		}
 	}
 	if len(pending) == 0 && strings.TrimSpace(args.EmptyReason) == "" {
-		return rejection[CheckpointOutput]("empty_checkpoint", "no snapshots are pending; provide an empty_reason explaining why")
+		return rejection[CheckpointOutput]("empty_checkpoint", "no evidence artifacts are pending; provide an empty_reason explaining why")
 	}
 	if len(pending) > 0 && args.CollectionExhausted {
 		return rejection[CheckpointOutput]("collection_exhausted", "collection_exhausted is only allowed for an empty checkpoint")
 	}
 	if len(pending) > 0 && args.EmptyReason != "" {
-		return rejection[CheckpointOutput]("empty_checkpoint", "snapshots are pending; empty_reason is only allowed for an empty checkpoint")
+		return rejection[CheckpointOutput]("empty_checkpoint", "evidence artifacts are pending; empty_reason is only allowed for an empty checkpoint")
 	}
 	if args.CollectionExhausted {
 		if err := h.context.State.MarkCollectionExhausted(); err != nil {
@@ -299,7 +328,7 @@ func (h *CheckpointHandler) Submit(args CheckpointArgs) corespec.ToolResponse[Ch
 		}
 	}
 	output := CheckpointOutput{
-		SnapshotIDs: pending, EmptyReason: args.EmptyReason,
+		ArtifactIDs: pending, EmptyReason: args.EmptyReason,
 		CollectionExhausted: args.CollectionExhausted,
 	}
 	return corespec.ToolResponse[CheckpointOutput]{Accepted: true, Output: &output}

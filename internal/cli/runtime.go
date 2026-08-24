@@ -26,7 +26,6 @@ import (
 	"github.com/lonegunmanb/r42/internal/executor"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/plan"
-	"github.com/lonegunmanb/r42/internal/preflight"
 	"github.com/lonegunmanb/r42/internal/project"
 	"github.com/lonegunmanb/r42/internal/provider"
 	"github.com/lonegunmanb/r42/internal/qc"
@@ -135,9 +134,6 @@ func (e *Engine) ConfigFromPlan(
 	planned *plan.Plan,
 	options executor.ResearchConfigOptions,
 ) (*executor.ResearchConfig, error) {
-	if err := requirePreflightReport(planned); err != nil {
-		return nil, err
-	}
 	ctx := options.Context
 	options.Apply = func(saved *plan.Plan) (map[string]cty.Value, []error, error) {
 		return e.apply(ctx, saved, options)
@@ -155,226 +151,6 @@ func (e *Engine) ConfigFromPlan(
 	}
 	return config, nil
 }
-
-func requirePreflightReport(planned *plan.Plan) error {
-	_, expected, err := preflight.Document(planned)
-	if err != nil {
-		return fmt.Errorf("inspect preflight requirements: %w", err)
-	}
-	if len(expected) == 0 {
-		return nil
-	}
-	report := planned.PreflightReport()
-	if report == nil {
-		return fmt.Errorf("saved plan is missing a successful preflight report")
-	}
-	if len(report.Checks) != len(expected) {
-		return fmt.Errorf("saved plan preflight report has %d checks, want %d", len(report.Checks), len(expected))
-	}
-	expectedIDs := make(map[string]struct{}, len(expected))
-	for _, item := range expected {
-		expectedIDs[item.ID] = struct{}{}
-	}
-	seenIDs := make(map[string]struct{}, len(report.Checks))
-	for _, check := range report.Checks {
-		if _, ok := expectedIDs[check.CheckID]; !ok {
-			return fmt.Errorf("saved plan preflight report has unknown check %q", check.CheckID)
-		}
-		if _, duplicate := seenIDs[check.CheckID]; duplicate {
-			return fmt.Errorf("saved plan preflight report duplicates check %q", check.CheckID)
-		}
-		seenIDs[check.CheckID] = struct{}{}
-		if check.Verdict != preflight.VerdictSufficient {
-			return fmt.Errorf("saved plan preflight check %q is %s", check.CheckID, check.Verdict)
-		}
-	}
-	return nil
-}
-
-// Preflight runs the plan-only dataflow review before a plan is displayed or saved.
-func (e *Engine) Preflight(ctx context.Context, planned *plan.Plan, modelOverride string) error {
-	document, expected, err := preflight.Document(planned)
-	if err != nil {
-		return err
-	}
-	if len(expected) == 0 {
-		return nil
-	}
-	selection, err := selectPreflightSelection(planned, modelOverride)
-	if err != nil {
-		return err
-	}
-	selectedProvider := selection.Provider
-	providers := selection.Providers
-	model := selection.Model
-	if selectedProvider == nil {
-		return fmt.Errorf("preflight requires a resolved research model provider")
-	}
-	if model == "" && len(providers) > 1 {
-		return fmt.Errorf("preflight model flag is required when more than one model provider is configured")
-	}
-	if model == "" {
-		return fmt.Errorf("preflight model is required")
-	}
-	documentJSON, err := document.JSON()
-	if err != nil {
-		return fmt.Errorf("encode preflight plan: %w", err)
-	}
-	const toolName = "r42_preflight_result"
-	var submitted bool
-	var submittedResult preflight.Input
-	var submittedMu sync.Mutex
-	tool := sdk.Tool{
-		Name: toolName,
-		Description: "Submit exactly one preflight check for every required input_from_agent field. " +
-			"verdict must be sufficient, insufficient, or ambiguous_contract; reason is required; insufficient and ambiguous_contract require issues.",
-		Parameters: objectSchema(map[string]any{
-			"checks": map[string]any{"type": "array", "items": map[string]any{
-				"type": "object", "properties": map[string]any{
-					"check_id": map[string]any{"type": "string"},
-					"verdict":  map[string]any{"type": "string", "description": "Allowed values: sufficient, insufficient, ambiguous_contract"},
-					"reason":   map[string]any{"type": "string"},
-					"issues":   issueArraySchema(),
-				}, "required": []string{"check_id", "verdict", "reason"},
-			}},
-		}, []string{"checks"}),
-		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
-			args, decodeErr := decodeArguments[preflight.Input](invocation.Arguments)
-			if decodeErr != nil {
-				return rejectedToolResult("invalid_preflight_result", decodeErr.Error())
-			}
-			if validateErr := args.Validate(expected); validateErr != nil {
-				return rejectedToolResult("invalid_preflight_result", validateErr.Error())
-			}
-			submittedMu.Lock()
-			submitted = true
-			submittedResult = args
-			submittedMu.Unlock()
-			return acceptedToolResult(preflight.Output{})
-		},
-	}
-	sessions := e.options.Sessions
-	if sessions == nil {
-		sessions = newOfficialSessionOpener()
-	}
-	session, err := sessions.Open(ctx, copilot.SessionConfig{
-		Provider: selectedProvider, Retry: provider.DefaultRetryPolicy(), Model: model,
-		SystemPrompt: "You are r42 preflight. You may read only the immutable plan JSON in the prompt. " +
-			"Do not use filesystem, shell, web, artifact, or snapshot access. Determine whether each required input_from_agent field can be constructed from the declared sources and HCL source snapshots.",
-		WorkingDirectory: planned.Directory(), Tools: []sdk.Tool{tool}, AvailableTools: []string{toolName},
-		ExcludedTools: closedWorldDisallowedTools(nil),
-	})
-	if err != nil {
-		return fmt.Errorf("open preflight session: %w", err)
-	}
-	defer func() { _ = session.Close(context.WithoutCancel(ctx)) }()
-	prompt := "Plan JSON:\n" + string(documentJSON) + "\nSubmit the complete preflight result now."
-	for attempt := 1; attempt <= preflightAttempts; attempt++ {
-		if _, err = session.SendAndWait(ctx, sdk.MessageOptions{Prompt: prompt}); err != nil {
-			return fmt.Errorf("send preflight prompt: %w", err)
-		}
-		submittedMu.Lock()
-		wasSubmitted := submitted
-		submittedMu.Unlock()
-		if wasSubmitted {
-			submittedMu.Lock()
-			result := submittedResult
-			submittedMu.Unlock()
-			if err = recordPreflightResult(planned, result); err != nil {
-				return err
-			}
-			return nil
-		}
-		// The tool handler validates its own input; a successful session turn with no
-		// accepted result is retried with a precise protocol reminder.
-		if attempt == preflightAttempts {
-			return fmt.Errorf("preflight result was not submitted")
-		}
-		prompt = "Call r42_preflight_result with exactly one valid check for every required field."
-	}
-	return nil
-}
-
-type preflightSelection struct {
-	Provider  *provider.Config
-	Providers map[*provider.Config]struct{}
-	Model     string
-}
-
-func selectPreflightSelection(planned *plan.Plan, modelOverride string) (preflightSelection, error) {
-	if planned == nil {
-		return preflightSelection{}, fmt.Errorf("plan is required")
-	}
-
-	selection := preflightSelection{
-		Providers: make(map[*provider.Config]struct{}),
-		Model:     strings.TrimSpace(modelOverride),
-	}
-	for _, node := range planned.Nodes() {
-		if node.Kind != "research" {
-			continue
-		}
-
-		staticPlan, staticErr := modulespec.DecodeResearchPlan(node.Config)
-		if staticErr == nil && staticPlan.Expression == "" {
-			selection.add(staticPlan)
-			continue
-		}
-
-		dynamicPlan, dynamicErr := modulespec.DecodeDynamicResearchPlan(node.Config)
-		if dynamicErr != nil || dynamicPlan.Tasks == cty.NilVal || !dynamicPlan.Tasks.IsWhollyKnown() {
-			continue
-		}
-		configs, _, decodeErr := researchspec.DecodeDynamicTasks(dynamicPlan.Tasks)
-		if decodeErr != nil {
-			return preflightSelection{}, fmt.Errorf("decode %s dynamic tasks: %w", node.Address, decodeErr)
-		}
-		for index, config := range configs {
-			resolved, resolveErr := dynamicPlan.Resolve(config)
-			if resolveErr != nil {
-				return preflightSelection{}, fmt.Errorf("resolve %s.tasks[%d]: %w", node.Address, index, resolveErr)
-			}
-			selection.add(resolved)
-		}
-	}
-	return selection, nil
-}
-
-func (s *preflightSelection) add(researchPlan modulespec.ResearchPlan) {
-	if researchPlan.Provider == nil {
-		return
-	}
-	if s.Provider == nil {
-		s.Provider = researchPlan.Provider
-	}
-	s.Providers[researchPlan.Provider] = struct{}{}
-	if s.Model != "" {
-		return
-	}
-	if researchPlan.Provider.PreflightModel != nil {
-		s.Model = strings.TrimSpace(*researchPlan.Provider.PreflightModel)
-	}
-	if s.Model == "" {
-		s.Model = researchPlan.Config.Model
-	}
-}
-
-func recordPreflightResult(planned *plan.Plan, result preflight.Input) error {
-	report := plan.PreflightReport{Checks: make([]plan.PreflightCheck, len(result.Checks))}
-	for index, check := range result.Checks {
-		report.Checks[index] = plan.PreflightCheck{
-			CheckID: check.CheckID, Verdict: check.Verdict, Reason: check.Reason,
-			Issues: slices.Clone(check.Issues),
-		}
-		if check.Verdict != preflight.VerdictSufficient {
-			return fmt.Errorf("preflight check %q returned %s: %s", check.CheckID, check.Verdict, check.Reason)
-		}
-	}
-	planned.SetPreflightReport(report)
-	return nil
-}
-
-const preflightAttempts = 3
 
 func (e *Engine) apply(
 	ctx context.Context,
@@ -434,7 +210,6 @@ func (e *Engine) apply(
 		state: new(runtimeState), tools: planned.Tools(), directory: planned.Directory(),
 		contextValues: planned.Context(), localExpressions: planned.LocalExpressions(),
 		sessionStallTimeout: effectiveSessionStallTimeout(options.SessionStallTimeout),
-		snapshotCatalog:     newRunSnapshotCatalog(),
 		artifactRegistry:    artifactpkg.NewRegistry(),
 	}
 	runner := executor.New(factory, nil)
@@ -516,7 +291,6 @@ type runtimeFactory struct {
 	contextValues       map[string]cty.Value
 	localExpressions    map[string]string
 	sessionStallTimeout time.Duration
-	snapshotCatalog     *runSnapshotCatalog
 	artifactRegistry    *artifactpkg.Registry
 }
 
@@ -645,8 +419,6 @@ func (f *runtimeFactory) newModuleBlock(
 		directory: node.Module.Plan.Directory(), contextValues: node.Module.Plan.Context(),
 		localExpressions:    node.Module.Plan.LocalExpressions(),
 		sessionStallTimeout: f.sessionStallTimeout,
-		snapshotCatalog:     f.snapshotCatalog,
-		artifactRegistry:    f.artifactRegistry,
 	}
 	return &moduleApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address,
@@ -1442,7 +1214,7 @@ func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.Ver
 			if recordErr := verdicts.Record(verdict); recordErr != nil {
 				var exhausted *qc.CollectionRoundBudgetExhaustedError
 				if errors.As(recordErr, &exhausted) {
-					hint := "Choose revise_research or pass using existing snapshots."
+					hint := "Choose revise_research or pass using existing evidence artifacts."
 					rejected, _ := json.Marshal(corespec.ToolResponse[any]{
 						Accepted: false,
 						Issues: []corespec.Issue{{
@@ -1480,7 +1252,6 @@ type researchApplyBlock struct {
 	workflowRun      func(context.Context) (researchruntime.Result, error)
 	workflowSessions []Session
 	afterSuccess     func()
-	artifactRegistry *artifactpkg.Registry
 }
 
 func (*researchApplyBlock) Type() string            { return "static" }
@@ -1508,21 +1279,8 @@ func (b *researchApplyBlock) Apply() error {
 	if b.afterSuccess != nil {
 		b.afterSuccess()
 	}
-	if b.artifactRegistry != nil {
-		for _, id := range b.config.ArtifactIDs {
-			if err = b.artifactRegistry.MarkReady(id); err != nil {
-				return err
-			}
-		}
-		for _, item := range result.Snapshots {
-			if err = b.artifactRegistry.MarkReady(item.ID); err != nil {
-				return err
-			}
-		}
-	}
 	value := map[string]cty.Value{
-		"artifact":  researchspec.ArtifactsValueWithIDs(b.config.Artifacts, result.Artifacts, b.config.ArtifactIDs),
-		"snapshots": researchspec.SnapshotsValue(result.Snapshots),
+		"artifact": researchspec.ArtifactsValueWithIDs(b.config.Artifacts, result.Artifacts, b.config.ArtifactIDs),
 	}
 	if b.config.TerminateToolName != "" {
 		value["result"] = cty.NullVal(cty.String)
@@ -1797,7 +1555,7 @@ func (s *recordingSession) currentKind() debuglog.SessionKind {
 type phasedResearch struct {
 	research    qc.Research
 	session     *recordingSession
-	snapshotIDs func() []string
+	artifactIDs func() []string
 	mu          sync.Mutex
 	calls       int
 }
@@ -1812,8 +1570,8 @@ func (r *phasedResearch) Run(ctx context.Context, config researchruntime.Config)
 	} else {
 		r.session.setKind(debuglog.SessionRevision)
 	}
-	if r.snapshotIDs != nil {
-		config.InitialPrompt = researchEvidencePrompt(config.InitialPrompt, r.snapshotIDs())
+	if r.artifactIDs != nil {
+		config.InitialPrompt = researchEvidencePrompt(config.InitialPrompt, r.artifactIDs())
 	}
 	return r.research.Run(ctx, config)
 }

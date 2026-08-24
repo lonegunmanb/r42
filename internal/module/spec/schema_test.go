@@ -487,11 +487,11 @@ research "static" "source" {
 research "static" "summary" {
   model         = "test-model"
   system_prompt = "Summarize evidence."
-  prompt        = one(research.static.source.artifact).path
+  prompt        = research.static.source.artifact.report.path
 }
 
 output "report_path" {
-  value = one(research.static.source.artifact).path
+  value = research.static.source.artifact.report.path
 }
 `)
 
@@ -510,7 +510,7 @@ output "report_path" {
 	assert.Equal(t, "research.static.summary", nodes[1].Address)
 	assert.Equal(t, []string{"research.static.source"}, nodes[1].Dependencies)
 	assert.Equal(t,
-		"one(research.static.source.artifact).path",
+		"research.static.source.artifact.report.path",
 		planned.Saved.Outputs()["report_path"].Expression,
 	)
 	assert.Contains(t, planned.Saved.Context(), "research")
@@ -882,7 +882,7 @@ research "static" "market" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestResearchToolUseRequiresOwnershipForEveryRequiredInput(t *testing.T) {
+func TestResearchToolUseAllowsAgentToConstructUnownedRequiredInput(t *testing.T) {
 	directory := t.TempDir()
 	writeR42(t, directory, "main.r42.hcl", `
 go_tool "finish" {
@@ -915,8 +915,7 @@ research "static" "source" {
 
 	_, err := planSource(directory, executor.ResearchConfigOptions{})
 
-	require.Error(t, err)
-	assert.ErrorContains(t, err, `tool_use "finish" required input field "Claims" has no owner`)
+	require.NoError(t, err)
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

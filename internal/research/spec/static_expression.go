@@ -2,6 +2,7 @@ package spec
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -204,7 +205,7 @@ func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
 		return "", fmt.Errorf("research supports at most one collection_qc block")
 	}
 	for _, nested := range block.NestedBlocks() {
-		if nested.Type == "retry" || nested.Type == "artifact" || nested.Type == "snapshot" || nested.Type == "qc" ||
+		if nested.Type == "retry" || nested.Type == "artifact" || nested.Type == "import_artifact" || nested.Type == "qc" ||
 			nested.Type == "collection_qc" || nested.Type == "tool_use" || golden.MetaNestedBlockNames.Contains(nested.Type) {
 			continue
 		}
@@ -220,42 +221,46 @@ func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
 	} else {
 		writeObject(&result, retryBlocks[0], nil)
 	}
-	result.WriteString("artifacts = [\n")
+	result.WriteString("artifact = {\n")
 	for _, artifact := range nestedBlocks(block, "artifact") {
 		name := ""
 		if len(artifact.Labels) > 0 {
 			name = artifact.Labels[len(artifact.Labels)-1]
 		}
+		result.WriteString(strconv.Quote(name))
+		result.WriteString(" = ")
 		writeObject(&result, artifact, map[string]string{
 			"name": strconv.Quote(name), "required": "false", "non_empty": "false",
 		})
-		result.WriteString(",\n")
+		result.WriteString("\n")
 	}
-	result.WriteString("]\n")
-	result.WriteString("snapshots = [\n")
-	for _, snapshot := range nestedBlocks(block, "snapshot") {
+	result.WriteString("}\n")
+	result.WriteString("import_artifact = {\n")
+	for _, imported := range nestedBlocks(block, "import_artifact") {
 		name := ""
-		if len(snapshot.Labels) > 0 {
-			name = snapshot.Labels[len(snapshot.Labels)-1]
+		if len(imported.Labels) > 0 {
+			name = imported.Labels[len(imported.Labels)-1]
 		}
-		writeObject(&result, snapshot, map[string]string{
-			"name": strconv.Quote(name), "required": "false", "non_empty": "false",
-		})
-		result.WriteString(",\n")
+		result.WriteString(strconv.Quote(name))
+		result.WriteString(" = ")
+		writeObject(&result, imported, nil)
+		result.WriteString("\n")
 	}
-	result.WriteString("]\n")
-	result.WriteString("tool_uses = [\n")
+	result.WriteString("}\n")
+	result.WriteString("tool_uses = {\n")
 	for _, toolUse := range nestedBlocks(block, "tool_use") {
 		name := ""
 		if len(toolUse.Labels) > 0 {
 			name = toolUse.Labels[len(toolUse.Labels)-1]
 		}
+		result.WriteString(strconv.Quote(name))
+		result.WriteString(" = ")
 		writeToolUseObject(&result, toolUse, map[string]string{
-			"name": strconv.Quote(name), "terminate": "false", "input": "{}", "input_from_agent": "{}",
+			"terminate": "false", "input": "{}", "input_from_agent": "{}",
 		})
-		result.WriteString(",\n")
+		result.WriteString("\n")
 	}
-	result.WriteString("]\nqc = ")
+	result.WriteString("}\nqc = ")
 	if len(qcBlocks) == 0 {
 		result.WriteString("null\n")
 	} else {
@@ -404,8 +409,7 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 		"skill_directories": cty.EmptyTupleVal, "skills": cty.EmptyTupleVal,
 		"disabled_skills": cty.EmptyTupleVal, "permission": cty.NullVal(cty.String),
 		"max_protocol_attempts": cty.NullVal(cty.Number), "timeout": cty.NullVal(cty.String),
-		"retry": cty.EmptyTupleVal, "artifact": cty.EmptyTupleVal, "snapshot": cty.EmptyTupleVal,
-		"snapshots": cty.UnknownVal(cty.List(snapshotValueType)), "tool_use": cty.EmptyTupleVal, "qc": cty.EmptyTupleVal,
+		"retry": cty.EmptyTupleVal, "artifact": cty.EmptyObjectVal, "tool_use": cty.EmptyTupleVal, "qc": cty.EmptyTupleVal,
 		"collection_model_provider":    cty.NullVal(cty.EmptyObject),
 		"collection_tool_ids":          cty.EmptyTupleVal,
 		"collection_skill_directories": cty.EmptyTupleVal,
@@ -418,12 +422,12 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 	if task.IsKnown() && task.Type().IsObjectType() {
 		for name, value := range task.AsValueMap() {
 			switch name {
-			case "artifacts":
-				values["artifact"] = value
-			case "snapshots":
-				values["snapshot"] = value
+			case "artifact":
+				values["artifact"] = artifactMapValue(value)
+			case "import_artifact":
+				// Imports authorize runtime access but are not an output value.
 			case "tool_uses":
-				values["tool_use"] = value
+				values["tool_use"] = toolUseListValue(value)
 			case "retry", "qc", "collection_qc":
 				if !value.IsNull() {
 					values[name] = cty.TupleVal([]cty.Value{value})
@@ -442,6 +446,44 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 	return values
 }
 
+func artifactMapValue(value cty.Value) cty.Value {
+	unmarked, marks := value.Unmark()
+	if unmarked.Type().IsMapType() {
+		return unmarked.WithMarks(marks)
+	}
+	if !unmarked.Type().IsObjectType() {
+		return value
+	}
+	attributes := unmarked.AsValueMap()
+	if len(attributes) == 0 {
+		return cty.MapValEmpty(artifactValueType).WithMarks(marks)
+	}
+	return cty.MapVal(attributes).WithMarks(marks)
+}
+
+func toolUseListValue(value cty.Value) cty.Value {
+	unmarked, marks := value.Unmark()
+	if !unmarked.IsKnown() || unmarked.IsNull() ||
+		(!unmarked.Type().IsMapType() && !unmarked.Type().IsObjectType()) {
+		return value
+	}
+	items := make([]cty.Value, 0, unmarked.LengthInt())
+	iterator := unmarked.ElementIterator()
+	for iterator.Next() {
+		key, item := iterator.Element()
+		if item.Type().IsObjectType() {
+			attributes := maps.Clone(item.AsValueMap())
+			attributes["name"] = key
+			item = cty.ObjectVal(attributes)
+		}
+		items = append(items, item)
+	}
+	if len(items) == 0 {
+		return cty.EmptyTupleVal.WithMarks(marks)
+	}
+	return cty.TupleVal(items).WithMarks(marks)
+}
+
 func taskHasTerminatingTool(task cty.Value) bool {
 	unmarked, _ := task.UnmarkDeep()
 	if !unmarked.Type().IsObjectType() {
@@ -455,10 +497,12 @@ func taskHasTerminatingTool(task cty.Value) bool {
 	}
 	toolUses := unmarked.GetAttr("tool_uses")
 	if !toolUses.IsKnown() || toolUses.IsNull() ||
-		(!toolUses.Type().IsListType() && !toolUses.Type().IsTupleType()) {
+		(!toolUses.Type().IsMapType() && !toolUses.Type().IsObjectType()) {
 		return false
 	}
-	for _, toolUse := range toolUses.AsValueSlice() {
+	iterator := toolUses.ElementIterator()
+	for iterator.Next() {
+		_, toolUse := iterator.Element()
 		if !toolUse.Type().IsObjectType() || !toolUse.Type().HasAttribute("terminate") {
 			continue
 		}

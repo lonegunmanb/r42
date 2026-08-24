@@ -53,7 +53,7 @@ research "dynamic" "followups" {
       system_prompt = "Research the assigned topic."
       prompt        = topic
 	  terminate_tool_id = go_tool.finish.id
-      artifacts     = []
+      artifact      = {}
       retry         = null
       qc            = null
     }
@@ -114,7 +114,7 @@ research "dynamic" "followups" {
       system_prompt     = "Research the assigned topic."
       prompt            = topic
       terminate_tool_id = go_tool.finish.id
-      artifacts         = []
+      artifact          = {}
       retry             = null
       qc                = null
     }
@@ -196,7 +196,7 @@ research "dynamic" "followups" {
     system_prompt     = "Research the assigned topic."
     prompt            = topic
     terminate_tool_id = go_tool.finish.id
-    artifacts         = []
+    artifact          = {}
     retry             = null
     qc                = null
   }]
@@ -293,7 +293,7 @@ research "dynamic" "followups" {
     model         = "test-model"
     system_prompt = "Research the assigned topic."
     prompt        = "${block_wd()}/${index}/${topic}"
-    artifacts     = []
+    artifact      = {}
     retry         = null
     qc            = null
   }]
@@ -320,7 +320,7 @@ research "dynamic" "followups" {
 	}
 }
 
-func TestProductionRuntimeDynamicTaskSelfSnapshotPathResolves(t *testing.T) {
+func TestProductionRuntimeDynamicTaskSelfArtifactPathResolves(t *testing.T) {
 	t.Parallel()
 
 	directory := t.TempDir()
@@ -328,15 +328,20 @@ func TestProductionRuntimeDynamicTaskSelfSnapshotPathResolves(t *testing.T) {
 research "dynamic" "followups" {
   tasks = [for index, topic in ["alpha", "beta"] : {
     model         = "test-model"
-    system_prompt = "Save source material under ${one(self.snapshot).path}."
-    prompt        = topic
-    artifacts     = []
-    snapshots = [{
-      name        = "sources"
-      type        = "directory"
-      path        = "${block_wd()}/${index}/collected"
-      description = "Collected source material"
-    }]
+    system_prompt = "Save source material under ${self.artifact.sources.path}."
+    prompt        = self.artifact["knowledge"].path
+    artifact = {
+      sources = {
+        type        = "directory"
+        path        = "${block_wd()}/${index}/collected"
+        description = "Collected source material"
+      }
+      knowledge = {
+        type        = "file"
+        path        = "${block_wd()}/${index}/knowledge.json"
+        description = "Collected knowledge"
+      }
+    }
     retry = null
     qc    = null
   }]
@@ -353,8 +358,9 @@ research "dynamic" "followups" {
 	require.NoError(t, err)
 	for _, config := range opener.Configs() {
 		if strings.Contains(config.SystemPrompt, "Save source material under") {
-			assert.NotContains(t, config.SystemPrompt, "__r42_dynamic_self_snapshot_path__")
+			assert.NotContains(t, config.SystemPrompt, "__r42_dynamic_self_artifact_path__")
 			assert.Contains(t, config.SystemPrompt, filepath.ToSlash(filepath.Join(config.WorkingDirectory, "collected")))
+			assert.Contains(t, opener.Prompts(), filepath.ToSlash(filepath.Join(config.WorkingDirectory, "knowledge.json")))
 		}
 	}
 }
@@ -394,7 +400,7 @@ research "dynamic" "followups" {
     model         = "test-model"
     system_prompt = "Research the assigned topic."
     prompt        = topic
-    artifacts     = []
+    artifact      = {}
     retry         = null
     qc            = null
   }]

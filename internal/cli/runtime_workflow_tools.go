@@ -22,7 +22,6 @@ import (
 	"github.com/lonegunmanb/r42/internal/evidence"
 	researchruntime "github.com/lonegunmanb/r42/internal/research/runtime"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
-	"github.com/lonegunmanb/r42/internal/snapshot"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"
 	ctyjson "github.com/zclconf/go-cty/cty/json"
@@ -34,8 +33,6 @@ var closedWorldBuiltIns = []string{
 }
 
 var collectionBlockedBuiltIns = []string{"task", "powershell", "curl"}
-
-var validSnapshotIDPattern = regexp.MustCompile(`^snapshot-(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`)
 
 func collectionDisallowedTools(configured []string) []string {
 	result := slices.Clone(configured)
@@ -118,7 +115,7 @@ func wrapCollectionAcquisitionTools(tools []sdk.Tool, context *collection.Contex
 				return toolResult, err
 			}
 			if invocation.ToolCallID != "" && toolResult.ResultType == "success" && toolResult.TextResultForLLM != "" {
-				if err = context.Registry.RetainToolResult(invocation.ToolCallID, toolResult.TextResultForLLM); err != nil {
+				if err = context.Artifacts.RetainToolResult(invocation.ToolCallID, toolResult.TextResultForLLM); err != nil {
 					return sdk.ToolResult{}, err
 				}
 			}
@@ -133,14 +130,14 @@ func collectionProtocolTools(context *collection.Context, checkpoints *collectio
 	checkpoint := collection.NewCheckpointHandler(context)
 	return []sdk.Tool{
 		{
-			Name: "r42_register_snapshot", Description: "Register an existing workspace snapshot path or retained source tool call result. " +
-				"Optional source may be a URL or any other source identifier; when supplied, it is added as a compatible Source header only if the snapshot has no non-empty Source or legacy URL header. " +
-				"Do not call this after r42_save_snapshot because that tool already registers its saved snapshot.",
+			Name: "r42_register_artifact", Description: "Register an existing workspace evidence artifact path or retained source tool call result. " +
+				"Optional source may be a URL or any other source identifier; when supplied, it is added as a compatible Source header only if the artifact has no non-empty Source or legacy URL header. " +
+				"Do not call this after r42_save_artifact because that tool already registers its saved artifact.",
 			Parameters: objectSchema(map[string]any{
 				"path":                map[string]any{"type": "string"},
 				"source_tool_call_id": map[string]any{"type": "string"},
 				"source":              map[string]any{"type": "string", "description": "Optional source identifier; may be a URL or a non-URL value"},
-				"description":         map[string]any{"type": "string", "description": "Optional concise semantic summary of what this snapshot contains"},
+				"description":         map[string]any{"type": "string", "description": "Optional concise semantic summary of what this evidence artifact contains"},
 			}, nil),
 			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
 				args, err := decodeArguments[collection.RegisterArgs](invocation.Arguments)
@@ -151,7 +148,7 @@ func collectionProtocolTools(context *collection.Context, checkpoints *collectio
 			},
 		},
 		{
-			Name: "r42_collection_checkpoint", Description: "Submit all unreviewed snapshots for Collection QC, or report that Collection is exhausted",
+			Name: "r42_collection_checkpoint", Description: "Submit all unreviewed evidence artifacts for Collection QC, or report that Collection is exhausted",
 			Parameters: objectSchema(map[string]any{
 				"empty_reason":         map[string]any{"type": "string"},
 				"collection_exhausted": map[string]any{"type": "boolean"},
@@ -170,64 +167,64 @@ func collectionProtocolTools(context *collection.Context, checkpoints *collectio
 				return responseToolResult(response)
 			},
 		},
-		collectionSaveSnapshotTool(context),
+		collectionSaveArtifactTool(context),
 	}
 }
 
-type saveSnapshotArgs struct {
-	SnapshotPath string `json:"snapshot_path"`
+type saveArtifactArgs struct {
+	ArtifactPath string `json:"artifact_path"`
 	Content      string `json:"content"`
 	Source       string `json:"source"`
 	Description  string `json:"description"`
 }
 
-type saveSnapshotOutput struct {
+type saveArtifactOutput struct {
 	Path       string `json:"path"`
-	SnapshotID string `json:"snapshot_id"`
+	ArtifactID string `json:"artifact_id"`
 }
 
-func collectionSaveSnapshotTool(context *collection.Context) sdk.Tool {
+func collectionSaveArtifactTool(context *collection.Context) sdk.Tool {
 	return sdk.Tool{
-		Name: "r42_save_snapshot",
-		Description: "Save and register complete source material as Markdown at a declared snapshot file target or below a declared snapshot directory target, " +
-			"then return path and snapshot_id. source is required and may be a URL or any other source identifier; it is written to the snapshot header. " +
-			"Provide description when possible to summarize the snapshot's semantic contents for downstream research planning. " +
-			"After a successful call, use the returned snapshot_id directly. Do not call r42_register_snapshot for the returned path.",
+		Name: "r42_save_artifact",
+		Description: "Save and register complete source material as Markdown at a declared evidence artifact file target or below a declared evidence artifact directory target, " +
+			"then return path and artifact_id. source is required and may be a URL or any other source identifier; it is written to the artifact header. " +
+			"Provide description when possible to summarize the artifact's semantic contents for downstream research planning. " +
+			"After a successful call, use the returned artifact_id directly. Do not call r42_register_artifact for the returned path.",
 		Parameters: objectSchema(map[string]any{
-			"snapshot_path": map[string]any{"type": "string", "description": "Absolute or workspace-relative .md path at a declared snapshot file target or below a declared snapshot directory target"},
+			"artifact_path": map[string]any{"type": "string", "description": "Absolute or workspace-relative .md path at a declared evidence artifact file target or below a declared evidence artifact directory target"},
 			"content":       map[string]any{"type": "string", "description": "Complete source material in Markdown"},
 			"source":        map[string]any{"type": "string", "description": "Non-empty source identifier; may be a URL or a non-URL value"},
 			"description":   map[string]any{"type": "string", "description": "Optional concise semantic summary of what the saved source material contains"},
-		}, []string{"snapshot_path", "content", "source"}),
+		}, []string{"artifact_path", "content", "source"}),
 		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
-			args, err := decodeArguments[saveSnapshotArgs](invocation.Arguments)
+			args, err := decodeArguments[saveArtifactArgs](invocation.Arguments)
 			if err != nil {
 				return rejectedToolResult("invalid_arguments", err.Error())
 			}
-			return saveCollectionSnapshot(context, args)
+			return saveCollectionArtifact(context, args)
 		},
 	}
 }
 
-func saveCollectionSnapshot(context *collection.Context, args saveSnapshotArgs) (sdk.ToolResult, error) {
+func saveCollectionArtifact(context *collection.Context, args saveArtifactArgs) (sdk.ToolResult, error) {
 	issues := make([]corespec.Issue, 0, 3)
 	workspace := ""
 	if context != nil {
 		workspace = context.Workspace
 	}
-	path, validPath := collectionSnapshotPath(context, args.SnapshotPath)
+	path, validPath := collectionArtifactPath(context, args.ArtifactPath)
 	if !validPath {
 		issues = append(issues, corespec.Issue{
-			Code: "snapshot_path", Message: "snapshot_path must be a .md path at a declared snapshot file target or below a declared snapshot directory target",
+			Code: "artifact_path", Message: "artifact_path must be a .md path at a declared evidence artifact file target or below a declared evidence artifact directory target",
 		})
 	}
 	source := strings.Join(strings.Fields(args.Source), " ")
 	if source == "" {
-		issues = append(issues, corespec.Issue{Code: "snapshot_source", Message: "source must not be empty"})
+		issues = append(issues, corespec.Issue{Code: "artifact_source", Message: "source must not be empty"})
 	}
 	content := args.Content
 	if strings.TrimSpace(content) == "" {
-		issues = append(issues, corespec.Issue{Code: "snapshot_content", Message: "content must not be empty"})
+		issues = append(issues, corespec.Issue{Code: "artifact_content", Message: "content must not be empty"})
 	}
 	if len(issues) > 0 {
 		return responseToolResult(corespec.ToolResponse[string]{Issues: issues})
@@ -239,24 +236,24 @@ func saveCollectionSnapshot(context *collection.Context, args saveSnapshotArgs) 
 	written, err := writer.WriteNew(path, "- Source: "+source+"\n\n"+content)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
-			return rejectedToolResult("snapshot_write_failed", "snapshot_path already exists; use a new path")
+			return rejectedToolResult("artifact_write_failed", "artifact_path already exists; use a new path")
 		}
-		return rejectedToolResult("snapshot_write_failed", err.Error())
+		return rejectedToolResult("artifact_write_failed", err.Error())
 	}
 	registration := collection.NewRegisterHandler(context).Register(collection.RegisterArgs{
 		Path: written, Description: args.Description,
 	})
 	if !registration.Accepted {
-		return responseToolResult(corespec.ToolResponse[saveSnapshotOutput]{Issues: registration.Issues})
+		return responseToolResult(corespec.ToolResponse[saveArtifactOutput]{Issues: registration.Issues})
 	}
-	output := saveSnapshotOutput{
+	output := saveArtifactOutput{
 		Path:       registration.Output.Path,
-		SnapshotID: registration.Output.ID,
+		ArtifactID: registration.Output.ID,
 	}
 	return acceptedToolResult(output)
 }
 
-func collectionSnapshotPath(context *collection.Context, raw string) (string, bool) {
+func collectionArtifactPath(context *collection.Context, raw string) (string, bool) {
 	if context == nil || strings.TrimSpace(context.Workspace) == "" || strings.TrimSpace(raw) == "" {
 		return "", false
 	}
@@ -269,7 +266,7 @@ func collectionSnapshotPath(context *collection.Context, raw string) (string, bo
 	if err != nil || !strings.HasSuffix(strings.ToLower(path), ".md") {
 		return "", false
 	}
-	return path, context.AllowsSnapshotPath(path)
+	return path, context.AllowsArtifactPath(path)
 }
 
 func collectionQCVerdictTool(verdicts *collectionqc.VerdictRecorder) sdk.Tool {
@@ -292,7 +289,15 @@ func collectionQCVerdictTool(verdicts *collectionqc.VerdictRecorder) sdk.Tool {
 	}
 }
 
-func applyToolUseBindings(tools []sdk.Tool, toolUses []researchspec.ToolUse) ([]sdk.Tool, error) {
+func applyToolUseBindings(
+	tools []sdk.Tool,
+	toolUses []researchspec.ToolUse,
+	artifactRegistries ...*artifactpkg.Registry,
+) ([]sdk.Tool, error) {
+	var artifactsRegistry *artifactpkg.Registry
+	if len(artifactRegistries) > 0 {
+		artifactsRegistry = artifactRegistries[0]
+	}
 	uses := make(map[string]researchspec.ToolUse, len(toolUses))
 	for _, toolUse := range toolUses {
 		uses[toolUse.ToolID] = toolUse
@@ -334,6 +339,11 @@ func applyToolUseBindings(tools []sdk.Tool, toolUses []researchspec.ToolUse) ([]
 		if sourceGuidance := groupedToolUseSourceGuidance(agent); sourceGuidance != "" {
 			result[index].Description = strings.TrimSpace(result[index].Description + "\n\n" + sourceGuidance)
 		}
+		if hasModelSuppliedFields(properties, input, agent) {
+			result[index].Description = strings.TrimSpace(result[index].Description +
+				"\n\nFor fields without explicit source guidance, construct values from the current block's declared artifacts. " +
+				"Call r42_list_artifacts first; read file artifacts with r42_read_artifact or JSON tools, and list directory artifacts with r42_list_artifact_files before reading child IDs.")
+		}
 		parameters["properties"] = properties
 		required, _ := parameters["required"].([]string)
 		required = slices.DeleteFunc(slices.Clone(required), func(field string) bool {
@@ -353,6 +363,11 @@ func applyToolUseBindings(tools []sdk.Tool, toolUses []researchspec.ToolUse) ([]
 				arguments = make(map[string]any, len(input))
 			}
 			maps.Copy(arguments, input)
+			if artifactsRegistry != nil {
+				if err := materializeArtifactPaths(arguments, artifactsRegistry); err != nil {
+					return rejectedToolResult("artifact_target", err.Error())
+				}
+			}
 			invocation.Arguments = arguments
 			if len(toolUse.Validations) > 0 {
 				inputValue, conversionErr := anyMapToCTY(arguments)
@@ -371,6 +386,19 @@ func applyToolUseBindings(tools []sdk.Tool, toolUses []researchspec.ToolUse) ([]
 		}
 	}
 	return result, nil
+}
+
+func hasModelSuppliedFields(properties, input map[string]any, agent map[string]cty.Value) bool {
+	for name := range properties {
+		if _, fixed := input[name]; fixed {
+			continue
+		}
+		if _, guided := agent[name]; guided {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func anyMapToCTY(values map[string]any) (cty.Value, error) {
@@ -568,14 +596,7 @@ func describeToolUseSource(source toolUseSource) string {
 		summary = "no description"
 	}
 	if source.artifactType == "directory" {
-		kind := "artifact"
-		if source.kind == "snapshot" {
-			kind = "snapshot"
-		}
-		return fmt.Sprintf("Directory %s %s (%s): call r42_list_artifact_files, then read returned child IDs with r42_read_artifact.", kind, source.id, summary)
-	}
-	if source.kind == "snapshot" {
-		return fmt.Sprintf("Snapshot %s (%s): use r42_read_snapshot or r42_search_snapshot by ID.", source.id, summary)
+		return fmt.Sprintf("Directory artifact %s (%s): call r42_list_artifact_files, then read returned child IDs with r42_read_artifact.", source.id, summary)
 	}
 	return fmt.Sprintf("File artifact %s (%s): use r42_read_artifact; for JSON, r42_read_artifact_json_schema or r42_query_artifact_json.", source.id, summary)
 }
@@ -589,7 +610,7 @@ func describeToolUseSources(value cty.Value) string {
 	if err != nil {
 		return ""
 	}
-	return "Construct this field using these authorized artifact or snapshot sources: " + string(encoded) + "."
+	return "Construct this field using these authorized artifact sources: " + string(encoded) + "."
 }
 
 func toolUseSourceStrings(value cty.Value) (id, kind, artifactType, description string) {
@@ -612,95 +633,35 @@ func toolUseSourceStrings(value cty.Value) (id, kind, artifactType, description 
 	return id, kind, artifactType, description
 }
 
-func evidenceTools(
-	registry *snapshot.Registry,
-	workspace string,
-	artifacts []researchspec.Artifact,
-	write bool,
-) ([]sdk.Tool, error) {
-	artifactsRegistry := artifactpkg.NewRegistry()
-	ids := make([]string, 0, len(artifacts))
-	for _, declared := range artifacts {
-		record, declareErr := artifactsRegistry.Declare(workspace, declared)
-		if declareErr != nil {
-			return nil, declareErr
-		}
-		ids = append(ids, record.ID)
-	}
-	return evidenceToolsWithArtifactRegistry(registry, workspace, artifacts, write, artifactsRegistry, ids)
-}
-
 func evidenceToolsWithArtifactRegistry(
-	registry *snapshot.Registry,
 	workspace string,
 	artifacts []researchspec.Artifact,
 	write bool,
 	artifactsRegistry *artifactpkg.Registry,
 	artifactIDs []string,
+	additionalIDs func() []string,
 ) ([]sdk.Tool, error) {
-	snapshots, err := evidence.NewSnapshotAccessWithRegistry(registry)
-	if err != nil {
-		return nil, err
-	}
-	return evidenceToolsWithAccess(snapshots, workspace, artifacts, write, artifactsRegistry, artifactIDs)
+	return evidenceToolsWithAccess(workspace, artifacts, write, artifactsRegistry, artifactIDs, additionalIDs)
 }
 
-func evidenceToolsWithUpstream(
-	registry *snapshot.Registry,
-	upstream map[string]string,
+func evidenceToolsWithDynamicArtifacts(
 	workspace string,
 	artifacts []researchspec.Artifact,
 	write bool,
-) ([]sdk.Tool, *evidence.SnapshotAccess, error) {
-	snapshots, err := evidence.NewSnapshotAccessWithRegistryAndUpstream(registry, upstream)
-	if err != nil {
-		return nil, nil, err
-	}
-	artifactsRegistry := artifactpkg.NewRegistry()
-	ids := make([]string, 0, len(artifacts))
-	for _, declared := range artifacts {
-		record, declareErr := artifactsRegistry.Declare(workspace, declared)
-		if declareErr != nil {
-			return nil, nil, declareErr
-		}
-		ids = append(ids, record.ID)
-	}
-	tools, err := evidenceToolsWithAccess(snapshots, workspace, artifacts, write, artifactsRegistry, ids)
-	tools = slices.DeleteFunc(tools, func(tool sdk.Tool) bool {
-		return tool.Name == "r42_list_snapshots"
-	})
-	return tools, snapshots, err
-}
-
-func evidenceToolsWithUpstreamAndArtifacts(
-	registry *snapshot.Registry,
-	upstream map[string]string,
-	workspace string,
-	artifacts []researchspec.Artifact,
-	write bool,
-	artifactsRegistry *artifactpkg.Registry,
+	registry *artifactpkg.Registry,
 	artifactIDs []string,
-) ([]sdk.Tool, *evidence.SnapshotAccess, error) {
-	snapshots, err := evidence.NewSnapshotAccessWithRegistryAndUpstream(registry, upstream)
-	if err != nil {
-		return nil, nil, err
-	}
-	tools, err := evidenceToolsWithAccess(
-		snapshots, workspace, artifacts, write, artifactsRegistry, artifactIDs,
-	)
-	tools = slices.DeleteFunc(tools, func(tool sdk.Tool) bool {
-		return tool.Name == "r42_list_snapshots"
-	})
-	return tools, snapshots, err
+	additionalIDs func() []string,
+) ([]sdk.Tool, error) {
+	return evidenceToolsWithAccess(workspace, artifacts, write, registry, artifactIDs, additionalIDs)
 }
 
 func evidenceToolsWithAccess(
-	snapshots *evidence.SnapshotAccess,
 	workspace string,
 	artifacts []researchspec.Artifact,
 	write bool,
 	artifactsRegistry *artifactpkg.Registry,
 	artifactIDs []string,
+	additionalIDs func() []string,
 ) ([]sdk.Tool, error) {
 	if artifactsRegistry == nil {
 		return nil, errors.New("artifact registry is required")
@@ -709,114 +670,48 @@ func evidenceToolsWithAccess(
 	if err != nil {
 		return nil, err
 	}
-	declared := make(map[string]researchspec.Artifact, len(artifacts))
-	for _, artifact := range artifacts {
-		declared[artifact.Name] = artifact
-	}
 	authorizedArtifacts := make(map[string]struct{}, len(artifactIDs))
-	for _, id := range artifactIDs {
-		authorizedArtifacts[id] = struct{}{}
-	}
 	var authorizedArtifactsMu sync.RWMutex
+	addAuthorizedArtifacts := func() {
+		authorizedArtifactsMu.Lock()
+		defer authorizedArtifactsMu.Unlock()
+		for _, id := range artifactIDs {
+			authorizedArtifacts[id] = struct{}{}
+		}
+		if additionalIDs != nil {
+			for _, id := range additionalIDs() {
+				authorizedArtifacts[id] = struct{}{}
+			}
+		}
+	}
+	addAuthorizedArtifacts()
 	isAuthorizedArtifact := func(id string) bool {
+		addAuthorizedArtifacts()
 		authorizedArtifactsMu.RLock()
 		if _, ok := authorizedArtifacts[id]; ok {
 			authorizedArtifactsMu.RUnlock()
 			return true
 		}
 		authorizedArtifactsMu.RUnlock()
-		record, recordErr := artifactsRegistry.Record(id)
-		return recordErr == nil && record.Ready && record.Kind == artifactpkg.KindSnapshot && snapshots.HasSnapshot(id)
+		return false
 	}
 	listedArtifacts := func() ([]artifactpkg.Record, error) {
-		records, err := artifactsRegistry.Records(artifactIDs)
+		addAuthorizedArtifacts()
+		authorizedArtifactsMu.RLock()
+		ids := make([]string, 0, len(authorizedArtifacts))
+		for id := range authorizedArtifacts {
+			ids = append(ids, id)
+		}
+		authorizedArtifactsMu.RUnlock()
+		slices.Sort(ids)
+		records, err := artifactsRegistry.Records(ids)
 		if err != nil {
 			return nil, err
-		}
-		records = slices.DeleteFunc(records, func(record artifactpkg.Record) bool { return !record.Ready })
-		for _, record := range artifactsRegistry.ReadyRecords() {
-			if record.Kind == artifactpkg.KindSnapshot && snapshots.HasSnapshot(record.ID) {
-				records = append(records, record)
-			}
 		}
 		return records, nil
 	}
 
 	tools := []sdk.Tool{
-		{
-			Name: "r42_list_snapshots", Description: "List registered research snapshots by ID",
-			Parameters: objectSchema(map[string]any{}, nil),
-			Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
-				items, listErr := snapshots.ListSnapshots()
-				if listErr != nil {
-					return sdk.ToolResult{}, listErr
-				}
-				return acceptedToolResult(items)
-			},
-		},
-		{
-			Name: "r42_read_snapshot", Description: "Read a bounded page and its source identifier from a registered snapshot ID. " +
-				"Use offset_bytes from 0 and continue with next_offset_bytes while truncated is true.",
-			Parameters: objectSchema(map[string]any{
-				"id":           map[string]any{"type": "string"},
-				"offset_bytes": map[string]any{"type": "integer", "minimum": 0, "default": 0},
-				"max_bytes":    map[string]any{"type": "integer", "minimum": 1},
-			}, []string{"id", "max_bytes"}),
-			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
-				args, decodeErr := decodeArguments[boundedReadArgs](invocation.Arguments)
-				if decodeErr != nil {
-					return rejectedToolResult("invalid_arguments", decodeErr.Error())
-				}
-				page, readErr := snapshots.ReadSnapshotPage(args.ID, args.OffsetBytes, args.MaxBytes)
-				if readErr != nil {
-					return rejectedToolResult("snapshot_read_failed", readErr.Error())
-				}
-				source, readErr := snapshots.SnapshotSource(args.ID)
-				if readErr != nil {
-					return rejectedToolResult("snapshot_read_failed", readErr.Error())
-				}
-				return acceptedToolResult(snapshotReadOutput{
-					Content: page.Content, Source: source, OffsetBytes: page.OffsetBytes,
-					NextOffsetBytes: page.NextOffsetBytes, TotalBytes: page.TotalBytes, Truncated: page.Truncated,
-				})
-			},
-		},
-		{
-			Name: "r42_search_snapshot", Description: "Search a registered snapshot by snapshot_id using a Go RE2 regular expression. " +
-				"Search runs over Unicode-whitespace-normalized text and returns exact matched_text that can be reused as exact_quote, plus bounded source context. " +
-				"Each match is limited to 2000 Unicode characters and each excerpt to 4000; snapshots larger than 32 MiB must be inspected with paged r42_read_snapshot calls.",
-			Parameters: objectSchema(map[string]any{
-				"snapshot_id":    map[string]any{"type": "string", "description": "Registered snapshot ID; filesystem paths are not accepted"},
-				"pattern":        map[string]any{"type": "string", "description": "Go RE2 regular expression applied after Unicode whitespace normalization"},
-				"case_sensitive": map[string]any{"type": "boolean", "default": false},
-				"max_matches":    map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
-				"context_lines":  map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 2},
-			}, []string{"snapshot_id", "pattern"}),
-			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
-				args, decodeErr := decodeArguments[snapshotSearchArgs](invocation.Arguments)
-				if decodeErr != nil {
-					return rejectedToolResult("invalid_arguments", decodeErr.Error())
-				}
-				if args.MaxMatches == 0 {
-					args.MaxMatches = 10
-				}
-				rawArguments, _ := invocation.Arguments.(map[string]any)
-				if _, supplied := rawArguments["context_lines"]; !supplied {
-					args.ContextLines = 2
-				}
-				result, searchErr := snapshots.SearchSnapshot(
-					args.SnapshotID,
-					args.Pattern,
-					args.CaseSensitive,
-					args.MaxMatches,
-					args.ContextLines,
-				)
-				if searchErr != nil {
-					return rejectedToolResult("snapshot_search_failed", searchErr.Error())
-				}
-				return acceptedToolResult(result)
-			},
-		},
 		{
 			Name: "r42_list_artifacts", Description: "List run-scoped artifacts authorized for the current research block or dynamic task by ID",
 			Parameters: objectSchema(map[string]any{}, nil),
@@ -855,7 +750,7 @@ func evidenceToolsWithAccess(
 			},
 		},
 		{
-			Name: "r42_read_artifact", Description: "Read a bounded page from an authorized run-scoped artifact by ID. " +
+			Name: "r42_read_artifact", Description: "Read a bounded page from an authorized run-scoped artifact by ID. Evidence artifacts include their source. " +
 				"Use offset_bytes=0 for the first page, then continue with next_offset_bytes while truncated is true. " +
 				"If the artifact ID is uncertain, call r42_list_artifacts to list valid IDs for the current block or dynamic task.",
 			Parameters: objectSchema(map[string]any{
@@ -875,7 +770,89 @@ func evidenceToolsWithAccess(
 				if readErr != nil {
 					return rejectedToolResult("artifact_read_failed", readErr.Error())
 				}
-				return acceptedToolResult(page)
+				record, recordErr := artifactsRegistry.Record(args.ID)
+				if recordErr != nil {
+					return rejectedToolResult("artifact_read_failed", recordErr.Error())
+				}
+				return acceptedToolResult(struct {
+					artifactpkg.Page
+					Source string `json:"source,omitempty"`
+				}{Page: page, Source: record.Source})
+			},
+		},
+		{
+			Name: "r42_search_artifact", Description: "Search an authorized evidence artifact by ID using a Go RE2 regular expression. Search uses Unicode-whitespace-normalized text and returns reusable exact matched_text plus bounded context.",
+			Parameters: objectSchema(map[string]any{
+				"artifact_id":    map[string]any{"type": "string", "description": "Authorized evidence artifact ID; filesystem paths are not accepted"},
+				"pattern":        map[string]any{"type": "string", "description": "Go RE2 regular expression applied after Unicode whitespace normalization"},
+				"case_sensitive": map[string]any{"type": "boolean", "default": false},
+				"max_matches":    map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
+				"context_lines":  map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 2},
+			}, []string{"artifact_id", "pattern"}),
+			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+				args, decodeErr := decodeArguments[artifactSearchArgs](invocation.Arguments)
+				if decodeErr != nil {
+					return rejectedToolResult("invalid_arguments", decodeErr.Error())
+				}
+				if args.MaxMatches == 0 {
+					args.MaxMatches = 10
+				}
+				rawArguments, _ := invocation.Arguments.(map[string]any)
+				if _, supplied := rawArguments["context_lines"]; !supplied {
+					args.ContextLines = 2
+				}
+				ids := slices.Clone(artifactIDs)
+				if additionalIDs != nil {
+					ids = append(ids, additionalIDs()...)
+				}
+				access, accessErr := evidence.NewArtifactEvidenceAccess(artifactsRegistry, ids)
+				if accessErr != nil {
+					return rejectedToolResult("artifact_search_failed", accessErr.Error())
+				}
+				result, searchErr := access.Search(args.ArtifactID, args.Pattern, args.CaseSensitive, args.MaxMatches, args.ContextLines)
+				if searchErr != nil {
+					return rejectedToolResult("artifact_search_failed", searchErr.Error())
+				}
+				return acceptedToolResult(result)
+			},
+		},
+		{
+			Name: "r42_search_artifacts", Description: "Search all authorized readable artifacts for the current research block or dynamic task, including imported artifacts and files within authorized directory artifacts. " +
+				"Use a Go RE2 regular expression; every match includes its artifact_id for r42_read_artifact. Search uses Unicode-whitespace-normalized text and returns bounded context.",
+			Parameters: objectSchema(map[string]any{
+				"pattern":        map[string]any{"type": "string", "description": "Go RE2 regular expression applied after Unicode whitespace normalization"},
+				"case_sensitive": map[string]any{"type": "boolean", "default": false},
+				"max_matches":    map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
+				"context_lines":  map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 2},
+			}, []string{"pattern"}),
+			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+				args, decodeErr := decodeArguments[artifactSearchArgs](invocation.Arguments)
+				if decodeErr != nil {
+					return rejectedToolResult("invalid_arguments", decodeErr.Error())
+				}
+				if args.MaxMatches == 0 {
+					args.MaxMatches = 10
+				}
+				rawArguments, _ := invocation.Arguments.(map[string]any)
+				if _, supplied := rawArguments["context_lines"]; !supplied {
+					args.ContextLines = 2
+				}
+				records, listErr := listedArtifacts()
+				if listErr != nil {
+					return rejectedToolResult("artifact_search_failed", listErr.Error())
+				}
+				result, discovered, searchErr := searchAuthorizedArtifacts(
+					artifactsRegistry, records, args.Pattern, args.CaseSensitive, args.MaxMatches, args.ContextLines,
+				)
+				if searchErr != nil {
+					return rejectedToolResult("artifact_search_failed", searchErr.Error())
+				}
+				authorizedArtifactsMu.Lock()
+				for _, id := range discovered {
+					authorizedArtifacts[id] = struct{}{}
+				}
+				authorizedArtifactsMu.Unlock()
+				return acceptedToolResult(result)
 			},
 		},
 		{
@@ -936,23 +913,27 @@ func evidenceToolsWithAccess(
 		return tools, nil
 	}
 	tools = append(tools, sdk.Tool{
-		Name: "r42_write_markdown", Description: "Write a declared Markdown artifact by name",
+		Name: "r42_write_markdown", Description: "Write a declared Markdown artifact by run-scoped artifact_id. Call r42_list_artifacts when the ID is uncertain; filesystem paths and artifact names are not accepted.",
 		Parameters: objectSchema(map[string]any{
-			"name": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"},
-		}, []string{"name", "content"}),
+			"artifact_id": map[string]any{"type": "string", "description": "Declared file artifact ID from r42_list_artifacts"},
+			"content":     map[string]any{"type": "string"},
+		}, []string{"artifact_id", "content"}),
 		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
 			args, decodeErr := decodeArguments[markdownWriteArgs](invocation.Arguments)
 			if decodeErr != nil {
 				return rejectedToolResult("invalid_arguments", decodeErr.Error())
 			}
-			artifact, ok := declared[args.Name]
-			if !ok {
-				return rejectedToolResult("unknown_artifact", fmt.Sprintf("unknown artifact %q", args.Name))
+			if !isAuthorizedArtifact(args.ArtifactID) {
+				return rejectedToolResult("unknown_artifact", fmt.Sprintf("unknown artifact %q", args.ArtifactID))
 			}
-			if artifact.Type != researchspec.ArtifactTypeFile {
+			record, recordErr := artifactsRegistry.Record(args.ArtifactID)
+			if recordErr != nil {
+				return rejectedToolResult("artifact_write_failed", recordErr.Error())
+			}
+			if record.Purpose != artifactpkg.PurposeOutput || record.Type != researchspec.ArtifactTypeFile {
 				return rejectedToolResult("invalid_artifact_type", "markdown writer requires a file artifact")
 			}
-			path, writeErr := writer.Write(artifact.Path, args.Content)
+			path, writeErr := writer.Write(record.Path, args.Content)
 			if writeErr != nil {
 				return rejectedToolResult("artifact_write_failed", writeErr.Error())
 			}
@@ -962,9 +943,92 @@ func evidenceToolsWithAccess(
 	return tools, nil
 }
 
-func enforceSnapshotIDReferences(
+type artifactSearchAllMatch struct {
+	ArtifactID   string `json:"artifact_id"`
+	ArtifactName string `json:"artifact_name,omitempty"`
+	evidence.ArtifactSearchMatch
+}
+
+type artifactSearchAllResult struct {
+	Matches             []artifactSearchAllMatch `json:"matches"`
+	SearchedArtifactIDs []string                 `json:"searched_artifact_ids"`
+	Truncated           bool                     `json:"truncated"`
+}
+
+func searchAuthorizedArtifacts(
+	registry *artifactpkg.Registry,
+	artifacts []artifactpkg.Record,
+	pattern string,
+	caseSensitive bool,
+	maxMatches, contextLines int,
+) (artifactSearchAllResult, []string, error) {
+	result := artifactSearchAllResult{Matches: make([]artifactSearchAllMatch, 0)}
+	if registry == nil {
+		return result, nil, errors.New("artifact registry is required")
+	}
+	if maxMatches <= 0 {
+		return result, nil, errors.New("maximum matches must be positive")
+	}
+
+	searchable := slices.Clone(artifacts)
+	discovered := make([]string, 0)
+	for index := 0; index < len(searchable); index++ {
+		artifact := searchable[index]
+		if artifact.Type != researchspec.ArtifactTypeDirectory {
+			continue
+		}
+		files, err := registry.ListDirectoryFiles(artifact.ID)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return result, discovered, err
+		}
+		for _, file := range files {
+			discovered = append(discovered, file.ID)
+			searchable = append(searchable, file)
+		}
+	}
+	sort.Slice(searchable, func(i, j int) bool { return searchable[i].ID < searchable[j].ID })
+
+	seen := make(map[string]struct{}, len(searchable))
+	for _, artifact := range searchable {
+		if artifact.Type != researchspec.ArtifactTypeFile {
+			continue
+		}
+		if _, exists := seen[artifact.ID]; exists {
+			continue
+		}
+		seen[artifact.ID] = struct{}{}
+		remaining := maxMatches - len(result.Matches)
+		if remaining == 0 {
+			result.Truncated = true
+			break
+		}
+		matches, err := evidence.SearchArtifact(registry, artifact.ID, pattern, caseSensitive, remaining, contextLines)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return result, discovered, err
+		}
+		result.SearchedArtifactIDs = append(result.SearchedArtifactIDs, artifact.ID)
+		for _, match := range matches.Matches {
+			result.Matches = append(result.Matches, artifactSearchAllMatch{
+				ArtifactID: artifact.ID, ArtifactName: artifact.Name, ArtifactSearchMatch: match,
+			})
+		}
+		if matches.Truncated {
+			result.Truncated = true
+			break
+		}
+	}
+	return result, discovered, nil
+}
+
+func enforceArtifactIDReferences(
 	tools []sdk.Tool,
-	access *evidence.SnapshotAccess,
+	access func() (*evidence.ArtifactEvidenceAccess, error),
 	workspace string,
 	terminalToolName string,
 	terminal *researchruntime.TerminalRecorder,
@@ -974,48 +1038,52 @@ func enforceSnapshotIDReferences(
 		original := result[index].Handler
 		toolName := result[index].Name
 		result[index].Handler = func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
-			invalidIDs := invalidSnapshotIDs(invocation.Arguments)
+			currentAccess, accessErr := access()
+			if accessErr != nil {
+				return rejectedArtifactReferenceResult(toolName, terminalToolName, terminal, "artifact_read_failed", accessErr.Error())
+			}
+			invalidIDs := invalidArtifactIDs(invocation.Arguments)
 			if len(invalidIDs) > 0 {
-				return rejectedSnapshotReferenceResult(toolName, terminalToolName, terminal,
-					"invalid_snapshot_id",
-					"snapshot_id must use a registered snapshot- ID, not a filesystem path: "+
+				return rejectedArtifactReferenceResult(toolName, terminalToolName, terminal,
+					"invalid_artifact_id",
+					"artifact_id must use a registered artifact- ID, not a filesystem path: "+
 						strings.Join(invalidIDs, ", "),
 				)
 			}
-			foreignPaths := foreignSnapshotPaths(invocation.Arguments, workspace)
+			foreignPaths := foreignArtifactPaths(invocation.Arguments, workspace)
 			if len(foreignPaths) > 0 {
-				return rejectedSnapshotReferenceResult(toolName, terminalToolName, terminal,
-					"snapshot_path_not_allowed",
-					"use snapshot_id for cross-block evidence references; paths are outside this research task workspace: "+
+				return rejectedArtifactReferenceResult(toolName, terminalToolName, terminal,
+					"artifact_path_not_allowed",
+					"use artifact_id for cross-block evidence references; paths are outside this research task workspace: "+
 						strings.Join(foreignPaths, ", "),
 				)
 			}
-			unknown := unknownSnapshotIDs(invocation.Arguments, access)
+			unknown := unknownArtifactIDs(invocation.Arguments, currentAccess)
 			if len(unknown) > 0 {
-				return rejectedSnapshotReferenceResult(toolName, terminalToolName, terminal,
-					"unknown_snapshot_id",
-					"snapshot IDs are not authorized for this research task: "+strings.Join(unknown, ", "),
+				return rejectedArtifactReferenceResult(toolName, terminalToolName, terminal,
+					"unknown_artifact_id",
+					"artifact IDs are not authorized for this research task: "+strings.Join(unknown, ", "),
 				)
 			}
-			invalidQuotes, validationErr := invalidSnapshotQuotes(invocation.Arguments, access)
+			invalidQuotes, validationErr := invalidArtifactQuotes(invocation.Arguments, currentAccess)
 			if validationErr != nil {
-				return rejectedSnapshotReferenceResult(toolName, terminalToolName, terminal, "snapshot_read_failed", validationErr.Error())
+				return rejectedArtifactReferenceResult(toolName, terminalToolName, terminal, "artifact_read_failed", validationErr.Error())
 			}
 			if len(invalidQuotes) > 0 {
-				return rejectedSnapshotReferenceResult(toolName, terminalToolName, terminal,
-					"snapshot_quote_not_found",
-					"exact_quote is not present in its referenced snapshot_id after whitespace normalization: "+
+				return rejectedArtifactReferenceResult(toolName, terminalToolName, terminal,
+					"artifact_quote_not_found",
+					"exact_quote is not present in its referenced artifact_id after whitespace normalization: "+
 						strings.Join(invalidQuotes, ", "),
 				)
 			}
-			invalidSources, validationErr := invalidSnapshotSources(invocation.Arguments, access)
+			invalidSources, validationErr := invalidArtifactSources(invocation.Arguments, currentAccess)
 			if validationErr != nil {
-				return rejectedSnapshotReferenceResult(toolName, terminalToolName, terminal, "snapshot_read_failed", validationErr.Error())
+				return rejectedArtifactReferenceResult(toolName, terminalToolName, terminal, "artifact_read_failed", validationErr.Error())
 			}
 			if len(invalidSources) > 0 {
-				return rejectedSnapshotReferenceResult(toolName, terminalToolName, terminal,
-					"snapshot_source_mismatch",
-					"source must match the Source header recorded in its referenced snapshot_id: "+
+				return rejectedArtifactReferenceResult(toolName, terminalToolName, terminal,
+					"artifact_source_mismatch",
+					"source must match the Source header recorded in its referenced artifact_id: "+
 						strings.Join(invalidSources, ", "),
 				)
 			}
@@ -1025,7 +1093,21 @@ func enforceSnapshotIDReferences(
 	return result
 }
 
-func rejectedSnapshotReferenceResult(
+// bindResearchToolUses applies fixed HCL fields before checking artifact
+// references, so model-supplied values cannot affect bound fields.
+func bindResearchToolUses(
+	tools []sdk.Tool,
+	toolUses []researchspec.ToolUse,
+	access func() (*evidence.ArtifactEvidenceAccess, error),
+	artifactsRegistry *artifactpkg.Registry,
+	workspace, terminalToolName string,
+	terminal *researchruntime.TerminalRecorder,
+) ([]sdk.Tool, error) {
+	guarded := enforceArtifactIDReferences(tools, access, workspace, terminalToolName, terminal)
+	return applyToolUseBindings(guarded, toolUses, artifactsRegistry)
+}
+
+func rejectedArtifactReferenceResult(
 	toolName, terminalToolName string,
 	terminal *researchruntime.TerminalRecorder,
 	code, message string,
@@ -1039,17 +1121,17 @@ func rejectedSnapshotReferenceResult(
 	return responseToolResult(response)
 }
 
-type snapshotSourceReference struct {
+type artifactSourceReference struct {
 	id     string
 	source string
 }
 
-func invalidSnapshotSources(arguments any, access *evidence.SnapshotAccess) ([]string, error) {
-	references := make([]snapshotSourceReference, 0)
-	collectSnapshotSources(arguments, &references)
+func invalidArtifactSources(arguments any, access *evidence.ArtifactEvidenceAccess) ([]string, error) {
+	references := make([]artifactSourceReference, 0)
+	collectArtifactSources(arguments, &references)
 	invalid := make([]string, 0)
 	for _, reference := range references {
-		expected, err := access.SnapshotSource(reference.id)
+		expected, err := access.Source(reference.id)
 		if err != nil {
 			return nil, err
 		}
@@ -1060,41 +1142,32 @@ func invalidSnapshotSources(arguments any, access *evidence.SnapshotAccess) ([]s
 	return invalid, nil
 }
 
-func collectSnapshotSources(value any, result *[]snapshotSourceReference) {
+func collectArtifactSources(value any, result *[]artifactSourceReference) {
 	switch typed := value.(type) {
 	case map[string]any:
-		id, hasID := typed["snapshot_id"].(string)
+		id, hasID := typed["artifact_id"].(string)
 		if hasID && strings.TrimSpace(id) != "" {
 			for _, field := range []string{"source", "url", "source_url"} {
 				if source, ok := typed[field].(string); ok && strings.TrimSpace(source) != "" {
-					*result = append(*result, snapshotSourceReference{id: id, source: source})
+					*result = append(*result, artifactSourceReference{id: id, source: source})
 				}
 			}
 		}
 		for _, nested := range typed {
-			collectSnapshotSources(nested, result)
+			collectArtifactSources(nested, result)
 		}
 	case []any:
 		for _, nested := range typed {
-			collectSnapshotSources(nested, result)
+			collectArtifactSources(nested, result)
 		}
 	}
 }
 
-func invalidSnapshotIDs(arguments any) []string {
-	seen := map[string]struct{}{}
-	collectSnapshotIDs(arguments, seen)
-	invalid := make([]string, 0, len(seen))
-	for id := range seen {
-		if !validSnapshotIDPattern.MatchString(id) {
-			invalid = append(invalid, id)
-		}
-	}
-	slices.Sort(invalid)
-	return invalid
+func invalidArtifactIDs(arguments any) []string {
+	return nil
 }
 
-type snapshotQuoteReference struct {
+type artifactQuoteReference struct {
 	id            string
 	quote         string
 	recordID      string
@@ -1102,9 +1175,9 @@ type snapshotQuoteReference struct {
 	field         string
 }
 
-func invalidSnapshotQuotes(arguments any, access *evidence.SnapshotAccess) ([]string, error) {
-	references := make([]snapshotQuoteReference, 0)
-	collectSnapshotQuotes(arguments, &references)
+func invalidArtifactQuotes(arguments any, access *evidence.ArtifactEvidenceAccess) ([]string, error) {
+	references := make([]artifactQuoteReference, 0)
+	collectArtifactQuotes(arguments, &references)
 	invalid := make([]string, 0)
 	for _, reference := range references {
 		contains, err := access.ContainsNormalizedText(reference.id, reference.quote)
@@ -1113,13 +1186,13 @@ func invalidSnapshotQuotes(arguments any, access *evidence.SnapshotAccess) ([]st
 		}
 		if !contains {
 			detail := fmt.Sprintf(
-				"%s=%s snapshot_id=%s field=%s",
+				"%s=%s artifact_id=%s field=%s",
 				reference.recordIDLabel,
 				reference.recordID,
 				reference.id,
 				reference.field,
 			)
-			if nearby := nearbySnapshotText(access, reference); nearby != "" {
+			if nearby := nearbyArtifactText(access, reference); nearby != "" {
 				detail += fmt.Sprintf(" nearby_text=%q", nearby)
 			}
 			invalid = append(invalid, detail)
@@ -1128,14 +1201,14 @@ func invalidSnapshotQuotes(arguments any, access *evidence.SnapshotAccess) ([]st
 	return invalid, nil
 }
 
-func collectSnapshotQuotes(value any, result *[]snapshotQuoteReference) {
-	collectSnapshotQuotesAt(value, "", "record_id", result)
+func collectArtifactQuotes(value any, result *[]artifactQuoteReference) {
+	collectArtifactQuotesAt(value, "", "record_id", result)
 }
 
-func collectSnapshotQuotesAt(value any, path, recordIDLabel string, result *[]snapshotQuoteReference) {
+func collectArtifactQuotesAt(value any, path, recordIDLabel string, result *[]artifactQuoteReference) {
 	switch typed := value.(type) {
 	case map[string]any:
-		id, hasID := typed["snapshot_id"].(string)
+		id, hasID := typed["artifact_id"].(string)
 		quote, hasQuote := typed["exact_quote"].(string)
 		if hasID && hasQuote && strings.TrimSpace(id) != "" && strings.TrimSpace(quote) != "" {
 			recordID, _ := typed["id"].(string)
@@ -1143,7 +1216,7 @@ func collectSnapshotQuotesAt(value any, path, recordIDLabel string, result *[]sn
 			if path != "" {
 				field = path + ".exact_quote"
 			}
-			*result = append(*result, snapshotQuoteReference{
+			*result = append(*result, artifactQuoteReference{
 				id: id, quote: quote, recordID: recordID, recordIDLabel: recordIDLabel, field: field,
 			})
 		}
@@ -1155,11 +1228,11 @@ func collectSnapshotQuotesAt(value any, path, recordIDLabel string, result *[]sn
 			case "quotes":
 				label = "quote_id"
 			}
-			collectSnapshotQuotesAt(nested, appendJSONPath(path, key), label, result)
+			collectArtifactQuotesAt(nested, appendJSONPath(path, key), label, result)
 		}
 	case []any:
 		for index, nested := range typed {
-			collectSnapshotQuotesAt(nested, fmt.Sprintf("%s[%d]", path, index), recordIDLabel, result)
+			collectArtifactQuotesAt(nested, fmt.Sprintf("%s[%d]", path, index), recordIDLabel, result)
 		}
 	}
 }
@@ -1171,15 +1244,15 @@ func appendJSONPath(path, field string) string {
 	return path + "." + field
 }
 
-func nearbySnapshotText(access *evidence.SnapshotAccess, reference snapshotQuoteReference) string {
+func nearbyArtifactText(access *evidence.ArtifactEvidenceAccess, reference artifactQuoteReference) string {
 	words := strings.Fields(reference.quote)
 	patterns := make([]string, 0, min(32, len(words)))
 	for start := 0; start+3 <= len(words) && len(patterns) < 32; start++ {
 		patterns = append(patterns, regexp.QuoteMeta(strings.Join(words[start:start+3], " ")))
 	}
-	result := evidence.SnapshotSearchResult{}
+	result := evidence.ArtifactSearchResult{}
 	if len(patterns) > 0 {
-		result, _ = access.SearchSnapshot(reference.id, strings.Join(patterns, "|"), false, 1, 1)
+		result, _ = access.Search(reference.id, strings.Join(patterns, "|"), false, 1, 1)
 	}
 	if len(result.Matches) == 0 {
 		patterns = patterns[:0]
@@ -1196,7 +1269,7 @@ func nearbySnapshotText(access *evidence.SnapshotAccess, reference snapshotQuote
 			}
 		}
 		if len(patterns) > 0 {
-			result, _ = access.SearchSnapshot(reference.id, strings.Join(patterns, "|"), false, 1, 1)
+			result, _ = access.Search(reference.id, strings.Join(patterns, "|"), false, 1, 1)
 		}
 	}
 	if len(result.Matches) == 0 {
@@ -1221,12 +1294,13 @@ func boundedNearbyText(text, matched string, maxRunes int) string {
 	return string(runes[start : start+maxRunes])
 }
 
-func unknownSnapshotIDs(arguments any, access *evidence.SnapshotAccess) []string {
+func unknownArtifactIDs(arguments any, access *evidence.ArtifactEvidenceAccess) []string {
 	seen := map[string]struct{}{}
-	collectSnapshotIDs(arguments, seen)
+	collectArtifactIDs(arguments, seen)
+	delete(seen, outputArtifactID(arguments))
 	unknown := make([]string, 0, len(seen))
 	for id := range seen {
-		if !access.HasSnapshot(id) {
+		if !access.HasArtifact(id) {
 			unknown = append(unknown, id)
 		}
 	}
@@ -1234,16 +1308,125 @@ func unknownSnapshotIDs(arguments any, access *evidence.SnapshotAccess) []string
 	return unknown
 }
 
-func collectSnapshotIDs(value any, result map[string]struct{}) {
+func outputArtifactID(arguments any) string {
+	values, ok := arguments.(map[string]any)
+	if !ok {
+		return ""
+	}
+	_, hasInternalTarget := values["_r42_artifact_path"]
+	id, hasArtifactID := values["artifact_id"].(string)
+	if !hasInternalTarget || !hasArtifactID {
+		return ""
+	}
+	return strings.TrimSpace(id)
+}
+
+// materializeArtifactTargetPath preserves the output-target helper used by
+// callers and tests. All private artifact path bindings are resolved below.
+func materializeArtifactTargetPath(arguments map[string]any, registry *artifactpkg.Registry) error {
+	return materializeArtifactPaths(arguments, registry)
+}
+
+// materializeArtifactPaths resolves fixed artifact IDs into their private path
+// fields immediately before a typed tool runs. Filesystem paths are a runtime
+// detail and are never supplied by the model.
+func materializeArtifactPaths(arguments map[string]any, registry *artifactpkg.Registry) error {
+	fields := make([]string, 0)
+	for field := range arguments {
+		if artifactPathIDField(field) != "" {
+			fields = append(fields, field)
+		}
+	}
+	slices.Sort(fields)
+	for _, pathField := range fields {
+		idField := artifactPathIDField(pathField)
+		if registry == nil {
+			return errors.New("artifact registry is required")
+		}
+		if strings.HasSuffix(pathField, "_paths") {
+			paths, err := materializeArtifactPathList(arguments[idField], registry)
+			if err != nil {
+				return fmt.Errorf("%s: %w", idField, err)
+			}
+			arguments[pathField] = paths
+			continue
+		}
+		id, ok := arguments[idField].(string)
+		if !ok || strings.TrimSpace(id) == "" {
+			return fmt.Errorf("%s is required", idField)
+		}
+		record, err := registry.Record(id)
+		if err != nil {
+			return err
+		}
+		if record.Type != researchspec.ArtifactTypeFile {
+			return fmt.Errorf("%s %q must name a file artifact", idField, id)
+		}
+		if pathField == "_r42_artifact_path" && record.Purpose != artifactpkg.PurposeOutput {
+			return fmt.Errorf("artifact_id %q must name a declared file output artifact", id)
+		}
+		arguments[pathField] = record.Path
+	}
+	return nil
+}
+
+func artifactPathIDField(pathField string) string {
+	if !strings.HasPrefix(pathField, "_r42_") {
+		return ""
+	}
+	name := strings.TrimPrefix(pathField, "_r42_")
+	if name == "artifact_path" {
+		return "artifact_id"
+	}
+	if prefix, ok := strings.CutSuffix(name, "_paths"); ok {
+		return prefix + "_artifact_ids"
+	}
+	if prefix, ok := strings.CutSuffix(name, "_path"); ok {
+		return prefix + "_artifact_id"
+	}
+	return ""
+}
+
+func materializeArtifactPathList(value any, registry *artifactpkg.Registry) ([]any, error) {
+	ids, ok := value.([]any)
+	if !ok {
+		if strings, stringsOK := value.([]string); stringsOK {
+			ids = make([]any, len(strings))
+			for index, id := range strings {
+				ids[index] = id
+			}
+		} else {
+			return nil, errors.New("must be a list of artifact IDs")
+		}
+	}
+	paths := make([]any, 0, len(ids))
+	for index, value := range ids {
+		id, ok := value.(string)
+		if !ok || strings.TrimSpace(id) == "" {
+			return nil, fmt.Errorf("item %d must be an artifact ID", index)
+		}
+		record, err := registry.Record(id)
+		if err != nil {
+			return nil, err
+		}
+		if record.Type != researchspec.ArtifactTypeFile {
+			return nil, fmt.Errorf("artifact ID %q must name a file artifact", id)
+		}
+		paths = append(paths, record.Path)
+	}
+	return paths, nil
+}
+
+func collectArtifactIDs(value any, result map[string]struct{}) {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, nested := range typed {
 			switch key {
-			case "snapshot_id":
+			case "artifact_id":
 				if id, ok := nested.(string); ok && strings.TrimSpace(id) != "" {
 					result[id] = struct{}{}
 				}
-			case "snapshot_ids":
+			case "artifact_ids":
 				switch ids := nested.(type) {
 				case []any:
 					for _, item := range ids {
@@ -1259,19 +1442,19 @@ func collectSnapshotIDs(value any, result map[string]struct{}) {
 					}
 				}
 			default:
-				collectSnapshotIDs(nested, result)
+				collectArtifactIDs(nested, result)
 			}
 		}
 	case []any:
 		for _, nested := range typed {
-			collectSnapshotIDs(nested, result)
+			collectArtifactIDs(nested, result)
 		}
 	}
 }
 
-func foreignSnapshotPaths(value any, workspace string) []string {
+func foreignArtifactPaths(value any, workspace string) []string {
 	paths := make([]string, 0)
-	collectSnapshotPaths(value, &paths)
+	collectArtifactPaths(value, &paths)
 	foreign := make([]string, 0, len(paths))
 	for _, path := range paths {
 		if !pathWithinWorkspace(workspace, path) {
@@ -1281,21 +1464,21 @@ func foreignSnapshotPaths(value any, workspace string) []string {
 	return foreign
 }
 
-func collectSnapshotPaths(value any, result *[]string) {
+func collectArtifactPaths(value any, result *[]string) {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, nested := range typed {
-			if key == "snapshot_path" {
+			if key == "artifact_path" {
 				if path, ok := nested.(string); ok && strings.TrimSpace(path) != "" {
 					*result = append(*result, path)
 				}
 				continue
 			}
-			collectSnapshotPaths(nested, result)
+			collectArtifactPaths(nested, result)
 		}
 	case []any:
 		for _, nested := range typed {
-			collectSnapshotPaths(nested, result)
+			collectArtifactPaths(nested, result)
 		}
 	}
 }
@@ -1313,21 +1496,8 @@ func pathWithinWorkspace(workspace, path string) bool {
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-type boundedReadArgs struct {
-	ID          string `json:"id"`
-	OffsetBytes int    `json:"offset_bytes"`
-	MaxBytes    int    `json:"max_bytes"`
-}
-type snapshotReadOutput struct {
-	Content         string `json:"content"`
-	Source          string `json:"source"`
-	OffsetBytes     int    `json:"offset_bytes"`
-	NextOffsetBytes int    `json:"next_offset_bytes"`
-	TotalBytes      int    `json:"total_bytes"`
-	Truncated       bool   `json:"truncated"`
-}
-type snapshotSearchArgs struct {
-	SnapshotID    string `json:"snapshot_id"`
+type artifactSearchArgs struct {
+	ArtifactID    string `json:"artifact_id"`
 	Pattern       string `json:"pattern"`
 	CaseSensitive bool   `json:"case_sensitive"`
 	MaxMatches    int    `json:"max_matches"`
@@ -1346,8 +1516,8 @@ type artifactJSONQueryArgs struct {
 	Query string `json:"query"`
 }
 type markdownWriteArgs struct {
-	Name    string `json:"name"`
-	Content string `json:"content"`
+	ArtifactID string `json:"artifact_id"`
+	Content    string `json:"content"`
 }
 
 const maxJSONArtifactBytes = 4 * 1024 * 1024

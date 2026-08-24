@@ -290,36 +290,36 @@ func TestCheckpointPending(t *testing.T) {
 		state := New(Config{MaxCollectionRounds: nil})
 		require.NoError(t, state.Begin())
 		for range 10 {
-			require.NoError(t, state.RegisterSnapshot())
+			require.NoError(t, state.RegisterEvidenceArtifact())
 		}
 		require.True(t, state.CheckpointPending())
 		require.ErrorContains(t, state.AcquireGate(), "checkpoint pending")
 	})
 
-	t.Run("checkpoint clears pending and snapshot count", func(t *testing.T) {
+	t.Run("checkpoint clears pending and evidence artifact count", func(t *testing.T) {
 		t.Parallel()
 
 		state := New(Config{MaxCollectionRounds: nil})
 		require.NoError(t, state.Begin())
 		for range 10 {
-			require.NoError(t, state.RegisterSnapshot())
+			require.NoError(t, state.RegisterEvidenceArtifact())
 		}
 		require.NoError(t, state.Checkpoint())
 		require.False(t, state.CheckpointPending())
 	})
 
-	t.Run("needs more resets snapshot count", func(t *testing.T) {
+	t.Run("needs more resets evidence artifact count", func(t *testing.T) {
 		t.Parallel()
 
 		state := New(Config{MaxCollectionRounds: nil})
 		require.NoError(t, state.Begin())
 		for range 3 {
-			require.NoError(t, state.RegisterSnapshot())
+			require.NoError(t, state.RegisterEvidenceArtifact())
 		}
 		require.NoError(t, state.Checkpoint())
 		require.NoError(t, state.Advance(EventCollectionCheckpoint))
 		require.NoError(t, state.Advance(EventNeedsMore))
-		require.Equal(t, 0, state.UnreviewedSnapshotCount())
+		require.Equal(t, 0, state.UnreviewedEvidenceArtifactCount())
 	})
 
 	t.Run("early checkpoint allowed below batch", func(t *testing.T) {
@@ -328,7 +328,7 @@ func TestCheckpointPending(t *testing.T) {
 		state := New(Config{MaxCollectionRounds: nil})
 		require.NoError(t, state.Begin())
 		for range 2 {
-			require.NoError(t, state.RegisterSnapshot())
+			require.NoError(t, state.RegisterEvidenceArtifact())
 		}
 		require.False(t, state.CheckpointPending())
 		require.NoError(t, state.Checkpoint())
@@ -341,29 +341,29 @@ func TestCheckpointPending(t *testing.T) {
 		require.NoError(t, state.Begin())
 		require.False(t, state.CheckpointPending())
 		for range 9 {
-			require.NoError(t, state.RegisterSnapshot())
+			require.NoError(t, state.RegisterEvidenceArtifact())
 		}
 		require.False(t, state.CheckpointPending())
-		require.NoError(t, state.RegisterSnapshot())
+		require.NoError(t, state.RegisterEvidenceArtifact())
 		require.True(t, state.CheckpointPending())
 	})
 }
 
-func TestSnapshotCountAndCursor(t *testing.T) {
+func TestEvidenceArtifactCountAndCursor(t *testing.T) {
 	t.Parallel()
 
 	state := New(Config{MaxCollectionRounds: nil, BatchSize: 2})
 	require.NoError(t, state.Begin())
-	require.NoError(t, state.RegisterSnapshot())
-	require.NoError(t, state.RegisterSnapshot())
-	require.Equal(t, 2, state.UnreviewedSnapshotCount())
+	require.NoError(t, state.RegisterEvidenceArtifact())
+	require.NoError(t, state.RegisterEvidenceArtifact())
+	require.Equal(t, 2, state.UnreviewedEvidenceArtifactCount())
 	require.NoError(t, state.Checkpoint())
 	require.Equal(t, 0, state.Cursor())
 	require.NoError(t, state.Advance(EventCollectionCheckpoint))
 	require.NoError(t, state.Advance(EventNeedsMore))
 	require.Equal(t, 1, state.Cursor())
-	require.NoError(t, state.RegisterSnapshot())
-	require.Equal(t, 1, state.UnreviewedSnapshotCount())
+	require.NoError(t, state.RegisterEvidenceArtifact())
+	require.Equal(t, 1, state.UnreviewedEvidenceArtifactCount())
 	require.NoError(t, state.Checkpoint())
 	require.NoError(t, state.Advance(EventCollectionCheckpoint))
 	require.NoError(t, state.Advance(EventSufficient))
@@ -386,14 +386,14 @@ func TestAcquireGateOnlyRejectsNewAcquisition(t *testing.T) {
 	state := New(Config{MaxCollectionRounds: nil})
 	require.NoError(t, state.Begin())
 	require.NoError(t, state.AcquireGate())
-	require.NoError(t, state.RegisterSnapshot())
-	require.NoError(t, state.RegisterSnapshot())
+	require.NoError(t, state.RegisterEvidenceArtifact())
+	require.NoError(t, state.RegisterEvidenceArtifact())
 	for range 8 {
-		require.NoError(t, state.RegisterSnapshot())
+		require.NoError(t, state.RegisterEvidenceArtifact())
 	}
 	require.True(t, state.CheckpointPending())
 	require.ErrorContains(t, state.AcquireGate(), "checkpoint pending")
-	require.NoError(t, state.RegisterSnapshot())
+	require.NoError(t, state.RegisterEvidenceArtifact())
 	require.NoError(t, state.Checkpoint())
 }
 
@@ -413,7 +413,7 @@ func TestStateConcurrentRegistration(t *testing.T) {
 	var group sync.WaitGroup
 	errors := make(chan error, 100)
 	for range 100 {
-		group.Go(func() { errors <- state.RegisterSnapshot() })
+		group.Go(func() { errors <- state.RegisterEvidenceArtifact() })
 	}
 	group.Wait()
 	close(errors)
@@ -421,7 +421,7 @@ func TestStateConcurrentRegistration(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	assert.Equal(t, 100, state.UnreviewedSnapshotCount())
+	assert.Equal(t, 100, state.UnreviewedEvidenceArtifactCount())
 	assert.True(t, state.CheckpointPending())
 }
 

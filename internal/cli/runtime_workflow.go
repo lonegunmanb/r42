@@ -3,24 +3,22 @@ package cli
 import (
 	"context"
 	"fmt"
-	"maps"
-	"regexp"
 	"slices"
 	"strings"
-	"sync"
 
 	"github.com/lonegunmanb/golden"
+	artifactpkg "github.com/lonegunmanb/r42/internal/artifact"
 	"github.com/lonegunmanb/r42/internal/collection"
 	"github.com/lonegunmanb/r42/internal/collectionqc"
 	"github.com/lonegunmanb/r42/internal/coordinator"
 	"github.com/lonegunmanb/r42/internal/copilot"
 	"github.com/lonegunmanb/r42/internal/debuglog"
+	"github.com/lonegunmanb/r42/internal/evidence"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/provider"
 	"github.com/lonegunmanb/r42/internal/qc"
 	researchruntime "github.com/lonegunmanb/r42/internal/research/runtime"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
-	"github.com/lonegunmanb/r42/internal/snapshot"
 	"github.com/lonegunmanb/r42/internal/workflow"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -31,77 +29,11 @@ const (
 	finalQCVerdictToolName       = "r42_qc_verdict"
 )
 
-const researchSnapshotProtocol = "Evidence protocol: snapshots cross research-block boundaries only by snapshot_id. " +
-	"Use r42_read_snapshot with an authorized snapshot_id to inspect source material, and r42_search_snapshot to locate exact evidence text. " +
-	"Do not use snapshot paths as cross-block evidence references and do not read or copy snapshot files through the filesystem. " +
-	"Every citation carried into a downstream knowledge result must retain its snapshot_id."
-
-var snapshotIDPattern = regexp.MustCompile(`snapshot-(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
-
-type runSnapshotCatalog struct {
-	mu    sync.RWMutex
-	paths map[string]string
-}
-
-func newRunSnapshotCatalog() *runSnapshotCatalog {
-	return &runSnapshotCatalog{paths: map[string]string{}}
-}
-
-func (c *runSnapshotCatalog) add(snapshots []snapshot.Snapshot) {
-	if c == nil {
-		return
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, item := range snapshots {
-		if item.Reviewed {
-			c.paths[item.ID] = item.Path
-		}
-	}
-}
-
-func (c *runSnapshotCatalog) authorized(text ...string) map[string]string {
-	result := map[string]string{}
-	if c == nil {
-		return result
-	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	for _, value := range text {
-		for _, id := range snapshotIDPattern.FindAllString(value, -1) {
-			if path, ok := c.paths[id]; ok {
-				result[id] = path
-			}
-		}
-	}
-	return result
-}
-
-func (c *runSnapshotCatalog) authorizedToolUseSnapshots(uses []researchspec.ToolUse) map[string]string {
-	ids := make([]string, 0)
-	for _, use := range uses {
-		fields, err := toolUseObjectMap(use.InputFromAgent)
-		if err != nil {
-			continue
-		}
-		for _, field := range fields {
-			unmarked, _ := field.UnmarkDeep()
-			if !unmarked.Type().IsObjectType() || !unmarked.Type().HasAttribute("sources") || !unmarked.GetAttr("sources").IsKnown() {
-				continue
-			}
-			for _, source := range unmarked.GetAttr("sources").AsValueSlice() {
-				if !source.Type().IsObjectType() || !source.Type().HasAttribute("id") || !source.Type().HasAttribute("kind") {
-					continue
-				}
-				id, kind := source.GetAttr("id"), source.GetAttr("kind")
-				if id.IsKnown() && !id.IsNull() && kind.IsKnown() && !kind.IsNull() && kind.AsString() == "snapshot" {
-					ids = append(ids, id.AsString())
-				}
-			}
-		}
-	}
-	return c.authorized(strings.Join(ids, "\n"))
-}
+const researchArtifactProtocol = "Evidence protocol: evidence crosses research-block boundaries only by artifact_id. " +
+	"Use r42_read_artifact with an authorized artifact_id to inspect source material, r42_search_artifact to locate exact evidence text, " +
+	"and r42_search_artifacts to find text across all authorized artifacts. " +
+	"Do not use artifact paths as cross-block evidence references and do not read or copy artifact files through the filesystem. " +
+	"Every citation carried into a downstream knowledge result must retain its artifact_id."
 
 func toolUseArtifactIDs(uses []researchspec.ToolUse) []string {
 	ids := make([]string, 0)
@@ -124,8 +56,7 @@ func toolUseArtifactIDs(uses []researchspec.ToolUse) []string {
 				if !id.IsKnown() || id.IsNull() || !kind.IsKnown() || kind.IsNull() {
 					continue
 				}
-				artifactType := source.GetAttr("type")
-				if kind.AsString() != "artifact" && (!artifactType.IsKnown() || artifactType.IsNull() || artifactType.AsString() != "directory") {
+				if kind.AsString() != "artifact" {
 					continue
 				}
 				if _, exists := seen[id.AsString()]; exists {
@@ -139,9 +70,48 @@ func toolUseArtifactIDs(uses []researchspec.ToolUse) []string {
 	return ids
 }
 
+func importedArtifactIDs(imports []researchspec.ImportArtifact) ([]string, error) {
+	result := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, imported := range imports {
+		sources, _ := imported.Sources.UnmarkDeep()
+		if !sources.IsKnown() || sources.IsNull() || (!sources.Type().IsListType() && !sources.Type().IsTupleType()) {
+			return nil, fmt.Errorf("import_artifact %q sources are not available at apply", imported.Name)
+		}
+		for _, source := range sources.AsValueSlice() {
+			if !source.Type().IsObjectType() || !source.Type().HasAttribute("id") || !source.Type().HasAttribute("kind") {
+				return nil, fmt.Errorf("import_artifact %q source is invalid", imported.Name)
+			}
+			id, kind := source.GetAttr("id"), source.GetAttr("kind")
+			if !id.IsKnown() || id.IsNull() || !id.Type().Equals(cty.String) || strings.TrimSpace(id.AsString()) == "" ||
+				!kind.IsKnown() || kind.IsNull() || !kind.Type().Equals(cty.String) || kind.AsString() != "artifact" {
+				return nil, fmt.Errorf("import_artifact %q source must resolve to an artifact ID", imported.Name)
+			}
+			if _, exists := seen[id.AsString()]; !exists {
+				seen[id.AsString()] = struct{}{}
+				result = append(result, id.AsString())
+			}
+		}
+	}
+	return result, nil
+}
+
+func validateToolUseArtifactAccess(uses []researchspec.ToolUse, authorized []string) error {
+	allowed := make(map[string]struct{}, len(authorized))
+	for _, id := range authorized {
+		allowed[id] = struct{}{}
+	}
+	for _, id := range toolUseArtifactIDs(uses) {
+		if _, exists := allowed[id]; !exists {
+			return fmt.Errorf("input_from_agent source artifact %q is not declared by artifact or import_artifact", id)
+		}
+	}
+	return nil
+}
+
 func materializeSelfToolUseSources(
 	uses []researchspec.ToolUse,
-	artifactIDs, snapshotIDs map[string]string,
+	artifactIDs, _ map[string]string,
 ) []researchspec.ToolUse {
 	result := slices.Clone(uses)
 	for useIndex := range result {
@@ -172,11 +142,8 @@ func materializeSelfToolUseSources(
 					continue
 				}
 				replacement := ""
-				switch parts[1] {
-				case "artifact":
+				if parts[1] == "artifact" {
 					replacement = artifactIDs[parts[2]]
-				case "snapshot":
-					replacement = snapshotIDs[parts[2]]
 				}
 				if replacement == "" {
 					continue
@@ -201,14 +168,14 @@ func materializeSelfToolUseSources(
 func closedResearchSystemPrompt(configured string) string {
 	return "You are the closed Research synthesis phase. Read registered evidence only through r42 typed tools. " +
 		"Do not acquire new evidence or use network, shell, generic file, edit, task, or user-input tools.\n\n" +
-		researchSnapshotProtocol + "\n\n" + configured
+		researchArtifactProtocol + "\n\n" + configured
 }
 
 func researchEvidencePrompt(configured string, ids []string) string {
 	if len(ids) == 0 {
 		return configured
 	}
-	return configured + "\n\nAuthorized evidence snapshot IDs for this Research phase:\n- " + strings.Join(ids, "\n- ")
+	return configured + "\n\nAuthorized evidence artifact IDs for this Research phase:\n- " + strings.Join(ids, "\n- ")
 }
 
 func (f *runtimeFactory) newResearchBlock(
@@ -244,23 +211,18 @@ func (f *runtimeFactory) newResearchBlock(
 	collectionContext := collection.NewContextWithArtifactRegistry(
 		workspace, planned.Config.CollectionBatchSize, planned.Config.MaxCollectionRounds, artifactsRegistry,
 	)
-	snapshotIDs := make(map[string]string, len(planned.Config.Snapshots))
-	for _, declared := range planned.Config.Snapshots {
-		reserved, reserveErr := collectionContext.Registry.Reserve(declared.Path, declared.Description)
-		if reserveErr != nil {
-			return nil, reserveErr
-		}
-		if targetErr := collectionContext.AddSnapshotTarget(declared.Path, declared.Type == researchspec.ArtifactTypeDirectory); targetErr != nil {
-			return nil, targetErr
-		}
-		if _, declareErr := artifactsRegistry.DeclareSnapshot(workspace, reserved.ID, declared); declareErr != nil {
-			return nil, declareErr
-		}
-		snapshotIDs[declared.Name] = reserved.ID
+	if targetErr := addCollectionArtifactTargets(collectionContext, artifactsRegistry, planned.Config.Artifacts, artifactIDs); targetErr != nil {
+		return nil, targetErr
 	}
-	planned.Config.ToolUses = materializeSelfToolUseSources(planned.Config.ToolUses, artifactIDs, snapshotIDs)
-	authorizedArtifactIDs := slices.Clone(currentArtifactIDs)
-	authorizedArtifactIDs = append(authorizedArtifactIDs, toolUseArtifactIDs(planned.Config.ToolUses)...)
+	planned.Config.ToolUses = materializeSelfToolUseSources(planned.Config.ToolUses, artifactIDs, nil)
+	importedArtifactIDs, importErr := importedArtifactIDs(planned.Config.Imports)
+	if importErr != nil {
+		return nil, importErr
+	}
+	researchArtifactIDs := append(slices.Clone(currentArtifactIDs), importedArtifactIDs...)
+	if accessErr := validateToolUseArtifactAccess(planned.Config.ToolUses, researchArtifactIDs); accessErr != nil {
+		return nil, accessErr
+	}
 	var err error
 	researchPhaseRetry, err := researchRetry(planned.Provider, planned.Config.Retry)
 	if err != nil {
@@ -292,10 +254,17 @@ func (f *runtimeFactory) newResearchBlock(
 		return nil, err
 	}
 	collectionTools = wrapCollectionAcquisitionTools(collectionTools, collectionContext)
+	collectionArtifactTools, err := evidenceToolsWithArtifactRegistry(
+		workspace, planned.Config.Artifacts, true, artifactsRegistry, currentArtifactIDs, collectionContext.EvidenceArtifactIDs,
+	)
+	if err != nil {
+		return cleanupSetup(err)
+	}
+	collectionTools = append(collectionTools, collectionArtifactTools...)
 	checkpoints := collection.NewCheckpointRecorder()
 	collectionTools = append(collectionTools, collectionProtocolTools(collectionContext, checkpoints)...)
 	collectionPrompt := appendBuiltInToolCallQuotaPrompt(
-		"You are the Collection phase. Acquire evidence and preserve complete source material. When source content is not already available as a workspace file or retained source-tool result, call r42_save_snapshot with a non-empty source identifier; it saves and registers the snapshot, so use its returned snapshot_id directly and do not call r42_register_snapshot afterward. Use r42_register_snapshot only for an existing workspace snapshot file or retained source-tool result; supply its optional source when that content has no Source or legacy URL header. Call r42_collection_checkpoint before ending the round. If no more evidence can be acquired, submit an empty checkpoint with empty_reason and collection_exhausted=true.\n\n"+planned.Config.SystemPrompt,
+		"You are the Collection phase. Acquire evidence and preserve complete source material. When source content is not already available as a workspace file or retained source-tool result, call r42_save_artifact with a non-empty source identifier; it saves and registers the evidence artifact, so use its returned artifact_id directly and do not call r42_register_artifact afterward. Use r42_register_artifact only for an existing workspace evidence file or retained source-tool result; supply its optional source when that content has no Source or legacy URL header. Call r42_collection_checkpoint before ending the round. If no more evidence can be acquired, submit an empty checkpoint with empty_reason and collection_exhausted=true.\n\n"+planned.Config.SystemPrompt,
 		collectionBuiltInQuota,
 	)
 	collectionSession, err := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionCollection, copilot.SessionConfig{
@@ -325,8 +294,7 @@ func (f *runtimeFactory) newResearchBlock(
 		return cleanupSetup(err)
 	}
 	collectionQCReadTools, err := evidenceToolsWithArtifactRegistry(
-		collectionContext.Registry, workspace, planned.Config.Artifacts, false,
-		artifactsRegistry, authorizedArtifactIDs,
+		workspace, planned.Config.Artifacts, false, artifactsRegistry, currentArtifactIDs, collectionContext.EvidenceArtifactIDs,
 	)
 	if err != nil {
 		return cleanupSetup(err)
@@ -337,7 +305,7 @@ func (f *runtimeFactory) newResearchBlock(
 		Provider: collectionQCProvider,
 		Retry:    effectiveCollectionQC.Retry, Model: effectiveCollectionQC.Model,
 		Profile: effectiveCollectionQC.Profile, ReasoningEffort: pointerValue(effectiveCollectionQC.ReasoningEffort),
-		SystemPrompt:     "You are Collection QC. Semantically assess whether registered snapshots are sufficient. Use only r42 read tools and submit a typed verdict.",
+		SystemPrompt:     "You are Collection QC. Semantically assess whether registered evidence artifacts are sufficient. Use only r42 read tools and submit a typed verdict.",
 		WorkingDirectory: workspace, Tools: collectionQCReadTools,
 		ExcludedTools: closedWorldDisallowedTools(nil),
 	})
@@ -347,7 +315,7 @@ func (f *runtimeFactory) newResearchBlock(
 	opened = append(opened, collectionQCSession)
 	collectionQCRunner := collectionqc.NewRunner(collectionQCSession, collectionVerdicts, collectionContext)
 
-	// Research is closed-world synthesis over registered snapshots.
+	// Research is closed-world synthesis over registered evidence artifacts.
 	researchTypedQuota, researchBuiltInQuota := splitToolCallQuota(planned.Config.Policy.ToolCallQuota)
 	terminal := researchruntime.NewTerminalRecorder()
 	researchTools, terminalType, err := f.buildTools(ctx, executionAddress, debuglog.SessionResearch, workspace,
@@ -355,24 +323,8 @@ func (f *runtimeFactory) newResearchBlock(
 	if err != nil {
 		return cleanupSetup(err)
 	}
-	researchTools, err = applyToolUseBindings(researchTools, planned.Config.ToolUses)
-	if err != nil {
-		return cleanupSetup(err)
-	}
-	upstreamText := planned.Config.SystemPrompt
-	if planned.Config.Prompt != nil {
-		upstreamText += "\n" + *planned.Config.Prompt
-	}
-	upstream := f.snapshotCatalog.authorized(upstreamText)
-	maps.Copy(upstream, f.snapshotCatalog.authorizedToolUseSnapshots(planned.Config.ToolUses))
-	readWriteTools, snapshotAccess, err := evidenceToolsWithUpstreamAndArtifacts(
-		collectionContext.Registry,
-		upstream,
-		workspace,
-		planned.Config.Artifacts,
-		true,
-		artifactsRegistry,
-		authorizedArtifactIDs,
+	readWriteTools, err := evidenceToolsWithDynamicArtifacts(
+		workspace, planned.Config.Artifacts, true, artifactsRegistry, researchArtifactIDs, collectionContext.EvidenceArtifactIDs,
 	)
 	if err != nil {
 		return cleanupSetup(err)
@@ -381,7 +333,13 @@ func (f *runtimeFactory) newResearchBlock(
 	if planned.Config.TerminateToolID != nil {
 		terminateName = *planned.Config.TerminateToolID
 	}
-	researchTools = enforceSnapshotIDReferences(researchTools, snapshotAccess, workspace, terminateName, terminal)
+	researchTools, err = bindResearchToolUses(researchTools, planned.Config.ToolUses, func() (*evidence.ArtifactEvidenceAccess, error) {
+		ids := append(slices.Clone(researchArtifactIDs), collectionContext.EvidenceArtifactIDs()...)
+		return evidence.NewArtifactEvidenceAccess(artifactsRegistry, ids)
+	}, artifactsRegistry, workspace, terminateName, terminal)
+	if err != nil {
+		return cleanupSetup(err)
+	}
 	researchTools = append(researchTools, readWriteTools...)
 	resolved := researchspec.ResolvedTools{}
 	if planned.Config.TerminateToolID != nil {
@@ -419,11 +377,8 @@ func (f *runtimeFactory) newResearchBlock(
 	coordinatedResearch := &phasedResearch{
 		research: researchRunner,
 		session:  recordedResearchSession,
-		snapshotIDs: func() []string {
-			ids := collectionContext.Registry.ReviewedSnapshotIDs()
-			for id := range upstream {
-				ids = append(ids, id)
-			}
+		artifactIDs: func() []string {
+			ids := collectionContext.ReviewedEvidenceArtifactIDs()
 			slices.Sort(ids)
 			return ids
 		},
@@ -477,14 +432,8 @@ func (f *runtimeFactory) newResearchBlock(
 		if toolsErr != nil {
 			return cleanupSetup(toolsErr)
 		}
-		finalEvidenceTools, _, toolsErr := evidenceToolsWithUpstreamAndArtifacts(
-			collectionContext.Registry,
-			upstream,
-			workspace,
-			planned.Config.Artifacts,
-			false,
-			artifactsRegistry,
-			authorizedArtifactIDs,
+		finalEvidenceTools, toolsErr := evidenceToolsWithDynamicArtifacts(
+			workspace, planned.Config.Artifacts, false, artifactsRegistry, researchArtifactIDs, collectionContext.EvidenceArtifactIDs,
 		)
 		if toolsErr != nil {
 			return cleanupSetup(toolsErr)
@@ -497,7 +446,7 @@ func (f *runtimeFactory) newResearchBlock(
 			Retry:    effectiveFinalQC.Retry, Model: effectiveFinalQC.Model, Profile: effectiveFinalQC.Profile,
 			ReasoningEffort: pointerValue(effectiveFinalQC.ReasoningEffort),
 			SystemPrompt: appendBuiltInToolCallQuotaPrompt(
-				"You are Final QC. Review only authorized snapshots by snapshot_id and candidate artifacts, then submit pass, revise_research, or reopen_collection. "+researchSnapshotProtocol,
+				"You are Final QC. Review only authorized evidence artifacts by artifact_id and candidate artifacts, then submit pass, revise_research, or reopen_collection. "+researchArtifactProtocol,
 				finalBuiltInQuota,
 			),
 			WorkingDirectory: workspace, Tools: finalTools,
@@ -529,25 +478,38 @@ func (f *runtimeFactory) newResearchBlock(
 	block := &researchApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: address,
 		config: workflowConfig.Research, publish: publish, cancel: blockCancel, workflowSessions: opened,
-		artifactRegistry: artifactsRegistry,
 		workflowRun: func(runContext context.Context) (researchruntime.Result, error) {
 			result, runErr := workflowRunner.Run(runContext, workflowConfig)
 			if runErr != nil {
 				return researchruntime.Result{}, runErr
 			}
-			for _, item := range collectionContext.Registry.ReviewedSnapshots() {
-				result.Snapshots = append(result.Snapshots, researchspec.Snapshot{
-					ID: item.ID, Path: item.Path, Description: item.Description,
-				})
-			}
 			return result, nil
 		},
-		afterSuccess: func() {
-			f.snapshotCatalog.add(collectionContext.Registry.Snapshots())
-		},
+		afterSuccess: func() {},
 	}
 	keepContext = true
 	return block, nil
+}
+
+func addCollectionArtifactTargets(
+	context *collection.Context,
+	registry *artifactpkg.Registry,
+	artifacts []researchspec.Artifact,
+	artifactIDs map[string]string,
+) error {
+	for _, declared := range artifacts {
+		if declared.Type != researchspec.ArtifactTypeDirectory {
+			continue
+		}
+		record, err := registry.Record(artifactIDs[declared.Name])
+		if err != nil {
+			return err
+		}
+		if err = context.AddArtifactTarget(record.Path, true); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func phaseProvider(override, fallback *provider.Config) *provider.Config {

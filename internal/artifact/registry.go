@@ -20,7 +20,13 @@ type Kind string
 const (
 	KindArtifact     Kind = "artifact"
 	KindArtifactFile Kind = "artifact_file"
-	KindSnapshot     Kind = "snapshot"
+)
+
+type Purpose string
+
+const (
+	PurposeOutput   Purpose = "output"
+	PurposeEvidence Purpose = "evidence"
 )
 
 // Record is one run-scoped readable artifact capability.
@@ -31,7 +37,8 @@ type Record struct {
 	Description string                    `json:"description"`
 	Kind        Kind                      `json:"kind"`
 	Type        researchspec.ArtifactType `json:"type"`
-	Ready       bool                      `json:"-"`
+	Purpose     Purpose                   `json:"purpose"`
+	Source      string                    `json:"source,omitempty"`
 }
 
 type entry struct {
@@ -43,14 +50,22 @@ type entry struct {
 
 // Registry owns opaque artifact IDs for one apply run.
 type Registry struct {
-	mu       sync.RWMutex
-	entries  map[string]entry
-	order    []string
-	children map[string]string
+	mu               sync.RWMutex
+	entries          map[string]entry
+	order            []string
+	children         map[string]string
+	retainedMu       sync.Mutex
+	retained         map[string]string
+	retainedEvidence map[string]string
 }
 
 func NewRegistry() *Registry {
-	return &Registry{entries: make(map[string]entry), children: make(map[string]string)}
+	return &Registry{
+		entries:          make(map[string]entry),
+		children:         make(map[string]string),
+		retained:         make(map[string]string),
+		retainedEvidence: make(map[string]string),
+	}
 }
 
 // Declare allocates an opaque ID for a configured research artifact.
@@ -67,7 +82,7 @@ func (r *Registry) Declare(workspace string, declared researchspec.Artifact) (Re
 	}
 	record := Record{
 		ID: "artifact-" + uuid.NewString(), Name: declared.Name, Path: path,
-		Description: strings.TrimSpace(declared.Description), Kind: KindArtifact, Type: declared.Type,
+		Description: strings.TrimSpace(declared.Description), Kind: KindArtifact, Type: declared.Type, Purpose: PurposeOutput,
 	}
 	r.mu.Lock()
 	r.entries[record.ID] = entry{Record: record, workspace: workspace}
@@ -76,70 +91,126 @@ func (r *Registry) Declare(workspace string, declared researchspec.Artifact) (Re
 	return record, nil
 }
 
-// RegisterSnapshot adds snapshot metadata using its existing evidence ID.
-func (r *Registry) RegisterSnapshot(workspace, id, path, description string) (Record, error) {
+// RetainToolResult stores a successful acquisition result for later evidence
+// registration. Collection owns the lifetime of retained results.
+func (r *Registry) RetainToolResult(toolCallID, result string) error {
 	if r == nil {
-		return Record{}, errors.New("artifact registry is required")
+		return errors.New("artifact registry is required")
 	}
-	if strings.TrimSpace(id) == "" {
-		return Record{}, errors.New("snapshot id is required")
+	if strings.TrimSpace(toolCallID) == "" {
+		return errors.New("tool call id is required")
 	}
-	resolved, err := absoluteArtifactPath(workspace, path)
+	if strings.TrimSpace(result) == "" {
+		return errors.New("tool result must not be empty")
+	}
+	r.retainedMu.Lock()
+	r.retained[toolCallID] = result
+	r.retainedMu.Unlock()
+	return nil
+}
+
+// RegisterEvidence registers one existing Collection evidence file. A source,
+// when supplied, is recorded in a compatible Markdown header and in metadata.
+func (r *Registry) RegisterEvidence(workspace, path, source, description string) (Record, bool, error) {
+	if r == nil {
+		return Record{}, false, errors.New("artifact registry is required")
+	}
+	resolved, err := evidencePath(workspace, path)
 	if err != nil {
-		return Record{}, err
+		return Record{}, false, err
 	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return Record{}, false, fmt.Errorf("evidence path %q does not exist: %w", path, err)
+	}
+	if info.IsDir() {
+		return Record{}, false, fmt.Errorf("evidence path %q is not a file", path)
+	}
+	if info.Size() == 0 {
+		return Record{}, false, fmt.Errorf("evidence path %q is empty", path)
+	}
+	content, err := os.ReadFile(resolved)
+	if err != nil {
+		return Record{}, false, fmt.Errorf("read evidence path %q: %w", path, err)
+	}
+	prepared := withSourceHeader(content, source)
+	if string(prepared) != string(content) {
+		if err := os.WriteFile(resolved, prepared, info.Mode().Perm()); err != nil {
+			return Record{}, false, fmt.Errorf("write evidence source header %q: %w", path, err)
+		}
+	}
+	source = sourceFromContent(string(prepared))
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if existing, ok := r.entries[id]; ok {
-		if existing.Path != resolved || existing.Kind != KindSnapshot {
-			return Record{}, fmt.Errorf("artifact id %q is already registered", id)
+	for _, existing := range r.entries {
+		if existing.Path != resolved || existing.Purpose != PurposeEvidence {
+			continue
 		}
 		if existing.Description == "" {
 			existing.Description = strings.TrimSpace(description)
-			r.entries[id] = existing
+			r.entries[existing.ID] = existing
 		}
-		return existing.Record, nil
+		return existing.Record, false, nil
 	}
 	record := Record{
-		ID: id, Path: resolved, Description: strings.TrimSpace(description), Kind: KindSnapshot, Type: researchspec.ArtifactTypeFile,
+		ID: "artifact-" + uuid.NewString(), Path: resolved, Description: strings.TrimSpace(description),
+		Kind: KindArtifact, Type: researchspec.ArtifactTypeFile, Purpose: PurposeEvidence, Source: source,
 	}
-	r.entries[id] = entry{Record: record, workspace: workspace}
-	r.order = append(r.order, id)
-	return record, nil
+	r.entries[record.ID] = entry{Record: record, workspace: workspace}
+	r.order = append(r.order, record.ID)
+	return record, true, nil
 }
 
-// DeclareSnapshot reserves an ID-backed Collection snapshot target before its
-// file or directory exists. File targets become ready after Collection QC;
-// directory targets are readable containers immediately.
-func (r *Registry) DeclareSnapshot(workspace, id string, declared researchspec.Artifact) (Record, error) {
+// RegisterRetainedEvidence materializes one retained acquisition result under
+// the Collection workspace, then registers it as evidence.
+func (r *Registry) RegisterRetainedEvidence(workspace, toolCallID, source, description string) (Record, bool, error) {
 	if r == nil {
-		return Record{}, errors.New("artifact registry is required")
+		return Record{}, false, errors.New("artifact registry is required")
 	}
-	if strings.TrimSpace(id) == "" {
-		return Record{}, errors.New("snapshot id is required")
+	if strings.TrimSpace(toolCallID) == "" {
+		return Record{}, false, errors.New("tool call id is required")
 	}
-	if err := declared.Validate(); err != nil {
-		return Record{}, err
+	r.retainedMu.Lock()
+	defer r.retainedMu.Unlock()
+	if id, ok := r.retainedEvidence[toolCallID]; ok {
+		record, err := r.Record(id)
+		if err != nil {
+			return Record{}, false, err
+		}
+		return record, false, nil
 	}
-	path, err := absoluteArtifactPath(workspace, declared.Path)
+	content, ok := r.retained[toolCallID]
+	if !ok {
+		return Record{}, false, fmt.Errorf("tool call %q was not retained", toolCallID)
+	}
+	directory := filepath.Join(workspace, ".r42-artifacts")
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return Record{}, false, fmt.Errorf("create retained artifact directory: %w", err)
+	}
+	file, err := os.CreateTemp(directory, "tool-*.md")
 	if err != nil {
-		return Record{}, err
+		return Record{}, false, fmt.Errorf("create retained artifact: %w", err)
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if existing, ok := r.entries[id]; ok {
-		return existing.Record, nil
+	path := file.Name()
+	if _, err = file.WriteString(content); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return Record{}, false, fmt.Errorf("write retained artifact: %w", err)
 	}
-	record := Record{
-		ID: id, Name: declared.Name, Path: path, Description: strings.TrimSpace(declared.Description),
-		Kind: KindSnapshot, Type: declared.Type, Ready: declared.Type == researchspec.ArtifactTypeDirectory,
+	if err = file.Close(); err != nil {
+		_ = os.Remove(path)
+		return Record{}, false, fmt.Errorf("close retained artifact: %w", err)
 	}
-	r.entries[id] = entry{Record: record, workspace: workspace}
-	r.order = append(r.order, id)
-	return record, nil
+	record, created, err := r.RegisterEvidence(workspace, path, source, description)
+	if err != nil {
+		_ = os.Remove(path)
+		return Record{}, false, err
+	}
+	r.retainedEvidence[toolCallID] = record.ID
+	return record, created, nil
 }
 
-// ListDirectoryFiles registers regular files below a ready directory artifact
+// ListDirectoryFiles registers regular files below a declared directory artifact
 // as read-only child capabilities. Symlinks are deliberately excluded.
 func (r *Registry) ListDirectoryFiles(id string) ([]Record, error) {
 	if r == nil {
@@ -151,10 +222,7 @@ func (r *Registry) ListDirectoryFiles(id string) ([]Record, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown artifact %q", id)
 	}
-	if !parent.Ready {
-		return nil, fmt.Errorf("artifact %q is not ready", id)
-	}
-	if (parent.Kind != KindArtifact && parent.Kind != KindSnapshot) || parent.Type != researchspec.ArtifactTypeDirectory {
+	if parent.Kind != KindArtifact || parent.Type != researchspec.ArtifactTypeDirectory {
 		return nil, fmt.Errorf("artifact %q is not a directory", id)
 	}
 	result := make([]Record, 0)
@@ -182,7 +250,7 @@ func (r *Registry) ListDirectoryFiles(id string) ([]Record, error) {
 			record := Record{
 				ID: childID, Name: filepath.ToSlash(relative), Path: path,
 				Description: "File from directory artifact " + parent.Name + ": " + filepath.ToSlash(relative),
-				Kind:        KindArtifactFile, Type: researchspec.ArtifactTypeFile, Ready: true,
+				Kind:        KindArtifactFile, Type: researchspec.ArtifactTypeFile, Purpose: parent.Purpose,
 			}
 			r.entries[childID] = entry{
 				Record:        record,
@@ -216,36 +284,6 @@ func (r *Registry) Record(id string) (Record, error) {
 	return item.Record, nil
 }
 
-func (r *Registry) MarkReady(id string) error {
-	if r == nil {
-		return errors.New("artifact registry is required")
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	item, ok := r.entries[id]
-	if !ok {
-		return fmt.Errorf("unknown artifact %q", id)
-	}
-	item.Ready = true
-	r.entries[id] = item
-	return nil
-}
-
-func (r *Registry) ReadyRecords() []Record {
-	if r == nil {
-		return nil
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	result := make([]Record, 0, len(r.order))
-	for _, id := range r.order {
-		if item := r.entries[id]; item.Ready {
-			result = append(result, item.Record)
-		}
-	}
-	return result
-}
-
 func (r *Registry) Records(ids []string) ([]Record, error) {
 	result := make([]Record, len(ids))
 	for index, id := range ids {
@@ -256,6 +294,22 @@ func (r *Registry) Records(ids []string) ([]Record, error) {
 		result[index] = item
 	}
 	return result, nil
+}
+
+// RecordsByPurpose returns matching records in registration order.
+func (r *Registry) RecordsByPurpose(purpose Purpose) []Record {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]Record, 0)
+	for _, id := range r.order {
+		if record, ok := r.entries[id]; ok && record.Purpose == purpose {
+			result = append(result, record.Record)
+		}
+	}
+	return result
 }
 
 // Page is a bounded UTF-8 byte range from an artifact.
@@ -279,9 +333,6 @@ func (r *Registry) ReadPage(id string, offsetBytes, maxBytes int) (Page, error) 
 	r.mu.RUnlock()
 	if !ok {
 		return Page{}, fmt.Errorf("unknown artifact %q", id)
-	}
-	if !item.Ready {
-		return Page{}, fmt.Errorf("artifact %q is not ready", id)
 	}
 	var root *os.Root
 	var file *os.File
@@ -361,4 +412,48 @@ func absoluteArtifactPath(workspace, path string) (string, error) {
 		return "", fmt.Errorf("resolve artifact path: %w", err)
 	}
 	return filepath.Clean(resolved), nil
+}
+
+func evidencePath(workspace, path string) (string, error) {
+	resolved, err := absoluteArtifactPath(workspace, path)
+	if err != nil {
+		return "", err
+	}
+	resolved, err = filepath.EvalSymlinks(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve evidence path %q: %w", path, err)
+	}
+	root, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		return "", fmt.Errorf("resolve evidence workspace: %w", err)
+	}
+	relative, err := filepath.Rel(root, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("evidence path %q is outside the collection workspace", path)
+	}
+	return resolved, nil
+}
+
+func withSourceHeader(content []byte, source string) []byte {
+	normalized := strings.Join(strings.Fields(source), " ")
+	if normalized == "" || sourceFromContent(string(content)) != "" {
+		return content
+	}
+	return append([]byte("- Source: "+normalized+"\n\n"), content...)
+}
+
+func sourceFromContent(content string) string {
+	lines := strings.Split(content, "\n")
+	if len(lines) > 64 {
+		lines = lines[:64]
+	}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		for _, prefix := range []string{"- Source:", "- URL:"} {
+			if value, found := strings.CutPrefix(trimmed, prefix); found && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	return ""
 }

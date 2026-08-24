@@ -305,7 +305,7 @@ Every `research` block is one workflow with three mandatory logical sessions:
 Collection, Collection QC, and closed Research. A nested `qc` block adds Final
 QC. Each session is created once and reused whenever the state machine returns
 to that phase. Static and dynamic research use the same coordinator; every
-dynamic member owns isolated sessions, snapshot registry, cursor, quotas, and
+dynamic member owns isolated sessions, artifact registry, cursor, quotas, and
 round state.
 
 Research session fields include:
@@ -567,22 +567,21 @@ Collection --checkpoint--> Collection QC --sufficient--> Research
 Collection is the only open-world phase. It uses only
 its effective provider, `collection_tool_ids`, Collection skills, the shared
 built-in policy, and the
-mandatory `r42_save_snapshot`, `r42_register_snapshot`, and
-`r42_collection_checkpoint` tools. `r42_save_snapshot` accepts complete
+mandatory `r42_save_artifact`, `r42_register_artifact`, and
+`r42_collection_checkpoint` tools. `r42_save_artifact` accepts complete
 Markdown content plus a required source identifier, which may be a URL or a
-non-URL value, writes the identifier into the snapshot header, registers the
-snapshot, and returns its path and snapshot ID. The returned snapshot ID is
+non-URL value, writes the identifier into the artifact header, registers the
+evidence artifact, and returns its path and artifact ID. The returned artifact ID is
 ready to use; Collection must not register the returned path again. A
 configured typed acquisition result is retained by tool-call ID so registration
 can materialize it as a managed file; a tool that already wrote a file can
-register that workspace path instead. `r42_register_snapshot` accepts an
+register that workspace path instead. `r42_register_artifact` accepts an
 optional `source`; when supplied and the target has no non-empty `- Source:` or
-legacy `- URL:` header, registration prepends `- Source: <source>` before
-computing the snapshot ID. Registration validates source exclusivity,
-existence, non-empty content, and ownership, and deduplicates identical content.
+legacy `- URL:` header, registration prepends `- Source: <source>`. Registration validates source exclusivity,
+existence, non-empty content, and ownership. Each saved artifact receives a run-scoped artifact ID.
 Path-based source immutability is not guaranteed.
 
-A checkpoint includes every newly registered snapshot. An empty checkpoint is
+A checkpoint includes every newly registered evidence artifact. An empty checkpoint is
 valid only with a non-empty `empty_reason`. Reaching `collection_batch_size`
 sets `checkpoint_pending`: new acquisition calls are rejected, but already
 in-flight work may finish and registration/checkpoint remain callable. The
@@ -614,7 +613,7 @@ the rejection distinguishes the configured round limit from the Collection
 session's explicit exhaustion. Merely revising Research or
 retrying a verdict does not consume a Collection round.
 
-Research is closed-world synthesis. It can read all registered snapshots by ID,
+Research is closed-world synthesis. It can read all registered evidence artifacts by ID,
 read declared candidate artifacts, write only declared Markdown file artifacts,
 use explicitly configured trusted `tool_ids`, and call its optional termination
 tool. Obvious network, shell, generic file, edit, task/sub-agent, and user-input

@@ -81,12 +81,12 @@ uses general file or shell tools to inspect upstream paths.
 This example requires Python 3 for the local `audit_synthesis` external tool;
 the research and planning tools remain inline Go tools compiled by r42.
 
-The built-in `r42_save_snapshot` tool is the typed boundary for source capture:
+The built-in `r42_save_artifact` tool is the typed boundary for source capture:
 during Collection it accepts complete Markdown content plus a required source
-identifier and writes only `.md` paths under the current block's `snapshots/`
+identifier and writes only `.md` paths under the current block's `artifacts/`
 directory. The source may be a URL or another stable identifier. The tool also
-registers the snapshot and returns its `snapshot_id`; Collection uses that ID
-directly and does not call `r42_register_snapshot` for the returned path.
+registers the artifact and returns its `artifact_id`; Collection uses that ID
+directly and does not call `r42_register_artifact` for the returned path.
 
 This workflow passes the source URL because its quote schema requires web
 citations; the built-in tool itself does not require an HTTP(S) source.
@@ -98,14 +98,14 @@ with HCL `for` expressions when no caller-supplied plan is present.
 
 Every deep-dive task must call `submit_knowledge`. The typed tool validates
 unique knowledge and quote IDs, bidirectional claim-to-quote references, valid
-source URLs, registered snapshot IDs, and confidence
+source URLs, registered artifact IDs, and confidence
 values before writing `knowledge.json` under that task's workspace. Before
-submitting knowledge, Collection must call `r42_save_snapshot` for every source it
-retains, store the complete fetched material under `<block_wd>/snapshots/`, and
-use its returned `snapshot_id` directly. Collection QC reviews those registered
-snapshots. R42 supplies the approved IDs to closed Research, which can inspect
+submitting knowledge, Collection must call `r42_save_artifact` for every source it
+retains, store the complete fetched material under `<block_wd>/artifacts/`, and
+use its returned `artifact_id` directly. Collection QC reviews those registered
+artifacts. R42 supplies the approved IDs to closed Research, which can inspect
 them only through
-`r42_read_snapshot`; submitted quotes retain `snapshot_id` rather than filesystem
+`r42_read_artifact`; submitted quotes retain `artifact_id` rather than filesystem
 paths. Final QC
 reviews semantic support; failed QC returns a revision or Collection-reopen
 decision up to `max_qc_rounds`.
@@ -122,7 +122,7 @@ groups, records resolved and unresolved contradictions in `resolution.json`,
 and has its own QC loop. The final synthesizer reads every knowledge artifact
 and the resolution, then writes `report.md` with source and quote references.
 Its QC calls `audit_synthesis` once per round for bounded mechanical checks:
-invented or unused quote IDs, source-table URL mappings, snapshot existence,
+invented or unused quote IDs, source-table URL mappings, artifact existence,
 and quote text presence. Text matching first tries the original bytes, then
 line-ending equivalence, paragraph-preserving whitespace equivalence, and
 Unicode NFC equivalence. These modes never fold case, punctuation, numbers,

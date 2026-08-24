@@ -6,6 +6,7 @@ import (
 	"maps"
 	"math"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -29,43 +30,41 @@ var (
 
 type ResearchBlock struct {
 	*golden.BaseBlock
-	ModelProvider              cty.Value           `hcl:"model_provider,optional"`
-	Model                      string              `hcl:"model"`
-	Profile                    *string             `hcl:"profile,optional"`
-	ReasoningEffort            *string             `hcl:"reasoning_effort,optional"`
-	SystemPrompt               string              `hcl:"system_prompt"`
-	Prompt                     *string             `hcl:"prompt,optional"`
-	ToolIDs                    []string            `hcl:"tool_ids,optional"`
-	ToolCallQuota              map[string]int      `hcl:"tool_call_quota,optional"`
-	TerminateToolID            *string             `hcl:"terminate_tool_id,optional"`
-	AllowedTools               []string            `hcl:"allowed_tools,optional"`
-	DisallowedTools            []string            `hcl:"disallowed_tools,optional"`
-	SkillDirectories           []string            `hcl:"skill_directories,optional"`
-	Skills                     []string            `hcl:"skills,optional"`
-	DisabledSkills             []string            `hcl:"disabled_skills,optional"`
-	Permission                 *Permission         `hcl:"permission,optional"`
-	MaxProtocolAttempts        *int                `hcl:"max_protocol_attempts,optional"`
-	Timeout                    *string             `hcl:"timeout,optional"`
-	RetryBlocks                []RetryBlock        `hcl:"retry,block"`
-	ArtifactBlocks             []ArtifactBlock     `hcl:"artifact,block"`
-	SnapshotBlocks             []ArtifactBlock     `hcl:"snapshot,block"`
-	ToolUseBlocks              []ToolUseBlock      `hcl:"tool_use,block"`
-	QCBlocks                   []QCBlock           `hcl:"qc,block"`
-	CollectionModelProvider    cty.Value           `hcl:"collection_model_provider,optional"`
-	CollectionToolIDs          []string            `hcl:"collection_tool_ids,optional"`
-	CollectionSkillDirectories []string            `hcl:"collection_skill_directories,optional"`
-	CollectionSkills           []string            `hcl:"collection_skills,optional"`
-	CollectionDisabledSkills   []string            `hcl:"collection_disabled_skills,optional"`
-	CollectionBatchSize        *int                `hcl:"collection_batch_size,optional"`
-	MaxCollectionRounds        *int                `hcl:"max_collection_rounds,optional"`
-	CollectionQCBlocks         []CollectionQCBlock `hcl:"collection_qc,block"`
+	ModelProvider              cty.Value             `hcl:"model_provider,optional"`
+	Model                      string                `hcl:"model"`
+	Profile                    *string               `hcl:"profile,optional"`
+	ReasoningEffort            *string               `hcl:"reasoning_effort,optional"`
+	SystemPrompt               string                `hcl:"system_prompt"`
+	Prompt                     *string               `hcl:"prompt,optional"`
+	ToolIDs                    []string              `hcl:"tool_ids,optional"`
+	ToolCallQuota              map[string]int        `hcl:"tool_call_quota,optional"`
+	TerminateToolID            *string               `hcl:"terminate_tool_id,optional"`
+	AllowedTools               []string              `hcl:"allowed_tools,optional"`
+	DisallowedTools            []string              `hcl:"disallowed_tools,optional"`
+	SkillDirectories           []string              `hcl:"skill_directories,optional"`
+	Skills                     []string              `hcl:"skills,optional"`
+	DisabledSkills             []string              `hcl:"disabled_skills,optional"`
+	Permission                 *Permission           `hcl:"permission,optional"`
+	MaxProtocolAttempts        *int                  `hcl:"max_protocol_attempts,optional"`
+	Timeout                    *string               `hcl:"timeout,optional"`
+	RetryBlocks                []RetryBlock          `hcl:"retry,block"`
+	ArtifactBlocks             []ArtifactBlock       `hcl:"artifact,block"`
+	ImportArtifactBlocks       []ImportArtifactBlock `hcl:"import_artifact,block"`
+	ToolUseBlocks              []ToolUseBlock        `hcl:"tool_use,block"`
+	QCBlocks                   []QCBlock             `hcl:"qc,block"`
+	CollectionModelProvider    cty.Value             `hcl:"collection_model_provider,optional"`
+	CollectionToolIDs          []string              `hcl:"collection_tool_ids,optional"`
+	CollectionSkillDirectories []string              `hcl:"collection_skill_directories,optional"`
+	CollectionSkills           []string              `hcl:"collection_skills,optional"`
+	CollectionDisabledSkills   []string              `hcl:"collection_disabled_skills,optional"`
+	CollectionBatchSize        *int                  `hcl:"collection_batch_size,optional"`
+	MaxCollectionRounds        *int                  `hcl:"max_collection_rounds,optional"`
+	CollectionQCBlocks         []CollectionQCBlock   `hcl:"collection_qc,block"`
 
 	planned                Config
 	deferredTaskExpression string
 	plannedTaskValue       cty.Value
 }
-
-const dynamicSelfSnapshotPath = "__r42_dynamic_self_snapshot_path__"
 
 type blockApplier interface {
 	ApplyBlock(string) error
@@ -114,31 +113,64 @@ func researchBlockEvalContext(block *golden.BaseBlock) *hcl.EvalContext {
 	})
 	context.Variables["self"] = cty.ObjectVal(map[string]cty.Value{
 		"artifact": declaredSelfSources(block, "artifact", "artifact", context),
-		"snapshot": declaredSelfSources(block, "snapshot", "snapshot", context),
 	})
 	return context
 }
 
-// DynamicTaskSelfValue permits a dynamic task to reference the path of its
-// single declared snapshot with one(self.snapshot).path. The placeholder is
-// resolved after the task object has been decoded.
+// DynamicTaskSelfValue permits a dynamic task to reference its source
+// directory with self.artifact.sources.path. The placeholder is resolved after
+// the task object has been decoded.
 func DynamicTaskSelfValue() cty.Value {
+	return dynamicTaskSelfValue([]string{"sources"})
+}
+
+var dynamicSelfArtifactPathPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`self\.artifact\.([A-Za-z_][A-Za-z0-9_]*)\.path`),
+	regexp.MustCompile(`self\.artifact\["([^"]+)"\]\.path`),
+}
+
+func DynamicTaskSelfValueForExpression(expression string) cty.Value {
+	names := map[string]struct{}{}
+	for _, pattern := range dynamicSelfArtifactPathPatterns {
+		for _, match := range pattern.FindAllStringSubmatch(expression, -1) {
+			names[match[1]] = struct{}{}
+		}
+	}
+	if len(names) == 0 {
+		return DynamicTaskSelfValue()
+	}
+	keys := make([]string, 0, len(names))
+	for name := range names {
+		keys = append(keys, name)
+	}
+	slices.Sort(keys)
+	return dynamicTaskSelfValue(keys)
+}
+
+func dynamicTaskSelfValue(names []string) cty.Value {
+	artifacts := make(map[string]cty.Value, len(names))
+	for _, name := range names {
+		artifacts[name] = dynamicSelfSource("artifact", name, dynamicSelfArtifactPathPlaceholder(name))
+	}
 	return cty.ObjectVal(map[string]cty.Value{
-		"artifact": cty.ListVal([]cty.Value{dynamicSelfSource("artifact", "__r42_dynamic_self_artifact_path__")}),
-		"snapshot": cty.ListVal([]cty.Value{dynamicSelfSource("snapshot", dynamicSelfSnapshotPath)}),
+		"artifact": cty.MapVal(artifacts),
 	})
 }
 
-func dynamicSelfSource(kind, path string) cty.Value {
+func dynamicSelfArtifactPathPlaceholder(name string) string {
+	return "__r42_dynamic_self_artifact_" + name + "_path__"
+}
+
+func dynamicSelfSource(kind, name, path string) cty.Value {
 	return cty.ObjectVal(map[string]cty.Value{
-		"id": cty.StringVal("self:" + kind + ":__dynamic__"), "name": cty.StringVal("__dynamic__"),
+		"id": cty.StringVal("self:" + kind + ":" + name), "name": cty.StringVal(name),
 		"kind": cty.StringVal(kind), "type": cty.StringVal("directory"), "path": cty.StringVal(path),
 		"description": cty.StringVal("Current task declared " + kind), "required": cty.BoolVal(false), "non_empty": cty.BoolVal(false),
 	})
 }
 
 func declaredSelfSources(block *golden.BaseBlock, blockType, kind string, context *hcl.EvalContext) cty.Value {
-	declarations := make([]cty.Value, 0)
+	declarations := make(map[string]cty.Value)
 	for _, nested := range block.HclBlock().NestedBlocks() {
 		if nested.Type != blockType || len(nested.Labels) == 0 {
 			continue
@@ -160,12 +192,12 @@ func declaredSelfSources(block *golden.BaseBlock, blockType, kind string, contex
 				values[name] = value
 			}
 		}
-		declarations = append(declarations, cty.ObjectVal(values))
+		declarations[nested.Labels[len(nested.Labels)-1]] = cty.ObjectVal(values)
 	}
 	if len(declarations) == 0 {
-		return cty.ListValEmpty(artifactValueType)
+		return cty.MapValEmpty(artifactValueType)
 	}
-	return cty.ListVal(declarations)
+	return cty.MapVal(declarations)
 }
 
 func (b *ResearchBlock) ExecuteDuringPlan() error {
@@ -236,8 +268,8 @@ func (b *ResearchBlock) validateNativeStringFields() error {
 			if err := validateBoolAttributes(nested, b.EvalContext(), "artifact", []string{"required", "non_empty"}); err != nil {
 				return err
 			}
-		case "snapshot":
-			if err := validateStringAttributes(nested, b.EvalContext(), "snapshot", []string{"type", "path", "description"}); err != nil {
+		case "import_artifact":
+			if err := validateStringAttributes(nested, b.EvalContext(), "import_artifact", []string{"desc"}); err != nil {
 				return err
 			}
 		case "qc":
@@ -405,9 +437,7 @@ func (b *ResearchBlock) Values() map[string]cty.Value {
 		"timeout":                      optionalStringValue(b.Timeout),
 		"retry":                        retryBlockValues(b.RetryBlocks),
 		"artifact":                     ArtifactsValue(b.planned.Artifacts, nil),
-		"snapshot":                     ArtifactsValue(b.planned.Snapshots, nil),
 		"tool_use":                     toolUseValues(b.planned.ToolUses),
-		"snapshots":                    cty.UnknownVal(cty.List(snapshotValueType)),
 		"qc":                           qcBlockValues(b.QCBlocks),
 		"collection_model_provider":    optionalObjectValue(b.CollectionModelProvider),
 		"collection_tool_ids":          stringListValue(b.CollectionToolIDs),
@@ -598,6 +628,12 @@ type ArtifactBlock struct {
 	NonEmpty     bool   `hcl:"non_empty,optional"`
 }
 
+type ImportArtifactBlock struct {
+	Name    string    `hcl:"name,label"`
+	Desc    string    `hcl:"desc"`
+	Sources cty.Value `hcl:"sources"`
+}
+
 type ToolUseBlock struct {
 	Name           string    `hcl:"name,label"`
 	ToolID         string    `hcl:"tool_id"`
@@ -701,9 +737,9 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 	for index, block := range b.ArtifactBlocks {
 		config.Artifacts[index] = block.toArtifact()
 	}
-	config.Snapshots = make([]Artifact, len(b.SnapshotBlocks))
-	for index, block := range b.SnapshotBlocks {
-		config.Snapshots[index] = block.toArtifact()
+	config.Imports = make([]ImportArtifact, len(b.ImportArtifactBlocks))
+	for index, block := range b.ImportArtifactBlocks {
+		config.Imports[index] = ImportArtifact(block)
 	}
 	if len(b.ToolUseBlocks) > 0 {
 		if len(b.ToolIDs) > 0 || b.TerminateToolID != nil {
@@ -942,10 +978,10 @@ func ArtifactsValueWithIDs(
 	ids map[string]string,
 ) cty.Value {
 	if len(artifacts) == 0 {
-		return cty.ListValEmpty(artifactValueType)
+		return cty.MapValEmpty(artifactValueType)
 	}
-	values := make([]cty.Value, len(artifacts))
-	for index, artifact := range artifacts {
+	values := make(map[string]cty.Value, len(artifacts))
+	for _, artifact := range artifacts {
 		id := cty.UnknownVal(cty.String)
 		if resolved, ok := ids[artifact.Name]; ok {
 			id = cty.StringVal(resolved)
@@ -957,7 +993,7 @@ func ArtifactsValueWithIDs(
 		if resolved, ok := resolvedPaths[artifact.Name]; ok {
 			path = cty.StringVal(resolved)
 		}
-		values[index] = cty.ObjectVal(map[string]cty.Value{
+		values[artifact.Name] = cty.ObjectVal(map[string]cty.Value{
 			"id":          id,
 			"name":        cty.StringVal(artifact.Name),
 			"kind":        cty.StringVal("artifact"),
@@ -968,37 +1004,7 @@ func ArtifactsValueWithIDs(
 			"non_empty":   cty.BoolVal(artifact.NonEmpty),
 		})
 	}
-	return cty.ListVal(values)
-}
-
-// Snapshot describes one Collection snapshot published by a research result.
-type Snapshot struct {
-	ID          string
-	Path        string
-	Description string
-}
-
-var snapshotValueType = artifactValueType
-
-// SnapshotsValue converts snapshot outputs into their HCL representation.
-func SnapshotsValue(snapshots []Snapshot) cty.Value {
-	if len(snapshots) == 0 {
-		return cty.ListValEmpty(snapshotValueType)
-	}
-	values := make([]cty.Value, len(snapshots))
-	for index, item := range snapshots {
-		values[index] = cty.ObjectVal(map[string]cty.Value{
-			"id":          cty.StringVal(item.ID),
-			"name":        cty.StringVal(item.ID),
-			"kind":        cty.StringVal("snapshot"),
-			"type":        cty.StringVal("file"),
-			"path":        cty.StringVal(item.Path),
-			"description": cty.StringVal(item.Description),
-			"required":    cty.BoolVal(false),
-			"non_empty":   cty.BoolVal(true),
-		})
-	}
-	return cty.ListVal(values)
+	return cty.MapVal(values)
 }
 
 func cloneConfig(config Config) Config {
@@ -1025,7 +1031,7 @@ func cloneConfig(config Config) Config {
 	result.CollectionDisabledSkills = slices.Clone(config.CollectionDisabledSkills)
 	result.MaxCollectionRounds = clonePointer(config.MaxCollectionRounds)
 	result.Artifacts = slices.Clone(config.Artifacts)
-	result.Snapshots = slices.Clone(config.Snapshots)
+	result.Imports = slices.Clone(config.Imports)
 	if config.QC != nil {
 		qc := *config.QC
 		qc.Model = cloneStringPointer(config.QC.Model)

@@ -17,19 +17,19 @@ import (
 func TestRunnerReviewsCheckpointAndAdvancesWatermark(t *testing.T) {
 	t.Parallel()
 
-	collectionContext, checkpoint := checkpointWithSnapshot(t, nil)
+	collectionContext, checkpoint := checkpointWithEvidenceArtifact(t, nil)
 	verdicts := collectionqc.NewVerdictRecorder()
 	session := &fakeSession{onSend: func(string) error {
 		return verdicts.Record(collectionqc.Verdict{Decision: collectionqc.DecisionSufficient})
 	}}
 	runner := collectionqc.NewRunner(session, verdicts, collectionContext)
 
-	result, err := runner.Review(t.Context(), validConfig(checkpoint.SnapshotIDs))
+	result, err := runner.Review(t.Context(), validConfig(checkpoint.ArtifactIDs))
 
 	require.NoError(t, err)
 	assert.Equal(t, collectionqc.DecisionSufficient, result.Verdict.Decision)
 	assert.Equal(t, 1, collectionContext.State.Cursor())
-	assert.ElementsMatch(t, checkpoint.SnapshotIDs, collectionContext.Registry.ReviewedSnapshotIDs())
+	assert.ElementsMatch(t, checkpoint.ArtifactIDs, collectionContext.ReviewedEvidenceArtifactIDs())
 	assert.Equal(t, "research", collectionContext.State.Phase().String())
 	require.Len(t, session.prompts, 1)
 	var document map[string]any
@@ -41,10 +41,10 @@ func TestRunnerReviewsCheckpointAndAdvancesWatermark(t *testing.T) {
 func TestRunnerNeedsMoreReturnsToCollectionAndCarriesIssues(t *testing.T) {
 	t.Parallel()
 
-	collectionContext, checkpoint := checkpointWithSnapshot(t, nil)
+	collectionContext, checkpoint := checkpointWithEvidenceArtifact(t, nil)
 	verdicts := collectionqc.NewVerdictRecorder()
 	issue := corespec.Issue{
-		Code: "coverage", Message: "current snapshots do not establish demand",
+		Code: "coverage", Message: "current evidence artifacts do not establish demand",
 		RepairHint: stringPointer("find regional demand evidence"),
 	}
 	session := &fakeSession{onSend: func(string) error {
@@ -55,7 +55,7 @@ func TestRunnerNeedsMoreReturnsToCollectionAndCarriesIssues(t *testing.T) {
 	}}
 	runner := collectionqc.NewRunner(session, verdicts, collectionContext)
 
-	result, err := runner.Review(t.Context(), validConfig(checkpoint.SnapshotIDs))
+	result, err := runner.Review(t.Context(), validConfig(checkpoint.ArtifactIDs))
 
 	require.NoError(t, err)
 	assert.False(t, result.CollectionLimitExhausted)
@@ -67,7 +67,7 @@ func TestRunnerNeedsMoreReturnsToCollectionAndCarriesIssues(t *testing.T) {
 func TestRunnerCarriesIssuesToResearchWhenCollectionBudgetIsExhausted(t *testing.T) {
 	t.Parallel()
 
-	collectionContext, checkpoint := checkpointWithSnapshot(t, intPointer(1))
+	collectionContext, checkpoint := checkpointWithEvidenceArtifact(t, intPointer(1))
 	verdicts := collectionqc.NewVerdictRecorder()
 	issue := corespec.Issue{Code: "coverage", Message: "evidence remains incomplete"}
 	session := &fakeSession{onSend: func(string) error {
@@ -78,7 +78,7 @@ func TestRunnerCarriesIssuesToResearchWhenCollectionBudgetIsExhausted(t *testing
 	}}
 	runner := collectionqc.NewRunner(session, verdicts, collectionContext)
 
-	result, err := runner.Review(t.Context(), validConfig(checkpoint.SnapshotIDs))
+	result, err := runner.Review(t.Context(), validConfig(checkpoint.ArtifactIDs))
 
 	require.NoError(t, err)
 	assert.True(t, result.CollectionLimitExhausted)
@@ -119,30 +119,30 @@ func TestRunnerCarriesCollectorExhaustionToResearchAndQCContext(t *testing.T) {
 func TestRunnerMalformedVerdictDoesNotAdvanceWatermark(t *testing.T) {
 	t.Parallel()
 
-	collectionContext, checkpoint := checkpointWithSnapshot(t, nil)
+	collectionContext, checkpoint := checkpointWithEvidenceArtifact(t, nil)
 	verdicts := collectionqc.NewVerdictRecorder()
 	runner := collectionqc.NewRunner(&fakeSession{}, verdicts, collectionContext)
-	config := validConfig(checkpoint.SnapshotIDs)
+	config := validConfig(checkpoint.ArtifactIDs)
 	config.MaxProtocolAttempts = 1
 
 	_, err := runner.Review(t.Context(), config)
 
 	require.ErrorContains(t, err, "collection qc verdict protocol attempts exhausted")
 	assert.Zero(t, collectionContext.State.Cursor())
-	assert.Empty(t, collectionContext.Registry.ReviewedSnapshotIDs())
+	assert.Empty(t, collectionContext.ReviewedEvidenceArtifactIDs())
 	assert.Equal(t, "collection_qc", collectionContext.State.Phase().String())
 }
 
 func TestRunnerAcceptsRepairAfterInvalidVerdictInSameTurn(t *testing.T) {
 	t.Parallel()
 
-	collectionContext, checkpoint := checkpointWithSnapshot(t, nil)
+	collectionContext, checkpoint := checkpointWithEvidenceArtifact(t, nil)
 	verdicts := collectionqc.NewVerdictRecorder()
 	require.Error(t, verdicts.Record(collectionqc.Verdict{Decision: collectionqc.DecisionNeedsMore}))
 	require.NoError(t, verdicts.Record(collectionqc.Verdict{Decision: collectionqc.DecisionSufficient}))
 	runner := collectionqc.NewRunner(&fakeSession{}, verdicts, collectionContext)
 
-	result, err := runner.Review(t.Context(), validConfig(checkpoint.SnapshotIDs))
+	result, err := runner.Review(t.Context(), validConfig(checkpoint.ArtifactIDs))
 
 	require.NoError(t, err)
 	assert.Equal(t, collectionqc.DecisionSufficient, result.Verdict.Decision)
@@ -177,10 +177,10 @@ func TestVerdictValidate(t *testing.T) {
 	}
 }
 
-func checkpointWithSnapshot(t *testing.T, maxRounds *int) (*collection.Context, collection.CheckpointOutput) {
+func checkpointWithEvidenceArtifact(t *testing.T, maxRounds *int) (*collection.Context, collection.CheckpointOutput) {
 	t.Helper()
 	context := collection.NewContext(t.TempDir(), 10, maxRounds)
-	require.NoError(t, context.Registry.RetainToolResult("call-1", "source evidence"))
+	require.NoError(t, context.Artifacts.RetainToolResult("call-1", "source evidence"))
 	registered := collection.NewRegisterHandler(context).Register(collection.RegisterArgs{SourceToolCallID: "call-1"})
 	require.True(t, registered.Accepted)
 	checkpoint := collection.NewCheckpointHandler(context).Submit(collection.CheckpointArgs{})
@@ -190,11 +190,11 @@ func checkpointWithSnapshot(t *testing.T, maxRounds *int) (*collection.Context, 
 	return context, *checkpoint.Output
 }
 
-func validConfig(snapshotIDs []string) collectionqc.Config {
+func validConfig(artifactIDs []string) collectionqc.Config {
 	return collectionqc.Config{
 		Task:                  collectionqc.Task{SystemPrompt: "research carefully", Prompt: stringPointer("investigate demand")},
 		Criteria:              cty.NilVal,
-		CheckpointSnapshotIDs: snapshotIDs,
+		CheckpointArtifactIDs: artifactIDs,
 		MaxProtocolAttempts:   2,
 		VerdictToolName:       "r42_collection_qc_verdict",
 	}

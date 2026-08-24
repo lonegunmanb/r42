@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRegistryDeclaresAndReadsArtifactByOpaqueID(t *testing.T) {
+func TestRegistryDeclaresAndReadsExistingArtifactByOpaqueID(t *testing.T) {
 	t.Parallel()
 
 	workspace := t.TempDir()
@@ -27,30 +27,62 @@ func TestRegistryDeclaresAndReadsArtifactByOpaqueID(t *testing.T) {
 	assert.Regexp(t, `^artifact-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, record.ID)
 	assert.Equal(t, path, record.Path)
 	assert.Equal(t, "Validated claims", record.Description)
-	assert.Empty(t, registry.ReadyRecords())
-
-	require.NoError(t, registry.MarkReady(record.ID))
-	require.Len(t, registry.ReadyRecords(), 1)
 	page, err := registry.ReadPage(record.ID, 10, 5)
 	require.NoError(t, err)
 	assert.Equal(t, "[1,2]", page.Content)
 	assert.Equal(t, 15, page.NextOffsetBytes)
 }
 
-func TestRegistryRegistersSnapshotWithExistingID(t *testing.T) {
+func TestRegistryRegisterEvidenceRecordsSourceAndPurpose(t *testing.T) {
 	t.Parallel()
 
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, "source.md")
-	require.NoError(t, os.WriteFile(path, []byte("source"), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte("evidence"), 0o600))
 	registry := artifactpkg.NewRegistry()
 
-	record, err := registry.RegisterSnapshot(
-		workspace, "snapshot-0123456789abcdef0123456789abcdef", path, "Regulatory filing",
-	)
+	record, created, err := registry.RegisterEvidence(workspace, path, "local-record:42", "Primary source")
 	require.NoError(t, err)
-	assert.Equal(t, "snapshot-0123456789abcdef0123456789abcdef", record.ID)
-	assert.Equal(t, artifactpkg.KindSnapshot, record.Kind)
+	assert.True(t, created)
+	assert.Regexp(t, `^artifact-`, record.ID)
+	assert.Equal(t, artifactpkg.PurposeEvidence, record.Purpose)
+	assert.Equal(t, "local-record:42", record.Source)
+	assert.Equal(t, "Primary source", record.Description)
+}
+
+func TestRegistryRegisterRetainedEvidenceWritesSourceHeader(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	require.NoError(t, registry.RetainToolResult("call-1", "captured evidence"))
+
+	record, created, err := registry.RegisterRetainedEvidence(workspace, "call-1", "database-row:42", "Captured record")
+
+	require.NoError(t, err)
+	assert.True(t, created)
+	assert.Equal(t, "database-row:42", record.Source)
+	content, err := os.ReadFile(record.Path)
+	require.NoError(t, err)
+	assert.Equal(t, "- Source: database-row:42\n\ncaptured evidence", string(content))
+}
+
+func TestRegistryRegisterRetainedEvidenceIsIdempotentForToolCall(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	require.NoError(t, registry.RetainToolResult("call-1", "captured evidence"))
+
+	first, firstCreated, err := registry.RegisterRetainedEvidence(workspace, "call-1", "database-row:42", "Captured record")
+	require.NoError(t, err)
+	second, secondCreated, err := registry.RegisterRetainedEvidence(workspace, "call-1", "database-row:42", "Captured record")
+
+	require.NoError(t, err)
+	assert.True(t, firstCreated)
+	assert.False(t, secondCreated)
+	assert.Equal(t, first, second)
+	assert.Len(t, registry.RecordsByPurpose(artifactpkg.PurposeEvidence), 1)
 }
 
 func TestRegistryListsDirectoryFilesAsReadableChildArtifacts(t *testing.T) {
@@ -66,14 +98,12 @@ func TestRegistryListsDirectoryFilesAsReadableChildArtifacts(t *testing.T) {
 		Name: "evidence", Type: researchspec.ArtifactTypeDirectory, Path: "evidence", Description: "Evidence files",
 	})
 	require.NoError(t, err)
-	require.NoError(t, registry.MarkReady(parent.ID))
 
 	files, err := registry.ListDirectoryFiles(parent.ID)
 	require.NoError(t, err)
 	require.Len(t, files, 2)
 	assert.Equal(t, []string{"nested/two.json", "one.json"}, []string{files[0].Name, files[1].Name})
 	assert.Equal(t, artifactpkg.KindArtifactFile, files[0].Kind)
-	assert.True(t, files[0].Ready)
 	page, err := registry.ReadPage(files[0].ID, 0, 32)
 	require.NoError(t, err)
 	assert.Equal(t, `{"two":true}`, page.Content)
@@ -99,7 +129,6 @@ func TestRegistryRefusesDirectoryChildReplacedBySymlink(t *testing.T) {
 		Name: "evidence", Type: researchspec.ArtifactTypeDirectory, Path: "evidence", Description: "Evidence files",
 	})
 	require.NoError(t, err)
-	require.NoError(t, registry.MarkReady(parent.ID))
 	files, err := registry.ListDirectoryFiles(parent.ID)
 	require.NoError(t, err)
 	require.Len(t, files, 1)

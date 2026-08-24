@@ -33,14 +33,14 @@ func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 		artifactPath := filepath.Join(current, "task", "knowledge.json")
 
 		response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
-			"artifact_path": artifactPath,
-			"subquestion":   "What happened?",
+			"_r42_artifact_path": artifactPath,
+			"subquestion":        "What happened?",
 			"knowledge": []any{map[string]any{
 				"id": "kb-1", "claim": "A claim", "confidence": "high", "quote_ids": []string{"quote-1"},
 			}},
 			"quotes": []any{map[string]any{
 				"id": "quote-1", "source_title": "Source", "url": "https://example.com/source",
-				"snapshot_id": "invalid", "locator": "paragraph 1", "exact_quote": "quoted text",
+				"artifact_id": "invalid", "locator": "paragraph 1", "exact_quote": "quoted text",
 			}},
 		}), current)
 
@@ -59,7 +59,7 @@ func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 		require.NoError(t, os.WriteFile(upstreamArtifact, []byte("{}"), 0o600))
 
 		response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
-			"artifact_path":      foreignArtifact,
+			"_r42_artifact_path": foreignArtifact,
 			"topic":              "Topic",
 			"reviewed_artifacts": []string{upstreamArtifact},
 			"conflicts":          []any{},
@@ -82,14 +82,14 @@ func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 		require.NoError(t, os.Symlink(foreignTarget, linkedArtifact))
 
 		response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
-			"artifact_path": linkedArtifact,
-			"subquestion":   "What happened?",
+			"_r42_artifact_path": linkedArtifact,
+			"subquestion":        "What happened?",
 			"knowledge": []any{map[string]any{
 				"id": "kb-1", "claim": "A claim", "confidence": "high", "quote_ids": []string{"quote-1"},
 			}},
 			"quotes": []any{map[string]any{
 				"id": "quote-1", "source_title": "Source", "url": "https://example.com/source",
-				"snapshot_id": "snapshot-33333333333333333333333333333333", "locator": "paragraph 1", "exact_quote": "quoted text",
+				"artifact_id": "artifact-33333333333333333333333333333333", "locator": "paragraph 1", "exact_quote": "quoted text",
 			}},
 		}), current)
 
@@ -99,6 +99,37 @@ func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 		require.NoError(t, readErr)
 		assert.Equal(t, "original", string(content))
 	})
+}
+
+func TestSubmitKnowledgeAcceptsBuiltinUUIDArtifactID(t *testing.T) {
+	t.Parallel()
+
+	workspace := filepath.Join(t.TempDir(), ".r42", "runs", "current", "blocks", "knowledge")
+	require.NoError(t, os.MkdirAll(workspace, 0o700))
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "submit_knowledge"))
+	require.NoError(t, err)
+	artifactPath := filepath.Join(workspace, "knowledge.json")
+
+	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"_r42_artifact_path": artifactPath,
+		"subquestion":        "What happened?",
+		"knowledge": []any{map[string]any{
+			"id": "kb-1", "claim": "A claim", "confidence": "high", "quote_ids": []string{"quote-1"},
+		}},
+		"quotes": []any{map[string]any{
+			"id": "quote-1", "source_title": "Source", "url": "https://example.com/source",
+			"artifact_id": "artifact-123e4567-e89b-12d3-a456-426614174000", "locator": "paragraph 1", "exact_quote": "quoted text",
+		}},
+	}), workspace)
+
+	require.NoError(t, err)
+	assert.True(t, response.Accepted, "issues: %#v", response.Issues)
+	require.NotNil(t, response.Output)
+	assert.NotContains(t, string(*response.Output), artifactPath)
+	assert.FileExists(t, artifactPath)
 }
 
 func TestTypedToolDescriptionsPublishAllowedValues(t *testing.T) {

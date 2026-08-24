@@ -117,14 +117,12 @@ go_tool "pplx_pro_search" {
 }
 
 go_tool "pplx_fetch" {
-  description = "Fetch one HTTP or HTTPS URL through Perplexity and write a URL-addressed Markdown snapshot under the required absolute snapshot_dir."
+  description = "Fetch one HTTP or HTTPS URL through Perplexity and write a uniquely named Markdown evidence artifact under the required absolute artifact_dir within the current Collection workspace. On success it returns artifact_path only; call r42_register_artifact with that path to receive an artifact_id. If it returns the fetch_failed issue, Perplexity could not retrieve usable content: no artifact was written, so do not register a file. Try another source URL or continue with the remaining sources. Do not call r42_save_artifact for this already-written file."
 
   source = <<-GO
     import (
       "bytes"
       "context"
-      "crypto/sha256"
-      "encoding/hex"
       "encoding/json"
       "fmt"
       "io"
@@ -138,13 +136,13 @@ go_tool "pplx_fetch" {
 
     type Input struct {
       URL         string `json:"url"`
-      SnapshotDir string `json:"snapshot_dir"`
+      ArtifactDir string `json:"artifact_dir"`
     }
 
     type Output struct {
       Title        string `json:"title"`
       URL          string `json:"url"`
-      SnapshotPath string `json:"snapshot_path"`
+      ArtifactPath string `json:"artifact_path"`
       FetchedAt    string `json:"fetched_at"`
     }
 
@@ -165,10 +163,14 @@ go_tool "pplx_fetch" {
           Code: "invalid_url", Message: err.Error(),
         }}}, nil
       }
-      snapshotDir, err := requireSnapshotDir(input.SnapshotDir)
+      workspace, err := os.Getwd()
+      if err != nil {
+        return ToolResponse[Output]{}, fmt.Errorf("pplx_fetch: resolve collection workspace: %w", err)
+      }
+      artifactDir, err := requireArtifactDir(input.ArtifactDir, workspace)
       if err != nil {
         return ToolResponse[Output]{Issues: []Issue{{
-          Code: "invalid_snapshot_dir", Message: err.Error(),
+          Code: "invalid_artifact_dir", Message: err.Error(),
         }}}, nil
       }
 
@@ -185,19 +187,22 @@ go_tool "pplx_fetch" {
       }
 
       title, fetchedURL, content := response.fetchedContent(sourceURL)
-      if content == "" {
-        return ToolResponse[Output]{}, fmt.Errorf("pplx_fetch: fetched content is empty")
+      if content == "" || isFetchFailureText(content) {
+        return ToolResponse[Output]{Issues: []Issue{{
+          Code: "fetch_failed",
+          Message: "Perplexity could not retrieve usable content for " + sourceURL + "; no artifact was written. Try another source URL.",
+        }}}, nil
       }
       if title == "" {
         title = sourceURL
       }
       fetchedAt := time.Now().UTC().Format(time.RFC3339Nano)
-      snapshotPath, err := writeSnapshot(snapshotDir, title, fetchedURL, content, fetchedAt)
+      artifactPath, err := writeArtifact(artifactDir, title, fetchedURL, content, fetchedAt)
       if err != nil {
         return ToolResponse[Output]{}, fmt.Errorf("pplx_fetch: %w", err)
       }
 
-      output := Output{Title: title, URL: fetchedURL, SnapshotPath: snapshotPath, FetchedAt: fetchedAt}
+      output := Output{Title: title, URL: fetchedURL, ArtifactPath: artifactPath, FetchedAt: fetchedAt}
       return ToolResponse[Output]{Accepted: true, Output: &output}, nil
     }
 
@@ -281,6 +286,20 @@ go_tool "pplx_fetch" {
       return strings.Join(values, "\n\n")
     }
 
+    func isFetchFailureText(content string) bool {
+      normalized := strings.ToLower(strings.Join(strings.Fields(content), " "))
+      normalized = strings.Trim(normalized, " .:;!?")
+      switch normalized {
+      case "unable to retrieve content from the provided url",
+        "could not retrieve content from the provided url",
+        "failed to retrieve content from the provided url",
+        "failed to fetch the provided url":
+        return true
+      default:
+        return false
+      }
+    }
+
     func requireHTTPURL(raw string) error {
       parsed, err := url.Parse(raw)
       if err != nil || parsed == nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
@@ -289,40 +308,104 @@ go_tool "pplx_fetch" {
       return nil
     }
 
-    func requireSnapshotDir(raw string) (string, error) {
+    func requireArtifactDir(raw, workspace string) (string, error) {
       if strings.TrimSpace(raw) == "" {
-        return "", fmt.Errorf("snapshot_dir is required")
+        return "", fmt.Errorf("artifact_dir is required")
       }
-      directory := filepath.Clean(raw)
+      directory, err := filepath.Abs(filepath.Clean(raw))
+      if err != nil {
+        return "", fmt.Errorf("artifact_dir could not be resolved")
+      }
       if !filepath.IsAbs(directory) {
-        return "", fmt.Errorf("snapshot_dir must be absolute")
+        return "", fmt.Errorf("artifact_dir must be absolute")
+      }
+      workspaceInfo, err := os.Lstat(workspace)
+      if err != nil || !workspaceInfo.IsDir() || workspaceInfo.Mode()&os.ModeSymlink != 0 {
+        return "", fmt.Errorf("current Collection workspace must be a real directory")
+      }
+      resolvedWorkspace, err := filepath.EvalSymlinks(workspace)
+      if err != nil {
+        return "", fmt.Errorf("current Collection workspace could not be resolved")
+      }
+      if !pathWithin(resolvedWorkspace, directory) {
+        return "", fmt.Errorf("artifact_dir must be inside the current Collection workspace")
+      }
+      directoryInfo, err := os.Lstat(directory)
+      if err == nil {
+        if !directoryInfo.IsDir() || directoryInfo.Mode()&os.ModeSymlink != 0 {
+          return "", fmt.Errorf("artifact_dir must be a real directory inside the current Collection workspace")
+        }
+        resolvedDirectory, resolveErr := filepath.EvalSymlinks(directory)
+        if resolveErr != nil || !pathWithin(resolvedWorkspace, resolvedDirectory) {
+          return "", fmt.Errorf("artifact_dir must not resolve outside the current Collection workspace")
+        }
+        return directory, nil
+      }
+      if !os.IsNotExist(err) {
+        return "", fmt.Errorf("artifact_dir could not be inspected")
+      }
+      ancestor, ok := nearestExistingDirectory(filepath.Dir(directory))
+      if !ok {
+        return "", fmt.Errorf("artifact_dir has no existing parent directory")
+      }
+      resolvedAncestor, err := filepath.EvalSymlinks(ancestor)
+      if err != nil || !pathWithin(resolvedWorkspace, resolvedAncestor) {
+        return "", fmt.Errorf("artifact_dir must not traverse a symbolic link outside the current Collection workspace")
       }
       return directory, nil
     }
 
-    func writeSnapshot(directory, title, rawURL, content, fetchedAt string) (string, error) {
-      digest := sha256.Sum256([]byte(rawURL))
-      name := "snapshot-" + hex.EncodeToString(digest[:8]) + ".md"
-      path := filepath.Join(directory, name)
-      snapshot := strings.Join([]string{
+    func writeArtifact(directory, title, rawURL, content, fetchedAt string) (string, error) {
+      artifact := strings.Join([]string{
         "# " + title,
         "",
         "- URL: " + rawURL,
         "- Fetched at: " + fetchedAt,
-        "- Snapshot source: Perplexity fetch_url",
+        "- Artifact source: Perplexity fetch_url",
         "",
         "## Extracted Content",
         "",
         strings.TrimSpace(content),
         "",
       }, "\n")
-      if err := os.MkdirAll(directory, 0755); err != nil {
+      if err := os.MkdirAll(directory, 0700); err != nil {
         return "", err
       }
-      if err := os.WriteFile(path, []byte(snapshot), 0600); err != nil {
+      file, err := os.CreateTemp(directory, "artifact-*.md")
+      if err != nil {
+        return "", err
+      }
+      path := file.Name()
+      if _, err := file.WriteString(artifact); err != nil {
+        _ = file.Close()
+        return "", err
+      }
+      if err := file.Close(); err != nil {
         return "", err
       }
       return filepath.ToSlash(path), nil
+    }
+
+    func nearestExistingDirectory(path string) (string, bool) {
+      for {
+        info, err := os.Lstat(path)
+        if err == nil {
+          return path, info.IsDir()
+        }
+        if !os.IsNotExist(err) {
+          return "", false
+        }
+        parent := filepath.Dir(path)
+        if parent == path {
+          return "", false
+        }
+        path = parent
+      }
+    }
+
+    func pathWithin(root, path string) bool {
+      relative, err := filepath.Rel(root, path)
+      return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
     }
 
     func firstNonEmpty(values ...string) string {

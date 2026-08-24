@@ -35,9 +35,9 @@ func TestDecodeDynamicTaskDecodesCollectionFields(t *testing.T) {
 				"lifecycle_retries": cty.NumberIntVal(2),
 			}),
 		}),
-		"artifacts": cty.EmptyTupleVal,
-		"retry":     cty.NullVal(cty.DynamicPseudoType),
-		"qc":        cty.NullVal(cty.DynamicPseudoType),
+		"artifact": cty.EmptyObjectVal,
+		"retry":    cty.NullVal(cty.DynamicPseudoType),
+		"qc":       cty.NullVal(cty.DynamicPseudoType),
 	})
 
 	config, err := researchspec.DecodeDynamicTask(task)
@@ -69,9 +69,9 @@ func TestDecodeDynamicTaskCollectionQCWithoutCriteria(t *testing.T) {
 		"collection_qc": cty.ObjectVal(map[string]cty.Value{
 			"model": cty.StringVal("qc-model"),
 		}),
-		"artifacts": cty.EmptyTupleVal,
-		"retry":     cty.NullVal(cty.DynamicPseudoType),
-		"qc":        cty.NullVal(cty.DynamicPseudoType),
+		"artifact": cty.EmptyObjectVal,
+		"retry":    cty.NullVal(cty.DynamicPseudoType),
+		"qc":       cty.NullVal(cty.DynamicPseudoType),
 	})
 
 	config, err := researchspec.DecodeDynamicTask(task)
@@ -88,7 +88,7 @@ func TestDecodeDynamicTaskCollectionDefaults(t *testing.T) {
 	task := cty.ObjectVal(map[string]cty.Value{
 		"model":         cty.StringVal("wire-model"),
 		"system_prompt": cty.StringVal("Collect and synthesize."),
-		"artifacts":     cty.EmptyTupleVal,
+		"artifact":      cty.EmptyObjectVal,
 		"retry":         cty.NullVal(cty.DynamicPseudoType),
 		"qc":            cty.NullVal(cty.DynamicPseudoType),
 	})
@@ -118,9 +118,9 @@ func TestStaticAndDynamicMembersProduceEquivalentConfigs(t *testing.T) {
 			"criteria": cty.ObjectVal(map[string]cty.Value{"coverage": cty.StringVal("cover the task")}),
 			"model":    cty.StringVal("qc-model"),
 		}),
-		"artifacts": cty.EmptyTupleVal,
-		"retry":     cty.NullVal(cty.DynamicPseudoType),
-		"qc":        cty.NullVal(cty.DynamicPseudoType),
+		"artifact": cty.EmptyObjectVal,
+		"retry":    cty.NullVal(cty.DynamicPseudoType),
+		"qc":       cty.NullVal(cty.DynamicPseudoType),
 	}))
 	require.NoError(t, err)
 
@@ -149,7 +149,7 @@ func TestPlanDynamicTasksPreservesCollectionShape(t *testing.T) {
 			"collection_batch_size": cty.NumberIntVal(5),
 			"max_collection_rounds": cty.NumberIntVal(3),
 			"collection_qc":         cty.ObjectVal(map[string]cty.Value{"model": cty.StringVal("qc-model")}),
-			"artifacts":             cty.EmptyTupleVal,
+			"artifact":              cty.EmptyObjectVal,
 			"retry":                 cty.NullVal(cty.DynamicPseudoType),
 			"qc":                    cty.NullVal(cty.DynamicPseudoType),
 		}),

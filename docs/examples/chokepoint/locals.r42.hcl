@@ -26,26 +26,22 @@ locals {
   source_tool_guidance = var.use_pplx ? join("\n", [
     "Use ${module.pplx_tools.pplx_pro_search_tool_id} to discover current sources",
     "and ${module.pplx_tools.pplx_fetch_tool_id} to fetch every source retained",
-    "as evidence. Every fetch call must include url and the absolute snapshot_dir",
-    "stated below. Record the final snapshot_path returned by each fetch.",
+    "as evidence. Every fetch call must include url and the absolute artifact_dir",
+    "stated below. For every returned artifact_path, call r42_register_artifact",
+    "to obtain artifact_id; do not call r42_save_artifact for that file.",
+    "If fetch returns fetch_failed, it wrote no file: do not register anything;",
+    "try another source URL or continue with the remaining sources.",
     ]) : join("\n", [
     "Use the built-in web_search tool to discover current sources and web_fetch",
     "to read every source retained as evidence.",
   ])
   synthesis_claim_paths = concat(
-    [one([
-      for artifact in research.static.primary_source_baseline.artifact :
-      artifact.path if artifact.name == "claims"
-    ])],
+    [research.static.primary_source_baseline.artifact.claims.path],
     [
-      for task in research.dynamic.graph_track.tasks : one([
-        for artifact in task.artifacts : artifact.path if artifact.name == "claims"
-      ])
+      for task in research.dynamic.graph_track.tasks : task.artifact.claims.path
     ],
     [
-      for task in research.dynamic.prioritize_companies.tasks : one([
-        for artifact in task.artifacts : artifact.path if artifact.name == "claims"
-      ])
+      for task in research.dynamic.prioritize_companies.tasks : task.artifact.claims.path
     ],
   )
   graph_tracks = {

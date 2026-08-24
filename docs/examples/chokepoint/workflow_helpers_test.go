@@ -22,7 +22,11 @@ func blockDirectory(t *testing.T, name string) string {
 
 func goToolSource(t *testing.T, name string) string {
 	t.Helper()
-	for _, filename := range []string{"support_tools.r42.hcl", "decision_tools.r42.hcl"} {
+	for _, filename := range []string{
+		"support_tools.r42.hcl",
+		"decision_tools.r42.hcl",
+		"modules/pplx_tools/main.r42.hcl",
+	} {
 		parser := hclparse.NewParser()
 		file, diagnostics := parser.ParseHCLFile(filename)
 		require.False(t, diagnostics.HasErrors(), diagnostics.Error())

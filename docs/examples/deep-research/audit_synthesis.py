@@ -10,7 +10,9 @@ from urllib.parse import urlsplit, urlunsplit
 QUOTE_ID_RE = re.compile(
     r"(?<![A-Za-z0-9_-])([A-Za-z0-9][A-Za-z0-9_-]*-quote-[A-Za-z0-9][A-Za-z0-9_-]*)(?![A-Za-z0-9_-])"
 )
-SNAPSHOT_ID_RE = re.compile(r"^snapshot-[0-9a-f]{32}$")
+ARTIFACT_ID_RE = re.compile(
+    r"^artifact-(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+)
 URL_RE = re.compile(r"https?://[^\s|<>]+")
 MATCH_MODES = (
     "typed_tool_validated",
@@ -41,25 +43,25 @@ def normalize_whitespace(value):
     return "\n\n".join(normalized).strip()
 
 
-def match_quote(quote, snapshot):
+def match_quote(quote, artifact):
     if not quote:
         return "not_found"
-    if quote in snapshot:
+    if quote in artifact:
         return "exact"
 
     quote_lines = normalize_line_endings(quote)
-    snapshot_lines = normalize_line_endings(snapshot)
-    if quote_lines in snapshot_lines:
+    artifact_lines = normalize_line_endings(artifact)
+    if quote_lines in artifact_lines:
         return "line_ending_equivalent"
 
     quote_whitespace = normalize_whitespace(quote_lines)
-    snapshot_whitespace = normalize_whitespace(snapshot_lines)
-    if quote_whitespace and quote_whitespace in snapshot_whitespace:
+    artifact_whitespace = normalize_whitespace(artifact_lines)
+    if quote_whitespace and quote_whitespace in artifact_whitespace:
         return "whitespace_equivalent"
 
     quote_unicode = unicodedata.normalize("NFC", quote_whitespace)
-    snapshot_unicode = unicodedata.normalize("NFC", snapshot_whitespace)
-    if quote_unicode and quote_unicode in snapshot_unicode:
+    artifact_unicode = unicodedata.normalize("NFC", artifact_whitespace)
+    if quote_unicode and quote_unicode in artifact_unicode:
         return "unicode_equivalent"
     return "not_found"
 
@@ -79,7 +81,7 @@ def empty_result():
         "report_quote_ids": 0,
         "knowledge_quote_ids": 0,
         "knowledge_artifacts": 0,
-        "snapshots_checked": 0,
+        "artifacts_checked": 0,
         "conflicts": 0,
         "match_modes": {mode: 0 for mode in MATCH_MODES},
         "issue_count": 0,
@@ -418,27 +420,27 @@ def audit(payload, workspace=None):
 
     for quote_id in sorted(body_ids & quotes.keys()):
         quote = quotes[quote_id]
-        snapshot_id = str(quote.get("snapshot_id", "")).strip()
+        artifact_id = str(quote.get("artifact_id", "")).strip()
         record_path = quote.get("_record_path", quote_id)
-        if not SNAPSHOT_ID_RE.fullmatch(snapshot_id):
+        if not ARTIFACT_ID_RE.fullmatch(artifact_id):
             issues.append(
                 new_issue(
-                    "invalid_snapshot_id",
-                    f"quote {quote_id} does not reference a registered snapshot ID",
+                    "invalid_artifact_id",
+                    f"quote {quote_id} does not reference a registered artifact ID",
                     record_path,
-                    "Retain the snapshot_id accepted by the upstream Research typed tool.",
+                    "Retain the artifact_id accepted by the upstream Research typed tool.",
                 )
             )
             result["match_modes"]["not_found"] += 1
             continue
-        result["snapshots_checked"] += 1
+        result["artifacts_checked"] += 1
         mode = "typed_tool_validated"
         result["match_modes"][mode] += 1
         matches.append(
             {
                 "quote_id": quote_id,
                 "match_mode": mode,
-                "snapshot_id": snapshot_id,
+                "artifact_id": artifact_id,
             }
         )
 

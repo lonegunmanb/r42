@@ -18,7 +18,7 @@ const (
 	DefaultMaxProtocolAttempts   = 10
 	DefaultMaxQCRounds           = 10
 	DefaultCollectionBatchSize   = 10
-	DefaultCollectionQCCriterion = "The registered snapshots must provide sufficient evidence to answer the research task."
+	DefaultCollectionQCCriterion = "The registered evidence artifacts must provide sufficient evidence to answer the research task."
 )
 
 type Permission string
@@ -49,7 +49,7 @@ type Config struct {
 	Retry                      provider.RetryOverride
 	Policy                     SessionPolicy
 	Artifacts                  []Artifact
-	Snapshots                  []Artifact
+	Imports                    []ImportArtifact
 	ToolUses                   []ToolUse
 	QC                         *QCConfig
 	CollectionModelProvider    cty.Value
@@ -60,6 +60,13 @@ type Config struct {
 	CollectionBatchSize        int
 	MaxCollectionRounds        *int
 	CollectionQC               *CollectionQCConfig
+}
+
+// ImportArtifact grants a block read access to artifacts declared by another block.
+type ImportArtifact struct {
+	Name    string
+	Desc    string
+	Sources cty.Value
 }
 
 // ToolUse assigns typed-tool input fields to HCL or to the research agent.
@@ -146,15 +153,21 @@ func (c Config) Validate() error {
 		}
 		artifactNames[artifact.Name] = struct{}{}
 	}
-	snapshotNames := make(map[string]struct{}, len(c.Snapshots))
-	for _, snapshot := range c.Snapshots {
-		if err := snapshot.Validate(); err != nil {
-			return fmt.Errorf("snapshot: %w", err)
+	importNames := make(map[string]struct{}, len(c.Imports))
+	for _, imported := range c.Imports {
+		if strings.TrimSpace(imported.Name) == "" {
+			return errors.New("import_artifact name is required")
 		}
-		if _, exists := snapshotNames[snapshot.Name]; exists {
-			return fmt.Errorf("snapshot %s is declared more than once", snapshot.Name)
+		if _, exists := importNames[imported.Name]; exists {
+			return fmt.Errorf("import_artifact %q is declared more than once", imported.Name)
 		}
-		snapshotNames[snapshot.Name] = struct{}{}
+		if strings.TrimSpace(imported.Desc) == "" {
+			return fmt.Errorf("import_artifact %q desc is required", imported.Name)
+		}
+		if err := validateArtifactSources(imported.Sources, "import_artifact "+imported.Name+" sources"); err != nil {
+			return err
+		}
+		importNames[imported.Name] = struct{}{}
 	}
 	if c.QC != nil {
 		if err := c.QC.Validate(); err != nil {
@@ -226,14 +239,14 @@ func validateAgentInputFields(fields cty.Value) error {
 		}
 		sources := unmarked.GetAttr("sources")
 		if !sources.Type().IsListType() && !sources.Type().IsTupleType() {
-			return fmt.Errorf("input_from_agent field %q sources must be a list of artifact or snapshot objects", name)
+			return fmt.Errorf("input_from_agent field %q sources must be a list of artifact objects", name)
 		}
 		if !sources.IsKnown() {
 			continue
 		}
 		for _, source := range sources.AsValueSlice() {
 			if !source.Type().IsObjectType() {
-				return fmt.Errorf("input_from_agent field %q sources must contain artifact or snapshot objects", name)
+				return fmt.Errorf("input_from_agent field %q sources must contain artifact objects", name)
 			}
 			for _, attribute := range []string{"id", "name", "kind", "type", "path", "description"} {
 				if !source.Type().HasAttribute(attribute) {
@@ -252,13 +265,36 @@ func validateAgentInputFields(fields cty.Value) error {
 				}
 			}
 			kind := source.GetAttr("kind")
-			if kind.IsKnown() && !kind.IsNull() && kind.AsString() != "artifact" && kind.AsString() != "snapshot" {
-				return fmt.Errorf("input_from_agent field %q source kind must be artifact or snapshot", name)
+			if kind.IsKnown() && !kind.IsNull() && kind.AsString() != "artifact" {
+				return fmt.Errorf("input_from_agent field %q source kind must be artifact", name)
 			}
 			artifactType := source.GetAttr("type")
 			if artifactType.IsKnown() && !artifactType.IsNull() && artifactType.AsString() != "file" && artifactType.AsString() != "directory" {
 				return fmt.Errorf("input_from_agent field %q source type must be file or directory", name)
 			}
+		}
+	}
+	return nil
+}
+
+func validateArtifactSources(sources cty.Value, name string) error {
+	if sources == cty.NilVal || sources.IsNull() {
+		return fmt.Errorf("%s must be a list of artifact objects", name)
+	}
+	unmarked, _ := sources.UnmarkDeep()
+	if !unmarked.Type().IsListType() && !unmarked.Type().IsTupleType() {
+		return fmt.Errorf("%s must be a list of artifact objects", name)
+	}
+	if !unmarked.IsKnown() {
+		return nil
+	}
+	for _, source := range unmarked.AsValueSlice() {
+		if !source.Type().IsObjectType() || !source.Type().HasAttribute("kind") {
+			return fmt.Errorf("%s must contain artifact objects", name)
+		}
+		kind := source.GetAttr("kind")
+		if kind.IsKnown() && !kind.IsNull() && (!kind.Type().Equals(cty.String) || kind.AsString() != "artifact") {
+			return fmt.Errorf("%s must contain artifact objects", name)
 		}
 	}
 	return nil

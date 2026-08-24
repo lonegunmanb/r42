@@ -126,7 +126,7 @@ func TestQCVerdictToolReturnsRepairableCollectionBudgetRejection(t *testing.T) {
 		"issues": [{
 			"code": "collection_round_budget_exhausted",
 			"message": "cannot reopen collection: all 2 collection rounds have been used",
-			"repair_hint": "Choose revise_research or pass using existing snapshots."
+			"repair_hint": "Choose revise_research or pass using existing evidence artifacts."
 		}]
 	}`, result.TextResultForLLM)
 }

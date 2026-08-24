@@ -91,7 +91,7 @@ research "static" "source" {
 }
 
 output "summary" {
-  value = one(research.static.source.artifact).path
+  value = research.static.source.artifact.report.path
 }
 `), 0o600))
 

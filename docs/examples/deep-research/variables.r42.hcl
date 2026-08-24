@@ -56,8 +56,8 @@ variable "system_prompt" {
     You must finish by calling the configured terminate tool. The call must
     submit atomic knowledge claims and separate verbatim quote records. Save
     the complete material returned by every source read as Markdown under the
-    current block workspace's snapshots/ directory before citing it. Every quote must include the
-    registered snapshot_id, locator, URL, and verbatim text from that snapshot.
+    current block workspace's artifacts/ directory before citing it. Every quote must include the
+    registered artifact_id, locator, URL, and verbatim text from that artifact.
     Every claim must reference at least one quote ID, and every quote must be
     used. Before calling the tool, be ready for it to write the accepted
     payload to the declared knowledge.json artifact.

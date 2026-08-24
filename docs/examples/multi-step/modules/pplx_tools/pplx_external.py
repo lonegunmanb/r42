@@ -147,6 +147,16 @@ def content_text(value: Any) -> str:
     return "\n\n".join(parts)
 
 
+def is_fetch_failure_text(content: str) -> bool:
+    normalized = " ".join(content.lower().split()).strip(" .:;!?")
+    return normalized in {
+        "unable to retrieve content from the provided url",
+        "could not retrieve content from the provided url",
+        "failed to retrieve content from the provided url",
+        "failed to fetch the provided url",
+    }
+
+
 def extract_fetched_content(decoded: dict[str, Any], requested_url: str) -> tuple[str, str, str]:
     fallback = ""
     for item in decoded.get("output", []):
@@ -166,6 +176,11 @@ def extract_fetched_content(decoded: dict[str, Any], requested_url: str) -> tupl
         if text and not fallback:
             fallback = text
     if fallback:
+        if is_fetch_failure_text(fallback):
+            raise ToolError(
+                "Perplexity fetch could not retrieve usable content for "
+                f"{requested_url}; no artifact was written. Try another source URL."
+            )
         return requested_url, requested_url, fallback
     raise ToolError("Perplexity fetch returned no extracted content")
 
@@ -191,14 +206,14 @@ def fetch(arguments: dict[str, Any]) -> dict[str, Any]:
     )
     title, fetched_url, content = extract_fetched_content(decoded, source_url)
     fetched_at = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
-    snapshot_path = (pathlib.Path.cwd() / "snapshot.md").resolve()
-    snapshot = "\n".join(
+    artifact_path = (pathlib.Path.cwd() / "artifact.md").resolve()
+    artifact = "\n".join(
         [
             f"# {title}",
             "",
             f"- URL: {fetched_url}",
             f"- Fetched at: {fetched_at}",
-            "- Snapshot source: Perplexity fetch_url",
+            "- Artifact source: Perplexity fetch_url",
             "",
             "## Extracted Content",
             "",
@@ -206,13 +221,13 @@ def fetch(arguments: dict[str, Any]) -> dict[str, Any]:
             "",
         ]
     )
-    snapshot_path.write_text(snapshot, encoding="utf-8")
+    artifact_path.write_text(artifact, encoding="utf-8")
     return {
         "accepted": True,
         "output": {
             "title": title,
             "url": fetched_url,
-            "snapshot_path": snapshot_path.as_posix(),
+            "artifact_path": artifact_path.as_posix(),
             "fetched_at": fetched_at,
         },
     }

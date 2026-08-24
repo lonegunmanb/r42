@@ -69,7 +69,7 @@ research "static" "source" {
 	assert.Equal(t, 2, opener.finalSends)
 }
 
-func TestDynamicResearchMembersHaveIsolatedSnapshotRegistries(t *testing.T) {
+func TestDynamicResearchMembersHaveIsolatedArtifactRegistries(t *testing.T) {
 	t.Parallel()
 
 	directory := t.TempDir()
@@ -120,7 +120,7 @@ func (s *workflowScenarioSession) SendAndWait(_ context.Context, options sdk.Mes
 				if err := os.WriteFile(path, fmt.Appendf(nil, "evidence-%d", index), 0o600); err != nil {
 					return nil, err
 				}
-				if _, err := findTool(s.config.Tools, "r42_register_snapshot").Handler(sdk.ToolInvocation{Arguments: map[string]any{"path": path}}); err != nil {
+				if _, err := findTool(s.config.Tools, "r42_register_artifact").Handler(sdk.ToolInvocation{Arguments: map[string]any{"path": path}}); err != nil {
 					return nil, err
 				}
 			}
@@ -222,13 +222,13 @@ func (s *isolatedRegistrySession) SendAndWait(_ context.Context, options sdk.Mes
 		if err := os.WriteFile(path, []byte(name), 0o600); err != nil {
 			return nil, err
 		}
-		if _, err := findTool(s.config.Tools, "r42_register_snapshot").Handler(sdk.ToolInvocation{Arguments: map[string]any{"path": path}}); err != nil {
+		if _, err := findTool(s.config.Tools, "r42_register_artifact").Handler(sdk.ToolInvocation{Arguments: map[string]any{"path": path}}); err != nil {
 			return nil, err
 		}
 		_, err := findTool(s.config.Tools, "r42_collection_checkpoint").Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
 		return &sdk.SessionEvent{}, err
 	case "collection_qc":
-		result, err := findTool(s.config.Tools, "r42_list_snapshots").Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+		result, err := findTool(s.config.Tools, "r42_list_artifacts").Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
 		if err != nil {
 			return nil, err
 		}
@@ -239,7 +239,7 @@ func (s *isolatedRegistrySession) SendAndWait(_ context.Context, options sdk.Mes
 			return nil, err
 		}
 		if len(response.Output) != 1 {
-			return nil, fmt.Errorf("snapshot registry contains %d entries, want 1", len(response.Output))
+			return nil, fmt.Errorf("artifact registry contains %d entries, want 1", len(response.Output))
 		}
 		s.opener.mu.Lock()
 		s.opener.reviewed++

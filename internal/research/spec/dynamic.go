@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"math/big"
+	"regexp"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
@@ -37,7 +38,7 @@ func (*DynamicResearchBlock) CanExecutePrePlan() bool { return false }
 
 func (b *DynamicResearchBlock) EvalContext() *hcl.EvalContext {
 	context := researchBlockEvalContext(b.BaseBlock)
-	context.Variables["self"] = DynamicTaskSelfValue()
+	context.Variables["self"] = DynamicTaskSelfValueForExpression(b.TasksExpression())
 	return context
 }
 
@@ -209,7 +210,7 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 	if block.ArtifactBlocks, err = dynamicArtifactBlocks(unmarked); err != nil {
 		return Config{}, err
 	}
-	if block.SnapshotBlocks, err = dynamicSnapshotBlocks(unmarked); err != nil {
+	if block.ImportArtifactBlocks, err = dynamicImportArtifactBlocks(unmarked); err != nil {
 		return Config{}, err
 	}
 	if block.QCBlocks, err = dynamicQCBlocks(unmarked); err != nil {
@@ -250,30 +251,111 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 }
 
 // ResolveDynamicTaskSelfReferences resolves dynamic self placeholders after a
-// task object's snapshot declarations are available.
+// task object's artifact declarations are available.
 func ResolveDynamicTaskSelfReferences(config Config) (Config, error) {
-	usesSnapshotPath := strings.Contains(config.SystemPrompt, dynamicSelfSnapshotPath) ||
-		(config.Prompt != nil && strings.Contains(*config.Prompt, dynamicSelfSnapshotPath))
-	if !usesSnapshotPath {
-		return config, nil
+	paths := make(map[string]string, len(config.Artifacts))
+	for _, artifact := range config.Artifacts {
+		paths[artifact.Name] = artifact.Path
 	}
-	path, err := dynamicSelfSnapshotPathFor(config.Snapshots)
-	if err != nil {
+	var err error
+	if config.SystemPrompt, err = replaceDynamicSelfArtifactPaths(config.SystemPrompt, paths); err != nil {
 		return Config{}, err
 	}
-	config.SystemPrompt = strings.ReplaceAll(config.SystemPrompt, dynamicSelfSnapshotPath, path)
 	if config.Prompt != nil {
-		prompt := strings.ReplaceAll(*config.Prompt, dynamicSelfSnapshotPath, path)
+		prompt, err := replaceDynamicSelfArtifactPaths(*config.Prompt, paths)
+		if err != nil {
+			return Config{}, err
+		}
 		config.Prompt = &prompt
+	}
+	for index := range config.ToolUses {
+		input, inputErr := replaceDynamicSelfArtifactPathsInValue(config.ToolUses[index].Input, paths)
+		if inputErr != nil {
+			return Config{}, fmt.Errorf("tool_use %q input: %w", config.ToolUses[index].Name, inputErr)
+		}
+		config.ToolUses[index].Input = input
 	}
 	return config, nil
 }
 
-func dynamicSelfSnapshotPathFor(snapshots []Artifact) (string, error) {
-	if len(snapshots) != 1 {
-		return "", fmt.Errorf("one(self.snapshot).path requires exactly one declared dynamic snapshot")
+var dynamicSelfArtifactPathPlaceholderPattern = regexp.MustCompile(`__r42_dynamic_self_artifact_(.+)_path__`)
+
+func replaceDynamicSelfArtifactPaths(value string, paths map[string]string) (string, error) {
+	result := value
+	for name, path := range paths {
+		result = strings.ReplaceAll(result, dynamicSelfArtifactPathPlaceholder(name), path)
 	}
-	return snapshots[0].Path, nil
+	match := dynamicSelfArtifactPathPlaceholderPattern.FindStringSubmatch(result)
+	if len(match) == 0 {
+		return result, nil
+	}
+	return "", fmt.Errorf("self.artifact.%s.path requires a dynamic artifact named %q", match[1], match[1])
+}
+
+func replaceDynamicSelfArtifactPathsInValue(value cty.Value, paths map[string]string) (cty.Value, error) {
+	if value == cty.NilVal {
+		return value, nil
+	}
+	unmarked, marks := value.Unmark()
+	if !unmarked.IsKnown() || unmarked.IsNull() {
+		return value, nil
+	}
+	switch {
+	case unmarked.Type().Equals(cty.String):
+		replaced, err := replaceDynamicSelfArtifactPaths(unmarked.AsString(), paths)
+		if err != nil {
+			return cty.NilVal, err
+		}
+		return cty.StringVal(replaced).WithMarks(marks), nil
+	case unmarked.Type().IsObjectType():
+		values := make(map[string]cty.Value, len(unmarked.AsValueMap()))
+		for name, item := range unmarked.AsValueMap() {
+			replaced, err := replaceDynamicSelfArtifactPathsInValue(item, paths)
+			if err != nil {
+				return cty.NilVal, err
+			}
+			values[name] = replaced
+		}
+		return cty.ObjectVal(values).WithMarks(marks), nil
+	case unmarked.Type().IsMapType():
+		values := make(map[string]cty.Value, len(unmarked.AsValueMap()))
+		for name, item := range unmarked.AsValueMap() {
+			replaced, err := replaceDynamicSelfArtifactPathsInValue(item, paths)
+			if err != nil {
+				return cty.NilVal, err
+			}
+			values[name] = replaced
+		}
+		if len(values) == 0 {
+			return cty.MapValEmpty(unmarked.Type().ElementType()).WithMarks(marks), nil
+		}
+		return cty.MapVal(values).WithMarks(marks), nil
+	case unmarked.Type().IsListType():
+		values := make([]cty.Value, 0, unmarked.LengthInt())
+		for _, item := range unmarked.AsValueSlice() {
+			replaced, err := replaceDynamicSelfArtifactPathsInValue(item, paths)
+			if err != nil {
+				return cty.NilVal, err
+			}
+			values = append(values, replaced)
+		}
+		if len(values) == 0 {
+			return cty.ListValEmpty(unmarked.Type().ElementType()).WithMarks(marks), nil
+		}
+		return cty.ListVal(values).WithMarks(marks), nil
+	case unmarked.Type().IsTupleType():
+		values := make([]cty.Value, 0, unmarked.LengthInt())
+		for _, item := range unmarked.AsValueSlice() {
+			replaced, err := replaceDynamicSelfArtifactPathsInValue(item, paths)
+			if err != nil {
+				return cty.NilVal, err
+			}
+			values = append(values, replaced)
+		}
+		return cty.TupleVal(values).WithMarks(marks), nil
+	default:
+		return value, nil
+	}
 }
 
 func dynamicToolUseBlocks(object cty.Value) ([]ToolUseBlock, error) {
@@ -282,17 +364,14 @@ func dynamicToolUseBlocks(object cty.Value) ([]ToolUseBlock, error) {
 		return nil, nil
 	}
 	unmarked, _ := value.UnmarkDeep()
-	if !unmarked.Type().IsListType() && !unmarked.Type().IsTupleType() {
-		return nil, fmt.Errorf("tool_uses must be a list")
+	if !unmarked.Type().IsMapType() && !unmarked.Type().IsObjectType() {
+		return nil, fmt.Errorf("tool_uses must be an object or map")
 	}
 	result := make([]ToolUseBlock, 0, unmarked.LengthInt())
 	iterator := unmarked.ElementIterator()
 	for index := 0; iterator.Next(); index++ {
-		_, item := iterator.Element()
-		name, err := dynamicRequiredString(item, "name")
-		if err != nil {
-			return nil, fmt.Errorf("tool_use %d: %w", index, err)
-		}
+		key, item := iterator.Element()
+		name := key.AsString()
 		toolID, err := dynamicRequiredString(item, "tool_id")
 		if err != nil {
 			return nil, fmt.Errorf("tool_use %d: %w", index, err)
@@ -476,11 +555,34 @@ func dynamicRetryBlocks(object cty.Value) ([]RetryBlock, error) {
 }
 
 func dynamicArtifactBlocks(object cty.Value) ([]ArtifactBlock, error) {
-	return dynamicNamedArtifactBlocks(object, "artifacts")
+	return dynamicNamedArtifactBlocks(object, "artifact")
 }
 
-func dynamicSnapshotBlocks(object cty.Value) ([]ArtifactBlock, error) {
-	return dynamicNamedArtifactBlocks(object, "snapshots")
+func dynamicImportArtifactBlocks(object cty.Value) ([]ImportArtifactBlock, error) {
+	value, ok := dynamicAttribute(object, "import_artifact")
+	if !ok || value.IsNull() {
+		return nil, nil
+	}
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.Type().IsMapType() && !unmarked.Type().IsObjectType() {
+		return nil, fmt.Errorf("import_artifact must be an object or map")
+	}
+	result := make([]ImportArtifactBlock, 0, unmarked.LengthInt())
+	iterator := unmarked.ElementIterator()
+	for index := 0; iterator.Next(); index++ {
+		key, item := iterator.Element()
+		name := key.AsString()
+		desc, err := dynamicRequiredString(item, "desc")
+		if err != nil {
+			return nil, fmt.Errorf("import_artifact %d: %w", index, err)
+		}
+		sources, exists := dynamicAttribute(item, "sources")
+		if !exists {
+			return nil, fmt.Errorf("import_artifact %d: sources is required", index)
+		}
+		result = append(result, ImportArtifactBlock{Name: name, Desc: desc, Sources: sources})
+	}
+	return result, nil
 }
 
 func dynamicNamedArtifactBlocks(object cty.Value, attribute string) ([]ArtifactBlock, error) {
@@ -489,16 +591,16 @@ func dynamicNamedArtifactBlocks(object cty.Value, attribute string) ([]ArtifactB
 		return nil, nil
 	}
 	unmarked, _ := value.UnmarkDeep()
-	if !unmarked.Type().IsListType() && !unmarked.Type().IsTupleType() {
-		return nil, fmt.Errorf("%s must be a list", attribute)
+	if !unmarked.Type().IsMapType() && !unmarked.Type().IsObjectType() {
+		return nil, fmt.Errorf("%s must be an object or map", attribute)
 	}
 	result := make([]ArtifactBlock, 0, unmarked.LengthInt())
 	iterator := unmarked.ElementIterator()
 	for index := 0; iterator.Next(); index++ {
-		_, artifact := iterator.Element()
-		name, err := dynamicRequiredString(artifact, "name")
-		if err != nil {
-			return nil, fmt.Errorf("artifact %d: %w", index, err)
+		key, artifact := iterator.Element()
+		name := ""
+		if unmarked.Type().IsMapType() || unmarked.Type().IsObjectType() {
+			name = key.AsString()
 		}
 		artifactType, err := dynamicRequiredString(artifact, "type")
 		if err != nil {
@@ -654,8 +756,7 @@ func dynamicAttribute(object cty.Value, name string) (cty.Value, bool) {
 
 func plannedDynamicTaskValue(task cty.Value, config Config) cty.Value {
 	values, marks := dynamicTaskValuesWithProfile(task)
-	values["artifacts"] = ArtifactsValue(config.Artifacts, nil)
-	values["snapshots"] = cty.UnknownVal(cty.List(snapshotValueType))
+	values["artifact"] = ArtifactsValue(config.Artifacts, nil)
 	if config.TerminateToolID != nil {
 		values["result"] = cty.UnknownVal(cty.String)
 	}
@@ -685,10 +786,7 @@ func AppliedDynamicTaskValue(task, result cty.Value) cty.Value {
 	values := maps.Clone(unmarked.AsValueMap())
 	resultValues := result.AsValueMap()
 	if artifacts, ok := resultValues["artifact"]; ok {
-		values["artifacts"] = artifacts
-	}
-	if snapshots, ok := resultValues["snapshots"]; ok {
-		values["snapshots"] = snapshots
+		values["artifact"] = artifacts
 	}
 	if value, ok := resultValues["result"]; ok {
 		values["result"] = value
@@ -719,8 +817,7 @@ func dynamicTaskOutputType(taskType cty.Type, hasTerminatingToolUse bool) cty.Ty
 	}
 	attributes := taskType.AttributeTypes()
 	attributes["profile"] = cty.String
-	attributes["artifacts"] = cty.List(artifactValueType)
-	attributes["snapshots"] = cty.List(snapshotValueType)
+	attributes["artifact"] = cty.Map(artifactValueType)
 	if taskType.HasAttribute("terminate_tool_id") || hasTerminatingToolUse {
 		attributes["result"] = cty.String
 	}

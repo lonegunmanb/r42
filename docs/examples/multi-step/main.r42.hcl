@@ -9,7 +9,7 @@ module "pplx_tools" {
   source = "./modules/pplx_tools"
 }
 
-research "static" "external_tool_snapshot" {
+research "static" "external_tool_artifact" {
   model_provider   = model_provider.primary
   model            = "deepseek-v4-flash"
   reasoning_effort = "low"
@@ -18,10 +18,10 @@ research "static" "external_tool_snapshot" {
 
     During Collection, call ${module.pplx_tools.pplx_pro_search_tool_id}, then
     ${module.pplx_tools.pplx_fetch_tool_id}. Register the fetched Markdown path
-    with r42_register_snapshot and submit the collection checkpoint.
+    with r42_register_artifact and submit the collection checkpoint.
 
     During closed Research, do not call acquisition tools. Use
-    r42_list_snapshots and r42_read_snapshot to verify the registered snapshot,
+    r42_list_artifacts and r42_read_artifact to verify the registered artifact,
     then finish with a concise confirmation of the Python release found.
 
     Never use PowerShell, a shell, curl, wget, or scripts and command-line
@@ -34,10 +34,10 @@ research "static" "external_tool_snapshot" {
   prompt = <<-PROMPT
     Search for the latest stable Python release announcement on python.org.
     Select one python.org result and call ${module.pplx_tools.pplx_fetch_tool_id} with its URL.
-    The fetch tool writes ${block_wd()}/snapshot.md itself.
+    The fetch tool writes ${self.artifact.artifact.path} itself.
     During Collection, do not checkpoint until the fetch succeeds, reports that
-    exact path, and r42_register_snapshot accepts it. During closed Research,
-    verify the snapshot through the r42 snapshot readers before responding.
+    exact path, and r42_register_artifact accepts it. During closed Research,
+    verify the artifact through the r42 artifact readers before responding.
   PROMPT
   collection_tool_ids = [
     module.pplx_tools.pplx_pro_search_tool_id,
@@ -46,16 +46,16 @@ research "static" "external_tool_snapshot" {
   disallowed_tools = ["web_search", "web_fetch"]
   permission        = "approve_all"
 
-  artifact "snapshot" {
+  artifact "artifact" {
     type      = "file"
-    path      = "${block_wd()}/snapshot.md"
-	description = "Markdown snapshot returned by the configured external fetch process"
+    path      = "${block_wd()}/artifact.md"
+	description = "Markdown artifact returned by the configured external fetch process"
     required  = true
     non_empty = true
   }
 }
 
-output "snapshot_path" {
-  description = "Absolute path to the Markdown snapshot written by the external fetch process."
-  value       = one(research.static.external_tool_snapshot.artifact).path
+output "artifact_path" {
+  description = "Absolute path to the Markdown artifact written by the external fetch process."
+  value       = research.static.external_tool_artifact.artifact.artifact.path
 }

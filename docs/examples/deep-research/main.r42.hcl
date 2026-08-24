@@ -63,11 +63,11 @@ research "static" "plan" {
     a precise subquestion and instructions that define its evidence scope,
     exclusions, and expected reasoning. Do not perform the research yourself.
     Every task must tell the researcher to save complete source material as
-    Markdown under its block_wd()/snapshots/ directory and associate every
-    quote with the snapshot_id returned by r42_save_snapshot. Tell it to call
-    r42_save_snapshot after every source read, passing the source URL in source.
-    Tell it to use the returned snapshot_id directly and not call
-    r42_register_snapshot afterward. A source identifier alone is not evidence.
+    Markdown under its block_wd()/artifacts/ directory and associate every
+    quote with the artifact_id returned by r42_save_artifact. Tell it to call
+    r42_save_artifact after every source read, passing the source URL in source.
+    Tell it to use the returned artifact_id directly and not call
+    r42_register_artifact afterward. A source identifier alone is not evidence.
     You must finish by calling ${go_tool.submit_research_plan.id}.
 
     During Collection, do not acquire external evidence; the topic is the
@@ -95,20 +95,6 @@ research "static" "plan" {
     terminate = true
     input = {
       topic = var.topic
-    }
-    input_from_agent = {
-      parallel_tasks = {
-        desc = "The independently executable tasks for the parallel group."
-        sources = []
-      }
-      independent_serial_tasks = {
-        desc = "The independently executable tasks for the serial group."
-        sources = []
-      }
-      final_serial_tasks = {
-        desc = "The tasks that wait for both earlier groups."
-        sources = []
-      }
     }
   }
   disallowed_tools  = local.offline_disallowed_tools
@@ -153,61 +139,53 @@ research "dynamic" "parallel_deep_dive" {
 
         During Collection, research this subquestion independently. Save the
         complete material returned by every retained source as Markdown under
-        "${one(self.snapshot).path}" by calling r42_save_snapshot with
-        source set to the source URL. Use the returned snapshot_id directly;
-        do not call r42_register_snapshot for the returned path. Submit a
+        "${self.artifact.sources.path}" by calling r42_save_artifact with
+        source set to the source URL. Use the returned artifact_id directly;
+        do not call r42_register_artifact for the returned path. Submit a
         collection checkpoint once the evidence is sufficient.
 
-        During closed Research, do not search or fetch. Use the snapshot IDs
-        supplied by r42 with r42_read_snapshot to inspect registered evidence. Associate
-        every quote with its registered snapshot_id, URL, locator, and verbatim
+        During closed Research, do not search or fetch. Use the artifact IDs
+        supplied by r42 with r42_read_artifact to inspect registered evidence. Associate
+        every quote with its registered artifact_id, URL, locator, and verbatim
         text. Then call
-        ${go_tool.submit_knowledge.id} with artifact_path exactly
-        "${block_wd()}/${index}/${task.id}/knowledge.json", subquestion exactly as
+        ${go_tool.submit_knowledge.id}; r42 binds its declared knowledge
+        artifact_id and the subquestion exactly as
         assigned above, atomic knowledge claims with IDs prefixed
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      snapshots = [{
-        name        = "sources"
-        type        = "directory"
-        path        = "${block_wd()}/${index}/snapshots"
-        description = "Source material collected for this parallel subquestion."
-      }]
-      tool_uses = [{
-        name      = "submit_knowledge"
-        tool_id   = go_tool.submit_knowledge.id
-        terminate = true
-        input = {
-          artifact_path = "${block_wd()}/${index}/${task.id}/knowledge.json"
-          subquestion   = task.subquestion
-        }
-        input_from_agent = {
-          knowledge = {
-            desc = "Atomic knowledge claims for the assigned subquestion, supported by the collected quotes."
-            sources = self.snapshot
-          }
-          quotes = {
-            desc = "Exact quote records read from the authorized snapshots."
-            sources = self.snapshot
+      tool_uses = {
+        submit_knowledge = {
+          tool_id   = go_tool.submit_knowledge.id
+          terminate = true
+          input = {
+            artifact_id            = self.artifact.knowledge.id
+            _r42_artifact_path     = ""
+            subquestion            = task.subquestion
           }
         }
-      }]
+      }
       tool_call_quota   = local.deep_dive_tool_call_quota
       permission        = "approve_all"
-      artifacts = [{
-        name      = "knowledge"
+      artifact = {
+        sources = {
+          type        = "directory"
+          path        = "${block_wd()}/${index}/artifacts"
+          description = "Source material collected for this parallel subquestion."
+        }
+        knowledge = {
         type      = "file"
         path      = "${block_wd()}/${index}/${task.id}/knowledge.json"
 		description = "Validated claims and exact quotes for this parallel subquestion"
         required  = true
         non_empty = true
-      }]
+        }
+      }
       retry = null
       qc = {
         criteria = {
           knowledge_items = "Judge whether every knowledge claim answers the assigned subquestion, expresses uncertainty carefully, and is fully supported by its cited quote records."
-          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool snapshot existence and text matching as authoritative."
+          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool artifact existence and text matching as authoritative."
           traceability = "Judge whether the cited evidence is sufficient and decision-relevant, and whether material contrary evidence or uncertainty is omitted. Treat typed-tool IDs and graph references as authoritative."
         }
         reasoning_effort = var.reasoning_effort
@@ -247,61 +225,52 @@ research "dynamic" "independent_serial_deep_dive" {
         result.
 
         During Collection, save the complete material returned by every
-        retained source as Markdown under "${one(self.snapshot).path}" by calling
-        r42_save_snapshot with source set to the source URL. Use the returned
-        snapshot_id directly; do not call r42_register_snapshot for the returned
+        retained source as Markdown under "${self.artifact.sources.path}" by calling
+        r42_save_artifact with source set to the source URL. Use the returned
+        artifact_id directly; do not call r42_register_artifact for the returned
         path. Submit a collection checkpoint once the evidence is sufficient.
 
-        During closed Research, do not search or fetch. Use the snapshot IDs
-        supplied by r42 with r42_read_snapshot to inspect registered evidence. Associate
-        every quote with its registered snapshot_id, URL, locator, and verbatim
+        During closed Research, do not search or fetch. Use the artifact IDs
+        supplied by r42 with r42_read_artifact to inspect registered evidence. Associate
+        every quote with its registered artifact_id, URL, locator, and verbatim
         text. Then call ${go_tool.submit_knowledge.id}
-        with artifact_path
-        exactly "${block_wd()}/${index}/${task.id}/knowledge.json", subquestion exactly
+        with its declared knowledge artifact_id and subquestion exactly
         as assigned above, atomic knowledge claims with IDs prefixed
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      snapshots = [{
-        name        = "sources"
-        type        = "directory"
-        path        = "${block_wd()}/${index}/snapshots"
-        description = "Source material collected for this serial subquestion."
-      }]
-      tool_uses = [{
-        name      = "submit_knowledge"
-        tool_id   = go_tool.submit_knowledge.id
-        terminate = true
-        input = {
-          artifact_path = "${block_wd()}/${index}/${task.id}/knowledge.json"
-          subquestion   = task.subquestion
-        }
-        input_from_agent = {
-          knowledge = {
-            desc = "Atomic knowledge claims for the assigned subquestion, supported by the collected quotes."
-            sources = self.snapshot
-          }
-          quotes = {
-            desc = "Exact quote records read from the authorized snapshots."
-            sources = self.snapshot
+      tool_uses = {
+        submit_knowledge = {
+          tool_id   = go_tool.submit_knowledge.id
+          terminate = true
+          input = {
+            artifact_id            = self.artifact.knowledge.id
+            _r42_artifact_path     = ""
+            subquestion            = task.subquestion
           }
         }
-      }]
+      }
       tool_call_quota   = local.deep_dive_tool_call_quota
       permission        = "approve_all"
-      artifacts = [{
-        name      = "knowledge"
+      artifact = {
+        sources = {
+          type        = "directory"
+          path        = "${block_wd()}/${index}/artifacts"
+          description = "Source material collected for this serial subquestion."
+        }
+        knowledge = {
         type      = "file"
         path      = "${block_wd()}/${index}/${task.id}/knowledge.json"
 		description = "Validated claims and exact quotes for this independent serial subquestion"
         required  = true
         non_empty = true
-      }]
+        }
+      }
       retry = null
       qc = {
         criteria = {
           knowledge_items = "Judge whether every knowledge claim answers the assigned subquestion, expresses uncertainty carefully, and is fully supported by its cited quote records."
-          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool snapshot existence and text matching as authoritative."
+          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool artifact existence and text matching as authoritative."
           traceability = "Judge whether the cited evidence is sufficient and decision-relevant, and whether material contrary evidence or uncertainty is omitted. Treat typed-tool IDs and graph references as authoritative."
         }
         reasoning_effort = var.reasoning_effort
@@ -327,6 +296,16 @@ research "dynamic" "final_serial_deep_dive" {
       model            = var.model
       reasoning_effort = var.reasoning_effort
       system_prompt    = local.deep_dive_system_prompt
+      import_artifact = {
+        parallel_knowledge = {
+          desc    = "Validated knowledge artifacts from parallel deep-dive tasks."
+          sources = flatten([for item in research.dynamic.parallel_deep_dive.tasks : values(item.artifact)])
+        }
+        independent_knowledge = {
+          desc    = "Validated knowledge artifacts from independent serial deep-dive tasks."
+          sources = flatten([for item in research.dynamic.independent_serial_deep_dive.tasks : values(item.artifact)])
+        }
+      }
       prompt = <<-PROMPT
         Overall topic:
         ${var.topic}
@@ -348,80 +327,70 @@ research "dynamic" "final_serial_deep_dive" {
         The corresponding artifact paths, used only when submitting the final
         reviewed_artifacts field, are:
         ${join("\n", concat(
-          [for item in research.dynamic.parallel_deep_dive.tasks : "- ${one(item.artifacts).path}"],
-          [for item in research.dynamic.independent_serial_deep_dive.tasks : "- ${one(item.artifacts).path}"],
+          [for item in research.dynamic.parallel_deep_dive.tasks : "- ${item.artifact.knowledge.path}"],
+          [for item in research.dynamic.independent_serial_deep_dive.tasks : "- ${item.artifact.knowledge.path}"],
         ))}
 
         During Collection, collect only evidence needed beyond the validated
         upstream JSON. Save each retained source as Markdown under
-        "${one(self.snapshot).path}" with r42_save_snapshot, passing the
-        source URL in source. Use the returned snapshot_id directly; do not call
-        r42_register_snapshot for the returned path. Submit a collection checkpoint.
+        "${self.artifact.sources.path}" with r42_save_artifact, passing the
+        source URL in source. Use the returned artifact_id directly; do not call
+        r42_register_artifact for the returned path. Submit a collection checkpoint.
         If the upstream JSON is sufficient, submit an empty
         collection checkpoint instead of searching.
 
-        During closed Research, do not search or fetch. Use the snapshot IDs
-        supplied by r42 with r42_read_snapshot for any newly registered evidence and use the
+        During closed Research, do not search or fetch. Use the artifact IDs
+        supplied by r42 with r42_read_artifact for any newly registered evidence and use the
         validated JSON above directly. Associate every new quote with its exact
-        snapshot_id, URL, locator, and verbatim text. Then call
+        artifact_id, URL, locator, and verbatim text. Then call
         ${go_tool.submit_knowledge.id}
-        with artifact_path exactly
-        "${block_wd()}/${index}/${task.id}/knowledge.json", subquestion exactly as
+        with its declared knowledge artifact_id, subquestion exactly as
         assigned above, atomic knowledge claims with IDs prefixed
         "${task.id}-kb-", and exact quote records with IDs prefixed
         "${task.id}-quote-". Do not finish with prose or a JSON code block.
       PROMPT
-      snapshots = [{
-        name        = "sources"
-        type        = "directory"
-        path        = "${block_wd()}/${index}/snapshots"
-        description = "Source material collected for this final subquestion."
-      }]
-      tool_uses = [{
-        name      = "submit_knowledge"
-        tool_id   = go_tool.submit_knowledge.id
-        terminate = true
-        input = {
-          artifact_path = "${block_wd()}/${index}/${task.id}/knowledge.json"
-          subquestion   = task.subquestion
-        }
-        input_from_agent = {
-          knowledge = {
-            desc = "New atomic knowledge claims supported by the authorized snapshots and validated upstream JSON."
-            sources = flatten([
-              [for item in research.dynamic.parallel_deep_dive.tasks : item.artifacts],
-              [for item in research.dynamic.independent_serial_deep_dive.tasks : item.artifacts],
-              [for item in research.dynamic.parallel_deep_dive.tasks : item.snapshots],
-              [for item in research.dynamic.independent_serial_deep_dive.tasks : item.snapshots],
-              self.snapshot,
-            ])
+      tool_uses = {
+        submit_knowledge = {
+          tool_id   = go_tool.submit_knowledge.id
+          terminate = true
+          input = {
+            artifact_id            = self.artifact.knowledge.id
+            _r42_artifact_path     = ""
+            subquestion            = task.subquestion
           }
-          quotes = {
-            desc = "Exact quote records for newly collected evidence."
-            sources = flatten([
-              [for item in research.dynamic.parallel_deep_dive.tasks : item.snapshots],
-              [for item in research.dynamic.independent_serial_deep_dive.tasks : item.snapshots],
-              self.snapshot,
-            ])
+          input_from_agent = {
+            knowledge = {
+              desc = "New atomic knowledge claims supported by the authorized artifacts and validated upstream JSON."
+              sources = flatten([
+                [for item in research.dynamic.parallel_deep_dive.tasks : values(item.artifact)],
+                [for item in research.dynamic.independent_serial_deep_dive.tasks : values(item.artifact)],
+              ])
+            }
           }
         }
-      }]
+      }
       tool_call_quota   = local.deep_dive_tool_call_quota
       permission        = "approve_all"
-      artifacts = [{
-        name      = "knowledge"
+      artifact = {
+        sources = {
+          type        = "directory"
+          path        = "${block_wd()}/${index}/artifacts"
+          description = "Source material collected for this final subquestion."
+        }
+        knowledge = {
         type      = "file"
         path      = "${block_wd()}/${index}/${task.id}/knowledge.json"
 		description = "Validated claims and exact quotes for this dependent serial subquestion"
         required  = true
         non_empty = true
-      }]
+        }
+      }
       retry = null
       qc = {
         criteria = {
           upstream_use = "Judge whether the candidate accurately uses the relevant claims and quotes from the validated upstream JSON included in the prompt."
           knowledge_items = "Judge whether every new claim answers the assigned subquestion, expresses uncertainty carefully, and is fully supported by its cited quotes."
-          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool snapshot existence and text matching as authoritative."
+          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool artifact existence and text matching as authoritative."
         }
         reasoning_effort = var.reasoning_effort
         max_qc_rounds    = 3
@@ -470,45 +439,58 @@ research "static" "resolve_conflicts" {
     The corresponding artifact paths, used only for the typed tool's
     reviewed_artifacts field, are:
     ${join("\n", concat(
-      [for item in research.dynamic.parallel_deep_dive.tasks : "- ${one(item.artifacts).path}"],
-      [for item in research.dynamic.independent_serial_deep_dive.tasks : "- ${one(item.artifacts).path}"],
-      [for item in research.dynamic.final_serial_deep_dive.tasks : "- ${one(item.artifacts).path}"],
+      [for item in research.dynamic.parallel_deep_dive.tasks : "- ${item.artifact.knowledge.path}"],
+      [for item in research.dynamic.independent_serial_deep_dive.tasks : "- ${item.artifact.knowledge.path}"],
+      [for item in research.dynamic.final_serial_deep_dive.tasks : "- ${item.artifact.knowledge.path}"],
     ))}
 
     Compare every included knowledge item and quote record. Call
-    ${go_tool.submit_conflict_resolution.id} with artifact_path exactly
-    "${block_wd()}/resolution.json", reviewed_artifacts containing every path
+    ${go_tool.submit_conflict_resolution.id}; r42 binds the declared resolution
+    artifact_id and reviewed_artifacts containing every path
     above, all detected conflicts and decisions, and synthesis_guidance for the
     final writer. An empty conflicts list is valid only after an explicit
     cross-file comparison.
   PROMPT
+  import_artifact "parallel_knowledge" {
+    desc    = "Validated knowledge artifacts from parallel deep-dive tasks."
+    sources = flatten([for item in research.dynamic.parallel_deep_dive.tasks : values(item.artifact)])
+  }
+  import_artifact "independent_knowledge" {
+    desc    = "Validated knowledge artifacts from independent serial deep-dive tasks."
+    sources = flatten([for item in research.dynamic.independent_serial_deep_dive.tasks : values(item.artifact)])
+  }
+  import_artifact "final_knowledge" {
+    desc    = "Validated knowledge artifacts from dependent serial deep-dive tasks."
+    sources = flatten([for item in research.dynamic.final_serial_deep_dive.tasks : values(item.artifact)])
+  }
   tool_use "submit_conflict_resolution" {
     tool_id   = go_tool.submit_conflict_resolution.id
     terminate = true
     input = {
-      artifact_path = "${block_wd()}/resolution.json"
-      topic         = var.topic
+      artifact_id           = self.artifact.resolution.id
+      _r42_artifact_path    = ""
+      topic                 = var.topic
       reviewed_artifacts = concat(
-        [for item in research.dynamic.parallel_deep_dive.tasks : one(item.artifacts).path],
-        [for item in research.dynamic.independent_serial_deep_dive.tasks : one(item.artifacts).path],
-        [for item in research.dynamic.final_serial_deep_dive.tasks : one(item.artifacts).path],
+        [for item in research.dynamic.parallel_deep_dive.tasks : item.artifact.knowledge.path],
+        [for item in research.dynamic.independent_serial_deep_dive.tasks : item.artifact.knowledge.path],
+        [for item in research.dynamic.final_serial_deep_dive.tasks : item.artifact.knowledge.path],
       )
     }
     input_from_agent = {
       conflicts = {
         desc = "Every detected cross-subquestion conflict and its evidence-backed decision."
         sources = flatten([
-          [for item in research.dynamic.parallel_deep_dive.tasks : item.artifacts],
-          [for item in research.dynamic.independent_serial_deep_dive.tasks : item.artifacts],
-          [for item in research.dynamic.final_serial_deep_dive.tasks : item.artifacts],
+          [for item in research.dynamic.parallel_deep_dive.tasks : values(item.artifact)],
+          [for item in research.dynamic.independent_serial_deep_dive.tasks : values(item.artifact)],
+          [for item in research.dynamic.final_serial_deep_dive.tasks : values(item.artifact)],
         ])
       }
       synthesis_guidance = {
         desc = "Guidance for the final writer, including unresolved uncertainty."
         sources = flatten([
-          [for item in research.dynamic.parallel_deep_dive.tasks : item.artifacts],
-          [for item in research.dynamic.independent_serial_deep_dive.tasks : item.artifacts],
-          [for item in research.dynamic.final_serial_deep_dive.tasks : item.artifacts],
+          [for item in research.dynamic.parallel_deep_dive.tasks : values(item.artifact)],
+          [for item in research.dynamic.independent_serial_deep_dive.tasks : values(item.artifact)],
+          [for item in research.dynamic.final_serial_deep_dive.tasks : values(item.artifact)],
         ])
       }
     }
@@ -587,19 +569,19 @@ research "static" "synthesize" {
 
     Validated knowledge artifact paths for Final QC's typed audit:
     ${join("\n", concat(
-      [for item in research.dynamic.parallel_deep_dive.tasks : "- ${one(item.artifacts).path}"],
-      [for item in research.dynamic.independent_serial_deep_dive.tasks : "- ${one(item.artifacts).path}"],
-      [for item in research.dynamic.final_serial_deep_dive.tasks : "- ${one(item.artifacts).path}"],
+      [for item in research.dynamic.parallel_deep_dive.tasks : "- ${item.artifact.knowledge.path}"],
+      [for item in research.dynamic.independent_serial_deep_dive.tasks : "- ${item.artifact.knowledge.path}"],
+      [for item in research.dynamic.final_serial_deep_dive.tasks : "- ${item.artifact.knowledge.path}"],
     ))}
 
     Conflict-resolution JSON:
     ${research.static.resolve_conflicts.result}
 
     Conflict-resolution artifact path for Final QC's typed audit:
-    ${one(research.static.resolve_conflicts.artifact).path}
+    ${research.static.resolve_conflicts.artifact.resolution.path}
 
-    Use only the included validated JSON and registered snapshots, then write
-    the final report to ${block_wd()}/report.md. Include
+    Use only the included validated JSON and registered artifacts, then write
+    the final report to ${self.artifact.report.path}. Include
     an executive summary, findings organized around the planner-produced task groups,
     resolved and unresolved contradictions, limitations, and a source table
     mapping each cited quote ID to its URL. Before writing, remove every
@@ -608,6 +590,22 @@ research "static" "synthesize" {
     files, and do not use pretrained knowledge or opinion to make the report
     sound complete.
   PROMPT
+  import_artifact "parallel_knowledge" {
+    desc    = "Validated knowledge artifacts from parallel deep-dive tasks."
+    sources = flatten([for item in research.dynamic.parallel_deep_dive.tasks : values(item.artifact)])
+  }
+  import_artifact "independent_knowledge" {
+    desc    = "Validated knowledge artifacts from independent serial deep-dive tasks."
+    sources = flatten([for item in research.dynamic.independent_serial_deep_dive.tasks : values(item.artifact)])
+  }
+  import_artifact "final_knowledge" {
+    desc    = "Validated knowledge artifacts from dependent serial deep-dive tasks."
+    sources = flatten([for item in research.dynamic.final_serial_deep_dive.tasks : values(item.artifact)])
+  }
+  import_artifact "conflict_resolution" {
+    desc    = "Validated cross-subquestion conflict-resolution record."
+    sources = values(research.static.resolve_conflicts.artifact)
+  }
   disallowed_tools = concat(["ask_user"], local.offline_disallowed_tools)
   permission       = "approve_all"
 
@@ -621,11 +619,11 @@ research "static" "synthesize" {
 
   qc {
     criteria = {
-      mechanical_audit = "Call ${external_tool.audit_synthesis.id} exactly once in each QC round before judging the current report revision. Pass report_path as the declared report artifact, knowledge_paths as the complete Validated knowledge artifacts list from the task, and resolution_path as the Conflict-resolution artifact. Treat its quote-ID, source-URL, unused-reference, and snapshot-ID checks as authoritative; upstream Research typed tools already validated snapshot authorization and exact quote text. Preserve every reported mechanical issue in the QC verdict, but do not repeat those checks with grep or view."
+      mechanical_audit = "Call ${external_tool.audit_synthesis.id} exactly once in each QC round before judging the current report revision. Pass report_path as the declared report artifact, knowledge_paths as the complete Validated knowledge artifacts list from the task, and resolution_path as the Conflict-resolution artifact. Treat its quote-ID, source-URL, unused-reference, and artifact-ID checks as authoritative; upstream Research typed tools already validated artifact authorization and exact quote text. Preserve every reported mechanical issue in the QC verdict, but do not repeat those checks with grep or view."
       plan_coverage = "Use the validated knowledge JSON included in the task to judge whether the report answers every planner-produced subquestion."
       factual_fidelity = "Use each knowledge item's claim, confidence, quote_ids, and exact_quote fields to judge whether every material report statement and conclusion is logically supported without extrapolation. Reject any statement that appears to come from model training, memory, general background knowledge, assumption, or opinion rather than the validated artifacts. This is a semantic judgment; do not repeat the typed tool's text matching."
       conflict_handling = "Use the included conflict-resolution JSON to judge whether all resolved and unresolved conflicts are represented faithfully without hiding residual uncertainty."
-      citation_semantics = "For citations that mechanically pass, decide whether the cited exact quote actually supports the surrounding report claim. Do not reopen snapshots unless the mechanical audit itself reports an unreadable or unmatched quote."
+      citation_semantics = "For citations that mechanically pass, decide whether the cited exact quote actually supports the surrounding report claim. Do not reopen artifacts unless the mechanical audit itself reports an unreadable or unmatched quote."
       provenance_guard = "Reject a report that includes a 信源限制说明 or equivalent training-data/knowledge-cutoff/paywall/quota disclaimer, or that uses such limitations as a reason to introduce uncited model opinion. Require unsupported conclusions to be removed or explicitly marked as insufficient evidence."
     }
     reasoning_effort = var.reasoning_effort
@@ -642,18 +640,18 @@ research "static" "synthesize" {
 output "knowledge_paths" {
   description = "Validated knowledge artifacts produced by all planner-selected task groups."
   value = concat(
-    [for item in research.dynamic.parallel_deep_dive.tasks : one(item.artifacts).path],
-    [for item in research.dynamic.independent_serial_deep_dive.tasks : one(item.artifacts).path],
-    [for item in research.dynamic.final_serial_deep_dive.tasks : one(item.artifacts).path],
+      [for item in research.dynamic.parallel_deep_dive.tasks : item.artifact.knowledge.path],
+      [for item in research.dynamic.independent_serial_deep_dive.tasks : item.artifact.knowledge.path],
+      [for item in research.dynamic.final_serial_deep_dive.tasks : item.artifact.knowledge.path],
   )
 }
 
 output "conflict_resolution_path" {
   description = "Validated cross-subquestion conflict decisions."
-  value       = one(research.static.resolve_conflicts.artifact).path
+  value       = research.static.resolve_conflicts.artifact.resolution.path
 }
 
 output "report_path" {
   description = "Final deep-research Markdown report."
-  value       = one(research.static.synthesize.artifact).path
+  value       = research.static.synthesize.artifact.report.path
 }

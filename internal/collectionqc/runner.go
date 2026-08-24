@@ -1,5 +1,5 @@
 // Package collectionqc implements semantic review of Collection checkpoints.
-// Mechanical snapshot validation remains in the Collection protocol tools.
+// Mechanical evidence validation remains in the Collection protocol tools.
 package collectionqc
 
 import (
@@ -64,7 +64,7 @@ type Task struct {
 type Config struct {
 	Task                  Task
 	Criteria              cty.Value
-	CheckpointSnapshotIDs []string
+	CheckpointArtifactIDs []string
 	CheckpointEmptyReason string
 	CollectionExhausted   bool
 	MaxProtocolAttempts   int
@@ -127,9 +127,9 @@ func (r *Runner) Review(ctx context.Context, config Config) (Result, error) {
 		prompt = fmt.Sprintf("You must call the %q tool before Collection QC can finish.", config.VerdictToolName)
 	}
 
-	for _, id := range config.CheckpointSnapshotIDs {
-		if err = r.collection.MarkSnapshotReviewed(id); err != nil {
-			return Result{}, fmt.Errorf("publish reviewed snapshot %q: %w", id, err)
+	for _, id := range config.CheckpointArtifactIDs {
+		if err = r.collection.MarkEvidenceReviewed(id); err != nil {
+			return Result{}, fmt.Errorf("publish reviewed evidence artifact %q: %w", id, err)
 		}
 	}
 	issueMessages := make([]string, len(verdict.Issues))
@@ -181,7 +181,7 @@ func (r *Runner) validate(config Config) error {
 type contextDocument struct {
 	Task                  Task              `json:"task"`
 	Criteria              map[string]string `json:"criteria"`
-	CheckpointSnapshotIDs []string          `json:"checkpoint_snapshot_ids"`
+	CheckpointArtifactIDs []string          `json:"checkpoint_artifact_ids"`
 	CheckpointEmptyReason string            `json:"checkpoint_empty_reason,omitempty"`
 	PreviousIssues        []string          `json:"previous_issues"`
 	CollectionRoundsUsed  int               `json:"collection_rounds_used"`
@@ -201,7 +201,7 @@ func contextPrompt(config Config, collectionContext *collection.Context) (string
 	document := contextDocument{
 		Task:                  config.Task,
 		Criteria:              criteriaMap,
-		CheckpointSnapshotIDs: append([]string{}, config.CheckpointSnapshotIDs...),
+		CheckpointArtifactIDs: append([]string{}, config.CheckpointArtifactIDs...),
 		CheckpointEmptyReason: config.CheckpointEmptyReason,
 		PreviousIssues:        collectionContext.State.LastCollectionQCIssues(),
 		CollectionRoundsUsed:  collectionContext.State.CollectionRoundsUsed(),

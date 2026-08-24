@@ -102,7 +102,7 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 			if err != nil {
 				return researchruntime.Result{}, fmt.Errorf("run collection: %w", err)
 			}
-			config.CollectionQC.CheckpointSnapshotIDs = append([]string(nil), checkpoint.SnapshotIDs...)
+			config.CollectionQC.CheckpointArtifactIDs = append([]string(nil), checkpoint.ArtifactIDs...)
 			config.CollectionQC.CheckpointEmptyReason = checkpoint.EmptyReason
 			config.CollectionQC.CollectionExhausted = checkpoint.CollectionExhausted
 			if err = r.state.Advance(workflow.EventCollectionCheckpoint); err != nil {

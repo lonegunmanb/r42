@@ -15,7 +15,7 @@ func TestRunnerReturnsRecordedCheckpoint(t *testing.T) {
 
 	recorder := collection.NewCheckpointRecorder()
 	session := &runnerSession{onSend: func(int) error {
-		return recorder.Record(collection.CheckpointOutput{SnapshotIDs: []string{"snapshot-1"}})
+		return recorder.Record(collection.CheckpointOutput{ArtifactIDs: []string{"artifact-1"}})
 	}}
 	runner := collection.NewRunner(session, recorder)
 
@@ -26,7 +26,7 @@ func TestRunnerReturnsRecordedCheckpoint(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"snapshot-1"}, result.SnapshotIDs)
+	assert.Equal(t, []string{"artifact-1"}, result.ArtifactIDs)
 	assert.Equal(t, []string{"collect evidence"}, session.prompts)
 }
 
@@ -36,10 +36,10 @@ func TestRunnerMergesAllRecordedCheckpoints(t *testing.T) {
 	recorder := collection.NewCheckpointRecorder()
 	session := &runnerSession{onSend: func(int) error {
 		require.NoError(t, recorder.Record(collection.CheckpointOutput{
-			SnapshotIDs: []string{"snapshot-1", "snapshot-2"},
+			ArtifactIDs: []string{"artifact-1", "artifact-2"},
 		}))
 		require.NoError(t, recorder.Record(collection.CheckpointOutput{
-			SnapshotIDs: []string{"snapshot-2", "snapshot-3"},
+			ArtifactIDs: []string{"artifact-2", "artifact-3"},
 		}))
 		return recorder.Record(collection.CheckpointOutput{
 			EmptyReason:         "supplementary search found no additional sources",
@@ -55,7 +55,7 @@ func TestRunnerMergesAllRecordedCheckpoints(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Equal(t, []string{"snapshot-1", "snapshot-2", "snapshot-3"}, result.SnapshotIDs)
+	assert.Equal(t, []string{"artifact-1", "artifact-2", "artifact-3"}, result.ArtifactIDs)
 	assert.Equal(t, "supplementary search found no additional sources", result.EmptyReason)
 	assert.True(t, result.CollectionExhausted)
 }

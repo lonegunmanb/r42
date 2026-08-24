@@ -485,10 +485,10 @@ cannot be disabled.
 
 Every research block now starts in Collection, even when
 `collection_tool_ids` is empty. Collection registers useful material through
-`r42_register_snapshot`, either from a workspace file path or from the retained
+`r42_register_artifact`, either from a workspace file path or from the retained
 result of a configured typed tool call, and ends each round through
 `r42_collection_checkpoint`. A checkpoint always contains every newly
-registered snapshot; an empty checkpoint must explain why no new evidence is
+registered evidence artifact; an empty checkpoint must explain why no new evidence is
 needed. After `collection_batch_size` unique registrations, new acquisition
 calls pause until the checkpoint is submitted, while in-flight completion,
 registration, and checkpoint calls remain available.
@@ -501,7 +501,7 @@ top-level provider.
 
 This changes the meaning of `tool_ids`: acquisition tools that previously
 appeared there must move to `collection_tool_ids`. Research uses only registered
-snapshots through r42's typed readers, its explicitly configured trusted typed
+evidence artifacts through r42's typed readers, its explicitly configured trusted typed
 tools, controlled Markdown output, and an optional termination tool.
 
 ### `skill_directories`
@@ -635,7 +635,7 @@ default sufficiency criterion.
 | `permission` | No | Permission override; otherwise inherits Research. |
 | `retry` | No | One retry block layered over the selected Collection-QC provider policy and then the research-level retry override. |
 
-Collection QC can list and read registered snapshots but cannot acquire or
+Collection QC can list and read registered evidence artifacts but cannot acquire or
 modify evidence. It reviews the current checkpoint plus prior issues and calls
 `r42_collection_qc_verdict` with either `sufficient` and no issues, or
 `needs_more` and at least one concrete issue. A valid verdict advances the
@@ -789,7 +789,7 @@ research "static" "exchange_rate" {
 ```
 
 After Collection and Collection QC finish, closed Research writes and validates
-`report.md`, then Final QC receives the candidate, registered snapshots, and the
+`report.md`, then Final QC receives the candidate, registered evidence artifacts, and the
 artifact's normalized path. With
 `max_qc_rounds = 3`, the sequence is bounded as follows:
 

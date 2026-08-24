@@ -149,7 +149,7 @@ func (s *State) MaxCollectionRounds() *int {
 	return &maximum
 }
 
-// Cursor returns the number of snapshots that have received a valid
+// Cursor returns the number of evidence artifacts that have received a valid
 // Collection-QC verdict. It advances only on valid verdicts.
 func (s *State) Cursor() int {
 	s.mu.RLock()
@@ -157,15 +157,15 @@ func (s *State) Cursor() int {
 	return s.cursor
 }
 
-// UnreviewedSnapshotCount returns snapshots registered since the last
+// UnreviewedEvidenceArtifactCount returns evidence artifacts registered since the last
 // checkpoint.
-func (s *State) UnreviewedSnapshotCount() int {
+func (s *State) UnreviewedEvidenceArtifactCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.unreviewedCount
 }
 
-// CheckpointPending reports whether the unreviewed snapshot count reached the
+// CheckpointPending reports whether the unreviewed evidence artifact count reached the
 // configured batch size.
 func (s *State) CheckpointPending() bool {
 	s.mu.RLock()
@@ -211,16 +211,16 @@ func (s *State) MarkCollectionExhausted() error {
 	return nil
 }
 
-// RegisterSnapshot records one newly registered unique snapshot. Reaching the
+// RegisterEvidenceArtifact records one newly registered unique evidence artifact. Reaching the
 // configured batch size enters checkpoint_pending, after which new acquisition
 // calls are rejected while in-flight completion, registration, and checkpoint
 // remain available.
-func (s *State) RegisterSnapshot() error {
+func (s *State) RegisterEvidenceArtifact() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if !s.begun {
-		return errors.New("workflow must begin before registering snapshots")
+		return errors.New("workflow must begin before registering evidence artifacts")
 	}
 	if s.config.BatchSize <= 0 {
 		return errors.New("collection batch size must be positive")
@@ -232,7 +232,7 @@ func (s *State) RegisterSnapshot() error {
 	return nil
 }
 
-// Checkpoint submits every unreviewed snapshot for review and clears the
+// Checkpoint submits every unreviewed evidence artifact for review and clears the
 // pending batch state. An empty checkpoint requires a non-empty reason.
 func (s *State) Checkpoint() error {
 	s.mu.Lock()

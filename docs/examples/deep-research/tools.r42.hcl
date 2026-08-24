@@ -108,12 +108,11 @@ go_tool "submit_research_plan" {
 }
 
 go_tool "submit_knowledge" {
-  description = "Submit one subquestion's knowledge records and exact source quotes linked by registered snapshot IDs, validate their links, and write knowledge.json. `knowledge.confidence` allowed values: `high`, `medium`, `low`."
+  description = "Submit one subquestion's knowledge records and exact source quotes linked by registered artifact IDs, validate their links, and write the declared knowledge artifact identified by artifact_id. `knowledge.confidence` allowed values: `high`, `medium`, `low`."
 
   source = <<-GO
     import (
       "context"
-      "encoding/hex"
       "encoding/json"
       "fmt"
       "net/url"
@@ -126,7 +125,7 @@ go_tool "submit_knowledge" {
       ID           string `json:"id"`
       SourceTitle  string `json:"source_title"`
       URL          string `json:"url"`
-      SnapshotID   string `json:"snapshot_id"`
+      ArtifactID   string `json:"artifact_id"`
       Locator      string `json:"locator"`
       ExactQuote   string `json:"exact_quote"`
     }
@@ -139,7 +138,8 @@ go_tool "submit_knowledge" {
     }
 
     type Input struct {
-      ArtifactPath string          `json:"artifact_path"`
+      ArtifactID   string          `json:"artifact_id"`
+      ArtifactPath string          `json:"_r42_artifact_path"`
       Subquestion  string          `json:"subquestion"`
       Knowledge    []KnowledgeItem `json:"knowledge"`
       Quotes       []Quote         `json:"quotes"`
@@ -153,12 +153,14 @@ go_tool "submit_knowledge" {
         return ToolResponse[Output]{Accepted: false, Issues: issues}, nil
       }
 
+      artifactPath := input.ArtifactPath
+      input.ArtifactPath = ""
       payload, err := json.MarshalIndent(input, "", "  ")
       if err != nil {
         return ToolResponse[Output]{}, fmt.Errorf("encode knowledge artifact: %w", err)
       }
       payload = append(payload, '\n')
-      artifactPath := filepath.Clean(input.ArtifactPath)
+      artifactPath = filepath.Clean(artifactPath)
       if err := os.MkdirAll(filepath.Dir(artifactPath), 0700); err != nil {
         return ToolResponse[Output]{}, fmt.Errorf("create knowledge artifact directory: %w", err)
       }
@@ -208,8 +210,8 @@ go_tool "submit_knowledge" {
         if !validHTTPURL(quote.URL) {
           issues = append(issues, newIssue("quote_url", path+".url", "must be an absolute HTTP or HTTPS URL"))
         }
-        if !validSnapshotID(quote.SnapshotID) {
-          issues = append(issues, newIssue("snapshot_id", path+".snapshot_id", "must name a registered snapshot ID authorized by r42"))
+        if !validArtifactID(quote.ArtifactID) {
+          issues = append(issues, newIssue("artifact_id", path+".artifact_id", "must name a registered artifact ID authorized by r42"))
         }
       }
 
@@ -258,13 +260,9 @@ go_tool "submit_knowledge" {
       return err == nil && parsed.Host != "" && (parsed.Scheme == "http" || parsed.Scheme == "https")
     }
 
-    func validSnapshotID(raw string) bool {
+    func validArtifactID(raw string) bool {
       id := strings.TrimSpace(raw)
-      if len(id) != len("snapshot-")+32 || !strings.HasPrefix(id, "snapshot-") {
-        return false
-      }
-      _, err := hex.DecodeString(strings.TrimPrefix(id, "snapshot-"))
-      return err == nil
+      return strings.HasPrefix(id, "artifact-") && len(strings.TrimPrefix(id, "artifact-")) > 0
     }
 
     func validBlockArtifactPath(raw, name string) bool {
@@ -347,7 +345,7 @@ go_tool "submit_knowledge" {
 }
 
 go_tool "submit_conflict_resolution" {
-  description = "Submit detected cross-subquestion conflicts and their evidence-backed resolutions, then write resolution.json. `conflicts.status` allowed values: `resolved`, `unresolved`."
+  description = "Submit detected cross-subquestion conflicts and their evidence-backed resolutions, then write the declared resolution artifact identified by artifact_id. `conflicts.status` allowed values: `resolved`, `unresolved`."
 
   source = <<-GO
     import (
@@ -371,7 +369,8 @@ go_tool "submit_conflict_resolution" {
     }
 
     type Input struct {
-      ArtifactPath      string             `json:"artifact_path"`
+      ArtifactID        string             `json:"artifact_id"`
+      ArtifactPath      string             `json:"_r42_artifact_path"`
       Topic             string             `json:"topic"`
       ReviewedArtifacts []string           `json:"reviewed_artifacts"`
       Conflicts         []ConflictDecision `json:"conflicts"`
@@ -386,12 +385,14 @@ go_tool "submit_conflict_resolution" {
         return ToolResponse[Output]{Accepted: false, Issues: issues}, nil
       }
 
+      artifactPath := input.ArtifactPath
+      input.ArtifactPath = ""
       payload, err := json.MarshalIndent(input, "", "  ")
       if err != nil {
         return ToolResponse[Output]{}, fmt.Errorf("encode conflict artifact: %w", err)
       }
       payload = append(payload, '\n')
-      if err := os.WriteFile(filepath.Clean(input.ArtifactPath), payload, 0600); err != nil {
+      if err := os.WriteFile(filepath.Clean(artifactPath), payload, 0600); err != nil {
         return ToolResponse[Output]{}, fmt.Errorf("write conflict artifact: %w", err)
       }
       output := Output(payload)
@@ -512,7 +513,7 @@ go_tool "submit_conflict_resolution" {
 }
 
 external_tool "audit_synthesis" {
-  description = "Audit final-report citation structure, source URL mappings, snapshot existence, and quote text equivalence in one bounded call. The tool performs exact, line-ending, paragraph-whitespace, and Unicode-equivalent matching internally and writes the full result to synthesis-audit.json. Call it exactly once per QC round."
+  description = "Audit final-report citation structure, source URL mappings, artifact existence, and quote text equivalence in one bounded call. The tool performs exact, line-ending, paragraph-whitespace, and Unicode-equivalent matching internally and writes the full result to synthesis-audit.json. Call it exactly once per QC round."
   program     = ["python", "${path.module}/audit_synthesis.py"]
 
   input_type = object({
@@ -526,7 +527,7 @@ external_tool "audit_synthesis" {
     report_quote_ids    = number
     knowledge_quote_ids = number
     knowledge_artifacts = number
-    snapshots_checked   = number
+    artifacts_checked   = number
     conflicts            = number
     match_modes          = map(number)
     issue_count          = number

@@ -403,26 +403,6 @@ func TestPlanUnknownValuesRoundTripAsKnownAfterApply(t *testing.T) {
 	assert.Contains(t, display, "<sensitive>")
 }
 
-func TestPlanPreflightReportRoundTrip(t *testing.T) {
-	t.Parallel()
-
-	planned, err := plan.NewWithContextAndLocals(
-		".", nil, nil, nil, nil,
-	)
-	require.NoError(t, err)
-	report := plan.PreflightReport{Checks: []plan.PreflightCheck{{
-		CheckID: "research.static.source/tool_use/finish/input_from_agent/claims",
-		Verdict: "sufficient", Reason: "claims are available",
-	}}}
-	planned.SetPreflightReport(report)
-	encoded, err := plan.Marshal(planned)
-	require.NoError(t, err)
-	restored, err := plan.Unmarshal(encoded)
-	require.NoError(t, err)
-	require.NotNil(t, restored.PreflightReport())
-	assert.Equal(t, report, *restored.PreflightReport())
-}
-
 func TestPlanDynamicUnknownOutputRoundTrips(t *testing.T) {
 	t.Parallel()
 

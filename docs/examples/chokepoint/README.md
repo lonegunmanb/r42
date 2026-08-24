@@ -102,7 +102,7 @@ independent performance.
 
 The typed tools keep source governance in source-registry.json: canonical and
 retrieval URLs, publisher, publication and access dates, source class, original
-origin, snapshot path, and content hashes. Report authors do not repeatedly fill
+origin, artifact path, and content hashes. Report authors do not repeatedly fill
 or reconcile those fields.
 
 Mechanical validation happens before QC:
@@ -112,7 +112,7 @@ Mechanical validation happens before QC:
 - URLs must be complete and usable;
 - dates must not exceed the fixed evidence cutoff;
 - inferred claims must reference existing, acyclic premises;
-- quotations must occur in the saved snapshot;
+- quotations must occur in the saved artifact;
 - Unicode spaces, line breaks, and tabs may differ, but words, punctuation, and
   order may not.
 
@@ -170,11 +170,11 @@ when the acquired evidence is sufficient.
 Every block uses the default `collection_batch_size = 10`. The examples omit
 `max_collection_rounds`, so Collection may reopen without a round limit. Search
 and fetch tools appear only in `collection_tool_ids`; closed Research receives
-registered snapshots and validated upstream typed-tool JSON.
+registered artifacts and validated upstream typed-tool JSON.
 
 All prompts prohibit PowerShell, shell commands, curl, wget, and scripts as a
 way to bypass source-tool policy or quotas. Every retained source is saved as a
-Markdown snapshot inside the block workspace.
+Markdown artifact inside the block workspace.
 
 ## Run
 
@@ -200,6 +200,6 @@ A complete study can take several hours. Use a timeout of at least six hours;
 increase it for a broad product boundary.
 
 The root outputs are report_path, scope_path, supply_chain_path,
-node_assessment_paths, and company_priority_paths. Snapshots, claim cards,
+node_assessment_paths, and company_priority_paths. Artifacts, claim cards,
 source registries, node assessments, and company priority artifacts remain
 under the run directory printed by r42.

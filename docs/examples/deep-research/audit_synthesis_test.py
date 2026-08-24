@@ -17,13 +17,28 @@ class MatchQuoteTests(unittest.TestCase):
             ("meaningful punctuation", "10-20", "10\u201320", "not_found"),
         ]
 
-        for name, quote, snapshot, expected in cases:
+        for name, quote, artifact, expected in cases:
             with self.subTest(name=name):
-                self.assertEqual(expected, audit_synthesis.match_quote(quote, snapshot))
+                self.assertEqual(expected, audit_synthesis.match_quote(quote, artifact))
 
 
 class AuditTests(unittest.TestCase):
-    def test_audit_accepts_typed_tool_validated_snapshot_id(self):
+    def test_audit_accepts_builtin_uuid_artifact_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self._write_fixture(Path(directory))
+            knowledge_path = Path(paths["knowledge_paths"][0])
+            knowledge = json.loads(knowledge_path.read_text(encoding="utf-8"))
+            knowledge["quotes"][0]["artifact_id"] = (
+                "artifact-123e4567-e89b-12d3-a456-426614174000"
+            )
+            knowledge_path.write_text(json.dumps(knowledge), encoding="utf-8")
+
+            result = self._audit(paths)
+
+            self.assertTrue(result["pass"])
+            self.assertEqual([], result["issues"])
+
+    def test_audit_accepts_typed_tool_validated_artifact_id(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = self._write_fixture(Path(directory))
 
@@ -77,9 +92,9 @@ class AuditTests(unittest.TestCase):
                     "id": "topic-quote-002",
                     "source_title": "Unused example",
                     "url": "https://example.com/unused",
-                    "snapshot_id": knowledge["quotes"][0]["snapshot_id"],
+                    "artifact_id": knowledge["quotes"][0]["artifact_id"],
                     "locator": "paragraph 2",
-                    "exact_quote": "Text absent from the snapshot.",
+                    "exact_quote": "Text absent from the artifact.",
                 }
             )
             knowledge_path.write_text(json.dumps(knowledge), encoding="utf-8")
@@ -87,7 +102,7 @@ class AuditTests(unittest.TestCase):
             result = self._audit(paths)
 
             self.assertTrue(result["pass"])
-            self.assertEqual(1, result["snapshots_checked"])
+            self.assertEqual(1, result["artifacts_checked"])
             self.assertEqual(2, result["knowledge_quote_ids"])
 
     def test_audit_rejects_artifacts_from_another_run(self):
@@ -161,7 +176,7 @@ class AuditTests(unittest.TestCase):
                             "id": "topic-quote-001",
                             "source_title": "Example",
                             "url": "https://example.com/source",
-                            "snapshot_id": "snapshot-11111111111111111111111111111111",
+                            "artifact_id": "artifact-11111111111111111111111111111111",
                             "locator": "paragraph 1",
                             "exact_quote": "The exchange rate remained stable.",
                         }

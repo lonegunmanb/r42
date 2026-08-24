@@ -102,8 +102,8 @@ research "static" "fact" {
 		assert.Equal(t, key, instance.GetAttr("system_prompt").AsString())
 		artifacts := instance.GetAttr("artifact")
 		require.Equal(t, 1, artifacts.LengthInt())
-		assert.Equal(t, "answer", artifacts.Index(cty.NumberIntVal(0)).GetAttr("name").AsString())
-		assert.False(t, artifacts.Index(cty.NumberIntVal(0)).GetAttr("path").IsKnown())
+		assert.Equal(t, "answer", artifacts.Index(cty.StringVal("answer")).GetAttr("name").AsString())
+		assert.False(t, artifacts.Index(cty.StringVal("answer")).GetAttr("path").IsKnown())
 	}
 
 	plannedPaths := make(map[string]string, len(blocks))
@@ -118,14 +118,15 @@ research "static" "fact" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestResearchBlockSelfSnapshotExposesDeclaredSaveTarget(t *testing.T) {
+func TestResearchBlockSelfArtifactExposesDeclaredSaveTarget(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
 research "static" "collect" {
   model = "model"
-  system_prompt = "Save source material under ${self.snapshot[0].path}."
+  system_prompt = "Save source material under ${self.artifact.sources.path}."
+  prompt = self.artifact["sources"].path
 
-  snapshot "sources" {
+  artifact "sources" {
     type = "directory"
     path = "${block_wd()}/snapshots"
     description = "Collected source material"
@@ -136,9 +137,49 @@ research "static" "collect" {
 	require.NoError(t, config.RunPlan())
 	block := golden.Blocks[*researchspec.ResearchBlock](config)[0]
 	assert.Equal(t, "Save source material under workspace/research.static.collect/snapshots.", block.ResearchConfig().SystemPrompt)
-	require.Len(t, block.ResearchConfig().Snapshots, 1)
-	assert.Equal(t, researchspec.ArtifactTypeDirectory, block.ResearchConfig().Snapshots[0].Type)
-	assert.Equal(t, "workspace/research.static.collect/snapshots", block.ResearchConfig().Snapshots[0].Path)
+	require.NotNil(t, block.ResearchConfig().Prompt)
+	assert.Equal(t, "workspace/research.static.collect/snapshots", *block.ResearchConfig().Prompt)
+	require.Len(t, block.ResearchConfig().Artifacts, 1)
+	assert.Equal(t, researchspec.ArtifactTypeDirectory, block.ResearchConfig().Artifacts[0].Type)
+	assert.Equal(t, "workspace/research.static.collect/snapshots", block.ResearchConfig().Artifacts[0].Path)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockPlansArtifactImport(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+research "static" "source" {
+  model = "model"
+  system_prompt = "source"
+
+  artifact "claims" {
+    type = "file"
+    path = "${block_wd()}/claims.json"
+    description = "Validated claim cards"
+  }
+}
+
+research "static" "consumer" {
+  model = "model"
+  system_prompt = "consumer"
+
+  import_artifact "upstream_claims" {
+    desc = "Claims needed to produce the consumer result."
+    sources = values(research.static.source.artifact)
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	blocks := golden.Blocks[*researchspec.ResearchBlock](config)
+	require.Len(t, blocks, 2)
+	for _, block := range blocks {
+		if block.Name() == "consumer" {
+			assert.Len(t, block.ResearchConfig().Imports, 1)
+			return
+		}
+	}
+	require.Fail(t, "consumer block is missing")
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -263,8 +304,8 @@ research "static" "summary" {
 	assert.False(t, value.GetAttr("result").IsKnown())
 	artifacts := value.GetAttr("artifact")
 	require.Equal(t, 2, artifacts.LengthInt())
-	assert.Equal(t, "report", artifacts.Index(cty.NumberIntVal(0)).GetAttr("name").AsString())
-	assert.Equal(t, "evidence", artifacts.Index(cty.NumberIntVal(1)).GetAttr("name").AsString())
+	assert.Equal(t, "report", artifacts.Index(cty.StringVal("report")).GetAttr("name").AsString())
+	assert.Equal(t, "evidence", artifacts.Index(cty.StringVal("evidence")).GetAttr("name").AsString())
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -284,7 +325,7 @@ research "static" "scope" {
   system_prompt = "scope"
   prompt        = research.static.baseline.result
 
-  snapshot "sources" {
+  artifact "sources" {
     type        = "directory"
     path        = "snapshots/sources"
     description = "Scope source material"
@@ -299,7 +340,7 @@ research "static" "scope" {
 research "static" "consumer" {
   model         = "model"
   system_prompt = "consumer"
-  prompt        = jsonencode(research.static.scope.snapshots)
+  prompt        = jsonencode(research.static.scope.artifact)
 }
 `)
 
@@ -307,8 +348,11 @@ research "static" "consumer" {
 	value := config.EvalContext().Variables["research"].GetAttr("static").GetAttr("scope")
 	require.True(t, value.Type().HasAttribute("result"))
 	assert.False(t, value.GetAttr("result").IsKnown())
-	require.True(t, value.Type().HasAttribute("snapshots"))
-	assert.False(t, value.GetAttr("snapshots").IsKnown())
+	require.True(t, value.Type().HasAttribute("artifact"))
+	assert.True(t, value.GetAttr("artifact").IsKnown())
+	toolUses := value.GetAttr("tool_use")
+	assert.True(t, toolUses.Type().IsTupleType())
+	assert.Equal(t, "finish", toolUses.Index(cty.NumberIntVal(0)).GetAttr("name").AsString())
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -626,9 +670,9 @@ research "static" "market" {
 	}
 	assert.True(t, value.Type().HasAttribute("result"))
 	artifacts := value.GetAttr("artifact")
-	assert.True(t, artifacts.Type().IsListType())
+	assert.True(t, artifacts.Type().IsMapType())
 	require.Equal(t, 1, artifacts.LengthInt())
-	assert.False(t, artifacts.Index(cty.NumberIntVal(0)).GetAttr("path").IsKnown())
+	assert.False(t, artifacts.Index(cty.StringVal("report")).GetAttr("path").IsKnown())
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -702,15 +746,16 @@ research "static" "market" {
 	value := cty.ObjectVal(golden.Blocks[*researchspec.ResearchBlock](config)[0].Values())
 	assert.False(t, value.Type().HasAttribute("artifacts"))
 
-	for _, name := range []string{"retry", "artifact", "qc"} {
+	for _, name := range []string{"retry", "qc"} {
 		require.True(t, value.Type().HasAttribute(name), name)
 		assert.True(t, value.GetAttr(name).Type().IsListType(), name)
 	}
 
 	artifacts := value.GetAttr("artifact")
+	assert.True(t, artifacts.Type().IsMapType())
 	require.Equal(t, 2, artifacts.LengthInt())
-	assert.Equal(t, "report", artifacts.Index(cty.NumberIntVal(0)).GetAttr("name").AsString())
-	assert.Equal(t, "evidence", artifacts.Index(cty.NumberIntVal(1)).GetAttr("name").AsString())
+	assert.Equal(t, "report", artifacts.Index(cty.StringVal("report")).GetAttr("name").AsString())
+	assert.Equal(t, "evidence", artifacts.Index(cty.StringVal("evidence")).GetAttr("name").AsString())
 
 	qc := value.GetAttr("qc").Index(cty.NumberIntVal(0))
 	assert.True(t, qc.Type().IsObjectType())
@@ -1138,33 +1183,34 @@ func TestArtifactDescriptionIsRequiredAndPublished(t *testing.T) {
 		Description: "Normalized claims with evidence references",
 	}
 	require.NoError(t, artifact.Validate())
-	values := researchspec.ArtifactsValue([]researchspec.Artifact{artifact}, nil).AsValueSlice()
-	require.Len(t, values, 1)
-	assert.False(t, values[0].GetAttr("id").IsKnown())
-	assert.Equal(t, artifact.Description, values[0].GetAttr("description").AsString())
+	values := researchspec.ArtifactsValue([]researchspec.Artifact{artifact}, nil)
+	require.True(t, values.Type().IsMapType())
+	claim := values.Index(cty.StringVal("claims"))
+	assert.False(t, claim.GetAttr("id").IsKnown())
+	assert.Equal(t, artifact.Description, claim.GetAttr("description").AsString())
 	withID := researchspec.ArtifactsValueWithIDs(
 		[]researchspec.Artifact{artifact}, nil, map[string]string{"claims": "artifact-1"},
-	).AsValueSlice()
-	assert.Equal(t, "artifact-1", withID[0].GetAttr("id").AsString())
+	)
+	assert.Equal(t, "artifact-1", withID.Index(cty.StringVal("claims")).GetAttr("id").AsString())
 
 	artifact.Description = " "
 	require.ErrorContains(t, artifact.Validate(), "description is required")
 }
 
-func TestSnapshotOutputsShareArtifactObjectType(t *testing.T) {
+func TestArtifactValuesExposeFileAndDirectoryTypes(t *testing.T) {
 	t.Parallel()
 
 	artifacts := researchspec.ArtifactsValue([]researchspec.Artifact{{
 		Name: "claims", Type: researchspec.ArtifactTypeFile, Path: "claims.json", Description: "Validated claims",
 	}}, nil)
-	snapshots := researchspec.SnapshotsValue([]researchspec.Snapshot{{
-		ID: "snapshot-0123456789abcdef0123456789abcdef", Path: "source.md", Description: "Primary source",
-	}})
+	directories := researchspec.ArtifactsValue([]researchspec.Artifact{{
+		Name: "sources", Type: researchspec.ArtifactTypeDirectory, Path: "sources", Description: "Primary source",
+	}}, nil)
 
-	assert.True(t, artifacts.Type().Equals(snapshots.Type()))
-	snapshot := snapshots.Index(cty.NumberIntVal(0))
-	assert.Equal(t, "snapshot", snapshot.GetAttr("kind").AsString())
-	assert.Equal(t, "file", snapshot.GetAttr("type").AsString())
+	assert.True(t, artifacts.Type().Equals(directories.Type()))
+	directory := directories.Index(cty.StringVal("sources"))
+	assert.Equal(t, "artifact", directory.GetAttr("kind").AsString())
+	assert.Equal(t, "directory", directory.GetAttr("type").AsString())
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

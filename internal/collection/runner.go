@@ -75,12 +75,12 @@ func mergeCheckpoints(outputs []CheckpointOutput) CheckpointOutput {
 	merged := CheckpointOutput{}
 	seen := make(map[string]struct{})
 	for _, output := range outputs {
-		for _, id := range output.SnapshotIDs {
+		for _, id := range output.ArtifactIDs {
 			if _, exists := seen[id]; exists {
 				continue
 			}
 			seen[id] = struct{}{}
-			merged.SnapshotIDs = append(merged.SnapshotIDs, id)
+			merged.ArtifactIDs = append(merged.ArtifactIDs, id)
 		}
 		if strings.TrimSpace(output.EmptyReason) != "" {
 			merged.EmptyReason = output.EmptyReason
@@ -102,7 +102,7 @@ func NewCheckpointRecorder() *CheckpointRecorder { return &CheckpointRecorder{} 
 
 // Record records one accepted checkpoint.
 func (r *CheckpointRecorder) Record(output CheckpointOutput) error {
-	output.SnapshotIDs = append([]string{}, output.SnapshotIDs...)
+	output.ArtifactIDs = append([]string{}, output.ArtifactIDs...)
 	r.mu.Lock()
 	r.outputs = append(r.outputs, output)
 	r.mu.Unlock()

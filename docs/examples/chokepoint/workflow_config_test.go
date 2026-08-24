@@ -73,15 +73,15 @@ func TestGraphTracksUseDynamicTasksForDeferredInputs(t *testing.T) {
 	assert.NotContains(t, configuration, "research.static.graph_track")
 }
 
-func TestClosedResearchPromptsUseAuthorizedSnapshotIDs(t *testing.T) {
+func TestClosedResearchPromptsUseAuthorizedArtifactIDs(t *testing.T) {
 	t.Parallel()
 
 	payload, err := os.ReadFile("main.r42.hcl")
 	require.NoError(t, err)
 	configuration := string(payload)
 
-	assert.NotContains(t, configuration, "Use r42_list_snapshots")
-	assert.GreaterOrEqual(t, strings.Count(configuration, "authorized snapshot_id"), 3)
+	assert.NotContains(t, configuration, "Use r42_list_artifacts")
+	assert.GreaterOrEqual(t, strings.Count(configuration, "authorized artifact_id"), 3)
 }
 
 func TestTypedToolDescriptionsPublishAllowedValues(t *testing.T) {

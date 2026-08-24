@@ -20,110 +20,52 @@ research "static" "primary_source_baseline" {
     Topic: ${var.topic}
     Evidence cutoff: ${var.as_of_date}
     ${local.source_tool_guidance}
-    ${var.use_pplx ? format("Perplexity snapshot_dir: %s", one(self.snapshot).path) : ""}
+    ${var.use_pplx ? format("Perplexity artifact_dir: %s", self.artifact.sources.path) : ""}
     Workspace: "${block_wd()}"
 
     During Collection, find the newest official filings, regulator records,
     product specifications, customer or contract disclosures, and applicable
     rules available by the cutoff. Save every retained source as a Markdown
-    snapshot at a unique .md path under "${one(self.snapshot).path}" by calling r42_save_snapshot,
+    artifact at a unique .md path under "${self.artifact.sources.path}" by calling r42_save_artifact,
     then submit a collection checkpoint when the primary
     corpus is sufficient.
 
-    During closed Research, do not search or fetch. Use the authorized snapshot_id
-    values supplied to this phase with r42_read_snapshot. Register each retained
-    source with ${go_tool.register_evidence_source.id}, using that snapshot_id,
-    workspace_dir "${block_wd()}", and ledger_path
-    "${block_wd()}/evidence-ledger.json".
+    During closed Research, do not search or fetch. Use the authorized artifact_id
+    values supplied to this phase with r42_read_artifact. Register each retained
+    source with ${go_tool.register_evidence_source.id}, using that artifact_id
+    and workspace_dir "${block_wd()}".
 
     Submit atomic cards in batches of at most five with
     ${go_tool.submit_claim_cards.id}. During revision, use remove_claim_ids in
     the same call to remove an earlier staged card. Use confirmed only when an authoritative
     primary source directly states the claim. Use reported for direct published
-    reporting. A direct card must use the same snapshot_id as its registered
+    reporting. A direct card must use the same artifact_id as its registered
     source. Use inferred only for a conclusion derived from existing card IDs;
-    inferred cards use derived_from and no source_id, snapshot_id, quote, or
+    inferred cards use derived_from and no source_id, artifact_id, quote, or
     locator. Do not submit unknown as a claim card.
 
     Finish once with ${go_tool.finalize_claim_cards.id}:
-    workspace_dir "${block_wd()}", claims_path "${block_wd()}/claims.json",
-    source_registry_path "${block_wd()}/source-registry.json", as_of_date
+    workspace_dir "${block_wd()}", claims_path "${self.artifact.claims.path}",
+    source_registry_path "${self.artifact.source_registry.path}", as_of_date
     "${var.as_of_date}", and allow_empty false.
   PROMPT
   collection_tool_ids = local.pplx_tool_ids
-  snapshot "sources" {
+  artifact "sources" {
     type        = "directory"
-    path        = "${block_wd()}/snapshots/sources"
+    path        = "${block_wd()}/artifacts/sources"
     description = "Primary-source material collected for the baseline."
   }
   tool_use "register_source" {
     tool_id = go_tool.register_evidence_source.id
     input = {
       workspace_dir = block_wd()
-      ledger_path   = "${block_wd()}/evidence-ledger.json"
-    }
-    input_from_agent = {
-      url = {
-        desc = "The URL recorded in the authorized snapshot."
-        sources = self.snapshot
-      }
-      canonical_url = {
-        desc = "Optional publication identity URL."
-        sources = self.snapshot
-      }
-      title = {
-        desc = "The retained source title."
-        sources = self.snapshot
-      }
-      publisher = {
-        desc = "The source publisher."
-        sources = self.snapshot
-      }
-      publication_date = {
-        desc = "The source publication date in YYYY-MM-DD format."
-        sources = self.snapshot
-      }
-      accessed_at = {
-        desc = "The date the source was accessed in YYYY-MM-DD format."
-        sources = self.snapshot
-      }
-      source_type = {
-        desc = "The source classification from the values listed in the tool description."
-        sources = self.snapshot
-      }
-      reporting_basis = {
-        desc = "The reporting basis from the values listed in the tool description."
-        sources = self.snapshot
-      }
-      provenance = {
-        desc = "The provenance from the values listed in the tool description."
-        sources = self.snapshot
-      }
-      snapshot_id = {
-        desc = "The snapshot_id returned by r42_save_snapshot or supplied by r42."
-        sources = self.snapshot
-      }
-      named_entities = {
-        desc = "Named entities relevant to this source."
-        sources = self.snapshot
-      }
     }
   }
   tool_use "submit_claims" {
     tool_id = go_tool.submit_claim_cards.id
     input = {
       workspace_dir = block_wd()
-      claims_path   = "${block_wd()}/claims.json"
-    }
-    input_from_agent = {
-      cards = {
-        desc = "Atomic claim cards supported by the registered sources."
-        sources = self.snapshot
-      }
-      remove_claim_ids = {
-        desc = "IDs of earlier staged cards that should be removed during revision."
-        sources = []
-      }
+      claims_path   = "${self.artifact.claims.path}"
     }
   }
   tool_use "finalize_claims" {
@@ -131,8 +73,8 @@ research "static" "primary_source_baseline" {
     terminate = true
     input = {
       workspace_dir        = block_wd()
-      claims_path           = "${block_wd()}/claims.json"
-      source_registry_path  = "${block_wd()}/source-registry.json"
+      claims_path           = "${self.artifact.claims.path}"
+      source_registry_path  = "${self.artifact.source_registry.path}"
       as_of_date            = var.as_of_date
       allow_empty           = false
     }
@@ -151,11 +93,10 @@ research "static" "primary_source_baseline" {
   artifact "source_registry" {
     type      = "file"
     path      = "${block_wd()}/source-registry.json"
-	description = "Baseline source metadata indexed by registered snapshot ID"
+	description = "Baseline source metadata indexed by registered artifact ID"
     required  = true
     non_empty = true
   }
-
   qc {
     criteria = {
       primary_coverage = "Judge whether the newest material primary documents available by the cutoff were retained. Identify every omission that could change the study."
@@ -189,16 +130,16 @@ research "static" "brainstorm" {
     Validated primary-source baseline JSON:
     ${research.static.primary_source_baseline.result}
     ${local.source_tool_guidance}
-    ${var.use_pplx ? format("Perplexity snapshot_dir: %s", one(self.snapshot).path) : ""}
+    ${var.use_pplx ? format("Perplexity artifact_dir: %s", self.artifact.sources.path) : ""}
 
     During Collection, acquire only evidence needed beyond the validated
     baseline. Save every retained source at a unique .md path under
-    "${one(self.snapshot).path}" with r42_save_snapshot and submit a collection checkpoint. If the baseline
+    "${self.artifact.sources.path}" with r42_save_artifact and submit a collection checkpoint. If the baseline
     is sufficient for scope design, submit an empty collection checkpoint.
 
-    During closed Research, do not search or fetch. Use the authorized snapshot_id
-    values supplied to this phase with r42_read_snapshot, and use the validated
-    baseline directly. Write "${block_wd()}/brainstorm.md" with the
+    During closed Research, do not search or fetch. Use the authorized artifact_id
+    values supplied to this phase with r42_read_artifact, and use the validated
+    Write "${self.artifact.brainstorm.path}" with the
     focal boundary, product variants, layered components, transformation stages,
     manufacturing, packaging, testing, module integration, downstream system
     qualification, competing dependency hypotheses, and open questions for the
@@ -206,55 +147,60 @@ research "static" "brainstorm" {
 
     Stop upstream decomposition at production equipment and input materials.
     Continue downstream through module components and system qualification.
-    Then call ${go_tool.submit_supply_chain_scope.id} with artifact_path
-    "${block_wd()}/scope.json". Every expected component and stage must be
+    Then call ${go_tool.submit_supply_chain_scope.id}; r42 binds its declared
+    scope artifact_id. Every expected component and stage must be
     assigned to one or more coverage items and exactly one of the five tracks.
   PROMPT
   collection_tool_ids = local.pplx_tool_ids
-  snapshot "sources" {
+  artifact "sources" {
     type        = "directory"
-    path        = "${block_wd()}/snapshots/sources"
+    path        = "${block_wd()}/artifacts/sources"
     description = "Additional source material used to define study scope."
+  }
+  import_artifact "baseline" {
+    desc    = "Validated baseline claims and source registry used to define the scope."
+    sources = values(research.static.primary_source_baseline.artifact)
   }
   tool_use "submit_scope" {
     tool_id   = go_tool.submit_supply_chain_scope.id
     terminate = true
     input = {
-      artifact_path = "${block_wd()}/scope.json"
-      topic         = var.topic
+      artifact_id             = self.artifact.scope.id
+      _r42_artifact_path      = ""
+      topic                   = var.topic
     }
     input_from_agent = {
       focal_product = {
         desc = "The exact focal product or system boundary."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
+        sources = values(research.static.primary_source_baseline.artifact)
       }
       product_variants = {
         desc = "Material product variants and branches."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
+        sources = values(research.static.primary_source_baseline.artifact)
       }
       expected_components = {
         desc = "Expected components within the declared boundary."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
+        sources = values(research.static.primary_source_baseline.artifact)
       }
       expected_stages = {
         desc = "Expected manufacturing, testing, qualification, and integration stages."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
+        sources = values(research.static.primary_source_baseline.artifact)
       }
       upstream_boundaries = {
         desc = "The upstream boundary of the study."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
+        sources = values(research.static.primary_source_baseline.artifact)
       }
       downstream_boundary = {
         desc = "The downstream boundary of the study."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
+        sources = values(research.static.primary_source_baseline.artifact)
       }
       coverage_items = {
         desc = "Coverage items assigned to one of the five track values listed in the tool description."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
+        sources = values(research.static.primary_source_baseline.artifact)
       }
       open_questions = {
         desc = "Material scope questions that remain unresolved."
-        sources = concat(research.static.primary_source_baseline.artifact, research.static.primary_source_baseline.snapshots, self.snapshot)
+        sources = values(research.static.primary_source_baseline.artifact)
       }
     }
   }
@@ -309,20 +255,20 @@ research "dynamic" "graph_track" {
         Validated primary-source baseline JSON:
         ${research.static.primary_source_baseline.result}
         ${local.source_tool_guidance}
-        ${var.use_pplx ? format("Perplexity snapshot_dir: %s", one(self.snapshot).path) : ""}
+        ${var.use_pplx ? format("Perplexity artifact_dir: %s", self.artifact.sources.path) : ""}
         Workspace: "${block_wd()}/${index}"
 
         During Collection, research only this track and address every assigned
         coverage item. Preserve product variants and distinguish generic-chain facts
         from target facts. Save every retained source at a unique .md path under
-        "${one(self.snapshot).path}" with r42_save_snapshot, then submit a
+        "${self.artifact.sources.path}" with r42_save_artifact, then submit a
         collection checkpoint when sufficient.
 
-        During closed Research, do not search or fetch. Use the authorized snapshot_id
-        values supplied to this phase with r42_read_snapshot. Register every retained
-        source with ${go_tool.register_evidence_source.id}, using that snapshot_id and
-        ledger_path "${block_wd()}/${index}/evidence-ledger.json". Direct claim
-        cards must use the same snapshot_id as their registered source.
+        During closed Research, do not search or fetch. Use the authorized artifact_id
+        values supplied to this phase with r42_read_artifact. Register every retained
+        source with ${go_tool.register_evidence_source.id}, using that artifact_id.
+        Direct claim
+        cards must use the same artifact_id as their registered source.
 
         Submit one independently auditable claim per card with
         ${go_tool.submit_claim_cards.id}, in batches of at most five. During
@@ -334,131 +280,80 @@ research "dynamic" "graph_track" {
 
         Finish once with ${go_tool.finalize_claim_cards.id}: workspace_dir
         "${block_wd()}/${index}", claims_path
-        "${block_wd()}/${index}/claims.json", source_registry_path
-        "${block_wd()}/${index}/source-registry.json", as_of_date
+        "${self.artifact.claims.path}", source_registry_path
+        "${self.artifact.source_registry.path}", as_of_date
         "${var.as_of_date}", and allow_empty false.
       PROMPT
       collection_tool_ids = local.pplx_tool_ids
-
-      snapshots = [{
-        name        = "sources"
-        type        = "directory"
-        path        = "${block_wd()}/${index}/snapshots/sources"
-        description = "Source material collected for this graph track."
-      }]
-      tool_uses = [
-        {
-          name = "register_source"
+      import_artifact = {
+        baseline = {
+          desc    = "Validated baseline claims and source registry for this track."
+          sources = values(research.static.primary_source_baseline.artifact)
+        }
+        scope = {
+          desc    = "Validated product scope and coverage items for this track."
+          sources = values(research.static.brainstorm.artifact)
+        }
+      }
+      tool_uses = {
+        register_source = {
           tool_id = go_tool.register_evidence_source.id
           input = {
             workspace_dir = "${block_wd()}/${index}"
-            ledger_path   = "${block_wd()}/${index}/evidence-ledger.json"
           }
-          input_from_agent = {
-            url = {
-              desc = "The URL recorded in the authorized snapshot."
-              sources = self.snapshot
-            }
-            canonical_url = {
-              desc = "Optional publication identity URL."
-              sources = self.snapshot
-            }
-            title = {
-              desc = "The retained source title."
-              sources = self.snapshot
-            }
-            publisher = {
-              desc = "The source publisher."
-              sources = self.snapshot
-            }
-            publication_date = {
-              desc = "The source publication date in YYYY-MM-DD format."
-              sources = self.snapshot
-            }
-            accessed_at = {
-              desc = "The access date in YYYY-MM-DD format."
-              sources = self.snapshot
-            }
-            source_type = {
-              desc = "The source classification from the values listed in the tool description."
-              sources = self.snapshot
-            }
-            reporting_basis = {
-              desc = "The reporting basis from the values listed in the tool description."
-              sources = self.snapshot
-            }
-            provenance = {
-              desc = "The provenance from the values listed in the tool description."
-              sources = self.snapshot
-            }
-            snapshot_id = {
-              desc = "The snapshot_id returned by r42_save_snapshot or supplied by r42."
-              sources = self.snapshot
-            }
-            named_entities = {
-              desc = "Named entities relevant to this source."
-              sources = self.snapshot
-            }
-          }
-        },
-        {
-          name = "submit_claims"
+        }
+        submit_claims = {
           tool_id = go_tool.submit_claim_cards.id
           input = {
             workspace_dir = "${block_wd()}/${index}"
-            claims_path   = "${block_wd()}/${index}/claims.json"
+            claims_path   = self.artifact.claims.path
           }
           input_from_agent = {
             cards = {
               desc = "Atomic claim cards for this track, grounded in current registered sources and the validated upstream scope and baseline."
               sources = concat(
-                research.static.brainstorm.artifact,
-                research.static.brainstorm.snapshots,
-                research.static.primary_source_baseline.artifact,
-                research.static.primary_source_baseline.snapshots,
-                self.snapshot,
+                values(research.static.primary_source_baseline.artifact),
+                values(research.static.brainstorm.artifact),
               )
             }
-            remove_claim_ids = {
-              desc = "IDs of earlier staged cards to remove during revision."
-              sources = []
-            }
           }
-        },
-        {
-          name = "finalize_claims"
+        }
+        finalize_claims = {
           tool_id = go_tool.finalize_claim_cards.id
           terminate = true
           input = {
             workspace_dir       = "${block_wd()}/${index}"
-            claims_path         = "${block_wd()}/${index}/claims.json"
-            source_registry_path = "${block_wd()}/${index}/source-registry.json"
+            claims_path         = self.artifact.claims.path
+            source_registry_path = self.artifact.source_registry.path
             as_of_date          = var.as_of_date
             allow_empty         = false
           }
-        },
-      ]
+        }
+      }
       tool_call_quota   = local.pplx_tool_call_quota
       disallowed_tools  = local.research_disallowed_tools
       permission        = "approve_all"
-      artifacts = [
-        {
-          name      = "claims"
+      artifact = {
+        sources = {
+          type        = "directory"
+          path        = "${block_wd()}/${index}/artifacts/sources"
+          description = "Source material collected for this graph track."
+        }
+        claims = {
           type      = "file"
           path      = "${block_wd()}/${index}/claims.json"
 		      description = "Validated atomic claims for this supply-chain track"
           required  = true
           non_empty = true
-        },
-        {
-          name      = "source_registry"
+        }
+        source_registry = {
           type      = "file"
           path      = "${block_wd()}/${index}/source-registry.json"
-		      description = "Source metadata for this track's registered evidence snapshots"
+		      description = "Source metadata for this track's registered evidence artifacts"
           required  = true
           non_empty = true
-        },
-      ]
+        }
+      }
       retry = null
       qc = {
         criteria = {
@@ -500,9 +395,8 @@ research "static" "build_supply_chain" {
     complete for this stage, so submit an empty collection checkpoint.
 
     During closed Research, use only the validated JSON above. Call
-    ${go_tool.submit_supply_chain_map.id} once with
-    workspace_dir "${block_wd()}", artifact_path
-    "${block_wd()}/supply-chain.json", the exact topic and scope_path, and
+    ${go_tool.submit_supply_chain_map.id} once; r42 binds its declared
+    supply-chain artifact_id, workspace_dir, exact topic and scope_path, and
     claim_paths containing the baseline plus all five track claim files.
 
     Map ordinary nodes and edges across the full declared product boundary.
@@ -512,51 +406,48 @@ research "static" "build_supply_chain" {
     next stage should separately test actual target dependency, alternatives,
     switching versus buffer time, applicable scenario, and falsification.
   PROMPT
+  import_artifact "baseline" {
+    desc    = "Validated baseline claims used to build the supply-chain map."
+    sources = values(research.static.primary_source_baseline.artifact)
+  }
+  import_artifact "scope" {
+    desc    = "Validated scope definition used to build the supply-chain map."
+    sources = values(research.static.brainstorm.artifact)
+  }
+  import_artifact "track_claims" {
+    desc    = "Validated graph-track claims used to build the supply-chain map."
+    sources = flatten([for task in research.dynamic.graph_track.tasks : values(task.artifact)])
+  }
   tool_use "submit_supply_chain_map" {
     tool_id   = go_tool.submit_supply_chain_map.id
     terminate = true
     input = {
-      workspace_dir = block_wd()
-      artifact_path = "${block_wd()}/supply-chain.json"
-      topic         = var.topic
-      scope_path    = one([for item in research.static.brainstorm.artifact : item.path if item.name == "scope"])
+      workspace_dir        = block_wd()
+      artifact_id          = self.artifact.supply_chain.id
+      _r42_artifact_path   = ""
+      topic                = var.topic
+      scope_path    = research.static.brainstorm.artifact.scope.path
       claim_paths = concat(
-        [one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "claims"])],
-        [for task in research.dynamic.graph_track.tasks : one([for item in task.artifacts : item.path if item.name == "claims"])],
+        [research.static.primary_source_baseline.artifact.claims.path],
+        [for task in research.dynamic.graph_track.tasks : task.artifact.claims.path],
       )
     }
     input_from_agent = {
       nodes = {
         desc = "Reference supply-chain nodes with their stages, branches, claim IDs, and unknowns."
-        sources = flatten([
-          research.static.brainstorm.artifact,
-          research.static.primary_source_baseline.artifact,
-          [for task in research.dynamic.graph_track.tasks : task.artifacts],
-        ])
+        sources = flatten([values(research.static.brainstorm.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
       }
       edges = {
         desc = "Reference supply-chain edges with their relation and supporting claim IDs."
-        sources = flatten([
-          research.static.brainstorm.artifact,
-          research.static.primary_source_baseline.artifact,
-          [for task in research.dynamic.graph_track.tasks : task.artifacts],
-        ])
+        sources = flatten([values(research.static.brainstorm.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
       }
       assessment_targets = {
         desc = "Nodes that warrant a separate continuity-risk assessment."
-        sources = flatten([
-          research.static.brainstorm.artifact,
-          research.static.primary_source_baseline.artifact,
-          [for task in research.dynamic.graph_track.tasks : task.artifacts],
-        ])
+        sources = flatten([values(research.static.brainstorm.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
       }
       unknowns = {
         desc = "Evidence gaps and unresolved map questions."
-        sources = flatten([
-          research.static.brainstorm.artifact,
-          research.static.primary_source_baseline.artifact,
-          [for task in research.dynamic.graph_track.tasks : task.artifacts],
-        ])
+        sources = flatten([values(research.static.brainstorm.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
       }
     }
   }
@@ -616,23 +507,37 @@ research "dynamic" "assess_nodes" {
         are already qualified and have usable capacity; whether switching and
         recovery exceed known buffers; and what evidence would falsify the view.
 
-        Call ${go_tool.submit_node_assessment.id} with task workspace_dir
-        "${block_wd()}/${index}", artifact_path
-        "${block_wd()}/${index}/node-assessment.json",
+        Call ${go_tool.submit_node_assessment.id}; r42 binds the task workspace
+        and declared node-assessment artifact_id.
         all claim_paths above, and the target node. risk_scope is global or
         branch; conclusion is independently confirmed, candidate, or not_proven.
         Keep unknowns and falsification_conditions explicit.
       PROMPT
-      tool_uses = [{
-        name      = "submit_node_assessment"
+      import_artifact = {
+        supply_chain = {
+          desc    = "Validated supply-chain map and selected node targets."
+          sources = values(research.static.build_supply_chain.artifact)
+        }
+        baseline = {
+          desc    = "Validated baseline claims for node assessment evidence."
+          sources = values(research.static.primary_source_baseline.artifact)
+        }
+        track_claims = {
+          desc    = "Validated graph-track claims for node assessment evidence."
+          sources = flatten([for task in research.dynamic.graph_track.tasks : values(task.artifact)])
+        }
+      }
+      tool_uses = {
+        submit_node_assessment = {
         tool_id   = go_tool.submit_node_assessment.id
         terminate = true
         input = {
-          workspace_dir = "${block_wd()}/${index}"
-          artifact_path = "${block_wd()}/${index}/node-assessment.json"
+          workspace_dir        = "${block_wd()}/${index}"
+          artifact_id          = self.artifact.node_assessment.id
+          _r42_artifact_path   = ""
           claim_paths = concat(
-            [one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "claims"])],
-            [for task in research.dynamic.graph_track.tasks : one([for item in task.artifacts : item.path if item.name == "claims"])],
+            [research.static.primary_source_baseline.artifact.claims.path],
+            [for task in research.dynamic.graph_track.tasks : task.artifact.claims.path],
           )
           node_id   = target.node_id
           node_name = target.node_name
@@ -640,56 +545,58 @@ research "dynamic" "assess_nodes" {
         input_from_agent = {
           risk_scope = {
             desc = "Whether this assessment applies globally or only to a branch."
-            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+            sources = flatten([values(research.static.build_supply_chain.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
           }
           branch = {
             desc = "The applicable product branch when risk_scope is branch."
-            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+            sources = flatten([values(research.static.build_supply_chain.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
           }
           scenarios = {
             desc = "Scenarios selected from current_production, expansion_upgrade, and product_branch."
-            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+            sources = flatten([values(research.static.build_supply_chain.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
           }
           actual_dependency = {
             desc = "Evidence-backed description of the target's actual dependency on this node."
-            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+            sources = flatten([values(research.static.build_supply_chain.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
           }
           qualified_alternatives = {
             desc = "Known qualified alternatives and usable capacity."
-            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+            sources = flatten([values(research.static.build_supply_chain.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
           }
           switching_vs_buffer = {
             desc = "Comparison of switching and recovery constraints with known buffers."
-            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+            sources = flatten([values(research.static.build_supply_chain.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
           }
           conclusion = {
             desc = "Conclusion selected from confirmed, candidate, or not_proven."
-            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+            sources = flatten([values(research.static.build_supply_chain.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
           }
           claim_ids = {
             desc = "Claim IDs supporting this node assessment."
-            sources = flatten([research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+            sources = flatten([values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
           }
           unknowns = {
             desc = "Material unknowns that prevent a stronger conclusion."
-            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+            sources = flatten([values(research.static.build_supply_chain.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
           }
           falsification_conditions = {
             desc = "Evidence that would falsify or materially change this assessment."
-            sources = flatten([research.static.build_supply_chain.artifact, research.static.primary_source_baseline.artifact, [for task in research.dynamic.graph_track.tasks : task.artifacts]])
+            sources = flatten([values(research.static.build_supply_chain.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
           }
         }
-      }]
+        }
+      }
       disallowed_tools  = local.offline_disallowed_tools
       permission        = "approve_all"
-      artifacts = [{
-        name      = "node_assessment"
+      artifact = {
+        node_assessment = {
         type      = "file"
         path      = "${block_wd()}/${index}/node-assessment.json"
 		description = "Evidence-based continuity-risk assessment for the target node"
         required  = true
         non_empty = true
-      }]
+        }
+      }
       retry = null
       qc = {
         criteria = {
@@ -726,43 +633,42 @@ research "dynamic" "prioritize_companies" {
         ${join("\n", [for item in research.dynamic.graph_track.tasks : item.result])}
         Task workspace: "${block_wd()}/${index}"
         ${local.source_tool_guidance}
-        ${var.use_pplx ? format("Perplexity snapshot_dir: %s", one(self.snapshot).path) : ""}
+        ${var.use_pplx ? format("Perplexity artifact_dir: %s", self.artifact.sources.path) : ""}
 
         During Collection, investigate whether any public company deserves more
         research because of this exact assessed node. Investigate at most
         ${var.max_candidates_per_chokepoint} companies. For each, distinguish an
         existing supplier, qualified alternative, related-product-only company,
         or unverified lead. Verify the exact legal entity and security. Save
-        every retained source at a unique .md path under "${one(self.snapshot).path}"
-        with r42_save_snapshot,
+        every retained source at a unique .md path under "${self.artifact.sources.path}"
+        with r42_save_artifact,
         then submit a collection checkpoint. If no new evidence is needed,
         submit an empty collection checkpoint.
 
-        During closed Research, do not search or fetch. Use the authorized snapshot_id
-        values supplied to this phase with r42_read_snapshot.
+        During closed Research, do not search or fetch. Use the authorized artifact_id
+        values supplied to this phase with r42_read_artifact.
 
         Register retained sources with ${go_tool.register_evidence_source.id}
-        using the authorized snapshot_id, workspace_dir above, and ledger_path
-        "${block_wd()}/${index}/evidence-ledger.json".
+        using the authorized artifact_id and workspace_dir above.
         Submit atomic relationship and economic-exposure cards with
         ${go_tool.submit_claim_cards.id}, using the registered source's same
-        snapshot_id for every direct card. If revision removes an earlier card,
+        artifact_id for every direct card. If revision removes an earlier card,
         include its ID in remove_claim_ids in the same call; missing removal IDs
-        are harmless. Different claims may share a source, snapshot, and quote.
+        are harmless. Different claims may share a source, artifact, and quote.
         Never claim that a related product proves adoption, qualification, market
         share, revenue, or profit impact.
 
         Finalize the current staged card set once with
         ${go_tool.finalize_claim_cards.id}, claims_path
-        "${block_wd()}/${index}/claims.json",
+        "${self.artifact.claims.path}",
         source_registry_path
-        "${block_wd()}/${index}/source-registry.json",
+        "${self.artifact.source_registry.path}",
         cutoff above, and allow_empty true. Exact duplicate cards are collapsed
         automatically. After an accepted finalize, do not call finalize again or
         read claims to inspect its contents.
 
-        Then call ${go_tool.submit_company_priorities.id} with artifact_path
-        "${block_wd()}/${index}/company-priorities.json",
+        Then call ${go_tool.submit_company_priorities.id}; r42 binds its
+        declared company-priorities artifact_id,
         the node assessment path, and claim_paths containing the baseline, all
         five track files, and this task's claims.json.
 
@@ -774,170 +680,107 @@ research "dynamic" "prioritize_companies" {
         research priorities, never investment ratings. An empty list is valid.
       PROMPT
       collection_tool_ids = local.pplx_tool_ids
-      snapshots = [{
-        name        = "sources"
-        type        = "directory"
-        path        = "${block_wd()}/${index}/snapshots/sources"
-        description = "Company-specific source material for this node assessment."
-      }]
-      tool_uses = [
-        {
-          name = "register_source"
+      import_artifact = {
+        node_assessment = {
+          desc    = "Validated assessment for this task's target node."
+          sources = values(assessment.artifact)
+        }
+        baseline = {
+          desc    = "Validated baseline claims for company evidence."
+          sources = values(research.static.primary_source_baseline.artifact)
+        }
+        track_claims = {
+          desc    = "Validated graph-track claims for company evidence."
+          sources = flatten([for task in research.dynamic.graph_track.tasks : values(task.artifact)])
+        }
+      }
+      tool_uses = {
+        register_source = {
           tool_id = go_tool.register_evidence_source.id
           input = {
             workspace_dir = "${block_wd()}/${index}"
-            ledger_path   = "${block_wd()}/${index}/evidence-ledger.json"
           }
-          input_from_agent = {
-            url = {
-              desc = "The URL recorded in the authorized snapshot."
-              sources = self.snapshot
-            }
-            canonical_url = {
-              desc = "Optional publication identity URL."
-              sources = self.snapshot
-            }
-            title = {
-              desc = "The retained source title."
-              sources = self.snapshot
-            }
-            publisher = {
-              desc = "The source publisher."
-              sources = self.snapshot
-            }
-            publication_date = {
-              desc = "The source publication date in YYYY-MM-DD format."
-              sources = self.snapshot
-            }
-            accessed_at = {
-              desc = "The access date in YYYY-MM-DD format."
-              sources = self.snapshot
-            }
-            source_type = {
-              desc = "The source classification from the values listed in the tool description."
-              sources = self.snapshot
-            }
-            reporting_basis = {
-              desc = "The reporting basis from the values listed in the tool description."
-              sources = self.snapshot
-            }
-            provenance = {
-              desc = "The provenance from the values listed in the tool description."
-              sources = self.snapshot
-            }
-            snapshot_id = {
-              desc = "The snapshot_id returned by r42_save_snapshot or supplied by r42."
-              sources = self.snapshot
-            }
-            named_entities = {
-              desc = "Named entities relevant to this source."
-              sources = self.snapshot
-            }
-          }
-        },
-        {
-          name = "submit_claims"
+        }
+        submit_claims = {
           tool_id = go_tool.submit_claim_cards.id
           input = {
             workspace_dir = "${block_wd()}/${index}"
-            claims_path   = "${block_wd()}/${index}/claims.json"
+            claims_path   = self.artifact.claims.path
           }
           input_from_agent = {
             cards = {
               desc = "Atomic relationship and economic-exposure claim cards grounded in current registered sources and the assessed node context."
-              sources = flatten([
-                assessment.artifacts,
-                research.static.primary_source_baseline.artifact,
-                research.static.primary_source_baseline.snapshots,
-                [for task in research.dynamic.graph_track.tasks : task.artifacts],
-                [for task in research.dynamic.graph_track.tasks : task.snapshots],
-                self.snapshot,
-              ])
-            }
-            remove_claim_ids = {
-              desc = "IDs of earlier staged cards to remove during revision."
-              sources = []
+              sources = flatten([values(assessment.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
             }
           }
-        },
-        {
-          name = "finalize_claims"
+        }
+        finalize_claims = {
           tool_id = go_tool.finalize_claim_cards.id
           input = {
             workspace_dir        = "${block_wd()}/${index}"
-            claims_path           = "${block_wd()}/${index}/claims.json"
-            source_registry_path  = "${block_wd()}/${index}/source-registry.json"
+            claims_path           = self.artifact.claims.path
+            source_registry_path  = self.artifact.source_registry.path
             as_of_date            = var.as_of_date
             allow_empty           = true
           }
-        },
-        {
-          name      = "submit_company_priorities"
+        }
+        submit_company_priorities = {
           tool_id   = go_tool.submit_company_priorities.id
           terminate = true
           input = {
             workspace_dir        = "${block_wd()}/${index}"
-            artifact_path        = "${block_wd()}/${index}/company-priorities.json"
-            node_assessment_path = one([for item in assessment.artifacts : item.path if item.name == "node_assessment"])
+            artifact_id          = self.artifact.company_priorities.id
+            _r42_artifact_path   = ""
+            node_assessment_path = assessment.artifact.node_assessment.path
             claim_paths = concat(
-              [one([for item in research.static.primary_source_baseline.artifact : item.path if item.name == "claims"])],
-              [for task in research.dynamic.graph_track.tasks : one([for item in task.artifacts : item.path if item.name == "claims"])],
-              ["${block_wd()}/${index}/claims.json"],
+              [research.static.primary_source_baseline.artifact.claims.path],
+              [for task in research.dynamic.graph_track.tasks : task.artifact.claims.path],
+              [self.artifact.claims.path],
             )
           }
           input_from_agent = {
           companies = {
             desc = "Companies prioritized against the exact assessed node, with role, priority, evidence claim IDs, unknowns, and next checks."
-            sources = flatten([
-              assessment.artifacts,
-              research.static.primary_source_baseline.artifact,
-              [for task in research.dynamic.graph_track.tasks : task.artifacts],
-              [for item in self.artifact : item if item.name == "claims"],
-              self.snapshot,
-            ])
+            sources = flatten([values(assessment.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
             }
           conclusion = {
             desc = "The concise conclusion for this node's company-priority list."
-            sources = flatten([
-              assessment.artifacts,
-              research.static.primary_source_baseline.artifact,
-              [for task in research.dynamic.graph_track.tasks : task.artifacts],
-              [for item in self.artifact : item if item.name == "claims"],
-              self.snapshot,
-            ])
+            sources = flatten([values(assessment.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
             }
           }
-        },
-      ]
+        }
+      }
       tool_call_quota   = local.pplx_tool_call_quota
       disallowed_tools  = local.research_disallowed_tools
       permission        = "approve_all"
-      artifacts = [
-        {
-          name      = "claims"
+      artifact = {
+        sources = {
+          type        = "directory"
+          path        = "${block_wd()}/${index}/artifacts/sources"
+          description = "Company-specific source material for this node assessment."
+        }
+        claims = {
           type      = "file"
           path      = "${block_wd()}/${index}/claims.json"
 		  description = "Validated company relationship and exposure claim cards"
           required  = true
           non_empty = true
-        },
-        {
-          name      = "source_registry"
+        }
+        source_registry = {
           type      = "file"
           path      = "${block_wd()}/${index}/source-registry.json"
 		  description = "Source metadata for company-prioritization evidence"
           required  = true
           non_empty = true
-        },
-        {
-          name      = "company_priorities"
+        }
+        company_priorities = {
           type      = "file"
           path      = "${block_wd()}/${index}/company-priorities.json"
 		  description = "Companies prioritized for further research against this node"
           required  = true
           non_empty = true
-        },
-      ]
+        }
+      }
       retry = null
       qc = {
         criteria = {
@@ -993,7 +836,7 @@ research "static" "synthesize" {
     collection_exhausted=true.
 
     During closed Research, use only the validated JSON above and write
-    "${block_wd()}/report.md" in this order:
+    "${self.artifact.report.path}" in this order:
     1. companies worth further research, showing A/B/C/do-not-research, exact
        node and role, strongest evidence, largest unknown, and next check;
     2. confirmed and candidate global or branch-specific risk nodes;
@@ -1010,17 +853,37 @@ research "static" "synthesize" {
     facts. Do not write a URL table or RPT IDs.
 
     Finish with ${go_tool.finalize_research_report.id}. Set report_path to exactly
-    "${block_wd()}/report.md". Set claim_paths to the Finalized claim_paths JSON
+    "${self.artifact.report.path}". Set claim_paths to the Finalized claim_paths JSON
     array above, unchanged. Every element is an absolute path to one finalized claims.json
     artifact; do not substitute directories, globs, Markdown files,
-    snapshot IDs, or guessed paths. The tool replaces claim markers with original
+    artifact IDs, or guessed paths. The tool replaces claim markers with original
     URLs and appends the referenced evidence cards.
   PROMPT
+  import_artifact "baseline" {
+    desc    = "Validated baseline claims for final report citations."
+    sources = values(research.static.primary_source_baseline.artifact)
+  }
+  import_artifact "scope_and_map" {
+    desc    = "Validated scope and supply-chain map for final report context."
+    sources = concat(values(research.static.brainstorm.artifact), values(research.static.build_supply_chain.artifact))
+  }
+  import_artifact "track_claims" {
+    desc    = "Validated graph-track claims for final report citations."
+    sources = flatten([for task in research.dynamic.graph_track.tasks : values(task.artifact)])
+  }
+  import_artifact "node_assessments" {
+    desc    = "Validated node continuity assessments for final report conclusions."
+    sources = flatten([for task in research.dynamic.assess_nodes.tasks : values(task.artifact)])
+  }
+  import_artifact "company_priorities" {
+    desc    = "Validated company-priority claims and recommendations for the report."
+    sources = flatten([for task in research.dynamic.prioritize_companies.tasks : values(task.artifact)])
+  }
   tool_use "finalize_report" {
     tool_id   = go_tool.finalize_research_report.id
     terminate = true
     input = {
-      report_path = "${block_wd()}/report.md"
+      report_path = self.artifact.report.path
       claim_paths = local.synthesis_claim_paths
     }
   }
@@ -1064,25 +927,25 @@ research "static" "synthesize" {
 
 output "report_path" {
   description = "Final company-first research-priority report with direct source URLs."
-  value       = one([for item in research.static.synthesize.artifact : item.path if item.name == "report"])
+  value       = research.static.synthesize.artifact.report.path
 }
 
 output "scope_path" {
   description = "Machine-readable product boundary and coverage inventory."
-  value       = one([for item in research.static.brainstorm.artifact : item.path if item.name == "scope"])
+  value       = research.static.brainstorm.artifact.scope.path
 }
 
 output "supply_chain_path" {
   description = "Machine-readable reference supply chain and node-assessment targets."
-  value       = one(research.static.build_supply_chain.artifact).path
+  value       = research.static.build_supply_chain.artifact.supply_chain.path
 }
 
 output "node_assessment_paths" {
   description = "Node assessments with independent risk scope and evidence conclusion."
-  value       = [for task in research.dynamic.assess_nodes.tasks : one(task.artifacts).path]
+  value       = [for task in research.dynamic.assess_nodes.tasks : task.artifact.node_assessment.path]
 }
 
 output "company_priority_paths" {
   description = "Company follow-up research priorities by assessed node."
-  value       = [for task in research.dynamic.prioritize_companies.tasks : one([for artifact in task.artifacts : artifact.path if artifact.name == "company_priorities"])]
+  value       = [for task in research.dynamic.prioritize_companies.tasks : task.artifact.company_priorities.path]
 }

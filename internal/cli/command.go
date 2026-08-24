@@ -36,10 +36,6 @@ type Runtime interface {
 	ReadProjectOutputs(string) ([]byte, error)
 }
 
-type preflightRuntime interface {
-	Preflight(context.Context, *plan.Plan, string) error
-}
-
 type projectInitializer interface {
 	InitProject(context.Context, string, string, bool) error
 }
@@ -113,7 +109,6 @@ func newPlanCommand(runtime Runtime) *cobra.Command {
 	var debug bool
 	var variables []string
 	var variableFiles []string
-	var preflightModel string
 	command := &cobra.Command{
 		Use:   "plan",
 		Short: "Create an immutable research plan",
@@ -145,11 +140,6 @@ func newPlanCommand(runtime Runtime) *cobra.Command {
 				return errors.Join(fmt.Errorf("plan directory %q: %w", directory, err), closeCommandDebug(command, debugState))
 			}
 			planned := config.Plan().SavedPlan()
-			if runner, ok := runtime.(preflightRuntime); ok {
-				if err = runner.Preflight(ctx, planned, preflightModel); err != nil {
-					return errors.Join(fmt.Errorf("preflight plan: %w", err), closeCommandDebug(command, debugState))
-				}
-			}
 			ctx, _, _, err = debugState.ensure(ctx, options.RunDirectory)
 			if err != nil {
 				return errors.Join(err, closeCommandDebug(command, debugState))
@@ -181,7 +171,6 @@ func newPlanCommand(runtime Runtime) *cobra.Command {
 	command.Flags().BoolVar(&debug, "debug", false, "persist sensitive planning debug events")
 	command.Flags().StringArrayVar(&variables, "var", nil, "set a Golden input variable (name=value)")
 	command.Flags().StringArrayVar(&variableFiles, "var-file", nil, "load Golden input variables from a file")
-	command.Flags().StringVar(&preflightModel, "preflight-model", "", "model used to verify plan dataflow contracts")
 	return command
 }
 

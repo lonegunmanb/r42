@@ -59,17 +59,6 @@ type ToolSpec struct {
 	Origin               Origin               `json:"origin,omitzero"`
 }
 
-type PreflightCheck struct {
-	CheckID string           `json:"check_id"`
-	Verdict string           `json:"verdict"`
-	Reason  string           `json:"reason"`
-	Issues  []corespec.Issue `json:"issues,omitempty"`
-}
-
-type PreflightReport struct {
-	Checks []PreflightCheck `json:"checks"`
-}
-
 type Plan struct {
 	directory        string
 	runDirectory     string
@@ -78,7 +67,6 @@ type Plan struct {
 	context          map[string]cty.Value
 	localExpressions map[string]string
 	tools            map[string]ToolSpec
-	preflight        *PreflightReport
 }
 
 func NewWithContextAndLocals(
@@ -173,27 +161,6 @@ func (p *Plan) Tools() map[string]ToolSpec {
 	return cloneTools(p.tools)
 }
 
-func (p *Plan) SetPreflightReport(report PreflightReport) {
-	copyReport := report
-	copyReport.Checks = slices.Clone(report.Checks)
-	for index := range copyReport.Checks {
-		copyReport.Checks[index].Issues = slices.Clone(copyReport.Checks[index].Issues)
-	}
-	p.preflight = &copyReport
-}
-
-func (p *Plan) PreflightReport() *PreflightReport {
-	if p.preflight == nil {
-		return nil
-	}
-	copyReport := *p.preflight
-	copyReport.Checks = slices.Clone(p.preflight.Checks)
-	for index := range copyReport.Checks {
-		copyReport.Checks[index].Issues = slices.Clone(copyReport.Checks[index].Issues)
-	}
-	return &copyReport
-}
-
 func IsToolID(value string) bool {
 	return toolIDPattern.MatchString(value)
 }
@@ -286,9 +253,6 @@ func clonePlan(source *Plan) *Plan {
 		context:          cloneContext(source.context),
 		localExpressions: maps.Clone(source.localExpressions),
 		tools:            cloneTools(source.tools),
-	}
-	if source.preflight != nil {
-		result.SetPreflightReport(*source.preflight)
 	}
 	return result
 }

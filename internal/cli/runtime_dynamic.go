@@ -84,7 +84,7 @@ func (f *runtimeFactory) evaluateResearchExpression(address, source, description
 		return cty.NilVal, fmt.Errorf("parse %s: %w", description, diagnostics)
 	}
 	contextValues := maps.Clone(f.contextValues)
-	contextValues["self"] = researchspec.DynamicTaskSelfValue()
+	contextValues["self"] = researchspec.DynamicTaskSelfValueForExpression(source)
 	f.mu.Lock()
 	for resultAddress, result := range f.results {
 		setBlockResult(contextValues, resultAddress, result)

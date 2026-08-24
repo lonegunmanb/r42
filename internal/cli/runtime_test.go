@@ -181,10 +181,10 @@ research "static" "source" {
 	}
 }
 locals {
-  report_with_retries = "${one(research.static.source.artifact).path}|${one(research.static.source.retry).lifecycle_retries}"
+  report_with_retries = "${research.static.source.artifact.report.path}|${one(research.static.source.retry).lifecycle_retries}"
 }
 output "report_path" { value = local.report_with_retries }
-output "report_id" { value = one(research.static.source.artifact).id }
+output "report_id" { value = research.static.source.artifact.report.id }
 `), 0o600))
 	opener := &fakeSessionOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})

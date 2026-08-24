@@ -30,7 +30,6 @@ type Config struct {
 type Result struct {
 	Value            *string
 	Artifacts        map[string]string
-	Snapshots        []researchspec.Snapshot
 	ProtocolAttempts int
 }
 

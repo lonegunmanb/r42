@@ -19,7 +19,7 @@ external_tool "pplx_pro_search" {
 }
 
 external_tool "pplx_fetch" {
-  description = "Fetch one absolute HTTP or HTTPS URL through Perplexity and save snapshot.md in this research block's workspace."
+  description = "Fetch one absolute HTTP or HTTPS URL through Perplexity and, only on success, save artifact.md in this research block's workspace. If Perplexity cannot retrieve usable content, the tool fails with a clear message and writes no file. Do not register an artifact after that failure; try another source URL."
   program     = ["python", "${path.module}/pplx_external.py", "fetch"]
 
   input_type = object({
@@ -29,7 +29,7 @@ external_tool "pplx_fetch" {
   output_type = object({
     title         = string
     url           = string
-    snapshot_path = string
+    artifact_path = string
     fetched_at    = string
   })
 }

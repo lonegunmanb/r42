@@ -1,6 +1,6 @@
 go_tool "register_evidence_source" {
   description = <<-DESC
-    Register one retained source in the current evidence-ledger draft. `url` must equal the fetched URL recorded in the referenced snapshot; this is enforced by the typed-tool host. `canonical_url` is optional publication identity metadata and may equal `url`. `source_type` allowed values: `authoritative_primary`, `official_filing`, `official_product`, `official_statement`, `regulator`, `qualified_media`, `credible_media`, `named_media`, `peer_reviewed`, `industry_research`, `other_published`, `other`, `lead_only`, `self_media`, `forum`, `aggregator`. `reporting_basis` allowed values: `public_document`, `named_source`, `anonymous_sources`, `direct_observation`, `published_methodology`. `provenance` allowed values: `original`, `syndication`, `aggregation`. Unfamiliar values are retained as unknown instead of rejecting the call. The host derives source, origin, and independence IDs.
+    Register one retained source in the current evidence draft. `workspace_dir` selects its workspace; the draft is internal staging for finalize_claim_cards, so no ledger path or separate ledger artifact is needed. `url` must equal the fetched URL recorded in the referenced artifact; this is enforced by the typed-tool host. `canonical_url` is optional publication identity metadata and may equal `url`. `source_type` allowed values: `authoritative_primary`, `official_filing`, `official_product`, `official_statement`, `regulator`, `qualified_media`, `credible_media`, `named_media`, `peer_reviewed`, `industry_research`, `other_published`, `other`, `lead_only`, `self_media`, `forum`, `aggregator`. `reporting_basis` allowed values: `public_document`, `named_source`, `anonymous_sources`, `direct_observation`, `published_methodology`. `provenance` allowed values: `original`, `syndication`, `aggregation`. Unfamiliar values are retained as unknown instead of rejecting the call. The host derives source, origin, and independence IDs.
   DESC
 
   source = <<-GO
@@ -19,7 +19,6 @@ go_tool "register_evidence_source" {
 
     type Input struct {
       WorkspaceDir    string   `json:"workspace_dir"`
-      LedgerPath      string   `json:"ledger_path"`
       URL             string   `json:"url"`
       CanonicalURL    string   `json:"canonical_url"`
       Title           string   `json:"title"`
@@ -29,7 +28,7 @@ go_tool "register_evidence_source" {
       SourceType      string   `json:"source_type"`
       ReportingBasis  string   `json:"reporting_basis"`
       Provenance      string   `json:"provenance"`
-      SnapshotID      string   `json:"snapshot_id"`
+      ArtifactID      string   `json:"artifact_id"`
       NamedEntities   []string `json:"named_entities"`
     }
 
@@ -57,11 +56,11 @@ go_tool "register_evidence_source" {
       SourceClass     string   `json:"source_class"`
       ReportingBasis  string   `json:"reporting_basis"`
       Provenance      string   `json:"provenance"`
-      SnapshotID      string   `json:"snapshot_id"`
+      ArtifactID      string   `json:"artifact_id"`
       NamedEntities   []string `json:"named_entities"`
     }
 
-    var evidenceSnapshotID = regexp.MustCompile(`^snapshot-(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`)
+    var evidenceArtifactID = regexp.MustCompile(`^artifact-(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`)
 
     func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
       currentDirectory, err := os.Getwd()
@@ -75,7 +74,7 @@ go_tool "register_evidence_source" {
       if err = os.MkdirAll(workspace, 0700); err != nil {
         return ToolResponse[Output]{}, fmt.Errorf("create evidence workspace: %w", err)
       }
-      ledgerPath, issues := evidenceLedgerPath(input.LedgerPath, workspace)
+      issues = []Issue{}
       normalizedURL, validURL := normalizeEvidenceURL(input.URL)
       if !validURL {
         issues = append(issues, evidenceIssue("url", "url", "url must be an absolute HTTP or HTTPS URL"))
@@ -102,18 +101,19 @@ go_tool "register_evidence_source" {
       if !evidenceDate(input.AccessedAt) {
         issues = append(issues, evidenceIssue("date", "accessed_at", "accessed_at must use YYYY-MM-DD"))
       }
-      snapshotID := strings.TrimSpace(input.SnapshotID)
-      if !evidenceSnapshotID.MatchString(snapshotID) {
-        issues = append(issues, evidenceIssue("snapshot_id", "snapshot_id", "snapshot_id must use a registered snapshot ID, either snapshot- plus 32 lowercase hexadecimal characters or a UUID, not a filesystem path"))
+      artifactID := strings.TrimSpace(input.ArtifactID)
+      if !evidenceArtifactID.MatchString(artifactID) {
+        issues = append(issues, evidenceIssue("artifact_id", "artifact_id", "artifact_id must use a registered artifact ID, either artifact- plus 32 lowercase hexadecimal characters or a UUID, not a filesystem path"))
       }
       if len(issues) > 0 {
         return ToolResponse[Output]{Accepted: false, Issues: issues}, nil
       }
-      suffix := strings.TrimPrefix(snapshotID, "snapshot-")
+      suffix := strings.TrimPrefix(artifactID, "artifact-")
       sourceID := "source-" + suffix
       originID := "origin-" + suffix[:20]
       independenceGroup := originID
-      existing, loadErr := loadEvidenceSources(filepath.Join(filepath.Dir(ledgerPath), ".evidence-draft", "sources"))
+      draftDirectory := filepath.Join(workspace, ".evidence-draft", "sources")
+      existing, loadErr := loadEvidenceSources(draftDirectory)
       if loadErr != nil {
         return ToolResponse[Output]{}, fmt.Errorf("load registered evidence sources: %w", loadErr)
       }
@@ -137,9 +137,9 @@ go_tool "register_evidence_source" {
         PublicationDate: strings.TrimSpace(input.PublicationDate), AccessedAt: strings.TrimSpace(input.AccessedAt),
         SourceType: sourceType, SourceClass: sourceClass,
         ReportingBasis: evidenceReportingBasis(input.ReportingBasis), Provenance: evidenceProvenance(input.Provenance),
-        SnapshotID: snapshotID, NamedEntities: entities,
+        ArtifactID: artifactID, NamedEntities: entities,
       }
-      sourcePath := filepath.Join(filepath.Dir(ledgerPath), ".evidence-draft", "sources", sourceID+".json")
+      sourcePath := filepath.Join(draftDirectory, sourceID+".json")
       if err = writeEvidenceJSON(sourcePath, record); err != nil {
         return ToolResponse[Output]{}, fmt.Errorf("write evidence source: %w", err)
       }
@@ -148,17 +148,6 @@ go_tool "register_evidence_source" {
         OriginID: originID, IndependenceGroup: independenceGroup, SourceClass: sourceClass,
       }
       return ToolResponse[Output]{Accepted: true, Output: &output}, nil
-    }
-
-    func evidenceLedgerPath(raw, workspace string) (string, []Issue) {
-      if !filepath.IsAbs(raw) {
-        return "", []Issue{evidenceIssue("invalid_path", "ledger_path", "ledger_path must be absolute")}
-      }
-      path, err := filepath.Abs(filepath.Clean(raw))
-      if err != nil || filepath.Base(path) != "evidence-ledger.json" || !evidenceWithin(path, workspace) {
-        return "", []Issue{evidenceIssue("invalid_path", "ledger_path", "ledger_path must end in evidence-ledger.json under workspace_dir")}
-      }
-      return path, nil
     }
 
     func evidenceWorkspaceDir(raw, currentDirectory string) (string, []Issue) {
@@ -289,7 +278,7 @@ go_tool "register_evidence_source" {
 }
 
 go_tool "submit_supply_chain_scope" {
-  description = "Validate the declared product boundary and coverage inventory, write scope.json, and return its JSON. `coverage_items.track` allowed values: `product_structure`, `manufacturing_testing`, `equipment`, `materials_chemicals`, `qualification_integration`."
+  description = "Validate the declared product boundary and coverage inventory, write the declared scope artifact identified by artifact_id, and return its JSON. `coverage_items.track` allowed values: `product_structure`, `manufacturing_testing`, `equipment`, `materials_chemicals`, `qualification_integration`."
 
   source = <<-GO
     import (
@@ -310,7 +299,8 @@ go_tool "submit_supply_chain_scope" {
     }
 
     type Input struct {
-      ArtifactPath       string         `json:"artifact_path"`
+      ArtifactID         string         `json:"artifact_id"`
+      ArtifactPath       string         `json:"_r42_artifact_path"`
       Topic              string         `json:"topic"`
       FocalProduct       string         `json:"focal_product"`
       ProductVariants    []string       `json:"product_variants"`
@@ -329,12 +319,14 @@ go_tool "submit_supply_chain_scope" {
       if len(issues) > 0 {
         return ToolResponse[Output]{Accepted: false, Issues: issues}, nil
       }
+      artifactPath := input.ArtifactPath
+      input.ArtifactPath = ""
       payload, err := json.MarshalIndent(input, "", "  ")
       if err != nil {
         return ToolResponse[Output]{}, fmt.Errorf("encode supply-chain scope: %w", err)
       }
       payload = append(payload, '\n')
-      if err := os.WriteFile(filepath.Clean(input.ArtifactPath), payload, 0600); err != nil {
+      if err := os.WriteFile(filepath.Clean(artifactPath), payload, 0600); err != nil {
         return ToolResponse[Output]{}, fmt.Errorf("write supply-chain scope: %w", err)
       }
       output := Output(payload)
