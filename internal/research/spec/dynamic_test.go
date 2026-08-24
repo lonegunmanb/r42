@@ -215,13 +215,13 @@ func TestDecodeDynamicTaskRejectsListArtifacts(t *testing.T) {
 	require.EqualError(t, err, "artifact must be an object or map")
 }
 
-func TestResolveDynamicTaskSelfReferencesReplacesToolInputPaths(t *testing.T) {
+func TestResolveArtifactReferencesReplacesDeferredPaths(t *testing.T) {
 	t.Parallel()
 
-	config, err := researchspec.ResolveDynamicTaskSelfReferences(researchspec.Config{
-		SystemPrompt: researchspec.DynamicTaskSelfValueForExpression(
-			`self.artifact.knowledge.path`,
-		).GetAttr("artifact").Index(cty.StringVal("knowledge")).GetAttr("path").AsString(),
+	reference, err := researchspec.ArtifactReferenceFunction(nil).Call([]cty.Value{cty.StringVal("knowledge")})
+	require.NoError(t, err)
+	config, err := researchspec.ResolveArtifactReferences(researchspec.Config{
+		SystemPrompt: reference.GetAttr("path").AsString(),
 		Artifacts: []researchspec.Artifact{{
 			Name: "knowledge", Type: researchspec.ArtifactTypeFile,
 			Path: "C:/run/task/knowledge.json", Description: "Knowledge artifact",
@@ -229,9 +229,7 @@ func TestResolveDynamicTaskSelfReferencesReplacesToolInputPaths(t *testing.T) {
 		ToolUses: []researchspec.ToolUse{{
 			Name: "submit_knowledge",
 			Input: cty.ObjectVal(map[string]cty.Value{
-				"artifact_path": researchspec.DynamicTaskSelfValueForExpression(
-					`self.artifact["knowledge"].path`,
-				).GetAttr("artifact").Index(cty.StringVal("knowledge")).GetAttr("path"),
+				"artifact_path": reference.GetAttr("path"),
 			}),
 		}},
 	})
@@ -239,6 +237,36 @@ func TestResolveDynamicTaskSelfReferencesReplacesToolInputPaths(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "C:/run/task/knowledge.json", config.SystemPrompt)
 	assert.Equal(t, "C:/run/task/knowledge.json", config.ToolUses[0].Input.GetAttr("artifact_path").AsString())
+}
+
+func TestArtifactReferenceFunctionProducesDeferredArtifactIDs(t *testing.T) {
+	t.Parallel()
+
+	function := researchspec.ArtifactReferenceFunction(nil)
+	scope, err := function.Call([]cty.Value{cty.StringVal("scope")})
+	require.NoError(t, err)
+	backup, err := function.Call([]cty.Value{cty.StringVal("backup")})
+	require.NoError(t, err)
+
+	scopeName, scopeReference := researchspec.ArtifactReferenceIDName(scope.GetAttr("id").AsString())
+	backupName, backupReference := researchspec.ArtifactReferenceIDName(backup.GetAttr("id").AsString())
+
+	assert.True(t, scopeReference)
+	assert.Equal(t, "scope", scopeName)
+	assert.True(t, backupReference)
+	assert.Equal(t, "backup", backupName)
+}
+
+func TestResolveArtifactReferencesRejectsUndeclaredArtifact(t *testing.T) {
+	t.Parallel()
+
+	reference, err := researchspec.ArtifactReferenceFunction(nil).Call([]cty.Value{cty.StringVal("missing")})
+	require.NoError(t, err)
+	_, err = researchspec.ResolveArtifactReferences(researchspec.Config{
+		SystemPrompt: reference.GetAttr("path").AsString(),
+	})
+
+	require.ErrorContains(t, err, `artifact("missing") references an undeclared artifact`)
 }
 
 func TestDecodeDynamicTaskRejectsEmptyProfile(t *testing.T) {

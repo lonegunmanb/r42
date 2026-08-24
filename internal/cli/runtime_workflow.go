@@ -109,60 +109,69 @@ func validateToolUseArtifactAccess(uses []researchspec.ToolUse, authorized []str
 	return nil
 }
 
-func materializeSelfToolUseSources(
+func materializeArtifactReferences(
 	uses []researchspec.ToolUse,
-	artifactIDs, _ map[string]string,
+	artifactIDs map[string]string,
 ) []researchspec.ToolUse {
 	result := slices.Clone(uses)
 	for useIndex := range result {
-		fields, err := toolUseObjectMap(result[useIndex].InputFromAgent)
-		if err != nil {
-			continue
-		}
-		for name, field := range fields {
-			unmarked, _ := field.UnmarkDeep()
-			if !unmarked.Type().IsObjectType() || !unmarked.Type().HasAttribute("sources") {
-				continue
-			}
-			sources := unmarked.GetAttr("sources")
-			if !sources.IsKnown() || sources.IsNull() || (!sources.Type().IsListType() && !sources.Type().IsTupleType()) {
-				continue
-			}
-			items := sources.AsValueSlice()
-			for index, source := range items {
-				if !source.Type().IsObjectType() || !source.Type().HasAttribute("id") {
-					continue
-				}
-				id := source.GetAttr("id")
-				if !id.IsKnown() || id.IsNull() || !id.Type().Equals(cty.String) {
-					continue
-				}
-				parts := strings.Split(id.AsString(), ":")
-				if len(parts) != 3 || parts[0] != "self" {
-					continue
-				}
-				replacement := ""
-				if parts[1] == "artifact" {
-					replacement = artifactIDs[parts[2]]
-				}
-				if replacement == "" {
-					continue
-				}
-				attributes := source.AsValueMap()
-				attributes["id"] = cty.StringVal(replacement)
-				items[index] = cty.ObjectVal(attributes)
-			}
-			values := unmarked.AsValueMap()
-			if sources.Type().IsListType() {
-				values["sources"] = cty.ListVal(items)
-			} else {
-				values["sources"] = cty.TupleVal(items)
-			}
-			fields[name] = cty.ObjectVal(values)
-		}
-		result[useIndex].InputFromAgent = cty.ObjectVal(fields)
+		result[useIndex].Input = materializeArtifactReferenceIDs(result[useIndex].Input, artifactIDs)
+		result[useIndex].InputFromAgent = materializeArtifactReferenceIDs(result[useIndex].InputFromAgent, artifactIDs)
 	}
 	return result
+}
+
+func materializeArtifactReferenceIDs(value cty.Value, artifactIDs map[string]string) cty.Value {
+	if value == cty.NilVal {
+		return value
+	}
+	unmarked, marks := value.Unmark()
+	if !unmarked.IsKnown() || unmarked.IsNull() {
+		return value
+	}
+	switch {
+	case unmarked.Type().Equals(cty.String):
+		name, reference := researchspec.ArtifactReferenceIDName(unmarked.AsString())
+		if !reference {
+			return value
+		}
+		if replacement := artifactIDs[name]; replacement != "" {
+			return cty.StringVal(replacement).WithMarks(marks)
+		}
+		return value
+	case unmarked.Type().IsObjectType():
+		values := make(map[string]cty.Value, len(unmarked.AsValueMap()))
+		for name, item := range unmarked.AsValueMap() {
+			values[name] = materializeArtifactReferenceIDs(item, artifactIDs)
+		}
+		return cty.ObjectVal(values).WithMarks(marks)
+	case unmarked.Type().IsMapType():
+		values := make(map[string]cty.Value, len(unmarked.AsValueMap()))
+		for name, item := range unmarked.AsValueMap() {
+			values[name] = materializeArtifactReferenceIDs(item, artifactIDs)
+		}
+		if len(values) == 0 {
+			return cty.MapValEmpty(unmarked.Type().ElementType()).WithMarks(marks)
+		}
+		return cty.MapVal(values).WithMarks(marks)
+	case unmarked.Type().IsListType():
+		items := unmarked.AsValueSlice()
+		for index := range items {
+			items[index] = materializeArtifactReferenceIDs(items[index], artifactIDs)
+		}
+		if len(items) == 0 {
+			return cty.ListValEmpty(unmarked.Type().ElementType()).WithMarks(marks)
+		}
+		return cty.ListVal(items).WithMarks(marks)
+	case unmarked.Type().IsTupleType():
+		items := unmarked.AsValueSlice()
+		for index := range items {
+			items[index] = materializeArtifactReferenceIDs(items[index], artifactIDs)
+		}
+		return cty.TupleVal(items).WithMarks(marks)
+	default:
+		return value
+	}
 }
 
 func closedResearchSystemPrompt(configured string) string {
@@ -214,7 +223,7 @@ func (f *runtimeFactory) newResearchBlock(
 	if targetErr := addCollectionArtifactTargets(collectionContext, artifactsRegistry, planned.Config.Artifacts, artifactIDs); targetErr != nil {
 		return nil, targetErr
 	}
-	planned.Config.ToolUses = materializeSelfToolUseSources(planned.Config.ToolUses, artifactIDs, nil)
+	planned.Config.ToolUses = materializeArtifactReferences(planned.Config.ToolUses, artifactIDs)
 	importedArtifactIDs, importErr := importedArtifactIDs(planned.Config.Imports)
 	if importErr != nil {
 		return nil, importErr

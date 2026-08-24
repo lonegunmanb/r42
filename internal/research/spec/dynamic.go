@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"maps"
 	"math/big"
-	"regexp"
-	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/lonegunmanb/golden"
@@ -38,7 +36,7 @@ func (*DynamicResearchBlock) CanExecutePrePlan() bool { return false }
 
 func (b *DynamicResearchBlock) EvalContext() *hcl.EvalContext {
 	context := researchBlockEvalContext(b.BaseBlock)
-	context.Variables["self"] = DynamicTaskSelfValueForExpression(b.TasksExpression())
+	context.Functions["artifact"] = ArtifactReferenceFunction(nil)
 	return context
 }
 
@@ -248,114 +246,6 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 		return Config{}, err
 	}
 	return config, nil
-}
-
-// ResolveDynamicTaskSelfReferences resolves dynamic self placeholders after a
-// task object's artifact declarations are available.
-func ResolveDynamicTaskSelfReferences(config Config) (Config, error) {
-	paths := make(map[string]string, len(config.Artifacts))
-	for _, artifact := range config.Artifacts {
-		paths[artifact.Name] = artifact.Path
-	}
-	var err error
-	if config.SystemPrompt, err = replaceDynamicSelfArtifactPaths(config.SystemPrompt, paths); err != nil {
-		return Config{}, err
-	}
-	if config.Prompt != nil {
-		prompt, err := replaceDynamicSelfArtifactPaths(*config.Prompt, paths)
-		if err != nil {
-			return Config{}, err
-		}
-		config.Prompt = &prompt
-	}
-	for index := range config.ToolUses {
-		input, inputErr := replaceDynamicSelfArtifactPathsInValue(config.ToolUses[index].Input, paths)
-		if inputErr != nil {
-			return Config{}, fmt.Errorf("tool_use %q input: %w", config.ToolUses[index].Name, inputErr)
-		}
-		config.ToolUses[index].Input = input
-	}
-	return config, nil
-}
-
-var dynamicSelfArtifactPathPlaceholderPattern = regexp.MustCompile(`__r42_dynamic_self_artifact_(.+)_path__`)
-
-func replaceDynamicSelfArtifactPaths(value string, paths map[string]string) (string, error) {
-	result := value
-	for name, path := range paths {
-		result = strings.ReplaceAll(result, dynamicSelfArtifactPathPlaceholder(name), path)
-	}
-	match := dynamicSelfArtifactPathPlaceholderPattern.FindStringSubmatch(result)
-	if len(match) == 0 {
-		return result, nil
-	}
-	return "", fmt.Errorf("self.artifact.%s.path requires a dynamic artifact named %q", match[1], match[1])
-}
-
-func replaceDynamicSelfArtifactPathsInValue(value cty.Value, paths map[string]string) (cty.Value, error) {
-	if value == cty.NilVal {
-		return value, nil
-	}
-	unmarked, marks := value.Unmark()
-	if !unmarked.IsKnown() || unmarked.IsNull() {
-		return value, nil
-	}
-	switch {
-	case unmarked.Type().Equals(cty.String):
-		replaced, err := replaceDynamicSelfArtifactPaths(unmarked.AsString(), paths)
-		if err != nil {
-			return cty.NilVal, err
-		}
-		return cty.StringVal(replaced).WithMarks(marks), nil
-	case unmarked.Type().IsObjectType():
-		values := make(map[string]cty.Value, len(unmarked.AsValueMap()))
-		for name, item := range unmarked.AsValueMap() {
-			replaced, err := replaceDynamicSelfArtifactPathsInValue(item, paths)
-			if err != nil {
-				return cty.NilVal, err
-			}
-			values[name] = replaced
-		}
-		return cty.ObjectVal(values).WithMarks(marks), nil
-	case unmarked.Type().IsMapType():
-		values := make(map[string]cty.Value, len(unmarked.AsValueMap()))
-		for name, item := range unmarked.AsValueMap() {
-			replaced, err := replaceDynamicSelfArtifactPathsInValue(item, paths)
-			if err != nil {
-				return cty.NilVal, err
-			}
-			values[name] = replaced
-		}
-		if len(values) == 0 {
-			return cty.MapValEmpty(unmarked.Type().ElementType()).WithMarks(marks), nil
-		}
-		return cty.MapVal(values).WithMarks(marks), nil
-	case unmarked.Type().IsListType():
-		values := make([]cty.Value, 0, unmarked.LengthInt())
-		for _, item := range unmarked.AsValueSlice() {
-			replaced, err := replaceDynamicSelfArtifactPathsInValue(item, paths)
-			if err != nil {
-				return cty.NilVal, err
-			}
-			values = append(values, replaced)
-		}
-		if len(values) == 0 {
-			return cty.ListValEmpty(unmarked.Type().ElementType()).WithMarks(marks), nil
-		}
-		return cty.ListVal(values).WithMarks(marks), nil
-	case unmarked.Type().IsTupleType():
-		values := make([]cty.Value, 0, unmarked.LengthInt())
-		for _, item := range unmarked.AsValueSlice() {
-			replaced, err := replaceDynamicSelfArtifactPathsInValue(item, paths)
-			if err != nil {
-				return cty.NilVal, err
-			}
-			values = append(values, replaced)
-		}
-		return cty.TupleVal(values).WithMarks(marks), nil
-	default:
-		return value, nil
-	}
 }
 
 func dynamicToolUseBlocks(object cty.Value) ([]ToolUseBlock, error) {

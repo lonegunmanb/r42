@@ -6,7 +6,6 @@ import (
 	"maps"
 	"math"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -111,74 +110,21 @@ func researchBlockEvalContext(block *golden.BaseBlock) *hcl.EvalContext {
 			return cty.StringVal(directory), nil
 		},
 	})
-	context.Variables["self"] = cty.ObjectVal(map[string]cty.Value{
-		"artifact": declaredSelfSources(block, "artifact", "artifact", context),
-	})
+	context.Functions["artifact"] = ArtifactReferenceFunction(declaredArtifactReferences(block, context))
 	return context
 }
 
-// DynamicTaskSelfValue permits a dynamic task to reference its source
-// directory with self.artifact.sources.path. The placeholder is resolved after
-// the task object has been decoded.
-func DynamicTaskSelfValue() cty.Value {
-	return dynamicTaskSelfValue([]string{"sources"})
-}
-
-var dynamicSelfArtifactPathPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`self\.artifact\.([A-Za-z_][A-Za-z0-9_]*)\.path`),
-	regexp.MustCompile(`self\.artifact\["([^"]+)"\]\.path`),
-}
-
-func DynamicTaskSelfValueForExpression(expression string) cty.Value {
-	names := map[string]struct{}{}
-	for _, pattern := range dynamicSelfArtifactPathPatterns {
-		for _, match := range pattern.FindAllStringSubmatch(expression, -1) {
-			names[match[1]] = struct{}{}
-		}
-	}
-	if len(names) == 0 {
-		return DynamicTaskSelfValue()
-	}
-	keys := make([]string, 0, len(names))
-	for name := range names {
-		keys = append(keys, name)
-	}
-	slices.Sort(keys)
-	return dynamicTaskSelfValue(keys)
-}
-
-func dynamicTaskSelfValue(names []string) cty.Value {
-	artifacts := make(map[string]cty.Value, len(names))
-	for _, name := range names {
-		artifacts[name] = dynamicSelfSource("artifact", name, dynamicSelfArtifactPathPlaceholder(name))
-	}
-	return cty.ObjectVal(map[string]cty.Value{
-		"artifact": cty.MapVal(artifacts),
-	})
-}
-
-func dynamicSelfArtifactPathPlaceholder(name string) string {
-	return "__r42_dynamic_self_artifact_" + name + "_path__"
-}
-
-func dynamicSelfSource(kind, name, path string) cty.Value {
-	return cty.ObjectVal(map[string]cty.Value{
-		"id": cty.StringVal("self:" + kind + ":" + name), "name": cty.StringVal(name),
-		"kind": cty.StringVal(kind), "type": cty.StringVal("directory"), "path": cty.StringVal(path),
-		"description": cty.StringVal("Current task declared " + kind), "required": cty.BoolVal(false), "non_empty": cty.BoolVal(false),
-	})
-}
-
-func declaredSelfSources(block *golden.BaseBlock, blockType, kind string, context *hcl.EvalContext) cty.Value {
+func declaredArtifactReferences(block *golden.BaseBlock, context *hcl.EvalContext) map[string]cty.Value {
 	declarations := make(map[string]cty.Value)
 	for _, nested := range block.HclBlock().NestedBlocks() {
-		if nested.Type != blockType || len(nested.Labels) == 0 {
+		if nested.Type != "artifact" || len(nested.Labels) == 0 {
 			continue
 		}
+		name := nested.Labels[len(nested.Labels)-1]
 		values := map[string]cty.Value{
-			"id":   cty.StringVal("self:" + kind + ":" + nested.Labels[len(nested.Labels)-1]),
-			"name": cty.StringVal(nested.Labels[len(nested.Labels)-1]),
-			"kind": cty.StringVal(kind), "type": cty.UnknownVal(cty.String),
+			"id":   cty.StringVal(artifactReferenceToken(name, "id")),
+			"name": cty.StringVal(name),
+			"kind": cty.StringVal("artifact"), "type": cty.UnknownVal(cty.String),
 			"path": cty.UnknownVal(cty.String), "description": cty.UnknownVal(cty.String),
 			"required": cty.BoolVal(false), "non_empty": cty.BoolVal(false),
 		}
@@ -192,12 +138,19 @@ func declaredSelfSources(block *golden.BaseBlock, blockType, kind string, contex
 				values[name] = value
 			}
 		}
-		declarations[nested.Labels[len(nested.Labels)-1]] = cty.ObjectVal(values)
+		for _, name := range []string{"required", "non_empty"} {
+			attribute, ok := nested.Attributes()[name]
+			if !ok {
+				continue
+			}
+			value, diagnostics := attribute.Expr.Value(context)
+			if !diagnostics.HasErrors() && value.Type().Equals(cty.Bool) {
+				values[name] = value
+			}
+		}
+		declarations[name] = cty.ObjectVal(values)
 	}
-	if len(declarations) == 0 {
-		return cty.MapValEmpty(artifactValueType)
-	}
-	return cty.MapVal(declarations)
+	return declarations
 }
 
 func (b *ResearchBlock) ExecuteDuringPlan() error {

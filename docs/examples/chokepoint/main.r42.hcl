@@ -20,13 +20,13 @@ research "static" "primary_source_baseline" {
     Topic: ${var.topic}
     Evidence cutoff: ${var.as_of_date}
     ${local.source_tool_guidance}
-    ${var.use_pplx ? format("Perplexity artifact_dir: %s", self.artifact.sources.path) : ""}
+    ${var.use_pplx ? format("Perplexity artifact_dir: %s", artifact("sources").path) : ""}
     Workspace: "${block_wd()}"
 
     During Collection, find the newest official filings, regulator records,
     product specifications, customer or contract disclosures, and applicable
     rules available by the cutoff. Save every retained source as a Markdown
-    artifact at a unique .md path under "${self.artifact.sources.path}" by calling r42_save_artifact,
+    artifact at a unique .md path under "${artifact("sources").path}" by calling r42_save_artifact,
     then submit a collection checkpoint when the primary
     corpus is sufficient.
 
@@ -45,8 +45,8 @@ research "static" "primary_source_baseline" {
     locator. Do not submit unknown as a claim card.
 
     Finish once with ${go_tool.finalize_claim_cards.id}:
-    workspace_dir "${block_wd()}", claims_path "${self.artifact.claims.path}",
-    source_registry_path "${self.artifact.source_registry.path}", as_of_date
+    workspace_dir "${block_wd()}", claims_path "${artifact("claims").path}",
+    source_registry_path "${artifact("source_registry").path}", as_of_date
     "${var.as_of_date}", and allow_empty false.
   PROMPT
   collection_tool_ids = local.pplx_tool_ids
@@ -65,7 +65,7 @@ research "static" "primary_source_baseline" {
     tool_id = go_tool.submit_claim_cards.id
     input = {
       workspace_dir = block_wd()
-      claims_path   = "${self.artifact.claims.path}"
+      claims_path   = "${artifact("claims").path}"
     }
   }
   tool_use "finalize_claims" {
@@ -73,8 +73,8 @@ research "static" "primary_source_baseline" {
     terminate = true
     input = {
       workspace_dir        = block_wd()
-      claims_path           = "${self.artifact.claims.path}"
-      source_registry_path  = "${self.artifact.source_registry.path}"
+      claims_path           = "${artifact("claims").path}"
+      source_registry_path  = "${artifact("source_registry").path}"
       as_of_date            = var.as_of_date
       allow_empty           = false
     }
@@ -130,16 +130,16 @@ research "static" "brainstorm" {
     Validated primary-source baseline JSON:
     ${research.static.primary_source_baseline.result}
     ${local.source_tool_guidance}
-    ${var.use_pplx ? format("Perplexity artifact_dir: %s", self.artifact.sources.path) : ""}
+    ${var.use_pplx ? format("Perplexity artifact_dir: %s", artifact("sources").path) : ""}
 
     During Collection, acquire only evidence needed beyond the validated
     baseline. Save every retained source at a unique .md path under
-    "${self.artifact.sources.path}" with r42_save_artifact and submit a collection checkpoint. If the baseline
+    "${artifact("sources").path}" with r42_save_artifact and submit a collection checkpoint. If the baseline
     is sufficient for scope design, submit an empty collection checkpoint.
 
     During closed Research, do not search or fetch. Use the authorized artifact_id
     values supplied to this phase with r42_read_artifact, and use the validated
-    Write "${self.artifact.brainstorm.path}" with the
+    Write "${artifact("brainstorm").path}" with the
     focal boundary, product variants, layered components, transformation stages,
     manufacturing, packaging, testing, module integration, downstream system
     qualification, competing dependency hypotheses, and open questions for the
@@ -165,7 +165,7 @@ research "static" "brainstorm" {
     tool_id   = go_tool.submit_supply_chain_scope.id
     terminate = true
     input = {
-      artifact_id             = self.artifact.scope.id
+      artifact_id             = artifact("scope").id
       _r42_artifact_path      = ""
       topic                   = var.topic
     }
@@ -255,13 +255,13 @@ research "dynamic" "graph_track" {
         Validated primary-source baseline JSON:
         ${research.static.primary_source_baseline.result}
         ${local.source_tool_guidance}
-        ${var.use_pplx ? format("Perplexity artifact_dir: %s", self.artifact.sources.path) : ""}
+        ${var.use_pplx ? format("Perplexity artifact_dir: %s", artifact("sources").path) : ""}
         Workspace: "${block_wd()}/${index}"
 
         During Collection, research only this track and address every assigned
         coverage item. Preserve product variants and distinguish generic-chain facts
         from target facts. Save every retained source at a unique .md path under
-        "${self.artifact.sources.path}" with r42_save_artifact, then submit a
+        "${artifact("sources").path}" with r42_save_artifact, then submit a
         collection checkpoint when sufficient.
 
         During closed Research, do not search or fetch. Use the authorized artifact_id
@@ -280,8 +280,8 @@ research "dynamic" "graph_track" {
 
         Finish once with ${go_tool.finalize_claim_cards.id}: workspace_dir
         "${block_wd()}/${index}", claims_path
-        "${self.artifact.claims.path}", source_registry_path
-        "${self.artifact.source_registry.path}", as_of_date
+        "${artifact("claims").path}", source_registry_path
+        "${artifact("source_registry").path}", as_of_date
         "${var.as_of_date}", and allow_empty false.
       PROMPT
       collection_tool_ids = local.pplx_tool_ids
@@ -306,7 +306,7 @@ research "dynamic" "graph_track" {
           tool_id = go_tool.submit_claim_cards.id
           input = {
             workspace_dir = "${block_wd()}/${index}"
-            claims_path   = self.artifact.claims.path
+            claims_path   = artifact("claims").path
           }
           input_from_agent = {
             cards = {
@@ -323,8 +323,8 @@ research "dynamic" "graph_track" {
           terminate = true
           input = {
             workspace_dir       = "${block_wd()}/${index}"
-            claims_path         = self.artifact.claims.path
-            source_registry_path = self.artifact.source_registry.path
+            claims_path         = artifact("claims").path
+            source_registry_path = artifact("source_registry").path
             as_of_date          = var.as_of_date
             allow_empty         = false
           }
@@ -423,7 +423,7 @@ research "static" "build_supply_chain" {
     terminate = true
     input = {
       workspace_dir        = block_wd()
-      artifact_id          = self.artifact.supply_chain.id
+      artifact_id          = artifact("supply_chain").id
       _r42_artifact_path   = ""
       topic                = var.topic
       scope_path    = research.static.brainstorm.artifact.scope.path
@@ -533,7 +533,7 @@ research "dynamic" "assess_nodes" {
         terminate = true
         input = {
           workspace_dir        = "${block_wd()}/${index}"
-          artifact_id          = self.artifact.node_assessment.id
+          artifact_id          = artifact("node_assessment").id
           _r42_artifact_path   = ""
           claim_paths = concat(
             [research.static.primary_source_baseline.artifact.claims.path],
@@ -633,14 +633,14 @@ research "dynamic" "prioritize_companies" {
         ${join("\n", [for item in research.dynamic.graph_track.tasks : item.result])}
         Task workspace: "${block_wd()}/${index}"
         ${local.source_tool_guidance}
-        ${var.use_pplx ? format("Perplexity artifact_dir: %s", self.artifact.sources.path) : ""}
+        ${var.use_pplx ? format("Perplexity artifact_dir: %s", artifact("sources").path) : ""}
 
         During Collection, investigate whether any public company deserves more
         research because of this exact assessed node. Investigate at most
         ${var.max_candidates_per_chokepoint} companies. For each, distinguish an
         existing supplier, qualified alternative, related-product-only company,
         or unverified lead. Verify the exact legal entity and security. Save
-        every retained source at a unique .md path under "${self.artifact.sources.path}"
+        every retained source at a unique .md path under "${artifact("sources").path}"
         with r42_save_artifact,
         then submit a collection checkpoint. If no new evidence is needed,
         submit an empty collection checkpoint.
@@ -660,9 +660,9 @@ research "dynamic" "prioritize_companies" {
 
         Finalize the current staged card set once with
         ${go_tool.finalize_claim_cards.id}, claims_path
-        "${self.artifact.claims.path}",
+        "${artifact("claims").path}",
         source_registry_path
-        "${self.artifact.source_registry.path}",
+        "${artifact("source_registry").path}",
         cutoff above, and allow_empty true. Exact duplicate cards are collapsed
         automatically. After an accepted finalize, do not call finalize again or
         read claims to inspect its contents.
@@ -705,7 +705,7 @@ research "dynamic" "prioritize_companies" {
           tool_id = go_tool.submit_claim_cards.id
           input = {
             workspace_dir = "${block_wd()}/${index}"
-            claims_path   = self.artifact.claims.path
+            claims_path   = artifact("claims").path
           }
           input_from_agent = {
             cards = {
@@ -718,8 +718,8 @@ research "dynamic" "prioritize_companies" {
           tool_id = go_tool.finalize_claim_cards.id
           input = {
             workspace_dir        = "${block_wd()}/${index}"
-            claims_path           = self.artifact.claims.path
-            source_registry_path  = self.artifact.source_registry.path
+            claims_path           = artifact("claims").path
+            source_registry_path  = artifact("source_registry").path
             as_of_date            = var.as_of_date
             allow_empty           = true
           }
@@ -729,13 +729,13 @@ research "dynamic" "prioritize_companies" {
           terminate = true
           input = {
             workspace_dir        = "${block_wd()}/${index}"
-            artifact_id          = self.artifact.company_priorities.id
+            artifact_id          = artifact("company_priorities").id
             _r42_artifact_path   = ""
             node_assessment_path = assessment.artifact.node_assessment.path
             claim_paths = concat(
               [research.static.primary_source_baseline.artifact.claims.path],
               [for task in research.dynamic.graph_track.tasks : task.artifact.claims.path],
-              [self.artifact.claims.path],
+              [artifact("claims").path],
             )
           }
           input_from_agent = {
@@ -836,7 +836,7 @@ research "static" "synthesize" {
     collection_exhausted=true.
 
     During closed Research, use only the validated JSON above and write
-    "${self.artifact.report.path}" in this order:
+    "${artifact("report").path}" in this order:
     1. companies worth further research, showing A/B/C/do-not-research, exact
        node and role, strongest evidence, largest unknown, and next check;
     2. confirmed and candidate global or branch-specific risk nodes;
@@ -853,7 +853,7 @@ research "static" "synthesize" {
     facts. Do not write a URL table or RPT IDs.
 
     Finish with ${go_tool.finalize_research_report.id}. Set report_path to exactly
-    "${self.artifact.report.path}". Set claim_paths to the Finalized claim_paths JSON
+    "${artifact("report").path}". Set claim_paths to the Finalized claim_paths JSON
     array above, unchanged. Every element is an absolute path to one finalized claims.json
     artifact; do not substitute directories, globs, Markdown files,
     artifact IDs, or guessed paths. The tool replaces claim markers with original
@@ -883,7 +883,7 @@ research "static" "synthesize" {
     tool_id   = go_tool.finalize_research_report.id
     terminate = true
     input = {
-      report_path = self.artifact.report.path
+      report_path = artifact("report").path
       claim_paths = local.synthesis_claim_paths
     }
   }

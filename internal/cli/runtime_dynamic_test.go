@@ -16,6 +16,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/copilot"
 	"github.com/lonegunmanb/r42/internal/executor"
+	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
@@ -143,6 +144,71 @@ output "summary" {
 	require.NoError(t, err)
 	assert.Equal(t, "alpha,beta", result.Outputs["summary"].AsString())
 	assert.Contains(t, opener.Prompts(), "alpha,beta")
+}
+
+func TestProductionRuntimeResolvesDeferredStaticArtifactID(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+go_tool "finish" {
+  description = "Finish research."
+  source = <<-GO
+    import "context"
+    type Input struct { Summary string; ArtifactID *string }
+    type Output string
+    func Invoke(ctx context.Context, input Input) (ToolResponse[Output], error) {
+      _ = ctx
+      output := Output(input.Summary)
+      if input.ArtifactID != nil {
+        output = Output(*input.ArtifactID)
+      }
+      return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+    }
+  GO
+}
+
+research "static" "seed" {
+  model             = "test-model"
+  system_prompt     = "Produce an upstream result."
+  terminate_tool_id = go_tool.finish.id
+}
+
+research "static" "brainstorm" {
+  model         = "test-model"
+  system_prompt = "Use the upstream result."
+  prompt        = research.static.seed.result
+
+  artifact "scope" {
+    type        = "file"
+    path        = "scope.json"
+    description = "Structured scope"
+  }
+
+  tool_use "finish" {
+    tool_id   = go_tool.finish.id
+    terminate = true
+    input = {
+      ArtifactID = artifact("scope").id
+    }
+  }
+}
+
+output "scope_id" { value = research.static.brainstorm.result }
+`), 0o600))
+
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: &toolCallingOpener{}})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+	encoded, err := plan.Marshal(planned)
+	require.NoError(t, err)
+	planned, err = plan.Unmarshal(encoded)
+	require.NoError(t, err)
+
+	result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+
+	require.NoError(t, err)
+	assert.Regexp(t, `^artifact-[0-9a-f-]{36}$`, result.Outputs["scope_id"].AsString())
 }
 
 func TestProductionRuntimeAcceptsEmptyDynamicTasksWithoutOpeningSession(t *testing.T) {
@@ -320,7 +386,7 @@ research "dynamic" "followups" {
 	}
 }
 
-func TestProductionRuntimeDynamicTaskSelfArtifactPathResolves(t *testing.T) {
+func TestProductionRuntimeDynamicTaskArtifactPathResolves(t *testing.T) {
 	t.Parallel()
 
 	directory := t.TempDir()
@@ -328,8 +394,8 @@ func TestProductionRuntimeDynamicTaskSelfArtifactPathResolves(t *testing.T) {
 research "dynamic" "followups" {
   tasks = [for index, topic in ["alpha", "beta"] : {
     model         = "test-model"
-    system_prompt = "Save source material under ${self.artifact.sources.path}."
-    prompt        = self.artifact["knowledge"].path
+    system_prompt = "Save source material under ${artifact("sources").path}."
+    prompt        = artifact("knowledge").path
     artifact = {
       sources = {
         type        = "directory"
@@ -358,7 +424,7 @@ research "dynamic" "followups" {
 	require.NoError(t, err)
 	for _, config := range opener.Configs() {
 		if strings.Contains(config.SystemPrompt, "Save source material under") {
-			assert.NotContains(t, config.SystemPrompt, "__r42_dynamic_self_artifact_path__")
+			assert.NotContains(t, config.SystemPrompt, "__r42_artifact_ref_")
 			assert.Contains(t, config.SystemPrompt, filepath.ToSlash(filepath.Join(config.WorkingDirectory, "collected")))
 			assert.Contains(t, opener.Prompts(), filepath.ToSlash(filepath.Join(config.WorkingDirectory, "knowledge.json")))
 		}

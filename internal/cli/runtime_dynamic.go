@@ -46,7 +46,7 @@ func (f *runtimeFactory) newDynamicResearchBlock(
 	}
 	resolved := make([]modulespec.ResearchPlan, len(configs))
 	for index, taskConfig := range configs {
-		taskConfig, err = researchspec.ResolveDynamicTaskSelfReferences(taskConfig)
+		taskConfig, err = researchspec.ResolveArtifactReferences(taskConfig)
 		if err != nil {
 			return nil, fmt.Errorf("dynamic research task %d: %w", index, err)
 		}
@@ -84,7 +84,6 @@ func (f *runtimeFactory) evaluateResearchExpression(address, source, description
 		return cty.NilVal, fmt.Errorf("parse %s: %w", description, diagnostics)
 	}
 	contextValues := maps.Clone(f.contextValues)
-	contextValues["self"] = researchspec.DynamicTaskSelfValueForExpression(source)
 	f.mu.Lock()
 	for resultAddress, result := range f.results {
 		setBlockResult(contextValues, resultAddress, result)
@@ -92,6 +91,7 @@ func (f *runtimeFactory) evaluateResearchExpression(address, source, description
 	f.mu.Unlock()
 	functions := hclfuncs.Functions(f.directory)
 	maps.Copy(functions, config.Functions())
+	functions["artifact"] = researchspec.ArtifactReferenceFunction(nil)
 	workspace, err := f.run.WorkspacePath(f.CanonicalAddress(address))
 	if err != nil {
 		return cty.NilVal, err

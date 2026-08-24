@@ -352,6 +352,10 @@ func (f *runtimeFactory) New(
 		if decodeErr != nil {
 			return nil, decodeErr
 		}
+		configValue, err = researchspec.ResolveArtifactReferences(configValue)
+		if err != nil {
+			return nil, err
+		}
 		planned, err = planned.Resolve(configValue)
 		if err != nil {
 			return nil, err

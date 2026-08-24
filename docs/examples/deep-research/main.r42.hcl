@@ -139,7 +139,7 @@ research "dynamic" "parallel_deep_dive" {
 
         During Collection, research this subquestion independently. Save the
         complete material returned by every retained source as Markdown under
-        "${self.artifact.sources.path}" by calling r42_save_artifact with
+        "${artifact("sources").path}" by calling r42_save_artifact with
         source set to the source URL. Use the returned artifact_id directly;
         do not call r42_register_artifact for the returned path. Submit a
         collection checkpoint once the evidence is sufficient.
@@ -159,7 +159,7 @@ research "dynamic" "parallel_deep_dive" {
           tool_id   = go_tool.submit_knowledge.id
           terminate = true
           input = {
-            artifact_id            = self.artifact.knowledge.id
+            artifact_id            = artifact("knowledge").id
             _r42_artifact_path     = ""
             subquestion            = task.subquestion
           }
@@ -225,7 +225,7 @@ research "dynamic" "independent_serial_deep_dive" {
         result.
 
         During Collection, save the complete material returned by every
-        retained source as Markdown under "${self.artifact.sources.path}" by calling
+        retained source as Markdown under "${artifact("sources").path}" by calling
         r42_save_artifact with source set to the source URL. Use the returned
         artifact_id directly; do not call r42_register_artifact for the returned
         path. Submit a collection checkpoint once the evidence is sufficient.
@@ -244,7 +244,7 @@ research "dynamic" "independent_serial_deep_dive" {
           tool_id   = go_tool.submit_knowledge.id
           terminate = true
           input = {
-            artifact_id            = self.artifact.knowledge.id
+            artifact_id            = artifact("knowledge").id
             _r42_artifact_path     = ""
             subquestion            = task.subquestion
           }
@@ -333,7 +333,7 @@ research "dynamic" "final_serial_deep_dive" {
 
         During Collection, collect only evidence needed beyond the validated
         upstream JSON. Save each retained source as Markdown under
-        "${self.artifact.sources.path}" with r42_save_artifact, passing the
+        "${artifact("sources").path}" with r42_save_artifact, passing the
         source URL in source. Use the returned artifact_id directly; do not call
         r42_register_artifact for the returned path. Submit a collection checkpoint.
         If the upstream JSON is sufficient, submit an empty
@@ -354,7 +354,7 @@ research "dynamic" "final_serial_deep_dive" {
           tool_id   = go_tool.submit_knowledge.id
           terminate = true
           input = {
-            artifact_id            = self.artifact.knowledge.id
+            artifact_id            = artifact("knowledge").id
             _r42_artifact_path     = ""
             subquestion            = task.subquestion
           }
@@ -467,7 +467,7 @@ research "static" "resolve_conflicts" {
     tool_id   = go_tool.submit_conflict_resolution.id
     terminate = true
     input = {
-      artifact_id           = self.artifact.resolution.id
+      artifact_id           = artifact("resolution").id
       _r42_artifact_path    = ""
       topic                 = var.topic
       reviewed_artifacts = concat(
@@ -581,7 +581,7 @@ research "static" "synthesize" {
     ${research.static.resolve_conflicts.artifact.resolution.path}
 
     Use only the included validated JSON and registered artifacts, then write
-    the final report to ${self.artifact.report.path}. Include
+    the final report to ${artifact("report").path}. Include
     an executive summary, findings organized around the planner-produced task groups,
     resolved and unresolved contradictions, limitations, and a source table
     mapping each cited quote ID to its URL. Before writing, remove every

@@ -512,6 +512,30 @@ func TestBindResearchToolUsesResolvesBoundOutputArtifactID(t *testing.T) {
 	assert.Equal(t, record.Path, received["_r42_artifact_path"])
 }
 
+func TestMaterializeArtifactReferencesResolvesBoundInputArtifactID(t *testing.T) {
+	t.Parallel()
+
+	reference, err := researchspec.ArtifactReferenceFunction(nil).Call([]cty.Value{cty.StringVal("scope")})
+	require.NoError(t, err)
+	uses := materializeArtifactReferences([]researchspec.ToolUse{{
+		Name: "submit_scope",
+		Input: cty.ObjectVal(map[string]cty.Value{
+			"artifact_id":    reference.GetAttr("id"),
+			"artifact_ids":   cty.ListVal([]cty.Value{reference.GetAttr("id")}),
+			"artifact_map":   cty.MapVal(map[string]cty.Value{"scope": reference.GetAttr("id")}),
+			"artifact_tuple": cty.TupleVal([]cty.Value{reference.GetAttr("id")}),
+			"unchanged":      cty.NumberIntVal(1),
+		}),
+	}}, map[string]string{"scope": "artifact-scope"})
+
+	require.Len(t, uses, 1)
+	assert.Equal(t, "artifact-scope", uses[0].Input.GetAttr("artifact_id").AsString())
+	assert.Equal(t, "artifact-scope", uses[0].Input.GetAttr("artifact_ids").Index(cty.NumberIntVal(0)).AsString())
+	assert.Equal(t, "artifact-scope", uses[0].Input.GetAttr("artifact_map").Index(cty.StringVal("scope")).AsString())
+	assert.Equal(t, "artifact-scope", uses[0].Input.GetAttr("artifact_tuple").Index(cty.NumberIntVal(0)).AsString())
+	assert.Equal(t, "1", uses[0].Input.GetAttr("unchanged").AsBigFloat().Text('f', 0))
+}
+
 func TestMaterializeArtifactTargetPathResolvesBoundArtifactID(t *testing.T) {
 	t.Parallel()
 

@@ -118,30 +118,34 @@ research "static" "fact" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestResearchBlockSelfArtifactExposesDeclaredSaveTarget(t *testing.T) {
+func TestResearchBlockArtifactFunctionExposesDeclaredSaveTarget(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
 research "static" "collect" {
   model = "model"
-  system_prompt = "Save source material under ${self.artifact.sources.path}."
-  prompt = self.artifact["sources"].path
+  system_prompt = "Save source material under ${artifact("sources").path}; type=${artifact("sources").type}; required=${artifact("sources").required}; non_empty=${artifact("sources").non_empty}."
+  prompt = artifact("sources").path
 
   artifact "sources" {
     type = "directory"
     path = "${block_wd()}/snapshots"
     description = "Collected source material"
+    required = true
+    non_empty = true
   }
 }
 `)
 
 	require.NoError(t, config.RunPlan())
 	block := golden.Blocks[*researchspec.ResearchBlock](config)[0]
-	assert.Equal(t, "Save source material under workspace/research.static.collect/snapshots.", block.ResearchConfig().SystemPrompt)
+	assert.Equal(t, "Save source material under workspace/research.static.collect/snapshots; type=directory; required=true; non_empty=true.", block.ResearchConfig().SystemPrompt)
 	require.NotNil(t, block.ResearchConfig().Prompt)
 	assert.Equal(t, "workspace/research.static.collect/snapshots", *block.ResearchConfig().Prompt)
 	require.Len(t, block.ResearchConfig().Artifacts, 1)
 	assert.Equal(t, researchspec.ArtifactTypeDirectory, block.ResearchConfig().Artifacts[0].Type)
 	assert.Equal(t, "workspace/research.static.collect/snapshots", block.ResearchConfig().Artifacts[0].Path)
+	assert.True(t, block.ResearchConfig().Artifacts[0].Required)
+	assert.True(t, block.ResearchConfig().Artifacts[0].NonEmpty)
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

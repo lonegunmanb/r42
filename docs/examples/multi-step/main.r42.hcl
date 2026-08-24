@@ -34,7 +34,7 @@ research "static" "external_tool_artifact" {
   prompt = <<-PROMPT
     Search for the latest stable Python release announcement on python.org.
     Select one python.org result and call ${module.pplx_tools.pplx_fetch_tool_id} with its URL.
-    The fetch tool writes ${self.artifact.artifact.path} itself.
+    The fetch tool writes ${artifact("artifact").path} itself.
     During Collection, do not checkpoint until the fetch succeeds, reports that
     exact path, and r42_register_artifact accepts it. During closed Research,
     verify the artifact through the r42 artifact readers before responding.
