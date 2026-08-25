@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/hcl/v2/hclparse"
@@ -12,6 +13,30 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDeepDiveCollectionsCanUseCopiedPPLXTools(t *testing.T) {
+	t.Parallel()
+
+	deepResearchModule, err := os.ReadFile("modules/pplx_tools/main.r42.hcl")
+	require.NoError(t, err)
+	chokepointModule, err := os.ReadFile("../chokepoint/modules/pplx_tools/main.r42.hcl")
+	require.NoError(t, err)
+	assert.Equal(t, string(chokepointModule), string(deepResearchModule))
+
+	variables, err := os.ReadFile("variables.r42.hcl")
+	require.NoError(t, err)
+	assert.Contains(t, string(variables), `variable "use_pplx"`)
+
+	configuration, err := os.ReadFile("main.r42.hcl")
+	require.NoError(t, err)
+	main := string(configuration)
+	assert.Contains(t, main, `module "pplx_tools"`)
+	assert.Contains(t, main, "var.use_pplx ?")
+	assert.Equal(t, 3, strings.Count(main, "collection_tool_ids = local.pplx_tool_ids"))
+	assert.Equal(t, 3, strings.Count(main, "${local.source_tool_guidance}"))
+	assert.Contains(t, main, "pplx_pro_search_tool_id")
+	assert.Contains(t, main, "pplx_fetch_tool_id")
+}
 
 func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 	t.Parallel()

@@ -97,13 +97,18 @@ research "static" "primary_source_baseline" {
     required  = true
     non_empty = true
   }
+
+  collection_qc {
+    model_provider = model_provider.qc
+  }
+
   qc {
     criteria = {
       primary_coverage = "Judge whether the newest material primary documents available by the cutoff were retained. Identify every omission that could change the study."
       entailment = "Judge whether every confirmed card is directly entailed by its authoritative source, including named parties, product variant, period, and qualifiers. Treat typed-tool path, URL, date, and quotation matching as authoritative."
       atomicity = "Judge whether each card makes one independently auditable assertion rather than bundling several facts behind one citation."
     }
-    model_provider   = model_provider.primary
+    model_provider   = model_provider.qc
     model            = local.qc_model
     reasoning_effort = var.reasoning_effort
     max_qc_rounds    = var.max_qc_rounds
@@ -223,13 +228,17 @@ research "static" "brainstorm" {
     non_empty = true
   }
 
+  collection_qc {
+    model_provider = model_provider.qc
+  }
+
   qc {
     criteria = {
       scope = "Judge whether every decision-relevant product branch, component, stage, equipment or material boundary, service dependency, and qualification step is represented."
       separation = "Judge whether generic architecture is clearly separated from target-specific facts and materially different variants are not silently merged."
       uncertainty = "Judge whether competing explanations and material open questions remain explicit."
     }
-    model_provider   = model_provider.primary
+    model_provider   = model_provider.qc
     model            = local.qc_model
     reasoning_effort = var.reasoning_effort
     max_qc_rounds    = var.max_qc_rounds
@@ -355,13 +364,16 @@ research "dynamic" "graph_track" {
         }
       }
       retry = null
+      collection_qc = {
+        model_provider = model_provider.qc
+      }
       qc = {
         criteria = {
           track_scope = "Judge whether the cards answer this track's assigned questions and preserve material unknowns without drifting into company selection."
           entailment = "Judge whether each source actually entails its atomic claim with the stated party, period, product branch, and qualifier. Treat typed-tool schema, path, URL, date, and quote matching as authoritative."
           inference = "Judge whether inferred cards follow from their premise cards without silently upgrading correlation, supplier marketing, or general industry structure into a target-specific fact."
         }
-        model_provider   = model_provider.primary
+        model_provider   = model_provider.qc
         model            = local.qc_model
         reasoning_effort = var.reasoning_effort
         max_qc_rounds    = var.max_qc_rounds
@@ -462,13 +474,17 @@ research "static" "build_supply_chain" {
     non_empty = true
   }
 
+  collection_qc {
+    model_provider = model_provider.qc
+  }
+
   qc {
     criteria = {
       completeness = "Judge whether the map covers the decision-relevant product branches and stages defined by scope without becoming an encyclopedia."
       target_selection = "Judge whether every assessment target could plausibly affect continuity and whether important candidates were omitted. A required input or commercially attractive supplier is not automatically a risk node."
       evidence = "Judge whether cited claims semantically support the mapped relationship and target rationale. Treat typed-tool graph references as authoritative."
     }
-    model_provider   = model_provider.primary
+    model_provider   = model_provider.qc
     model            = local.qc_model
     reasoning_effort = var.reasoning_effort
     max_qc_rounds    = var.max_qc_rounds
@@ -598,13 +614,16 @@ research "dynamic" "assess_nodes" {
         }
       }
       retry = null
+      collection_qc = {
+        model_provider = model_provider.qc
+      }
       qc = {
         criteria = {
           dependency = "Judge whether public evidence actually establishes the target's dependency rather than only an industry-wide possibility."
           alternatives = "Judge whether qualified alternatives, available capacity, switching constraints, and buffers are treated separately and honestly."
           conclusion = "Judge whether confirmed, candidate, or not_proven follows from the evidence for the stated scenario and branch. Not proven means insufficient public evidence, not no risk."
         }
-        model_provider   = model_provider.primary
+        model_provider   = model_provider.qc
         model            = local.qc_model
         reasoning_effort = var.reasoning_effort
         max_qc_rounds    = var.max_qc_rounds
@@ -657,6 +676,18 @@ research "dynamic" "prioritize_companies" {
         are harmless. Different claims may share a source, artifact, and quote.
         Never claim that a related product proves adoption, qualification, market
         share, revenue, or profit impact.
+
+        For each company, assess four separate economic-exposure dimensions:
+        customer_validation, revenue_materiality, bottleneck_capture, and
+        commercialization_timing. Every dimension has status,
+        evidence_directness, and claim_ids. evidence_directness must be none,
+        confirmed, reported, or inferred and must match the status of every
+        referenced atomic claim card. Use unknown with evidence_directness none
+        and empty claim_ids when the available evidence does not establish a
+        dimension. Never fill an evidence gap with a related-product analogy.
+        Commercialization timing is measured from the evidence cutoff;
+        within_12_months and beyond_12_months describe expected supplier revenue
+        timing, not merely the target product's launch date.
 
         Finalize the current staged card set once with
         ${go_tool.finalize_claim_cards.id}, claims_path
@@ -740,7 +771,7 @@ research "dynamic" "prioritize_companies" {
           }
           input_from_agent = {
           companies = {
-            desc = "Companies prioritized against the exact assessed node, with role, priority, evidence claim IDs, unknowns, and next checks."
+            desc = "Companies prioritized against the exact assessed node. For every company, provide role, priority, relationship_claim_ids, why_research, largest_unknown, next_check, and economic_exposure. Each economic dimension requires status, evidence_directness (none, confirmed, reported, or inferred), and claim_ids. customer_validation status: unknown, evaluation, qualified, ordered, delivering, or production_use. revenue_materiality status: unknown, exposure_unquantified, quantified_immaterial, or quantified_material. bottleneck_capture status: unknown, none, plausible, or demonstrated. commercialization_timing status: unknown, current, within_12_months, or beyond_12_months. Use the validated upstream evidence plus current task claim IDs returned by submit_claim_cards; use unknown/none/[] when evidence is absent."
             sources = flatten([values(assessment.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
             }
           conclusion = {
@@ -782,13 +813,17 @@ research "dynamic" "prioritize_companies" {
         }
       }
       retry = null
+      collection_qc = {
+        model_provider = model_provider.qc
+      }
       qc = {
         criteria = {
           company_gate = "Judge whether each priority follows from the assessed node and the exact company's proven role. Industry relevance alone is C at most."
           relationship = "Judge whether claims distinguish product availability, validation, orders, delivery, production use, and primary-supplier status without upgrading one into another."
+          exposure_dimensions = "Judge each company's customer_validation, revenue_materiality, bottleneck_capture, and commercialization_timing separately. Each non-unknown status must be semantically entailed by its own claim_ids at the declared evidence_directness; do not let evidence for one dimension support another."
           economic_boundary = "Judge whether revenue, profit, order, capacity, and competitive significance remain unknown unless directly supported. A/B/C are follow-up priorities, not investment recommendations."
         }
-        model_provider   = model_provider.primary
+        model_provider   = model_provider.qc
         model            = local.qc_model
         reasoning_effort = var.reasoning_effort
         max_qc_rounds    = var.max_qc_rounds
@@ -838,7 +873,8 @@ research "static" "synthesize" {
     During closed Research, use only the validated JSON above and write
     "${artifact("report").path}" in this order:
     1. companies worth further research, showing A/B/C/do-not-research, exact
-       node and role, strongest evidence, largest unknown, and next check;
+       node and role, all four economic-exposure dimensions with their evidence
+       directness, strongest evidence, largest unknown, and next check;
     2. confirmed and candidate global or branch-specific risk nodes;
     3. separate views for current production, expansion/upgrade, and product
        branches;
@@ -894,7 +930,7 @@ research "static" "synthesize" {
     criteria = {
       closed_input = "This is closed-input synthesis over already validated upstream JSON. An empty checkpoint with collection_exhausted=true is sufficient. Do not request new sources or re-review upstream evidence coverage."
     }
-    model_provider   = model_provider.primary
+    model_provider   = model_provider.qc
     model            = local.qc_model
     reasoning_effort = var.reasoning_effort
     permission       = "approve_all"
@@ -910,13 +946,13 @@ research "static" "synthesize" {
 
   qc {
     criteria = {
-      decision_usefulness = "Judge whether the first page gives a defensible company research-priority list with the exact node, role, strongest evidence, largest unknown, and next check."
+      decision_usefulness = "Judge whether the first page gives a defensible company research-priority list with the exact node, role, customer validation, revenue materiality, bottleneck capture, commercialization timing, evidence directness, largest unknown, and next check."
       entailment = "Judge whether each cited atomic claim semantically supports the adjacent report clause without concept, party, period, product-branch, or qualifier substitution. Treat marker, ID, path, URL, and quotation checks as authoritative."
       risk_scope = "Judge whether global versus branch scope and current production versus expansion/upgrade scenarios are separated from proof strength."
       restraint = "Reject investment recommendations, composite scores, false precision, and any company promotion based only on industry relevance or a related product."
       uncertainty = "Judge whether not-proven nodes, rejected companies, missing economic exposure, alternatives, buffers, and falsification conditions remain visible."
     }
-    model_provider   = model_provider.primary
+    model_provider   = model_provider.qc
     model            = local.qc_model
     reasoning_effort = var.reasoning_effort
     max_qc_rounds    = var.max_qc_rounds

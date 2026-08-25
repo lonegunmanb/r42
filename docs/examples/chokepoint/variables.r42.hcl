@@ -80,7 +80,29 @@ variable "pplx_tool_call_quota" {
 }
 
 variable "model_provider" {
-  description = "BYOK model provider and retry configuration shared by every workflow phase session."
+  description = "BYOK model provider and retry configuration shared by Research and Collection sessions."
+  type = object({
+    type             = optional(string, "openai")
+    endpoint         = optional(string, "https://openrouter.ai/api/v1")
+    wire_api         = optional(string, "completions")
+    transport        = optional(string)
+    headers          = optional(map(string))
+    api_key          = optional(string)
+    api_key_ref      = optional(string)
+    bearer_token     = optional(string)
+    bearer_token_ref = optional(string)
+    retry = optional(object({
+      lifecycle_retries    = optional(number, 3)
+      model_call_retries   = optional(number, 6)
+      interval_seconds     = optional(number, 2)
+      max_interval_seconds = optional(number, 30)
+      error_message_regex  = optional(list(string), [])
+    }), {})
+  })
+}
+
+variable "qc_model_provider" {
+  description = "BYOK model provider and retry configuration shared by Collection QC and Final QC sessions."
   type = object({
     type             = optional(string, "openai")
     endpoint         = optional(string, "https://openrouter.ai/api/v1")

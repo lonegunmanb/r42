@@ -134,7 +134,21 @@ inventory.
 | do_not_research | The node or company link is too weak for the next research round |
 
 Every listed company includes the exact node and role, strongest evidence,
-largest remaining unknown, and next verification action.
+largest remaining unknown, and next verification action. It also records four
+separate economic-exposure dimensions:
+
+| Dimension | Allowed status |
+| --- | --- |
+| customer validation | `unknown`, `evaluation`, `qualified`, `ordered`, `delivering`, `production_use` |
+| revenue materiality | `unknown`, `exposure_unquantified`, `quantified_immaterial`, `quantified_material` |
+| bottleneck capture | `unknown`, `none`, `plausible`, `demonstrated` |
+| commercialization timing | `unknown`, `current`, `within_12_months`, `beyond_12_months` |
+
+Each dimension has its own `evidence_directness` and `claim_ids`.
+`evidence_directness` is `none`, `confirmed`, `reported`, or `inferred`, matching
+the referenced atomic claim status. An unknown dimension uses `none` and an
+empty claim list. Timing is measured from the evidence cutoff and refers to
+expected supplier revenue timing, not only the target product's launch date.
 
 A company with only a related product cannot receive A. A node assessed as
 not_proven cannot produce an A or B company. These gates are enforced by the
@@ -184,18 +198,22 @@ Install r42 and ensure GitHub Copilot CLI is installed:
 
 Create a local `research.r42vars` in this directory before planning. It is
 analogous to `terraform.tfvars`, is ignored by Git, and must never be
-committed. It must provide the required topic, evidence cutoff, and provider
-configuration; the remaining variables have defaults:
+committed. It must provide the required topic, evidence cutoff, and Research and
+QC provider configurations; the remaining variables have defaults:
 
     topic      = "The technology or industrial system to study"
     as_of_date = "2026-08-25"
     model_provider = {
       api_key_ref = "OPENROUTER_API_KEY"
     }
+    qc_model_provider = {
+      api_key_ref = "OPENROUTER_QC_API_KEY"
+    }
 
-Set the referenced environment variable separately. For example:
+Set the referenced environment variables separately. For example:
 
     $env:OPENROUTER_API_KEY = Read-Host -MaskInput "OpenRouter API key"
+    $env:OPENROUTER_QC_API_KEY = Read-Host -MaskInput "OpenRouter QC API key"
 
 When use_pplx is true, also set PPLX_API_KEY.
 

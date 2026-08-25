@@ -1,3 +1,7 @@
+module "pplx_tools" {
+  source = "./modules/pplx_tools"
+}
+
 locals {
   supplied_research_tasks = [
     for index, question in coalesce(var.research_plan, []) : {
@@ -27,9 +31,36 @@ locals {
     continue with the evidence already collected.
   PROMPT
 
-  deep_dive_tool_call_quota = var.web_fetch_tool_call_quota == null ? {} : {
-    web_fetch = var.web_fetch_tool_call_quota
-  }
+  pplx_tool_ids = var.use_pplx ? [
+    module.pplx_tools.pplx_pro_search_tool_id,
+    module.pplx_tools.pplx_fetch_tool_id,
+  ] : []
+
+  deep_dive_tool_call_quota = var.web_fetch_tool_call_quota == null ? {} : (
+    var.use_pplx ? {
+      (module.pplx_tools.pplx_fetch_tool_id) = var.web_fetch_tool_call_quota
+      } : {
+      web_fetch = var.web_fetch_tool_call_quota
+    }
+  )
+
+  deep_dive_disallowed_tools = var.use_pplx ? ["web_search", "web_fetch"] : []
+
+  source_tool_guidance = var.use_pplx ? join("\n", [
+    "Use ${module.pplx_tools.pplx_pro_search_tool_id} to discover current sources",
+    "and ${module.pplx_tools.pplx_fetch_tool_id} to fetch every source retained",
+    "as evidence. Every fetch call must include url and the artifact_dir stated",
+    "in the task prompt. For every successful artifact_path, call",
+    "r42_register_artifact to obtain its artifact_id; do not call",
+    "r42_save_artifact for that file. If fetch returns fetch_failed, it wrote",
+    "no file: do not register anything; try another source URL or continue.",
+    ]) : join("\n", [
+    "Use the built-in web_search tool to discover current sources and web_fetch",
+    "to read every source retained as evidence. Save the complete returned",
+    "material as Markdown under the source artifact directory stated in the",
+    "task prompt by calling r42_save_artifact with source set to the source URL. Use the returned",
+    "artifact_id directly; do not call r42_register_artifact for that path.",
+  ])
 
   offline_disallowed_tools = ["web_search", "web_fetch"]
 }
@@ -100,6 +131,10 @@ research "static" "plan" {
   disallowed_tools  = local.offline_disallowed_tools
   permission        = "approve_all"
 
+  collection_qc {
+    model_provider = model_provider.qc
+  }
+
   qc {
     criteria = {
       coverage = "Verify the combined task set covers the topic's material perspectives, mechanisms, counterarguments, and evidence needs without assuming the answer."
@@ -107,6 +142,7 @@ research "static" "plan" {
       scheduling = "Verify parallel tasks are mutually independent, independent_serial tasks require no output from either earlier group, and final_serial tasks are meaningful only after both earlier groups have completed."
       executability = "Verify every task has a globally unique safe ID, a falsifiable subquestion, concrete instructions, explicit evidence expectations, and enough context to execute without asking the planner for clarification."
     }
+    model_provider   = model_provider.qc
     reasoning_effort = var.reasoning_effort
     max_qc_rounds    = 2
     permission       = "approve_all"
@@ -137,12 +173,10 @@ research "dynamic" "parallel_deep_dive" {
 
         Any permitted upstream knowledge is included directly in this prompt.
 
-        During Collection, research this subquestion independently. Save the
-        complete material returned by every retained source as Markdown under
-        "${artifact("sources").path}" by calling r42_save_artifact with
-        source set to the source URL. Use the returned artifact_id directly;
-        do not call r42_register_artifact for the returned path. Submit a
-        collection checkpoint once the evidence is sufficient.
+        During Collection, research this subquestion independently.
+        ${local.source_tool_guidance}
+        Source artifact directory: "${artifact("sources").path}"
+        Submit a collection checkpoint once the evidence is sufficient.
 
         During closed Research, do not search or fetch. Use the artifact IDs
         supplied by r42 with r42_read_artifact to inspect registered evidence. Associate
@@ -165,8 +199,10 @@ research "dynamic" "parallel_deep_dive" {
           }
         }
       }
-      tool_call_quota   = local.deep_dive_tool_call_quota
-      permission        = "approve_all"
+      collection_tool_ids = local.pplx_tool_ids
+      tool_call_quota     = local.deep_dive_tool_call_quota
+      disallowed_tools    = local.deep_dive_disallowed_tools
+      permission          = "approve_all"
       artifact = {
         sources = {
           type        = "directory"
@@ -182,12 +218,16 @@ research "dynamic" "parallel_deep_dive" {
         }
       }
       retry = null
+      collection_qc = {
+        model_provider = model_provider.qc
+      }
       qc = {
         criteria = {
           knowledge_items = "Judge whether every knowledge claim answers the assigned subquestion, expresses uncertainty carefully, and is fully supported by its cited quote records."
           quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool artifact existence and text matching as authoritative."
           traceability = "Judge whether the cited evidence is sufficient and decision-relevant, and whether material contrary evidence or uncertainty is omitted. Treat typed-tool IDs and graph references as authoritative."
         }
+        model_provider   = model_provider.qc
         reasoning_effort = var.reasoning_effort
         max_qc_rounds    = 3
         permission       = "approve_all"
@@ -224,11 +264,10 @@ research "dynamic" "independent_serial_deep_dive" {
         group. Research independently without assuming access to another task's
         result.
 
-        During Collection, save the complete material returned by every
-        retained source as Markdown under "${artifact("sources").path}" by calling
-        r42_save_artifact with source set to the source URL. Use the returned
-        artifact_id directly; do not call r42_register_artifact for the returned
-        path. Submit a collection checkpoint once the evidence is sufficient.
+        During Collection, research this subquestion independently.
+        ${local.source_tool_guidance}
+        Source artifact directory: "${artifact("sources").path}"
+        Submit a collection checkpoint once the evidence is sufficient.
 
         During closed Research, do not search or fetch. Use the artifact IDs
         supplied by r42 with r42_read_artifact to inspect registered evidence. Associate
@@ -250,8 +289,10 @@ research "dynamic" "independent_serial_deep_dive" {
           }
         }
       }
-      tool_call_quota   = local.deep_dive_tool_call_quota
-      permission        = "approve_all"
+      collection_tool_ids = local.pplx_tool_ids
+      tool_call_quota     = local.deep_dive_tool_call_quota
+      disallowed_tools    = local.deep_dive_disallowed_tools
+      permission          = "approve_all"
       artifact = {
         sources = {
           type        = "directory"
@@ -267,12 +308,16 @@ research "dynamic" "independent_serial_deep_dive" {
         }
       }
       retry = null
+      collection_qc = {
+        model_provider = model_provider.qc
+      }
       qc = {
         criteria = {
           knowledge_items = "Judge whether every knowledge claim answers the assigned subquestion, expresses uncertainty carefully, and is fully supported by its cited quote records."
           quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool artifact existence and text matching as authoritative."
           traceability = "Judge whether the cited evidence is sufficient and decision-relevant, and whether material contrary evidence or uncertainty is omitted. Treat typed-tool IDs and graph references as authoritative."
         }
+        model_provider   = model_provider.qc
         reasoning_effort = var.reasoning_effort
         max_qc_rounds    = 3
         permission       = "approve_all"
@@ -332,10 +377,10 @@ research "dynamic" "final_serial_deep_dive" {
         ))}
 
         During Collection, collect only evidence needed beyond the validated
-        upstream JSON. Save each retained source as Markdown under
-        "${artifact("sources").path}" with r42_save_artifact, passing the
-        source URL in source. Use the returned artifact_id directly; do not call
-        r42_register_artifact for the returned path. Submit a collection checkpoint.
+        upstream JSON.
+        ${local.source_tool_guidance}
+        Source artifact directory: "${artifact("sources").path}"
+        Submit a collection checkpoint.
         If the upstream JSON is sufficient, submit an empty
         collection checkpoint instead of searching.
 
@@ -369,8 +414,10 @@ research "dynamic" "final_serial_deep_dive" {
           }
         }
       }
-      tool_call_quota   = local.deep_dive_tool_call_quota
-      permission        = "approve_all"
+      collection_tool_ids = local.pplx_tool_ids
+      tool_call_quota     = local.deep_dive_tool_call_quota
+      disallowed_tools    = local.deep_dive_disallowed_tools
+      permission          = "approve_all"
       artifact = {
         sources = {
           type        = "directory"
@@ -386,12 +433,16 @@ research "dynamic" "final_serial_deep_dive" {
         }
       }
       retry = null
+      collection_qc = {
+        model_provider = model_provider.qc
+      }
       qc = {
         criteria = {
           upstream_use = "Judge whether the candidate accurately uses the relevant claims and quotes from the validated upstream JSON included in the prompt."
           knowledge_items = "Judge whether every new claim answers the assigned subquestion, expresses uncertainty carefully, and is fully supported by its cited quotes."
           quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool artifact existence and text matching as authoritative."
         }
+        model_provider   = model_provider.qc
         reasoning_effort = var.reasoning_effort
         max_qc_rounds    = 3
         permission       = "approve_all"
@@ -506,6 +557,10 @@ research "static" "resolve_conflicts" {
     non_empty = true
   }
 
+  collection_qc {
+    model_provider = model_provider.qc
+  }
+
   qc {
     criteria = {
       coverage = "Judge whether the resolution considers every subquestion represented in the validated upstream JSON. Treat typed-tool reviewed_artifacts validation as authoritative."
@@ -513,6 +568,7 @@ research "static" "resolve_conflicts" {
       decisions = "Check every conflict decision against its knowledge IDs and supporting quote IDs. A resolved decision must prefer the stronger evidence; an unresolved decision must preserve the uncertainty for synthesis."
       evidence_semantics = "Judge whether the accepted quotes actually support each conflict decision without changing scope or qualifiers. Treat typed-tool paths, IDs, and text matching as authoritative."
     }
+    model_provider   = model_provider.qc
     reasoning_effort = var.reasoning_effort
     max_qc_rounds    = 3
     permission       = "approve_all"
@@ -617,6 +673,10 @@ research "static" "synthesize" {
     non_empty = true
   }
 
+  collection_qc {
+    model_provider = model_provider.qc
+  }
+
   qc {
     criteria = {
       mechanical_audit = "Call ${external_tool.audit_synthesis.id} exactly once in each QC round before judging the current report revision. Pass report_path as the declared report artifact, knowledge_paths as the complete Validated knowledge artifacts list from the task, and resolution_path as the Conflict-resolution artifact. Treat its quote-ID, source-URL, unused-reference, and artifact-ID checks as authoritative; upstream Research typed tools already validated artifact authorization and exact quote text. Preserve every reported mechanical issue in the QC verdict, but do not repeat those checks with grep or view."
@@ -626,6 +686,7 @@ research "static" "synthesize" {
       citation_semantics = "For citations that mechanically pass, decide whether the cited exact quote actually supports the surrounding report claim. Do not reopen artifacts unless the mechanical audit itself reports an unreadable or unmatched quote."
       provenance_guard = "Reject a report that includes a 信源限制说明 or equivalent training-data/knowledge-cutoff/paywall/quota disclaimer, or that uses such limitations as a reason to introduce uncited model opinion. Require unsupported conclusions to be removed or explicitly marked as insufficient evidence."
     }
+    model_provider   = model_provider.qc
     reasoning_effort = var.reasoning_effort
     max_qc_rounds    = 10
     disallowed_tools = ["bash", "powershell", "edit", "task", "ask_user", "web_search", "web_fetch"]

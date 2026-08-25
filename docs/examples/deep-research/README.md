@@ -41,7 +41,8 @@ go install github.com/lonegunmanb/r42/cmd/r42@latest
 
 From the repository root, initialize the example. Then create a local
 `research.r42vars` beside this README. It is ignored by Git and must never be
-committed. At minimum it needs the required topic and provider configuration:
+committed. At minimum it needs the required topic plus Research and QC provider
+configurations:
 
 ```hcl
 topic = "Investigate the question to answer"
@@ -49,11 +50,16 @@ topic = "Investigate the question to answer"
 model_provider = {
   api_key_ref = "OPENROUTER_API_KEY"
 }
+qc_model_provider = {
+  api_key_ref = "OPENROUTER_QC_API_KEY"
+}
 ```
 
-Set the named environment variable without placing its value in the variable
+Set the named environment variables without placing their values in the variable
 file. You may also set a different provider endpoint, model, or reasoning
-effort in that local file. Then create and apply a saved plan:
+effort in that local file. To use Perplexity for deep-dive source collection,
+add `use_pplx = true` and set `PPLX_API_KEY` in the environment. Then create
+and apply a saved plan:
 
 ```powershell
 r42 init ./docs/examples/deep-research
@@ -88,12 +94,22 @@ paths.
 This example requires Python 3 for the local `audit_synthesis` external tool;
 the research and planning tools remain inline Go tools compiled by r42.
 
-The built-in `r42_save_artifact` tool is the typed boundary for source capture:
-during Collection it accepts complete Markdown content plus a required source
-identifier and writes only `.md` paths under the current block's `artifacts/`
-directory. The source may be a URL or another stable identifier. The tool also
-registers the artifact and returns its `artifact_id`; Collection uses that ID
-directly and does not call `r42_register_artifact` for the returned path.
+By default, the built-in `r42_save_artifact` tool is the typed boundary for
+source capture: during Collection it accepts complete Markdown content plus a
+required source identifier and writes only `.md` paths under the current
+block's `artifacts/` directory. The source may be a URL or another stable
+identifier. The tool also registers the artifact and returns its `artifact_id`;
+Collection uses that ID directly and does not call `r42_register_artifact` for
+the returned path.
+
+Set `use_pplx = true` to replace built-in `web_search` and `web_fetch` in the
+three deep-dive Collection groups with the copied `pplx_pro_search` and
+`pplx_fetch` typed tools. `pplx_fetch` writes fetched Markdown into the task's
+declared source artifact directory and returns `artifact_path`; Collection then
+calls `r42_register_artifact` for that path to obtain `artifact_id`. It must not
+call `r42_save_artifact` for a file already written by `pplx_fetch`. Planner,
+conflict-resolution, and synthesis sessions remain closed-input and receive no
+PPLX tools.
 
 This workflow passes the source URL because its quote schema requires web
 citations; the built-in tool itself does not require an HTTP(S) source.
@@ -107,22 +123,22 @@ Every deep-dive task must call `submit_knowledge`. The typed tool validates
 unique knowledge and quote IDs, bidirectional claim-to-quote references, valid
 source URLs, registered artifact IDs, and confidence
 values before writing `knowledge.json` under that task's workspace. Before
-submitting knowledge, Collection must call `r42_save_artifact` for every source it
-retains, store the complete fetched material under `<block_wd>/artifacts/`, and
-use its returned `artifact_id` directly. Collection QC reviews those registered
-artifacts. R42 supplies the approved IDs to closed Research, which can inspect
-them only through
+submitting knowledge, Collection must retain the complete fetched material
+under the task's declared source artifact directory and obtain its registered
+`artifact_id` through the active capture flow described above. Collection QC
+reviews those registered artifacts. R42 supplies the approved IDs to closed
+Research, which can inspect them through
 `r42_read_artifact`; submitted quotes retain `artifact_id` rather than filesystem
 paths. Final QC
 reviews semantic support; failed QC returns a revision or Collection-reopen
 decision up to `max_qc_rounds`.
 
-By default, each materialized deep-dive task has its own `web_fetch` entry in
-`tool_call_quota`. The `web_fetch_tool_call_quota` input variable controls the
-number of successful built-in fetch calls allowed for each task's Collection
-session and defaults to 20; failed fetches do not consume it. Set the variable
-to `null` to omit the `web_fetch` quota and leave evidence-sufficiency judgment
-to Collection QC.
+Each materialized deep-dive task has its own fetch entry in `tool_call_quota`.
+The `web_fetch_tool_call_quota` input variable controls successful built-in
+`web_fetch` calls when `use_pplx` is false and successful `pplx_fetch` calls
+when it is true. It defaults to 20; failed fetches do not consume it. Set the
+variable to `null` to omit the active fetch quota and leave
+evidence-sufficiency judgment to Collection QC.
 
 The conflict resolver reads all knowledge artifacts from all three dynamic
 groups, records resolved and unresolved contradictions in `resolution.json`,
@@ -144,8 +160,9 @@ own `result` and `artifacts` values in the parent block's `tasks` list, so
 downstream HCL can iterate over structured results without inventing extra DAG
 addresses.
 
-All sessions use `model_provider.primary`, whose complete configuration is
-provided by the `model_provider` object variable. The example uses inline Go
-typed tools and Copilot's built-in web tools; Apply still requires an installed
-Copilot CLI, while BYOK means the selected provider does not require a GitHub
-Copilot subscription.
+Research and Collection use `model_provider.primary`, while Collection QC and
+Final QC use `model_provider.qc`. Their complete configurations come from the
+`model_provider` and `qc_model_provider` object variables. The example uses
+inline Go typed tools and either Copilot's built-in web tools or the optional
+copied PPLX module. Apply still requires an installed Copilot CLI, while BYOK
+means the selected provider does not require a GitHub Copilot subscription.

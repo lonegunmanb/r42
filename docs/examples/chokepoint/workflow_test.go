@@ -513,6 +513,10 @@ func TestCompanyPrioritiesRequireNodeAndRelationshipEvidence(t *testing.T) {
 		"node_id": "node-osat", "node_name": "Packaging services", "conclusion": "candidate",
 	}))
 	artifactPath := filepath.Join(workspace, "company-priorities.json")
+	economicExposure := unknownEconomicExposure()
+	economicExposure["customer_validation"] = map[string]any{
+		"status": "qualified", "evidence_directness": "confirmed", "claim_ids": []string{"C-001"},
+	}
 
 	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
 		"workspace_dir": workspace, "_r42_artifact_path": artifactPath,
@@ -520,9 +524,10 @@ func TestCompanyPrioritiesRequireNodeAndRelationshipEvidence(t *testing.T) {
 		"companies": []any{map[string]any{
 			"company": "Supplier A", "ticker": "000001", "market": "a-share",
 			"role": "existing_supplier", "priority": "A",
-			"relationship_claim_ids": []string{"C-001"}, "economic_impact_claim_ids": []string{},
-			"why_research":    "The exact-node relationship is confirmed; economic exposure remains open.",
-			"largest_unknown": "Revenue and profit exposure", "next_check": "Verify segment revenue and orders.",
+			"relationship_claim_ids": []string{"C-001"},
+			"economic_exposure":      economicExposure,
+			"why_research":           "The exact-node relationship is confirmed; economic exposure remains open.",
+			"largest_unknown":        "Revenue and profit exposure", "next_check": "Verify segment revenue and orders.",
 		}},
 		"conclusion": "One company merits immediate follow-up research.",
 	}), workspace)
@@ -535,6 +540,10 @@ func TestCompanyPrioritiesRequireNodeAndRelationshipEvidence(t *testing.T) {
 	assert.Contains(t, priorityOutput, "claims")
 	assert.Equal(t, "node-osat", priorityOutput["node_id"])
 	assert.FileExists(t, artifactPath)
+	companies := mapValue[[]any](t, priorityOutput, "companies")
+	recordedCompany, ok := companies[0].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, recordedCompany, "economic_exposure")
 
 	invalid := map[string]any{
 		"workspace_dir": workspace, "_r42_artifact_path": filepath.Join(workspace, "invalid-priorities.json"),
@@ -542,8 +551,9 @@ func TestCompanyPrioritiesRequireNodeAndRelationshipEvidence(t *testing.T) {
 		"companies": []any{map[string]any{
 			"company": "Supplier B", "ticker": "000002", "market": "a-share",
 			"role": "related_product_only", "priority": "A",
-			"relationship_claim_ids": []string{}, "economic_impact_claim_ids": []string{},
-			"why_research": "It sells a related product.", "largest_unknown": "Any target relationship",
+			"relationship_claim_ids": []string{},
+			"economic_exposure":      unknownEconomicExposure(),
+			"why_research":           "It sells a related product.", "largest_unknown": "Any target relationship",
 			"next_check": "Find direct relationship evidence.",
 		}},
 		"conclusion": "Invalid A classification.",
@@ -552,6 +562,93 @@ func TestCompanyPrioritiesRequireNodeAndRelationshipEvidence(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, rejected.Accepted)
 	assert.Contains(t, issueCodes(rejected), "priority")
+}
+
+func TestCompanyPrioritiesRejectInvalidEconomicExposure(t *testing.T) {
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "submit_company_priorities"))
+	require.NoError(t, err)
+	workspace, claimsPath, _ := finalizedClaimCardFixture(t, "company-exposure-validation")
+	nodePath := filepath.Join(workspace, "node-assessment.json")
+	require.NoError(t, writeJSON(nodePath, map[string]any{
+		"node_id": "node-osat", "node_name": "Packaging services", "conclusion": "candidate",
+	}))
+
+	tests := []struct {
+		name       string
+		dimension  string
+		assessment map[string]any
+		empty      bool
+		code       string
+	}{
+		{
+			name: "all dimensions are required", empty: true, code: "economic_exposure",
+		},
+		{
+			name: "non-unknown status requires a claim", dimension: "customer_validation",
+			assessment: map[string]any{"status": "qualified", "evidence_directness": "confirmed", "claim_ids": []string{}}, code: "economic_exposure",
+		},
+		{
+			name: "unknown status cannot claim direct evidence", dimension: "customer_validation",
+			assessment: map[string]any{"status": "unknown", "evidence_directness": "confirmed", "claim_ids": []string{"C-001"}}, code: "economic_exposure",
+		},
+		{
+			name: "unsupported materiality status is rejected", dimension: "revenue_materiality",
+			assessment: map[string]any{"status": "very_large", "evidence_directness": "confirmed", "claim_ids": []string{"C-001"}}, code: "economic_exposure",
+		},
+		{
+			name: "unsupported evidence directness is rejected", dimension: "customer_validation",
+			assessment: map[string]any{"status": "qualified", "evidence_directness": "secondary_guess", "claim_ids": []string{"C-001"}}, code: "economic_exposure",
+		},
+		{
+			name: "evidence directness must match claim status", dimension: "customer_validation",
+			assessment: map[string]any{"status": "qualified", "evidence_directness": "inferred", "claim_ids": []string{"C-001"}}, code: "economic_exposure",
+		},
+		{
+			name: "economic exposure claim must exist", dimension: "customer_validation",
+			assessment: map[string]any{"status": "qualified", "evidence_directness": "confirmed", "claim_ids": []string{"MISSING-001"}}, code: "claim_id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			exposure := unknownEconomicExposure()
+			if tt.empty {
+				exposure = map[string]any{}
+			} else {
+				exposure[tt.dimension] = tt.assessment
+			}
+			response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+				"workspace_dir": workspace, "_r42_artifact_path": filepath.Join(workspace, "company-priorities.json"),
+				"node_assessment_path": nodePath, "claim_paths": []string{claimsPath},
+				"companies": []any{map[string]any{
+					"company": "Supplier A", "ticker": "000001", "market": "a-share",
+					"role": "existing_supplier", "priority": "B", "relationship_claim_ids": []string{"C-001"},
+					"economic_exposure": exposure, "why_research": "Economic exposure needs verification.",
+					"largest_unknown": "Economic impact", "next_check": "Verify commercial evidence.",
+				}},
+				"conclusion": "The company needs more research.",
+			}), workspace)
+
+			require.NoError(t, invokeErr)
+			assert.False(t, response.Accepted)
+			assert.Contains(t, issueCodes(response), tt.code)
+		})
+	}
+}
+
+func unknownEconomicExposure() map[string]any {
+	unknown := func() map[string]any {
+		return map[string]any{"status": "unknown", "evidence_directness": "none", "claim_ids": []string{}}
+	}
+	return map[string]any{
+		"customer_validation":      unknown(),
+		"revenue_materiality":      unknown(),
+		"bottleneck_capture":       unknown(),
+		"commercialization_timing": unknown(),
+	}
 }
 
 func TestCompanyPrioritiesReturnOnlyCurrentTaskClaims(t *testing.T) {

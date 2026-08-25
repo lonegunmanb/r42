@@ -105,6 +105,11 @@ func TestTypedToolDescriptionsPublishAllowedValues(t *testing.T) {
 		{file: "decision_tools.r42.hcl", tool: "submit_supply_chain_map", field: "edges.relation", allowed: []string{"contains", "supplies", "transformed_into", "assembled_into", "processed_by", "tested_by", "qualified_by", "used_by"}},
 		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.role", allowed: []string{"existing_supplier", "qualified_alternative", "related_product_only", "unverified"}},
 		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.priority", allowed: []string{"A", "B", "C", "do_not_research"}},
+		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.economic_exposure.*.evidence_directness", allowed: []string{"none", "confirmed", "reported", "inferred"}},
+		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.economic_exposure.customer_validation.status", allowed: []string{"unknown", "evaluation", "qualified", "ordered", "delivering", "production_use"}},
+		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.economic_exposure.revenue_materiality.status", allowed: []string{"unknown", "exposure_unquantified", "quantified_immaterial", "quantified_material"}},
+		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.economic_exposure.bottleneck_capture.status", allowed: []string{"unknown", "none", "plausible", "demonstrated"}},
+		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.economic_exposure.commercialization_timing.status", allowed: []string{"unknown", "current", "within_12_months", "beyond_12_months"}},
 	}
 
 	for _, tt := range tests {
@@ -118,6 +123,38 @@ func TestTypedToolDescriptionsPublishAllowedValues(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCompanyPriorityToolUseDescribesEconomicExposureInputs(t *testing.T) {
+	t.Parallel()
+
+	payload, err := os.ReadFile("main.r42.hcl")
+	require.NoError(t, err)
+	configuration := string(payload)
+	start := strings.Index(configuration, "submit_company_priorities = {")
+	require.NotEqual(t, -1, start)
+	toolUse := configuration[start:]
+	end := strings.Index(toolUse, "conclusion = {")
+	require.NotEqual(t, -1, end)
+	companiesBinding := toolUse[:end]
+
+	for _, required := range []string{
+		"economic_exposure",
+		"customer_validation",
+		"revenue_materiality",
+		"bottleneck_capture",
+		"commercialization_timing",
+		"evidence_directness",
+		"claim_ids",
+		"current task",
+		"assessment.artifact",
+		"primary_source_baseline.artifact",
+		"graph_track.tasks",
+	} {
+		assert.Contains(t, companiesBinding, required)
+	}
+	assert.Contains(t, companiesBinding, "unknown")
+	assert.Contains(t, companiesBinding, "submit_claim_cards")
 }
 
 func TestFinalizeReportDescriptionPublishesPathContract(t *testing.T) {
