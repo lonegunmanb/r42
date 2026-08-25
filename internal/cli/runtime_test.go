@@ -543,11 +543,31 @@ func (s *toolCallingSession) SendAndWait(context.Context, sdk.MessageOptions) (*
 func handleDefaultWorkflowProtocol(config copilot.SessionConfig) (bool, error) {
 	for _, tool := range config.Tools {
 		switch tool.Name {
+		case "r42_set_information_needs":
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+				"information_needs": []any{map[string]any{
+					"question":        "test fixture need",
+					"stop_conditions": []any{map[string]any{"condition": "test fixture condition"}},
+				}},
+			}})
+			if err != nil {
+				return true, err
+			}
 		case "r42_collection_checkpoint":
-			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"empty_reason": "test fixture has no acquisition work"}})
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+				"empty_reason": "test fixture has no acquisition work",
+				"need_dispositions": []any{map[string]any{
+					"information_need_id": "NEED-001", "search_disposition": "stalled",
+				}},
+			}})
 			return true, err
 		case "r42_collection_qc_verdict":
-			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "sufficient"}})
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+				"assessments": []any{map[string]any{
+					"information_need_id": "NEED-001", "status": "sufficient",
+					"unsatisfied_condition_ids": []any{}, "evidence_progress": "none",
+				}},
+			}})
 			return true, err
 		case "r42_qc_verdict":
 			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "pass"}})

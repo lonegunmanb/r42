@@ -21,7 +21,7 @@ func TestRegisterToolHandler(t *testing.T) {
 		file := filepath.Join(workspace, "evidence.md")
 		require.NoError(t, os.WriteFile(file, []byte("content"), 0o644))
 
-		handler := NewRegisterHandler(NewContext(workspace, 10, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, workspace, 10, nil))
 		response := handler.Register(RegisterArgs{Path: file})
 		require.True(t, response.Accepted)
 		require.NotNil(t, response.Output)
@@ -36,7 +36,7 @@ func TestRegisterToolHandler(t *testing.T) {
 		workspace := t.TempDir()
 		file := filepath.Join(workspace, "described.md")
 		require.NoError(t, os.WriteFile(file, []byte("content"), 0o644))
-		handler := NewRegisterHandler(NewContext(workspace, 10, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, workspace, 10, nil))
 
 		response := handler.Register(RegisterArgs{Path: file, Description: "Regulatory filing excerpts"})
 
@@ -53,7 +53,7 @@ func TestRegisterToolHandler(t *testing.T) {
 	t.Run("registers retained tool result", func(t *testing.T) {
 		t.Parallel()
 
-		handler := NewRegisterHandler(NewContext(t.TempDir(), 10, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, t.TempDir(), 10, nil))
 		require.NoError(t, handler.Context().Artifacts.RetainToolResult("call-1", "evidence"))
 		response := handler.Register(RegisterArgs{SourceToolCallID: "call-1"})
 		require.True(t, response.Accepted)
@@ -68,7 +68,7 @@ func TestRegisterToolHandler(t *testing.T) {
 		file := filepath.Join(workspace, "evidence.md")
 		require.NoError(t, os.WriteFile(file, []byte("evidence"), 0o644))
 
-		response := NewRegisterHandler(NewContext(workspace, 10, nil)).Register(RegisterArgs{
+		response := NewRegisterHandler(newPlannedContext(t, workspace, 10, nil)).Register(RegisterArgs{
 			Path: file, Source: "local-record:42",
 		})
 
@@ -95,7 +95,7 @@ func TestRegisterToolHandler(t *testing.T) {
 				file := filepath.Join(workspace, "evidence.md")
 				require.NoError(t, os.WriteFile(file, []byte(tt.content), 0o644))
 
-				response := NewRegisterHandler(NewContext(workspace, 10, nil)).Register(RegisterArgs{
+				response := NewRegisterHandler(newPlannedContext(t, workspace, 10, nil)).Register(RegisterArgs{
 					Path: file, Source: "new-record",
 				})
 
@@ -115,7 +115,7 @@ func TestRegisterToolHandler(t *testing.T) {
 		original := "- Source:   \n- URL: https://example.com/ignored\n\nevidence"
 		require.NoError(t, os.WriteFile(file, []byte(original), 0o644))
 
-		response := NewRegisterHandler(NewContext(workspace, 10, nil)).Register(RegisterArgs{
+		response := NewRegisterHandler(newPlannedContext(t, workspace, 10, nil)).Register(RegisterArgs{
 			Path: file, Source: "local-record:42",
 		})
 
@@ -128,7 +128,7 @@ func TestRegisterToolHandler(t *testing.T) {
 	t.Run("adds source header to retained tool result", func(t *testing.T) {
 		t.Parallel()
 
-		handler := NewRegisterHandler(NewContext(t.TempDir(), 10, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, t.TempDir(), 10, nil))
 		require.NoError(t, handler.Context().Artifacts.RetainToolResult("call-source", "evidence"))
 
 		response := handler.Register(RegisterArgs{
@@ -148,7 +148,7 @@ func TestRegisterToolHandler(t *testing.T) {
 		file := filepath.Join(workspace, "evidence.md")
 		require.NoError(t, os.WriteFile(file, []byte("content"), 0o644))
 
-		handler := NewRegisterHandler(NewContext(workspace, 10, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, workspace, 10, nil))
 		response := handler.Register(RegisterArgs{})
 		assert.False(t, response.Accepted)
 		assert.Empty(t, response.Output)
@@ -163,7 +163,7 @@ func TestRegisterToolHandler(t *testing.T) {
 	t.Run("rejects bad path with repairable issue", func(t *testing.T) {
 		t.Parallel()
 
-		handler := NewRegisterHandler(NewContext(t.TempDir(), 10, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, t.TempDir(), 10, nil))
 		response := handler.Register(RegisterArgs{Path: filepath.Join(t.TempDir(), "missing.md")})
 		assert.False(t, response.Accepted)
 		require.NotEmpty(t, response.Issues)
@@ -173,7 +173,7 @@ func TestRegisterToolHandler(t *testing.T) {
 	t.Run("rejects unknown retained call", func(t *testing.T) {
 		t.Parallel()
 
-		handler := NewRegisterHandler(NewContext(t.TempDir(), 10, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, t.TempDir(), 10, nil))
 		response := handler.Register(RegisterArgs{SourceToolCallID: "unknown"})
 		assert.False(t, response.Accepted)
 		require.NotEmpty(t, response.Issues)
@@ -184,7 +184,7 @@ func TestRegisterToolHandler(t *testing.T) {
 		t.Parallel()
 
 		workspace := t.TempDir()
-		handler := NewRegisterHandler(NewContext(workspace, 10, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, workspace, 10, nil))
 		for index := range 10 {
 			file := filepath.Join(workspace, "evidence-"+string(rune('a'+index))+".md")
 			require.NoError(t, os.WriteFile(file, []byte("content "+string(rune('a'+index))), 0o644))
@@ -198,7 +198,7 @@ func TestRegisterToolHandler(t *testing.T) {
 		t.Parallel()
 
 		workspace := t.TempDir()
-		handler := NewRegisterHandler(NewContext(workspace, 10, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, workspace, 10, nil))
 		first := true
 		for index := range 3 {
 			file := filepath.Join(workspace, "dup-"+string(rune('a'+index))+".md")
@@ -221,7 +221,7 @@ func TestRegisterToolHandler(t *testing.T) {
 		t.Parallel()
 
 		workspace := t.TempDir()
-		handler := NewRegisterHandler(NewContext(workspace, 0, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, workspace, 0, nil))
 		for index := range 10 {
 			file := filepath.Join(workspace, "batch-"+string(rune('a'+index))+".md")
 			require.NoError(t, os.WriteFile(file, []byte("content "+string(rune('a'+index))), 0o644))
@@ -239,7 +239,9 @@ func TestRegisterToolHandlerAddsEvidenceArtifactToArtifactRegistry(t *testing.T)
 	path := filepath.Join(workspace, "source.md")
 	require.NoError(t, os.WriteFile(path, []byte("source"), 0o600))
 	artifacts := artifactpkg.NewRegistry()
-	handler := NewRegisterHandler(NewContextWithArtifactRegistry(workspace, 10, nil, artifacts))
+	context := NewContextWithArtifactRegistry(workspace, 10, nil, artifacts)
+	freezeTestPlan(t, context)
+	handler := NewRegisterHandler(context)
 
 	response := handler.Register(RegisterArgs{Path: path, Description: "Primary source"})
 
@@ -262,7 +264,9 @@ func TestRegisterToolHandlerKeepsEvidenceOnlyInArtifactRegistry(t *testing.T) {
 	path := filepath.Join(workspace, "source.md")
 	require.NoError(t, os.WriteFile(path, []byte("source"), 0o600))
 	artifacts := artifactpkg.NewRegistry()
-	handler := NewRegisterHandler(NewContextWithArtifactRegistry(workspace, 10, nil, artifacts))
+	context := NewContextWithArtifactRegistry(workspace, 10, nil, artifacts)
+	freezeTestPlan(t, context)
+	handler := NewRegisterHandler(context)
 
 	response := handler.Register(RegisterArgs{Path: path, Source: "filing:42", Description: "Primary source"})
 
@@ -281,7 +285,7 @@ func TestCheckpointToolHandler(t *testing.T) {
 		t.Parallel()
 
 		workspace := t.TempDir()
-		handler := NewRegisterHandler(NewContext(workspace, 10, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, workspace, 10, nil))
 		ids := make([]string, 3)
 		for index := range 3 {
 			file := filepath.Join(workspace, "evidence-"+string(rune('a'+index))+".md")
@@ -291,7 +295,7 @@ func TestCheckpointToolHandler(t *testing.T) {
 			ids[index] = response.Output.ID
 		}
 		checkpoint := NewCheckpointHandler(handler.Context())
-		response := checkpoint.Submit(CheckpointArgs{})
+		response := checkpoint.Submit(CheckpointArgs{NeedDispositions: testNeedDispositions()})
 		require.True(t, response.Accepted)
 		require.NotNil(t, response.Output)
 		assert.ElementsMatch(t, ids, response.Output.ArtifactIDs)
@@ -301,13 +305,13 @@ func TestCheckpointToolHandler(t *testing.T) {
 	t.Run("empty checkpoint requires reason", func(t *testing.T) {
 		t.Parallel()
 
-		checkpoint := NewCheckpointHandler(NewContext(t.TempDir(), 10, nil))
-		response := checkpoint.Submit(CheckpointArgs{})
+		checkpoint := NewCheckpointHandler(newPlannedContext(t, t.TempDir(), 10, nil))
+		response := checkpoint.Submit(CheckpointArgs{NeedDispositions: testNeedDispositions()})
 		assert.False(t, response.Accepted)
 		require.NotEmpty(t, response.Issues)
 		assert.Equal(t, "empty_checkpoint", response.Issues[0].Code)
 
-		response = checkpoint.Submit(CheckpointArgs{EmptyReason: "no sources found"})
+		response = checkpoint.Submit(CheckpointArgs{NeedDispositions: testNeedDispositions(), EmptyReason: "no sources found"})
 		require.True(t, response.Accepted)
 		require.NotNil(t, response.Output)
 		assert.Empty(t, response.Output.ArtifactIDs)
@@ -316,10 +320,10 @@ func TestCheckpointToolHandler(t *testing.T) {
 	t.Run("empty checkpoint rejects whitespace reason", func(t *testing.T) {
 		t.Parallel()
 
-		checkpoint := NewCheckpointHandler(NewContext(t.TempDir(), 10, nil))
+		checkpoint := NewCheckpointHandler(newPlannedContext(t, t.TempDir(), 10, nil))
 		response := checkpoint.Submit(CheckpointArgs{
-			EmptyReason:         " \t\n ",
-			CollectionExhausted: true,
+			NeedDispositions: testNeedDispositions(),
+			EmptyReason:      " \t\n ",
 		})
 
 		assert.False(t, response.Accepted)
@@ -327,76 +331,54 @@ func TestCheckpointToolHandler(t *testing.T) {
 		assert.Equal(t, "empty_checkpoint", response.Issues[0].Code)
 	})
 
-	t.Run("empty checkpoint can declare collection exhausted", func(t *testing.T) {
+	t.Run("empty checkpoint with reason is accepted exactly once per round", func(t *testing.T) {
 		t.Parallel()
 
-		context := NewContext(t.TempDir(), 10, nil)
+		context := newPlannedContext(t, t.TempDir(), 10, nil)
 		checkpoint := NewCheckpointHandler(context)
 		response := checkpoint.Submit(CheckpointArgs{
-			EmptyReason:         "configured source tools are exhausted",
-			CollectionExhausted: true,
+			NeedDispositions: testNeedDispositions(),
+			EmptyReason:      "configured source tools are exhausted",
 		})
 
 		require.True(t, response.Accepted)
 		require.NotNil(t, response.Output)
-		assert.True(t, response.Output.CollectionExhausted)
+		assert.Empty(t, response.Output.ArtifactIDs)
 		assert.Equal(t, "configured source tools are exhausted", response.Output.EmptyReason)
-		assert.True(t, context.State.CollectionLimitExhausted())
+
+		repeated := checkpoint.Submit(CheckpointArgs{
+			NeedDispositions: testNeedDispositions(),
+			EmptyReason:      "still exhausted",
+		})
+		assert.False(t, repeated.Accepted)
+		require.NotEmpty(t, repeated.Issues)
+		assert.Equal(t, "collection_round_complete", repeated.Issues[0].Code)
 	})
 
-	t.Run("exhaustion requires an empty checkpoint", func(t *testing.T) {
+	t.Run("checkpoint with pending evidence rejects empty_reason", func(t *testing.T) {
 		t.Parallel()
 
 		workspace := t.TempDir()
-		handler := NewRegisterHandler(NewContext(workspace, 10, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, workspace, 10, nil))
 		file := filepath.Join(workspace, "evidence.md")
 		require.NoError(t, os.WriteFile(file, []byte("content"), 0o644))
 		require.True(t, handler.Register(RegisterArgs{Path: file}).Accepted)
 
 		response := NewCheckpointHandler(handler.Context()).Submit(CheckpointArgs{
-			EmptyReason:         "cannot find more",
-			CollectionExhausted: true,
+			NeedDispositions: testNeedDispositions(),
+			EmptyReason:      "cannot find more",
 		})
 
 		assert.False(t, response.Accepted)
 		require.NotEmpty(t, response.Issues)
-		assert.Equal(t, "collection_exhausted", response.Issues[0].Code)
-	})
-
-	t.Run("exhaustion after an earlier checkpoint means no additional evidence artifacts", func(t *testing.T) {
-		t.Parallel()
-
-		workspace := t.TempDir()
-		context := NewContext(workspace, 10, nil)
-		register := NewRegisterHandler(context)
-		checkpoint := NewCheckpointHandler(context)
-		file := filepath.Join(workspace, "evidence.md")
-		require.NoError(t, os.WriteFile(file, []byte("content"), 0o644))
-		registration := register.Register(RegisterArgs{Path: file})
-		require.True(t, registration.Accepted)
-
-		first := checkpoint.Submit(CheckpointArgs{})
-		require.True(t, first.Accepted)
-		require.NotNil(t, first.Output)
-		assert.Equal(t, []string{registration.Output.ID}, first.Output.ArtifactIDs)
-
-		final := checkpoint.Submit(CheckpointArgs{
-			EmptyReason:         "supplementary search found no additional sources",
-			CollectionExhausted: true,
-		})
-
-		require.True(t, final.Accepted)
-		require.NotNil(t, final.Output)
-		assert.Empty(t, final.Output.ArtifactIDs)
-		assert.True(t, final.Output.CollectionExhausted)
-		assert.True(t, context.State.CollectionLimitExhausted())
+		assert.Equal(t, "empty_checkpoint", response.Issues[0].Code)
 	})
 
 	t.Run("later checkpoint submits only newly registered evidence artifacts", func(t *testing.T) {
 		t.Parallel()
 
 		workspace := t.TempDir()
-		context := NewContext(workspace, 10, nil)
+		context := newPlannedContext(t, workspace, 10, nil)
 		register := NewRegisterHandler(context)
 		checkpoint := NewCheckpointHandler(context)
 		registerFile := func(name, content string) string {
@@ -408,12 +390,14 @@ func TestCheckpointToolHandler(t *testing.T) {
 		}
 
 		firstID := registerFile("first.md", "first")
-		first := checkpoint.Submit(CheckpointArgs{})
+		first := checkpoint.Submit(CheckpointArgs{NeedDispositions: testNeedDispositions()})
 		require.True(t, first.Accepted)
 		assert.Equal(t, []string{firstID}, first.Output.ArtifactIDs)
 
+		// A later round only opens after Collection QC returns needs_more.
+		context.BeginNextCollectionRound()
 		secondID := registerFile("second.md", "second")
-		second := checkpoint.Submit(CheckpointArgs{})
+		second := checkpoint.Submit(CheckpointArgs{NeedDispositions: testNeedDispositions()})
 
 		require.True(t, second.Accepted)
 		require.NotNil(t, second.Output)
@@ -424,17 +408,46 @@ func TestCheckpointToolHandler(t *testing.T) {
 		t.Parallel()
 
 		workspace := t.TempDir()
-		handler := NewRegisterHandler(NewContext(workspace, 10, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, workspace, 10, nil))
 		file := filepath.Join(workspace, "evidence.md")
 		require.NoError(t, os.WriteFile(file, []byte("content"), 0o644))
 		response := handler.Register(RegisterArgs{Path: file})
 		require.True(t, response.Accepted)
 
 		checkpoint := NewCheckpointHandler(handler.Context())
-		checkpointResponse := checkpoint.Submit(CheckpointArgs{EmptyReason: "selective"})
+		checkpointResponse := checkpoint.Submit(CheckpointArgs{NeedDispositions: testNeedDispositions(), EmptyReason: "selective"})
 		assert.False(t, checkpointResponse.Accepted)
 		require.NotEmpty(t, checkpointResponse.Issues)
 		assert.Equal(t, "empty_checkpoint", checkpointResponse.Issues[0].Code)
+	})
+
+	t.Run("all non-read-only tools lock after an accepted checkpoint", func(t *testing.T) {
+		t.Parallel()
+
+		context := newPlannedContext(t, t.TempDir(), 10, nil)
+		checkpoint := NewCheckpointHandler(context)
+		response := checkpoint.Submit(CheckpointArgs{
+			NeedDispositions: testNeedDispositions(),
+			EmptyReason:      "no sources found",
+		})
+		require.True(t, response.Accepted)
+
+		// Registration and further checkpoints are rejected this round.
+		registerErr := context.CollectionToolGate()
+		require.Error(t, registerErr)
+		assert.Contains(t, registerErr.Error(), "wait for Collection QC")
+
+		repeated := checkpoint.Submit(CheckpointArgs{
+			NeedDispositions: testNeedDispositions(),
+			EmptyReason:      "still no sources",
+		})
+		assert.False(t, repeated.Accepted)
+		require.NotEmpty(t, repeated.Issues)
+		assert.Equal(t, "collection_round_complete", repeated.Issues[0].Code)
+
+		// A new round reopens the tools.
+		context.BeginNextCollectionRound()
+		require.NoError(t, context.CollectionToolGate())
 	})
 }
 
@@ -445,7 +458,7 @@ func TestAcquisitionGate(t *testing.T) {
 		t.Parallel()
 
 		workspace := t.TempDir()
-		handler := NewRegisterHandler(NewContext(workspace, 2, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, workspace, 2, nil))
 		for index := range 2 {
 			file := filepath.Join(workspace, "evidence-"+string(rune('a'+index))+".md")
 			require.NoError(t, os.WriteFile(file, []byte("content "+string(rune('a'+index))), 0o644))
@@ -464,7 +477,7 @@ func TestAcquisitionGate(t *testing.T) {
 		t.Parallel()
 
 		workspace := t.TempDir()
-		handler := NewRegisterHandler(NewContext(workspace, 1, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, workspace, 1, nil))
 		file := filepath.Join(workspace, "evidence.md")
 		require.NoError(t, os.WriteFile(file, []byte("content"), 0o644))
 		response := handler.Register(RegisterArgs{Path: file})
@@ -478,7 +491,7 @@ func TestAcquisitionGate(t *testing.T) {
 		require.True(t, registrationResponse.Accepted)
 
 		checkpoint := NewCheckpointHandler(handler.Context())
-		checkpointResponse := checkpoint.Submit(CheckpointArgs{})
+		checkpointResponse := checkpoint.Submit(CheckpointArgs{NeedDispositions: testNeedDispositions()})
 		require.True(t, checkpointResponse.Accepted)
 		assert.False(t, handler.Context().State.CheckpointPending())
 	})
@@ -486,7 +499,7 @@ func TestAcquisitionGate(t *testing.T) {
 	t.Run("allows acquisition below batch", func(t *testing.T) {
 		t.Parallel()
 
-		context := NewContext(t.TempDir(), 10, nil)
+		context := newPlannedContext(t, t.TempDir(), 10, nil)
 		require.NoError(t, context.BeginWorkflow())
 		require.NoError(t, context.Gate().Acquire())
 	})
@@ -495,11 +508,11 @@ func TestAcquisitionGate(t *testing.T) {
 func TestContextValidation(t *testing.T) {
 	t.Parallel()
 
-	require.Error(t, NewContext("", 10, nil).Validate())
+	require.Error(t, newPlannedContext(t, "", 10, nil).Validate())
 	// Batch size 0 normalizes to the default of 10 in NewContext.
-	require.NoError(t, NewContext(t.TempDir(), 0, nil).Validate())
-	require.Error(t, NewContext(t.TempDir(), -1, nil).Validate())
-	require.NoError(t, NewContext(t.TempDir(), 10, nil).Validate())
+	require.NoError(t, newPlannedContext(t, t.TempDir(), 0, nil).Validate())
+	require.Error(t, newPlannedContext(t, t.TempDir(), -1, nil).Validate())
+	require.NoError(t, newPlannedContext(t, t.TempDir(), 10, nil).Validate())
 }
 
 func TestProtocolHandlersRejectNilContext(t *testing.T) {
@@ -519,7 +532,7 @@ func TestProtocolHandlersRejectNilContext(t *testing.T) {
 		{
 			name: "checkpoint",
 			invoke: func() corespec.ToolResponse[struct{}] {
-				response := NewCheckpointHandler(nil).Submit(CheckpointArgs{EmptyReason: "none"})
+				response := NewCheckpointHandler(nil).Submit(CheckpointArgs{NeedDispositions: testNeedDispositions(), EmptyReason: "none"})
 				return eraseResponse(response)
 			},
 		},
@@ -542,13 +555,35 @@ func eraseResponse[T any](response corespec.ToolResponse[T]) corespec.ToolRespon
 	return corespec.ToolResponse[struct{}]{Accepted: response.Accepted, Issues: response.Issues}
 }
 
+func newPlannedContext(t *testing.T, workspace string, batchSize int, maxRounds *int) *Context {
+	t.Helper()
+	context := NewContext(workspace, batchSize, maxRounds)
+	if workspace == "" || batchSize < 0 {
+		return context
+	}
+	freezeTestPlan(t, context)
+	return context
+}
+
+func freezeTestPlan(t *testing.T, context *Context) {
+	t.Helper()
+	response := NewInformationNeedsHandler(context).Set(InformationNeedsArgs{InformationNeeds: []InformationNeedInput{{
+		Question: "test evidence need", StopConditions: []StopConditionInput{{Condition: "test evidence condition"}},
+	}}})
+	require.True(t, response.Accepted)
+}
+
+func testNeedDispositions() []NeedDisposition {
+	return []NeedDisposition{{InformationNeedID: "NEED-001", SearchDisposition: SearchDispositionContinue}}
+}
+
 func TestRegisterHandlerInfrastructureErrors(t *testing.T) {
 	t.Parallel()
 
 	t.Run("retain failure surfaces as an error", func(t *testing.T) {
 		t.Parallel()
 
-		handler := NewRegisterHandler(NewContext(t.TempDir(), 10, nil))
+		handler := NewRegisterHandler(newPlannedContext(t, t.TempDir(), 10, nil))
 		err := handler.Context().Artifacts.RetainToolResult("", "content")
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "tool call id")

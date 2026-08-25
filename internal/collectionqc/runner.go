@@ -13,43 +13,31 @@ import (
 	sdk "github.com/github/copilot-sdk/go"
 	"github.com/lonegunmanb/r42/internal/collection"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
-	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/lonegunmanb/r42/internal/workflow"
 	"github.com/zclconf/go-cty/cty"
 )
 
-// Decision is the semantic outcome of one Collection QC checkpoint review.
-type Decision string
-
-const (
-	DecisionSufficient Decision = "sufficient"
-	DecisionNeedsMore  Decision = "needs_more"
-)
-
 // Verdict is submitted through the mandatory Collection QC verdict tool.
 type Verdict struct {
-	Decision Decision         `json:"decision"`
-	Issues   []corespec.Issue `json:"issues,omitempty"`
+	Assessments []collection.QCAssessment `json:"assessments"`
 }
 
-// Validate enforces the Collection QC verdict protocol.
+// Validate enforces the Collection QC verdict protocol. Mechanical shape
+// checks for assessments happen against the frozen plan in the Collection
+// context, so the verdict only needs to be structurally valid here.
 func (v Verdict) Validate() error {
-	switch v.Decision {
-	case DecisionSufficient:
-		if len(v.Issues) != 0 {
-			return errors.New("sufficient verdict must not contain issues")
-		}
-	case DecisionNeedsMore:
-		if len(v.Issues) == 0 {
-			return errors.New("needs_more verdict must contain at least one issue")
-		}
-	default:
-		return fmt.Errorf("unsupported collection qc decision %q", v.Decision)
+	if len(v.Assessments) == 0 {
+		return errors.New("collection qc verdict must contain at least one assessment")
 	}
-	for index, issue := range v.Issues {
-		if err := issue.Validate(); err != nil {
-			return fmt.Errorf("issue %d: %w", index, err)
+	seen := make(map[string]struct{}, len(v.Assessments))
+	for index, assessment := range v.Assessments {
+		if strings.TrimSpace(assessment.InformationNeedID) == "" {
+			return fmt.Errorf("assessment %d: information_need_id is required", index)
 		}
+		if _, duplicate := seen[assessment.InformationNeedID]; duplicate {
+			return fmt.Errorf("assessment %d: information need %q appears more than once", index, assessment.InformationNeedID)
+		}
+		seen[assessment.InformationNeedID] = struct{}{}
 	}
 	return nil
 }
@@ -66,16 +54,20 @@ type Config struct {
 	Criteria              cty.Value
 	CheckpointArtifactIDs []string
 	CheckpointEmptyReason string
-	CollectionExhausted   bool
+	NeedDispositions      []collection.NeedDisposition
 	MaxProtocolAttempts   int
 	VerdictToolName       string
 }
 
-// Result reports the valid verdict and whether the collection budget forced
-// Research to proceed with unresolved gaps.
+// Result reports the valid verdict, the terminal per-need outcomes, and
+// whether the Collection round budget forced Research to proceed with
+// unresolved gaps.
 type Result struct {
-	Verdict                  Verdict
-	CollectionLimitExhausted bool
+	Verdict                     Verdict
+	Outcomes                    []collection.InformationNeedOutcome
+	ActiveInformationNeeds      []collection.InformationNeed
+	ActiveInformationNeedStates []collection.ActiveInformationNeedState
+	CollectionLimitExhausted    bool
 }
 
 // Session is the persistent Collection QC model session.
@@ -132,28 +124,45 @@ func (r *Runner) Review(ctx context.Context, config Config) (Result, error) {
 			return Result{}, fmt.Errorf("publish reviewed evidence artifact %q: %w", id, err)
 		}
 	}
-	issueMessages := make([]string, len(verdict.Issues))
-	for index, issue := range verdict.Issues {
-		issueMessages[index] = issue.Message
+	budgetExhausted := r.collection.State.CollectionLimitExhausted()
+	assessment := r.collection.ApplyQCAssessments(config.NeedDispositions, verdict.Assessments, budgetExhausted, len(config.CheckpointArtifactIDs) > 0)
+	if !assessment.Accepted {
+		return Result{}, fmt.Errorf("apply collection qc assessments: %s", assessment.Issues[0].Message)
 	}
-	r.collection.State.SetLastCollectionQCIssues(issueMessages)
-
-	if verdict.Decision == DecisionSufficient {
+	collectionLimitExhausted := false
+	for _, outcome := range assessment.Outcomes {
+		if outcome.TerminationReason == collection.TerminationBudgetExhausted {
+			collectionLimitExhausted = true
+			break
+		}
+	}
+	if len(assessment.Outcomes) > 0 {
+		encoded, err := json.Marshal(assessment.Outcomes)
+		if err != nil {
+			return Result{}, fmt.Errorf("encode information need outcomes: %w", err)
+		}
+		r.collection.State.SetInformationNeedOutcomes(encoded)
+	}
+	if assessment.AllTerminal {
 		if err = r.collection.State.Advance(workflow.EventSufficient); err != nil {
-			return Result{}, fmt.Errorf("advance sufficient collection qc verdict: %w", err)
+			return Result{}, fmt.Errorf("advance terminal collection qc verdict: %w", err)
 		}
-		return Result{Verdict: verdict}, nil
-	}
-	if r.collection.State.CollectionLimitExhausted() {
-		if err = r.collection.State.Advance(workflow.EventCollectionLimitExhausted); err != nil {
-			return Result{}, fmt.Errorf("advance exhausted collection qc verdict: %w", err)
-		}
-		return Result{Verdict: verdict, CollectionLimitExhausted: true}, nil
+		return Result{
+			Verdict: verdict, Outcomes: assessment.Outcomes,
+			ActiveInformationNeeds:      r.collection.ActiveInformationNeeds(),
+			ActiveInformationNeedStates: r.collection.ActiveInformationNeedStates(),
+			CollectionLimitExhausted:    collectionLimitExhausted,
+		}, nil
 	}
 	if err = r.collection.State.Advance(workflow.EventNeedsMore); err != nil {
 		return Result{}, fmt.Errorf("advance needs_more collection qc verdict: %w", err)
 	}
-	return Result{Verdict: verdict}, nil
+	r.collection.BeginNextCollectionRound()
+	return Result{
+		Verdict: verdict, Outcomes: assessment.Outcomes,
+		ActiveInformationNeeds:      r.collection.ActiveInformationNeeds(),
+		ActiveInformationNeedStates: r.collection.ActiveInformationNeedStates(),
+	}, nil
 }
 
 func (r *Runner) validate(config Config) error {
@@ -179,14 +188,15 @@ func (r *Runner) validate(config Config) error {
 }
 
 type contextDocument struct {
-	Task                  Task              `json:"task"`
-	Criteria              map[string]string `json:"criteria"`
-	CheckpointArtifactIDs []string          `json:"checkpoint_artifact_ids"`
-	CheckpointEmptyReason string            `json:"checkpoint_empty_reason,omitempty"`
-	PreviousIssues        []string          `json:"previous_issues"`
-	CollectionRoundsUsed  int               `json:"collection_rounds_used"`
-	CollectionCanReopen   bool              `json:"collection_can_reopen"`
-	CollectionExhausted   bool              `json:"collection_exhausted"`
+	Task                        Task                                    `json:"task"`
+	Criteria                    map[string]string                       `json:"criteria"`
+	CheckpointArtifactIDs       []string                                `json:"checkpoint_artifact_ids"`
+	CheckpointEmptyReason       string                                  `json:"checkpoint_empty_reason,omitempty"`
+	InformationNeeds            []collection.InformationNeed            `json:"information_needs"`
+	ActiveInformationNeeds      []collection.InformationNeed            `json:"active_information_needs"`
+	ActiveInformationNeedStates []collection.ActiveInformationNeedState `json:"active_information_need_states"`
+	PreviousOutcomes            []collection.InformationNeedOutcome     `json:"information_need_outcomes"`
+	CollectionRoundsUsed        int                                     `json:"collection_rounds_used"`
 }
 
 func contextPrompt(config Config, collectionContext *collection.Context) (string, error) {
@@ -199,14 +209,15 @@ func contextPrompt(config Config, collectionContext *collection.Context) (string
 		criteriaMap[name] = value.AsString()
 	}
 	document := contextDocument{
-		Task:                  config.Task,
-		Criteria:              criteriaMap,
-		CheckpointArtifactIDs: append([]string{}, config.CheckpointArtifactIDs...),
-		CheckpointEmptyReason: config.CheckpointEmptyReason,
-		PreviousIssues:        collectionContext.State.LastCollectionQCIssues(),
-		CollectionRoundsUsed:  collectionContext.State.CollectionRoundsUsed(),
-		CollectionCanReopen:   !collectionContext.State.CollectionLimitExhausted(),
-		CollectionExhausted:   config.CollectionExhausted,
+		Task:                        config.Task,
+		Criteria:                    criteriaMap,
+		CheckpointArtifactIDs:       append([]string{}, config.CheckpointArtifactIDs...),
+		CheckpointEmptyReason:       config.CheckpointEmptyReason,
+		InformationNeeds:            collectionContext.InformationNeeds(),
+		ActiveInformationNeeds:      collectionContext.ActiveInformationNeeds(),
+		ActiveInformationNeedStates: collectionContext.ActiveInformationNeedStates(),
+		PreviousOutcomes:            collectionContext.InformationNeedOutcomes(),
+		CollectionRoundsUsed:        collectionContext.State.CollectionRoundsUsed(),
 	}
 	encoded, err := json.Marshal(document)
 	if err != nil {
@@ -231,10 +242,13 @@ func (r *VerdictRecorder) Record(verdict Verdict) error {
 	if err := verdict.Validate(); err != nil {
 		return err
 	}
-	verdict.Issues = append([]corespec.Issue{}, verdict.Issues...)
+	verdict.Assessments = append([]collection.QCAssessment{}, verdict.Assessments...)
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.verdicts) > 0 {
+		return errors.New("r42_collection_qc_verdict may be accepted exactly once in each Collection QC round")
+	}
 	r.verdicts = append(r.verdicts, verdict)
-	r.mu.Unlock()
 	return nil
 }
 

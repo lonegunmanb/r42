@@ -29,18 +29,16 @@ const (
 	EventCollectionCheckpoint      Event = "checkpoint"
 	EventSufficient                Event = "sufficient"
 	EventNeedsMore                 Event = "needs_more"
-	EventCollectionLimitExhausted  Event = "collection_limit_exhausted"
 	EventResearchComplete          Event = "research_complete"
 	EventResearchCompleteWithoutQC Event = "research_complete_without_qc"
 	EventReviseResearch            Event = "revise_research"
-	EventReopenCollection          Event = "reopen_collection"
 	EventPass                      Event = "pass"
 )
 
 func (e Event) String() string { return string(e) }
 
 // Config is the immutable workflow configuration. A nil MaxCollectionRounds
-// means an unlimited collection budget. BatchSize defaults to 10 when zero.
+// falls back to DefaultMaxCollectionRounds. BatchSize defaults to 10 when zero.
 type Config struct {
 	MaxCollectionRounds *int
 	BatchSize           int
@@ -49,6 +47,10 @@ type Config struct {
 // DefaultBatchSize is the configured default collection batch size.
 const DefaultBatchSize = 10
 
+// DefaultMaxCollectionRounds is the default hard cap on Collection rounds,
+// including the initial Collection phase.
+const DefaultMaxCollectionRounds = 10
+
 // State is the mutable runtime state of one research workflow instance. Each
 // dynamic research member owns an isolated State instance. State is not safe
 // for concurrent use.
@@ -56,20 +58,23 @@ type State struct {
 	mu     sync.RWMutex
 	config Config
 
-	phase                  Phase
-	begun                  bool
-	collectionRoundsUsed   int
-	cursor                 int
-	unreviewedCount        int
-	checkpointPending      bool
-	collectionExhausted    bool
-	lastCollectionQCIssues []string
+	phase                   Phase
+	begun                   bool
+	collectionRoundsUsed    int
+	cursor                  int
+	unreviewedCount         int
+	checkpointPending       bool
+	informationNeedOutcomes []byte
 }
 
 // New creates an unbegun workflow state.
 func New(config Config) *State {
 	if config.BatchSize == 0 {
 		config.BatchSize = DefaultBatchSize
+	}
+	if config.MaxCollectionRounds == nil {
+		maximum := DefaultMaxCollectionRounds
+		config.MaxCollectionRounds = &maximum
 	}
 	return &State{config: config}
 }
@@ -136,15 +141,11 @@ func (s *State) CollectionRoundsUsed() int {
 	return s.collectionRoundsUsed
 }
 
-// MaxCollectionRounds returns a defensive copy of the configured limit. Nil
-// means Collection rounds are unlimited.
+// MaxCollectionRounds returns a defensive copy of the configured limit.
 func (s *State) MaxCollectionRounds() *int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if s.config.MaxCollectionRounds == nil {
-		return nil
-	}
 	maximum := *s.config.MaxCollectionRounds
 	return &maximum
 }
@@ -178,37 +179,7 @@ func (s *State) CheckpointPending() bool {
 func (s *State) CollectionLimitExhausted() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	if s.collectionExhausted {
-		return true
-	}
-	if s.config.MaxCollectionRounds == nil {
-		return false
-	}
 	return s.collectionRoundsUsed >= *s.config.MaxCollectionRounds
-}
-
-// CollectionExhausted reports whether Collection explicitly declared that it
-// cannot acquire more evidence, independent of any configured round limit.
-func (s *State) CollectionExhausted() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.collectionExhausted
-}
-
-// MarkCollectionExhausted permanently closes Collection for this workflow.
-func (s *State) MarkCollectionExhausted() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if !s.begun {
-		return errors.New("workflow must begin before exhausting collection")
-	}
-	if s.phase != PhaseCollection {
-		return &TransitionError{From: s.phase, Event: EventCollectionLimitExhausted}
-	}
-	s.collectionExhausted = true
-	return nil
 }
 
 // RegisterEvidenceArtifact records one newly registered unique evidence artifact. Reaching the
@@ -281,12 +252,12 @@ func (s *State) Advance(event Event) error {
 		}
 	case PhaseCollectionQC:
 		switch event {
-		case EventSufficient, EventCollectionLimitExhausted:
+		case EventSufficient:
 			s.phase = PhaseResearch
 			s.cursor++
 			return nil
 		case EventNeedsMore:
-			if s.collectionExhausted || s.config.MaxCollectionRounds != nil && s.collectionRoundsUsed >= *s.config.MaxCollectionRounds {
+			if s.collectionRoundsUsed >= *s.config.MaxCollectionRounds {
 				return &BudgetExhaustedError{Phase: s.phase, Event: event}
 			}
 			s.phase = PhaseCollection
@@ -311,31 +282,26 @@ func (s *State) Advance(event Event) error {
 		case EventReviseResearch:
 			s.phase = PhaseResearch
 			return nil
-		case EventReopenCollection:
-			if s.collectionExhausted || s.config.MaxCollectionRounds != nil && s.collectionRoundsUsed >= *s.config.MaxCollectionRounds {
-				return &BudgetExhaustedError{Phase: s.phase, Event: event}
-			}
-			s.phase = PhaseCollection
-			s.collectionRoundsUsed++
-			return nil
 		}
 	case PhaseComplete:
 	}
 	return &TransitionError{From: s.phase, Event: event}
 }
 
-// SetLastCollectionQCIssues records the most recent Collection-QC verdict
-// issues for context handed to later phases.
-func (s *State) SetLastCollectionQCIssues(issues []string) {
+// SetInformationNeedOutcomes stores the immutable, terminal per-need outcomes
+// produced by Collection QC, ready for later phases. It accepts the raw
+// encoded payload so the workflow layer stays independent of the Collection
+// package's concrete type.
+func (s *State) SetInformationNeedOutcomes(outcomes []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.lastCollectionQCIssues = append([]string(nil), issues...)
+	s.informationNeedOutcomes = append([]byte(nil), outcomes...)
 }
 
-// LastCollectionQCIssues returns a copy of the most recent Collection-QC
-// verdict issues.
-func (s *State) LastCollectionQCIssues() []string {
+// InformationNeedOutcomes returns a copy of the stored terminal per-need
+// outcomes, or nil when Collection has not yet terminated a need.
+func (s *State) InformationNeedOutcomes() []byte {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return append([]string(nil), s.lastCollectionQCIssues...)
+	return append([]byte(nil), s.informationNeedOutcomes...)
 }

@@ -4,6 +4,7 @@ package coordinator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -81,7 +82,8 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 		return researchruntime.Result{}, err
 	}
 	var candidate researchruntime.Result
-	var researchIssues []corespec.Issue
+	var finalQCIssues []corespec.Issue
+	var collectionState []collection.ActiveInformationNeedState
 	finalRounds := 0
 
 	for {
@@ -89,22 +91,18 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 		switch r.state.Phase() {
 		case workflow.PhaseCollection:
 			collectionConfig := config.Collection
-			if len(researchIssues) > 0 {
-				collectionConfig.InitialPrompt = issuePrompt("Collect additional evidence for these Final QC issues:", researchIssues)
-			} else if previous := r.state.LastCollectionQCIssues(); len(previous) > 0 {
-				issues := make([]corespec.Issue, len(previous))
-				for index, message := range previous {
-					issues[index] = corespec.Issue{Code: "collection_qc", Message: message}
-				}
-				collectionConfig.InitialPrompt = issuePrompt("Collection QC needs more evidence:", issues)
-			}
+			collectionConfig.InitialPrompt = collectionRoundPrompt(
+				collectionConfig.InitialPrompt,
+				collectionState,
+				r.state.InformationNeedOutcomes(),
+			)
 			checkpoint, err := r.collection.Run(ctx, collectionConfig)
 			if err != nil {
 				return researchruntime.Result{}, fmt.Errorf("run collection: %w", err)
 			}
 			config.CollectionQC.CheckpointArtifactIDs = append([]string(nil), checkpoint.ArtifactIDs...)
 			config.CollectionQC.CheckpointEmptyReason = checkpoint.EmptyReason
-			config.CollectionQC.CollectionExhausted = checkpoint.CollectionExhausted
+			config.CollectionQC.NeedDispositions = append([]collection.NeedDisposition(nil), checkpoint.NeedDispositions...)
 			if err = r.state.Advance(workflow.EventCollectionCheckpoint); err != nil {
 				return researchruntime.Result{}, err
 			}
@@ -113,23 +111,22 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 			if err != nil {
 				return researchruntime.Result{}, fmt.Errorf("run collection qc: %w", err)
 			}
+			collectionState = append([]collection.ActiveInformationNeedState(nil), result.ActiveInformationNeedStates...)
 			emit(config.Observe, Event{
 				Phase: workflow.PhaseCollectionQC, Action: ActionDecision,
-				Decision: string(result.Verdict.Decision), CollectionRounds: r.state.CollectionRoundsUsed(),
+				Decision: collectionQCDecision(result), CollectionRounds: r.state.CollectionRoundsUsed(),
 			})
-			if result.Verdict.Decision == collectionqc.DecisionNeedsMore && !result.CollectionLimitExhausted {
+			if !result.CollectionLimitExhausted && r.state.Phase() == workflow.PhaseCollection {
 				continue
-			}
-			if len(result.Verdict.Issues) > 0 {
-				researchIssues = append([]corespec.Issue(nil), result.Verdict.Issues...)
 			}
 		case workflow.PhaseResearch:
 			researchConfig := config.Research
-			if len(researchIssues) > 0 {
+			researchConfig.InitialPrompt = researchOutcomesPrompt(researchConfig.InitialPrompt, r.state.InformationNeedOutcomes())
+			if len(finalQCIssues) > 0 {
 				researchConfig.InitialPrompt = appendIssuePrompt(
-					config.Research.InitialPrompt,
-					"Address these review issues while completing the original task:",
-					researchIssues,
+					researchConfig.InitialPrompt,
+					"Address these Final QC issues while completing the original task:",
+					finalQCIssues,
 				)
 			}
 			var err error
@@ -137,7 +134,6 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 			if err != nil {
 				return researchruntime.Result{}, fmt.Errorf("run research: %w", err)
 			}
-			researchIssues = nil
 			event := workflow.EventResearchComplete
 			if !config.FinalQCEnabled {
 				event = workflow.EventResearchCompleteWithoutQC
@@ -147,6 +143,7 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 			}
 		case workflow.PhaseFinalQC:
 			finalRounds++
+			config.FinalQC.OpenIssues = append([]corespec.Issue(nil), finalQCIssues...)
 			verdict, err := r.finalQC.Review(ctx, config.FinalQC, candidate)
 			if err != nil {
 				return researchruntime.Result{}, fmt.Errorf("run final qc: %w", err)
@@ -161,15 +158,14 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 				}
 				continue
 			}
+			if verdict.Decision != qc.DecisionReviseResearch {
+				return researchruntime.Result{}, fmt.Errorf("unsupported final qc decision %q", verdict.Decision)
+			}
 			if finalRounds >= config.MaxFinalQCRounds {
 				return researchruntime.Result{}, fmt.Errorf("final qc rounds exhausted after %d rounds", finalRounds)
 			}
-			researchIssues = append([]corespec.Issue(nil), verdict.Issues...)
-			event := workflow.EventReviseResearch
-			if verdict.Decision == qc.DecisionReopenCollection {
-				event = workflow.EventReopenCollection
-			}
-			if err = r.state.Advance(event); err != nil {
+			finalQCIssues = append([]corespec.Issue(nil), verdict.Issues...)
+			if err = r.state.Advance(workflow.EventReviseResearch); err != nil {
 				return researchruntime.Result{}, err
 			}
 		case workflow.PhaseComplete:
@@ -178,6 +174,53 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 			return researchruntime.Result{}, fmt.Errorf("unsupported workflow phase %q", r.state.Phase())
 		}
 	}
+}
+
+func collectionQCDecision(result collectionqc.Result) string {
+	if result.CollectionLimitExhausted {
+		return "budget_exhausted"
+	}
+	for _, outcome := range result.Outcomes {
+		if outcome.Resolution == collection.NeedResolutionUnresolved {
+			return "needs_more"
+		}
+	}
+	return "sufficient"
+}
+
+// collectionRoundPrompt drives the next Collection round from the frozen
+// per-need outcomes instead of a global issue list. Unresolved needs must stay
+// explicit so Collection continues genuine search only where the plan still
+// demands it. Satisfied or otherwise terminal outcomes add no next-round work.
+func collectionRoundPrompt(initialPrompt string, active []collection.ActiveInformationNeedState, outcomes []byte) string {
+	if len(active) == 0 && len(outcomes) == 0 {
+		return initialPrompt
+	}
+	document := struct {
+		ActiveInformationNeeds []collection.ActiveInformationNeedState `json:"active_information_needs"`
+		TerminalOutcomes       json.RawMessage                         `json:"information_need_outcomes,omitempty"`
+	}{ActiveInformationNeeds: active}
+	if len(outcomes) > 0 {
+		document.TerminalOutcomes = json.RawMessage(outcomes)
+	}
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		return initialPrompt
+	}
+	return initialPrompt + "\n\nCollection QC state for the next round. Search only active needs and their remaining condition IDs; terminal outcomes are frozen and must not be reopened:\n" + string(encoded)
+}
+
+// researchOutcomesPrompt makes unresolved information needs visible to closed
+// Research so it must represent them as uncertainty, never as absent facts.
+// Fully satisfied plans add no uncertainty and keep the original prompt intact.
+func researchOutcomesPrompt(initialPrompt string, outcomes []byte) string {
+	if len(outcomes) == 0 {
+		return initialPrompt
+	}
+	if !json.Valid(outcomes) {
+		return initialPrompt
+	}
+	return initialPrompt + "\n\nComplete information_need_outcomes from Collection QC (represent unresolved needs as uncertainty, never as proven absence):\n" + string(outcomes)
 }
 
 func emit(observer func(Event), event Event) {

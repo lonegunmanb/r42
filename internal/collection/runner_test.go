@@ -30,34 +30,14 @@ func TestRunnerReturnsRecordedCheckpoint(t *testing.T) {
 	assert.Equal(t, []string{"collect evidence"}, session.prompts)
 }
 
-func TestRunnerMergesAllRecordedCheckpoints(t *testing.T) {
+func TestCheckpointRecorderAcceptsExactlyOneCheckpointPerRound(t *testing.T) {
 	t.Parallel()
 
 	recorder := collection.NewCheckpointRecorder()
-	session := &runnerSession{onSend: func(int) error {
-		require.NoError(t, recorder.Record(collection.CheckpointOutput{
-			ArtifactIDs: []string{"artifact-1", "artifact-2"},
-		}))
-		require.NoError(t, recorder.Record(collection.CheckpointOutput{
-			ArtifactIDs: []string{"artifact-2", "artifact-3"},
-		}))
-		return recorder.Record(collection.CheckpointOutput{
-			EmptyReason:         "supplementary search found no additional sources",
-			CollectionExhausted: true,
-		})
-	}}
-	runner := collection.NewRunner(session, recorder)
+	checkpoint := collection.CheckpointOutput{ArtifactIDs: []string{"artifact-1"}}
 
-	result, err := runner.Run(t.Context(), collection.RunConfig{
-		InitialPrompt:       "collect evidence",
-		MaxProtocolAttempts: 3,
-		CheckpointToolName:  "r42_collection_checkpoint",
-	})
-
-	require.NoError(t, err)
-	assert.Equal(t, []string{"artifact-1", "artifact-2", "artifact-3"}, result.ArtifactIDs)
-	assert.Equal(t, "supplementary search found no additional sources", result.EmptyReason)
-	assert.True(t, result.CollectionExhausted)
+	require.NoError(t, recorder.Record(checkpoint))
+	require.ErrorContains(t, recorder.Record(checkpoint), "exactly once")
 }
 
 func TestRunnerRequiresCheckpointAndReusesSession(t *testing.T) {

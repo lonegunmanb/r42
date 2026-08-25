@@ -21,14 +21,13 @@ The workflow optimizes for three questions:
         |
         v
     reference supply-chain map
-        |
-        v
-    node assessments
-        |
-        v
-    company research priorities
-        |
-        v
+        |                         |
+        v                         v
+    node assessments      company research priorities
+        |                         |
+        +------------+------------+
+                     |
+                     v
     company-first report with direct source URLs
 
 primary_source_baseline first captures current official filings, regulator
@@ -43,8 +42,10 @@ five parallel tracks:
 - qualification and integration lock-in.
 
 The supply-chain map keeps ordinary nodes and explicit gaps. It does not score
-or pre-declare chokepoints. It only identifies a short set of nodes worth a
-separate assessment.
+or pre-declare chokepoints. It identifies two independent target lists:
+continuity-risk `assessment_targets`, and supplier-addressable
+`company_mapping_targets` for components, materials, processes, equipment, and
+services. Companies remain outside the supply-chain graph.
 
 Each node assessment answers:
 
@@ -64,9 +65,9 @@ not_proven means public evidence is insufficient. It does not mean that no risk
 exists.
 
 The company stage combines discovery and verification in one research task per
-assessed node. It asks whether a public company is an existing supplier, a
-qualified alternative, merely a related-product company, or an unverified lead.
-An empty company list is a valid result.
+company-mapping target, independently of node risk assessment. It records an
+existing supplier, qualified alternative, exact-node capability match,
+related-product company, or unverified lead. An empty company list is valid.
 
 ## Atomic claim cards
 
@@ -128,14 +129,18 @@ inventory.
 
 | Priority | Meaning |
 | --- | --- |
-| A | The node matters and the exact company role and relationship are confirmed; economic impact still needs research |
-| B | The node matters, but the relationship, qualification, or benefit mechanism is incomplete |
+| A | An exact-node relationship or capability is confirmed and a high-value unresolved question has an executable next check |
+| B | The exact-node link is plausible, but the relationship, qualification, or benefit mechanism is incomplete |
 | C | Only industry relevance or a related product is established |
 | do_not_research | The node or company link is too weak for the next research round |
 
-Every listed company includes the exact node and role, strongest evidence,
-largest remaining unknown, and next verification action. It also records four
-separate economic-exposure dimensions:
+Every public-company record includes a non-empty ticker and market so the same
+security can be merged safely across mapping targets. `research_priority` is separate from `role`. Relationship claim IDs prove a
+customer, supplier, or qualification relationship; capability claim IDs prove
+the ability to supply the exact node without implying a named customer. Every
+listed company includes the exact node, strongest evidence, largest remaining
+unknown, and next verification action. It also records four separate
+economic-exposure dimensions:
 
 | Dimension | Allowed status |
 | --- | --- |
@@ -150,9 +155,16 @@ the referenced atomic claim status. An unknown dimension uses `none` and an
 empty claim list. Timing is measured from the evidence cutoff and refers to
 expected supplier revenue timing, not only the target product's launch date.
 
-A company with only a related product cannot receive A. A node assessed as
-not_proven cannot produce an A or B company. These gates are enforced by the
-typed tool rather than left to report prose.
+Optional `exposure_signals` preserve the scope of evidence that does not fit a
+single categorical dimension. A signal records `scope`, `subject`, `metric`,
+`value`, `as_of`, `evidence_directness`, and `claim_ids`; scope is `company`,
+`segment`, `modality`, `target_branch`, or `named_program`. A segment or modality
+metric is never silently promoted to named-program economics.
+
+A company with only a related product cannot receive A. A requires confirmed
+relationship evidence for an existing supplier or qualified alternative, or
+confirmed exact-node capability evidence for a capability match. It does not
+require a named target customer. These gates are enforced by the typed tool.
 
 ## Report contract
 
@@ -181,10 +193,10 @@ pplx_tool_call_quota limits successful pplx_fetch calls per Collection session;
 set it to null (the default) for no call limit and let Collection QC decide
 when the acquired evidence is sufficient.
 
-Every block uses the default `collection_batch_size = 10`. The examples omit
-`max_collection_rounds`, so Collection may reopen without a round limit. Search
-and fetch tools appear only in `collection_tool_ids`; closed Research receives
-registered artifacts and validated upstream typed-tool JSON.
+Every block uses the default `collection_batch_size = 10` and the default
+`max_collection_rounds = 10`. Search and fetch tools appear only in
+`collection_tool_ids`; closed Research receives registered artifacts and
+validated upstream typed-tool JSON.
 
 All prompts prohibit PowerShell, shell commands, curl, wget, and scripts as a
 way to bypass source-tool policy or quotas. Every retained source is saved as a

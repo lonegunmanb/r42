@@ -18,6 +18,7 @@ const (
 	DefaultMaxProtocolAttempts   = 10
 	DefaultMaxQCRounds           = 10
 	DefaultCollectionBatchSize   = 10
+	DefaultMaxCollectionRounds   = 10
 	DefaultCollectionQCCriterion = "The registered evidence artifacts must provide sufficient evidence to answer the research task."
 )
 

@@ -55,7 +55,7 @@ func TestQCVerdictToolSchemaDescribesIssueFields(t *testing.T) {
 	assert.JSONEq(t, `{
 		"type": "object",
 		"properties": {
-			"decision": {"type": "string", "enum": ["pass", "revise_research", "reopen_collection"]},
+			"decision": {"type": "string", "enum": ["pass", "revise_research"]},
 			"issues": {
 				"type": "array",
 				"items": {
@@ -103,15 +103,13 @@ func TestObjectSchemaRequiredFields(t *testing.T) {
 	}
 }
 
-func TestQCVerdictToolReturnsRepairableCollectionBudgetRejection(t *testing.T) {
+func TestQCVerdictToolRejectsReopenDecision(t *testing.T) {
 	t.Parallel()
 
 	recorder, err := debuglog.NewRecorder(t.TempDir(), false)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
 	verdicts := qc.NewVerdictRecorder()
-	maximum := 2
-	verdicts.SetCollectionBudget(qc.CollectionBudget{RoundsUsed: 2, MaxRounds: &maximum})
 	tool := qcVerdictTool("research.static.test", recorder, verdicts)
 
 	result, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
@@ -124,9 +122,8 @@ func TestQCVerdictToolReturnsRepairableCollectionBudgetRejection(t *testing.T) {
 	assert.JSONEq(t, `{
 		"accepted": false,
 		"issues": [{
-			"code": "collection_round_budget_exhausted",
-			"message": "cannot reopen collection: all 2 collection rounds have been used",
-			"repair_hint": "Choose revise_research or pass using existing evidence artifacts."
+			"code": "invalid_verdict",
+			"message": "unsupported final qc decision \"reopen_collection\""
 		}]
 	}`, result.TextResultForLLM)
 }

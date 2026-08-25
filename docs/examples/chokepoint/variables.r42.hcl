@@ -31,7 +31,7 @@ variable "market" {
 
 variable "max_candidates_per_chokepoint" {
   type        = number
-  description = "Maximum number of public companies screened for each assessed supply-chain node. The legacy name is retained for variable-file compatibility."
+  description = "Maximum number of public companies screened for each company-mapping target. The legacy name is retained for variable-file compatibility."
   default     = 3
 
   validation {

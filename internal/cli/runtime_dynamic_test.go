@@ -386,6 +386,41 @@ research "dynamic" "followups" {
 	}
 }
 
+func TestProductionRuntimeDynamicTasksKeepFinalQCIssuesIsolated(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+research "dynamic" "reviewed" {
+  serial = true
+  tasks = [for topic in ["alpha", "beta"] : {
+    model         = "test-model"
+    system_prompt = "Research the assigned topic."
+    prompt        = topic
+    artifact      = {}
+    retry         = null
+    qc = {
+      criteria = { accuracy = "accurate" }
+    }
+  }]
+}
+`), 0o600))
+
+	opener := &dynamicQCIssueOpener{finalRounds: map[string]int{}, handoffPrompts: map[string]string{}}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+
+	require.NoError(t, err)
+	require.Len(t, opener.finalRounds, 2)
+	for workspace, rounds := range opener.finalRounds {
+		assert.Equal(t, 2, rounds)
+		assert.Contains(t, opener.handoffPrompts[workspace], "correct the task result")
+	}
+}
+
 func TestProductionRuntimeDynamicTaskArtifactPathResolves(t *testing.T) {
 	t.Parallel()
 
@@ -527,19 +562,20 @@ func (s *dynamicTestSession) SendAndWait(_ context.Context, options sdk.MessageO
 	if handled, err := handleDefaultWorkflowProtocol(s.config); handled {
 		return &sdk.SessionEvent{}, err
 	}
+	basePrompt := researchTaskPrompt(options.Prompt)
 	if s.opener.started != nil {
-		s.opener.started <- options.Prompt
+		s.opener.started <- basePrompt
 	}
-	if options.Prompt == s.opener.failPrompt {
+	if basePrompt == s.opener.failPrompt {
 		return nil, errors.New("forced task failure")
 	}
-	if s.opener.release != nil && options.Prompt == s.opener.blockPrompt {
+	if s.opener.release != nil && basePrompt == s.opener.blockPrompt {
 		<-s.opener.release
 	}
 	if len(s.config.Tools) > 0 {
 		tool := s.config.Tools[0]
-		summary := options.Prompt
-		if options.Prompt == "Begin the configured research task." {
+		summary := basePrompt
+		if basePrompt == "Begin the configured research task." {
 			arguments, err := json.Marshal(s.opener.topics)
 			if err != nil {
 				return nil, err
@@ -547,16 +583,99 @@ func (s *dynamicTestSession) SendAndWait(_ context.Context, options sdk.MessageO
 			summary = string(arguments)
 		} else {
 			s.opener.mu.Lock()
-			s.opener.prompts = append(s.opener.prompts, options.Prompt)
+			s.opener.prompts = append(s.opener.prompts, basePrompt)
 			s.opener.mu.Unlock()
 		}
 		_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Summary": summary}})
 		return &sdk.SessionEvent{}, err
 	}
 	s.opener.mu.Lock()
-	s.opener.prompts = append(s.opener.prompts, options.Prompt)
+	s.opener.prompts = append(s.opener.prompts, basePrompt)
 	s.opener.mu.Unlock()
 	return &sdk.SessionEvent{}, nil
 }
 
 func (*dynamicTestSession) Close(context.Context) error { return nil }
+
+func researchTaskPrompt(prompt string) string {
+	const marker = "\n\nComplete information_need_outcomes from Collection QC"
+	base, _, found := strings.Cut(prompt, marker)
+	if found {
+		return base
+	}
+	return prompt
+}
+
+type dynamicQCIssueOpener struct {
+	mu             sync.Mutex
+	finalRounds    map[string]int
+	handoffPrompts map[string]string
+}
+
+func (o *dynamicQCIssueOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
+	return &dynamicQCIssueSession{config: config, opener: o}, nil
+}
+
+type dynamicQCIssueSession struct {
+	config copilot.SessionConfig
+	opener *dynamicQCIssueOpener
+}
+
+func (s *dynamicQCIssueSession) SendAndWait(_ context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	switch workflowSessionKind(s.config) {
+	case "collection":
+		_ = callDynamicQCWorkflowTool(s.config, "r42_set_information_needs", map[string]any{
+			"information_needs": []any{map[string]any{
+				"question":        "test fixture need",
+				"stop_conditions": []any{map[string]any{"condition": "test fixture condition"}},
+			}},
+		})
+		return &sdk.SessionEvent{}, callDynamicQCWorkflowTool(s.config, "r42_collection_checkpoint", map[string]any{
+			"empty_reason": "fixture has no acquisition work",
+			"need_dispositions": []any{map[string]any{
+				"information_need_id": "NEED-001", "search_disposition": "stalled",
+			}},
+		})
+	case "collection_qc":
+		return &sdk.SessionEvent{}, callDynamicQCWorkflowTool(s.config, "r42_collection_qc_verdict", map[string]any{
+			"assessments": []any{map[string]any{
+				"information_need_id": "NEED-001", "status": "sufficient",
+				"unsatisfied_condition_ids": []any{}, "evidence_progress": "none",
+			}},
+		})
+	case "final_qc":
+		workspace := s.config.WorkingDirectory
+		s.opener.mu.Lock()
+		s.opener.finalRounds[workspace]++
+		round := s.opener.finalRounds[workspace]
+		s.opener.mu.Unlock()
+		arguments := map[string]any{"decision": "pass"}
+		if round == 1 {
+			arguments = map[string]any{
+				"decision": "revise_research",
+				"issues":   []any{map[string]any{"code": "accuracy", "message": "correct the task result"}},
+			}
+		}
+		return &sdk.SessionEvent{}, callDynamicQCWorkflowTool(s.config, "r42_qc_verdict", arguments)
+	default:
+		if !strings.Contains(options.Prompt, "correct the task result") {
+			return &sdk.SessionEvent{}, nil
+		}
+		s.opener.mu.Lock()
+		s.opener.handoffPrompts[s.config.WorkingDirectory] = options.Prompt
+		s.opener.mu.Unlock()
+		return &sdk.SessionEvent{}, nil
+	}
+}
+
+func (*dynamicQCIssueSession) Close(context.Context) error { return nil }
+
+func callDynamicQCWorkflowTool(config copilot.SessionConfig, name string, arguments map[string]any) error {
+	for _, tool := range config.Tools {
+		if tool.Name == name {
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: arguments})
+			return err
+		}
+	}
+	return fmt.Errorf("tool %q not found", name)
+}

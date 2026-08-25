@@ -469,7 +469,7 @@ func TestNodeAssessmentSeparatesScopeFromConclusion(t *testing.T) {
 	assert.Equal(t, "candidate", assessment["conclusion"])
 }
 
-func TestSupplyChainMapKeepsAssessmentTargetsWithoutChokepointScores(t *testing.T) {
+func TestSupplyChainMapSeparatesAssessmentAndCompanyMappingTargets(t *testing.T) {
 	compiler, err := gotool.NewCompiler()
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
@@ -489,7 +489,12 @@ func TestSupplyChainMapKeepsAssessmentTargetsWithoutChokepointScores(t *testing.
 		},
 		"edges":              []any{map[string]any{"from": "osat", "to": "product", "relation": "supplies", "claim_ids": []string{"C-001"}}},
 		"assessment_targets": []any{map[string]any{"node_id": "osat", "node_name": "Packaging services", "why_assess": "External capacity dependency", "claim_ids": []string{"C-001"}}},
-		"unknowns":           []string{"Alternative capacity"},
+		"company_mapping_targets": []any{map[string]any{
+			"node_id": "osat", "node_name": "Packaging services",
+			"why_map":   "A supplier-addressable service where public-company capability can be tested.",
+			"claim_ids": []string{"C-001"},
+		}},
+		"unknowns": []string{"Alternative capacity"},
 	}), workspace)
 
 	require.NoError(t, err)
@@ -497,21 +502,62 @@ func TestSupplyChainMapKeepsAssessmentTargetsWithoutChokepointScores(t *testing.
 	var document map[string]any
 	require.NoError(t, readJSON(artifactPath, &document))
 	assert.Len(t, mapValue[[]any](t, document, "assessment_targets"), 1)
+	assert.Len(t, mapValue[[]any](t, document, "company_mapping_targets"), 1)
 	assert.NotContains(t, document, "chokepoints")
 	assert.NotContains(t, document, "score")
 }
 
-func TestCompanyPrioritiesRequireNodeAndRelationshipEvidence(t *testing.T) {
+func TestSupplyChainMapRejectsInvalidCompanyMappingTargets(t *testing.T) {
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "submit_supply_chain_map"))
+	require.NoError(t, err)
+	workspace, claimsPath, _ := finalizedClaimCardFixture(t, "supply-chain-map-invalid-target")
+	scopePath := filepath.Join(workspace, "scope.json")
+	require.NoError(t, writeJSON(scopePath, map[string]any{"topic": "CXMT DDR5"}))
+
+	tests := []struct {
+		name   string
+		target map[string]any
+		code   string
+	}{
+		{name: "unknown node", target: map[string]any{"node_id": "missing", "node_name": "Missing", "why_map": "Investigate suppliers.", "claim_ids": []string{"C-001"}}, code: "node_id"},
+		{name: "wrong node name", target: map[string]any{"node_id": "osat", "node_name": "Wrong", "why_map": "Investigate suppliers.", "claim_ids": []string{"C-001"}}, code: "node_name"},
+		{name: "non supplier addressable node", target: map[string]any{"node_id": "product", "node_name": "DDR5", "why_map": "Investigate suppliers.", "claim_ids": []string{"C-001"}}, code: "node_kind"},
+		{name: "missing rationale", target: map[string]any{"node_id": "osat", "node_name": "Packaging services", "why_map": "", "claim_ids": []string{"C-001"}}, code: "why_map"},
+		{name: "missing evidence", target: map[string]any{"node_id": "osat", "node_name": "Packaging services", "why_map": "Investigate suppliers.", "claim_ids": []string{}}, code: "claim_id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+				"workspace_dir": workspace, "_r42_artifact_path": filepath.Join(workspace, "supply-chain.json"),
+				"topic": "CXMT DDR5", "scope_path": scopePath, "claim_paths": []string{claimsPath},
+				"nodes": []any{
+					map[string]any{"id": "product", "name": "DDR5", "kind": "product", "stages": []string{"product"}, "branches": []string{"all"}, "claim_ids": []string{"C-001"}, "unknowns": []string{}},
+					map[string]any{"id": "osat", "name": "Packaging services", "kind": "service", "stages": []string{"packaging"}, "branches": []string{"die"}, "claim_ids": []string{"C-001"}, "unknowns": []string{}},
+				},
+				"edges": []any{}, "assessment_targets": []any{},
+				"company_mapping_targets": []any{tt.target, tt.target}, "unknowns": []string{},
+			}), workspace)
+
+			require.NoError(t, invokeErr)
+			assert.False(t, response.Accepted)
+			assert.Contains(t, issueCodes(response), tt.code)
+			assert.Contains(t, issueCodes(response), "node_id", "duplicate mapping targets must also be reported")
+		})
+	}
+}
+
+func TestCompanyPrioritiesUseSupplyChainTargetAndCapabilityEvidence(t *testing.T) {
 	compiler, err := gotool.NewCompiler()
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
 	program, err := compiler.Compile(t.Context(), goToolSource(t, "submit_company_priorities"))
 	require.NoError(t, err)
 	workspace, claimsPath, _ := finalizedClaimCardFixture(t, "company-priority")
-	nodePath := filepath.Join(workspace, "node-assessment.json")
-	require.NoError(t, writeJSON(nodePath, map[string]any{
-		"node_id": "node-osat", "node_name": "Packaging services", "conclusion": "candidate",
-	}))
+	supplyChainPath := writeCompanyMappingSupplyChain(t, workspace)
 	artifactPath := filepath.Join(workspace, "company-priorities.json")
 	economicExposure := unknownEconomicExposure()
 	economicExposure["customer_validation"] = map[string]any{
@@ -520,15 +566,29 @@ func TestCompanyPrioritiesRequireNodeAndRelationshipEvidence(t *testing.T) {
 
 	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
 		"workspace_dir": workspace, "_r42_artifact_path": artifactPath,
-		"node_assessment_path": nodePath, "claim_paths": []string{claimsPath},
-		"companies": []any{map[string]any{
-			"company": "Supplier A", "ticker": "000001", "market": "a-share",
-			"role": "existing_supplier", "priority": "A",
-			"relationship_claim_ids": []string{"C-001"},
-			"economic_exposure":      economicExposure,
-			"why_research":           "The exact-node relationship is confirmed; economic exposure remains open.",
-			"largest_unknown":        "Revenue and profit exposure", "next_check": "Verify segment revenue and orders.",
-		}},
+		"supply_chain_path": supplyChainPath, "target_node_id": "node-osat", "claim_paths": []string{claimsPath},
+		"companies": []any{
+			map[string]any{
+				"company": "Supplier A", "ticker": "000001", "market": "a-share",
+				"role": "capability_match", "research_priority": "A",
+				"relationship_claim_ids": []string{}, "capability_claim_ids": []string{"C-001"},
+				"economic_exposure": economicExposure,
+				"exposure_signals": []any{map[string]any{
+					"scope": "segment", "subject": "Advanced packaging", "metric": "share_of_revenue",
+					"value": "18%", "as_of": "2025", "evidence_directness": "confirmed", "claim_ids": []string{"C-001"},
+				}},
+				"why_research":    "The exact-node capability is confirmed; economic exposure remains open.",
+				"largest_unknown": "Revenue and profit exposure", "next_check": "Verify segment revenue and orders.",
+			},
+			map[string]any{
+				"company": "Supplier B", "ticker": "000002", "market": "a-share",
+				"role": "existing_supplier", "research_priority": "A",
+				"relationship_claim_ids": []string{"C-001"}, "capability_claim_ids": []string{},
+				"economic_exposure": unknownEconomicExposure(), "exposure_signals": []any{},
+				"why_research":    "The exact-node relationship is confirmed; economics remain open.",
+				"largest_unknown": "Order materiality", "next_check": "Verify disclosed order value.",
+			},
+		},
 		"conclusion": "One company merits immediate follow-up research.",
 	}), workspace)
 
@@ -539,29 +599,136 @@ func TestCompanyPrioritiesRequireNodeAndRelationshipEvidence(t *testing.T) {
 	assert.Contains(t, priorityOutput, "companies")
 	assert.Contains(t, priorityOutput, "claims")
 	assert.Equal(t, "node-osat", priorityOutput["node_id"])
+	assert.Equal(t, "Packaging services", priorityOutput["node_name"])
+	assert.Equal(t, "service", priorityOutput["node_kind"])
+	assert.NotContains(t, priorityOutput, "node_conclusion")
 	assert.FileExists(t, artifactPath)
 	companies := mapValue[[]any](t, priorityOutput, "companies")
+	require.Len(t, companies, 2)
 	recordedCompany, ok := companies[0].(map[string]any)
 	require.True(t, ok)
 	assert.Contains(t, recordedCompany, "economic_exposure")
 
 	invalid := map[string]any{
 		"workspace_dir": workspace, "_r42_artifact_path": filepath.Join(workspace, "invalid-priorities.json"),
-		"node_assessment_path": nodePath, "claim_paths": []string{claimsPath},
-		"companies": []any{map[string]any{
-			"company": "Supplier B", "ticker": "000002", "market": "a-share",
-			"role": "related_product_only", "priority": "A",
-			"relationship_claim_ids": []string{},
-			"economic_exposure":      unknownEconomicExposure(),
-			"why_research":           "It sells a related product.", "largest_unknown": "Any target relationship",
-			"next_check": "Find direct relationship evidence.",
-		}},
+		"supply_chain_path": supplyChainPath, "target_node_id": "node-osat", "claim_paths": []string{claimsPath},
+		"companies": []any{
+			map[string]any{
+				"company": "Supplier C", "ticker": "000003", "market": "a-share",
+				"role": "capability_match", "research_priority": "A",
+				"relationship_claim_ids": []string{}, "capability_claim_ids": []string{},
+				"economic_exposure": unknownEconomicExposure(), "exposure_signals": []any{},
+				"why_research": "Capability is only a lead.", "largest_unknown": "Exact-node capability",
+				"next_check": "Find exact-node capability evidence.",
+			},
+			map[string]any{
+				"company": "Supplier D", "ticker": "000004", "market": "a-share",
+				"role": "related_product_only", "research_priority": "A",
+				"relationship_claim_ids": []string{}, "capability_claim_ids": []string{},
+				"economic_exposure": unknownEconomicExposure(), "exposure_signals": []any{},
+				"why_research": "It sells a related product.", "largest_unknown": "Any target relationship",
+				"next_check": "Find direct relationship evidence.",
+			},
+		},
 		"conclusion": "Invalid A classification.",
 	}
 	rejected, err := program.Invoke(t.Context(), marshalInput(t, invalid), workspace)
 	require.NoError(t, err)
 	assert.False(t, rejected.Accepted)
-	assert.Contains(t, issueCodes(rejected), "priority")
+	assert.Contains(t, issueCodes(rejected), "research_priority")
+
+	missingTarget := invalid
+	missingTarget["target_node_id"] = "not-selected"
+	rejected, err = program.Invoke(t.Context(), marshalInput(t, missingTarget), workspace)
+	require.NoError(t, err)
+	assert.False(t, rejected.Accepted)
+	assert.Contains(t, issueCodes(rejected), "target_node_id")
+}
+
+func TestCompanyPrioritiesRejectMissingSecurityIdentifier(t *testing.T) {
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "submit_company_priorities"))
+	require.NoError(t, err)
+	workspace, claimsPath, _ := finalizedClaimCardFixture(t, "company-missing-security")
+
+	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"workspace_dir": workspace, "_r42_artifact_path": filepath.Join(workspace, "company-priorities.json"),
+		"supply_chain_path": writeCompanyMappingSupplyChain(t, workspace),
+		"target_node_id":    "node-osat", "claim_paths": []string{claimsPath},
+		"companies": []any{map[string]any{
+			"company": "Supplier A", "ticker": "", "market": "a-share",
+			"role": "existing_supplier", "research_priority": "B",
+			"relationship_claim_ids": []string{"C-001"}, "capability_claim_ids": []string{},
+			"economic_exposure": unknownEconomicExposure(), "exposure_signals": []any{},
+			"why_research": "The relationship merits follow-up.", "largest_unknown": "Economic impact",
+			"next_check": "Verify economic exposure.",
+		}},
+		"conclusion": "The company needs more research.",
+	}), workspace)
+
+	require.NoError(t, err)
+	assert.False(t, response.Accepted)
+	assert.Contains(t, issueCodes(response), "required")
+}
+
+func TestCompanyPrioritiesRejectInvalidAuthoritativeSupplyChain(t *testing.T) {
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "submit_company_priorities"))
+	require.NoError(t, err)
+	workspace, claimsPath, _ := finalizedClaimCardFixture(t, "company-invalid-supply-chain")
+
+	tests := []struct {
+		name       string
+		writeValue any
+		missing    bool
+		code       string
+	}{
+		{name: "wrong artifact kind", writeValue: map[string]any{"artifact_kind": "not_supply_chain"}, code: "supply_chain_path"},
+		{name: "malformed JSON", writeValue: []byte("{"), code: "supply_chain_path"},
+		{name: "missing file", missing: true, code: "supply_chain_path"},
+		{name: "target node is missing", writeValue: map[string]any{
+			"artifact_kind": "r42_supply_chain", "nodes": []any{},
+			"company_mapping_targets": []any{map[string]any{"node_id": "node-osat", "node_name": "Packaging services"}},
+		}, code: "target_node_id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			supplyChainPath := filepath.Join(workspace, strings.ReplaceAll(tt.name, " ", "-"), "supply-chain.json")
+			if !tt.missing {
+				require.NoError(t, os.MkdirAll(filepath.Dir(supplyChainPath), 0o700))
+				switch value := tt.writeValue.(type) {
+				case []byte:
+					require.NoError(t, os.WriteFile(supplyChainPath, value, 0o600))
+				default:
+					require.NoError(t, writeJSON(supplyChainPath, value))
+				}
+			}
+			artifactPath := filepath.Join(workspace, strings.ReplaceAll(tt.name, " ", "-"), "company-priorities.json")
+			response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+				"workspace_dir": workspace, "_r42_artifact_path": artifactPath,
+				"supply_chain_path": supplyChainPath, "target_node_id": "node-osat", "claim_paths": []string{claimsPath},
+				"companies": []any{map[string]any{
+					"company": "", "ticker": "", "market": "", "role": "unverified", "research_priority": "C",
+					"relationship_claim_ids": []string{}, "capability_claim_ids": []string{},
+					"economic_exposure": unknownEconomicExposure(), "exposure_signals": []any{},
+					"why_research": "", "largest_unknown": "", "next_check": "",
+				}},
+				"conclusion": "",
+			}), workspace)
+
+			require.NoError(t, invokeErr)
+			assert.False(t, response.Accepted)
+			assert.Contains(t, issueCodes(response), tt.code)
+			assert.Contains(t, issueCodes(response), "required", "authority and company issues must be aggregated")
+			assert.Contains(t, issueCodes(response), "conclusion", "authority and conclusion issues must be aggregated")
+			assert.NoFileExists(t, artifactPath)
+		})
+	}
 }
 
 func TestCompanyPrioritiesRejectInvalidEconomicExposure(t *testing.T) {
@@ -571,10 +738,7 @@ func TestCompanyPrioritiesRejectInvalidEconomicExposure(t *testing.T) {
 	program, err := compiler.Compile(t.Context(), goToolSource(t, "submit_company_priorities"))
 	require.NoError(t, err)
 	workspace, claimsPath, _ := finalizedClaimCardFixture(t, "company-exposure-validation")
-	nodePath := filepath.Join(workspace, "node-assessment.json")
-	require.NoError(t, writeJSON(nodePath, map[string]any{
-		"node_id": "node-osat", "node_name": "Packaging services", "conclusion": "candidate",
-	}))
+	supplyChainPath := writeCompanyMappingSupplyChain(t, workspace)
 
 	tests := []struct {
 		name       string
@@ -622,12 +786,58 @@ func TestCompanyPrioritiesRejectInvalidEconomicExposure(t *testing.T) {
 			}
 			response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
 				"workspace_dir": workspace, "_r42_artifact_path": filepath.Join(workspace, "company-priorities.json"),
-				"node_assessment_path": nodePath, "claim_paths": []string{claimsPath},
+				"supply_chain_path": supplyChainPath, "target_node_id": "node-osat", "claim_paths": []string{claimsPath},
 				"companies": []any{map[string]any{
 					"company": "Supplier A", "ticker": "000001", "market": "a-share",
-					"role": "existing_supplier", "priority": "B", "relationship_claim_ids": []string{"C-001"},
+					"role": "existing_supplier", "research_priority": "B",
+					"relationship_claim_ids": []string{"C-001"}, "capability_claim_ids": []string{},
 					"economic_exposure": exposure, "why_research": "Economic exposure needs verification.",
-					"largest_unknown": "Economic impact", "next_check": "Verify commercial evidence.",
+					"exposure_signals": []any{},
+					"largest_unknown":  "Economic impact", "next_check": "Verify commercial evidence.",
+				}},
+				"conclusion": "The company needs more research.",
+			}), workspace)
+
+			require.NoError(t, invokeErr)
+			assert.False(t, response.Accepted)
+			assert.Contains(t, issueCodes(response), tt.code)
+		})
+	}
+}
+
+func TestCompanyPrioritiesRejectInvalidExposureSignals(t *testing.T) {
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "submit_company_priorities"))
+	require.NoError(t, err)
+	workspace, claimsPath, _ := finalizedClaimCardFixture(t, "company-exposure-signals")
+	supplyChainPath := writeCompanyMappingSupplyChain(t, workspace)
+
+	tests := []struct {
+		name   string
+		signal map[string]any
+		code   string
+	}{
+		{name: "unsupported scope", signal: map[string]any{"scope": "factory", "subject": "Plant", "metric": "capacity", "value": "10", "as_of": "2025", "evidence_directness": "confirmed", "claim_ids": []string{"C-001"}}, code: "exposure_signal"},
+		{name: "required field", signal: map[string]any{"scope": "company", "subject": "", "metric": "revenue", "value": "10", "as_of": "2025", "evidence_directness": "confirmed", "claim_ids": []string{"C-001"}}, code: "required"},
+		{name: "claim required", signal: map[string]any{"scope": "modality", "subject": "RNA vaccines", "metric": "share_of_revenue", "value": "11%", "as_of": "2025", "evidence_directness": "confirmed", "claim_ids": []string{}}, code: "exposure_signal"},
+		{name: "claim status must match", signal: map[string]any{"scope": "named_program", "subject": "Program X", "metric": "order_value", "value": "$10m", "as_of": "2025", "evidence_directness": "inferred", "claim_ids": []string{"C-001"}}, code: "exposure_signal"},
+		{name: "claim must exist", signal: map[string]any{"scope": "target_branch", "subject": "DDR5", "metric": "revenue", "value": "$10m", "as_of": "2025", "evidence_directness": "confirmed", "claim_ids": []string{"MISSING"}}, code: "claim_id"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+				"workspace_dir": workspace, "_r42_artifact_path": filepath.Join(workspace, "company-priorities.json"),
+				"supply_chain_path": supplyChainPath, "target_node_id": "node-osat", "claim_paths": []string{claimsPath},
+				"companies": []any{map[string]any{
+					"company": "Supplier A", "ticker": "000001", "market": "a-share",
+					"role": "existing_supplier", "research_priority": "B",
+					"relationship_claim_ids": []string{"C-001"}, "capability_claim_ids": []string{},
+					"economic_exposure": unknownEconomicExposure(), "exposure_signals": []any{tt.signal},
+					"why_research": "Economic exposure needs verification.", "largest_unknown": "Economic impact",
+					"next_check": "Verify commercial evidence.",
 				}},
 				"conclusion": "The company needs more research.",
 			}), workspace)
@@ -651,6 +861,22 @@ func unknownEconomicExposure() map[string]any {
 	}
 }
 
+func writeCompanyMappingSupplyChain(t *testing.T, workspace string) string {
+	t.Helper()
+
+	path := filepath.Join(workspace, "supply-chain.json")
+	require.NoError(t, writeJSON(path, map[string]any{
+		"artifact_kind": "r42_supply_chain",
+		"nodes": []any{map[string]any{
+			"id": "node-osat", "name": "Packaging services", "kind": "service",
+		}},
+		"company_mapping_targets": []any{map[string]any{
+			"node_id": "node-osat", "node_name": "Packaging services", "why_map": "Investigate public suppliers.",
+		}},
+	}))
+	return path
+}
+
 func TestCompanyPrioritiesReturnOnlyCurrentTaskClaims(t *testing.T) {
 	compiler, err := gotool.NewCompiler()
 	require.NoError(t, err)
@@ -671,18 +897,16 @@ func TestCompanyPrioritiesReturnOnlyCurrentTaskClaims(t *testing.T) {
 		"artifact_kind": "r42_claim_cards",
 		"claims":        []any{map[string]any{"id": "TASK-001", "status": "reported"}},
 	}))
-	nodePath := filepath.Join(workspace, "node-assessment.json")
-	require.NoError(t, writeJSON(nodePath, map[string]any{
-		"node_id": "node-osat", "node_name": "Packaging services", "conclusion": "candidate",
-	}))
+	supplyChainPath := writeCompanyMappingSupplyChain(t, workspace)
 
 	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
-		"workspace_dir":        workspace,
-		"_r42_artifact_path":   filepath.Join(workspace, "company-priorities.json"),
-		"node_assessment_path": nodePath,
-		"claim_paths":          []string{upstreamClaimsPath, taskClaimsPath},
-		"companies":            []any{},
-		"conclusion":           "No public company merits follow-up research.",
+		"workspace_dir":      workspace,
+		"_r42_artifact_path": filepath.Join(workspace, "company-priorities.json"),
+		"supply_chain_path":  supplyChainPath,
+		"target_node_id":     "node-osat",
+		"claim_paths":        []string{upstreamClaimsPath, taskClaimsPath},
+		"companies":          []any{},
+		"conclusion":         "No public company merits follow-up research.",
 	}), workspace)
 
 	require.NoError(t, err)
@@ -697,12 +921,13 @@ func TestCompanyPrioritiesReturnOnlyCurrentTaskClaims(t *testing.T) {
 	assert.Equal(t, "TASK-001", output.Claims[0].ID)
 
 	rejected, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
-		"workspace_dir":        workspace,
-		"_r42_artifact_path":   filepath.Join(workspace, "company-priorities.json"),
-		"node_assessment_path": nodePath,
-		"claim_paths":          []string{upstreamClaimsPath},
-		"companies":            []any{},
-		"conclusion":           "No public company merits follow-up research.",
+		"workspace_dir":      workspace,
+		"_r42_artifact_path": filepath.Join(workspace, "company-priorities.json"),
+		"supply_chain_path":  supplyChainPath,
+		"target_node_id":     "node-osat",
+		"claim_paths":        []string{upstreamClaimsPath},
+		"companies":          []any{},
+		"conclusion":         "No public company merits follow-up research.",
 	}), workspace)
 	require.NoError(t, err)
 	assert.False(t, rejected.Accepted)

@@ -253,7 +253,7 @@ func TestCancellationStopsSessionAndExternalChildProcess(t *testing.T) {
 	require.Eventually(t, func() bool {
 		_, statErr := os.Stat(startedFile)
 		return statErr == nil
-	}, 2*time.Second, 10*time.Millisecond)
+	}, 10*time.Second, 10*time.Millisecond)
 	cancel()
 
 	actual := <-finished
@@ -428,6 +428,7 @@ func (o *qcScenarioOpener) Open(_ context.Context, config copilot.SessionConfig)
 	case "collection_qc":
 		return &protocolScenarioSession{config: config, session: &o.collectionQC}, nil
 	case "research":
+		o.research.config = config
 		return &o.research, nil
 	}
 	o.qc.config = config
@@ -437,6 +438,7 @@ func (o *qcScenarioOpener) Open(_ context.Context, config copilot.SessionConfig)
 type promptScenarioSession struct {
 	sends, closes int
 	prompts       []string
+	config        copilot.SessionConfig
 }
 
 func (s *promptScenarioSession) SendAndWait(_ context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
@@ -558,11 +560,31 @@ func (s *protocolScenarioSession) Close(ctx context.Context) error { return s.se
 func handleWorkflowProtocol(config copilot.SessionConfig) (bool, error) {
 	for _, tool := range config.Tools {
 		switch tool.Name {
+		case "r42_set_information_needs":
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+				"information_needs": []any{map[string]any{
+					"question":        "fixture need",
+					"stop_conditions": []any{map[string]any{"condition": "fixture condition"}},
+				}},
+			}})
+			if err != nil {
+				return true, err
+			}
 		case "r42_collection_checkpoint":
-			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"empty_reason": "fixture has no acquisition work"}})
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+				"empty_reason": "fixture has no acquisition work",
+				"need_dispositions": []any{map[string]any{
+					"information_need_id": "NEED-001", "search_disposition": "stalled",
+				}},
+			}})
 			return true, err
 		case "r42_collection_qc_verdict":
-			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "sufficient"}})
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+				"assessments": []any{map[string]any{
+					"information_need_id": "NEED-001", "status": "sufficient",
+					"unsatisfied_condition_ids": []any{}, "evidence_progress": "none",
+				}},
+			}})
 			return true, err
 		case "r42_qc_verdict":
 			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "pass"}})

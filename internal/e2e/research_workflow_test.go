@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestStaticResearchWorkflowCoversBatchNeedsMoreReopenAndRevision(t *testing.T) {
+func TestStaticResearchWorkflowCoversBatchNeedsMoreAndRevision(t *testing.T) {
 	t.Parallel()
 
 	directory := t.TempDir()
@@ -39,13 +39,13 @@ research "static" "source" {
 	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
-	assert.Equal(t, 3, opener.collectionRounds)
-	assert.Equal(t, 3, opener.collectionQCRounds)
-	assert.Equal(t, 3, opener.researchRounds)
-	assert.Equal(t, 3, opener.finalQCRounds)
+	assert.Equal(t, 2, opener.collectionRounds)
+	assert.Equal(t, 2, opener.collectionQCRounds)
+	assert.Equal(t, 2, opener.researchRounds)
+	assert.Equal(t, 2, opener.finalQCRounds)
 }
 
-func TestFinalQCExhaustedReopenIsRepairable(t *testing.T) {
+func TestFinalQCRejectsReopenCollection(t *testing.T) {
 	t.Parallel()
 
 	directory := t.TempDir()
@@ -57,7 +57,7 @@ research "static" "source" {
   qc { criteria = { accuracy = "accurate" } }
 }
 `), 0o600))
-	opener := &exhaustedReopenOpener{}
+	opener := &reopenRejectionOpener{}
 	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
 	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
@@ -65,7 +65,7 @@ research "static" "source" {
 	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
-	assert.Contains(t, opener.rejection, "collection_round_budget_exhausted")
+	assert.Contains(t, opener.rejection, "unsupported final qc decision")
 	assert.Equal(t, 2, opener.finalSends)
 }
 
@@ -115,6 +115,15 @@ func (s *workflowScenarioSession) SendAndWait(_ context.Context, options sdk.Mes
 	case "collection":
 		s.opener.collectionRounds++
 		if s.opener.collectionRounds == 1 {
+			_, err := findTool(s.config.Tools, "r42_set_information_needs").Handler(sdk.ToolInvocation{Arguments: map[string]any{
+				"information_needs": []any{map[string]any{
+					"question":        "Investigate the topic",
+					"stop_conditions": []any{map[string]any{"condition": "evidence is sufficient"}},
+				}},
+			}})
+			if err != nil {
+				return &sdk.SessionEvent{}, err
+			}
 			for index := range 10 {
 				path := filepath.Join(s.config.WorkingDirectory, fmt.Sprintf("source-%d.txt", index))
 				if err := os.WriteFile(path, fmt.Appendf(nil, "evidence-%d", index), 0o600); err != nil {
@@ -124,17 +133,35 @@ func (s *workflowScenarioSession) SendAndWait(_ context.Context, options sdk.Mes
 					return nil, err
 				}
 			}
-			_, err := findTool(s.config.Tools, "r42_collection_checkpoint").Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+			_, err = findTool(s.config.Tools, "r42_collection_checkpoint").Handler(sdk.ToolInvocation{Arguments: map[string]any{
+				"need_dispositions": []any{map[string]any{
+					"information_need_id": "NEED-001", "search_disposition": "continue",
+				}},
+			}})
 			return &sdk.SessionEvent{}, err
 		}
-		_, err := findTool(s.config.Tools, "r42_collection_checkpoint").Handler(sdk.ToolInvocation{Arguments: map[string]any{"empty_reason": "no additional source required by fixture"}})
+		_, err := findTool(s.config.Tools, "r42_collection_checkpoint").Handler(sdk.ToolInvocation{Arguments: map[string]any{
+			"empty_reason": "no additional source required by fixture",
+			"need_dispositions": []any{map[string]any{
+				"information_need_id": "NEED-001", "search_disposition": "continue",
+			}},
+		}})
 		return &sdk.SessionEvent{}, err
 	case "collection_qc":
 		s.opener.collectionQCRounds++
-		decision := "sufficient"
-		arguments := map[string]any{"decision": decision}
+		arguments := map[string]any{
+			"assessments": []any{map[string]any{
+				"information_need_id": "NEED-001", "status": "sufficient",
+				"unsatisfied_condition_ids": []any{}, "evidence_progress": "none",
+			}},
+		}
 		if s.opener.collectionQCRounds == 1 {
-			arguments = map[string]any{"decision": "needs_more", "issues": []any{map[string]any{"code": "coverage", "message": "add another perspective"}}}
+			arguments = map[string]any{
+				"assessments": []any{map[string]any{
+					"information_need_id": "NEED-001", "status": "needs_more",
+					"unsatisfied_condition_ids": []any{"NEED-001-SC-001"}, "evidence_progress": "none",
+				}},
+			}
 		}
 		_, err := findTool(s.config.Tools, "r42_collection_qc_verdict").Handler(sdk.ToolInvocation{Arguments: arguments})
 		return &sdk.SessionEvent{}, err
@@ -142,16 +169,21 @@ func (s *workflowScenarioSession) SendAndWait(_ context.Context, options sdk.Mes
 		s.opener.finalQCRounds++
 		arguments := map[string]any{"decision": "pass"}
 		if s.opener.finalQCRounds == 1 {
-			arguments = decisionArguments("reopen_collection", "coverage")
+			arguments = map[string]any{
+				"decision": "revise_research",
+				"issues": []any{
+					map[string]any{"code": "coverage", "message": "coverage"},
+					map[string]any{"code": "accuracy", "message": "accuracy"},
+				},
+			}
 		}
 		if s.opener.finalQCRounds == 2 {
-			arguments = decisionArguments("revise_research", "accuracy")
+			arguments = map[string]any{"decision": "pass"}
 		}
 		_, err := findTool(s.config.Tools, "r42_qc_verdict").Handler(sdk.ToolInvocation{Arguments: arguments})
 		return &sdk.SessionEvent{}, err
 	default:
 		s.opener.researchRounds++
-		_ = options
 		return &sdk.SessionEvent{}, nil
 	}
 }
@@ -162,22 +194,22 @@ func decisionArguments(decision, code string) map[string]any {
 	return map[string]any{"decision": decision, "issues": []any{map[string]any{"code": code, "message": code}}}
 }
 
-type exhaustedReopenOpener struct {
+type reopenRejectionOpener struct {
 	mu         sync.Mutex
 	finalSends int
 	rejection  string
 }
 
-func (o *exhaustedReopenOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
-	return &exhaustedReopenSession{opener: o, config: config}, nil
+func (o *reopenRejectionOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
+	return &reopenRejectionSession{opener: o, config: config}, nil
 }
 
-type exhaustedReopenSession struct {
-	opener *exhaustedReopenOpener
+type reopenRejectionSession struct {
+	opener *reopenRejectionOpener
 	config copilot.SessionConfig
 }
 
-func (s *exhaustedReopenSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
+func (s *reopenRejectionSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
 	if workflowSessionKind(s.config) != "final_qc" {
 		if handled, err := handleWorkflowProtocol(s.config); handled {
 			return &sdk.SessionEvent{}, err
@@ -198,7 +230,7 @@ func (s *exhaustedReopenSession) SendAndWait(context.Context, sdk.MessageOptions
 	return &sdk.SessionEvent{}, err
 }
 
-func (*exhaustedReopenSession) Close(context.Context) error { return nil }
+func (*reopenRejectionSession) Close(context.Context) error { return nil }
 
 type isolatedRegistryOpener struct {
 	mu       sync.Mutex
@@ -222,10 +254,23 @@ func (s *isolatedRegistrySession) SendAndWait(_ context.Context, options sdk.Mes
 		if err := os.WriteFile(path, []byte(name), 0o600); err != nil {
 			return nil, err
 		}
+		_, err := findTool(s.config.Tools, "r42_set_information_needs").Handler(sdk.ToolInvocation{Arguments: map[string]any{
+			"information_needs": []any{map[string]any{
+				"question":        "fixture need",
+				"stop_conditions": []any{map[string]any{"condition": "fixture condition"}},
+			}},
+		}})
+		if err != nil {
+			return nil, err
+		}
 		if _, err := findTool(s.config.Tools, "r42_register_artifact").Handler(sdk.ToolInvocation{Arguments: map[string]any{"path": path}}); err != nil {
 			return nil, err
 		}
-		_, err := findTool(s.config.Tools, "r42_collection_checkpoint").Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+		_, err = findTool(s.config.Tools, "r42_collection_checkpoint").Handler(sdk.ToolInvocation{Arguments: map[string]any{
+			"need_dispositions": []any{map[string]any{
+				"information_need_id": "NEED-001", "search_disposition": "continue",
+			}},
+		}})
 		return &sdk.SessionEvent{}, err
 	case "collection_qc":
 		result, err := findTool(s.config.Tools, "r42_list_artifacts").Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
@@ -244,7 +289,12 @@ func (s *isolatedRegistrySession) SendAndWait(_ context.Context, options sdk.Mes
 		s.opener.mu.Lock()
 		s.opener.reviewed++
 		s.opener.mu.Unlock()
-		_, err = findTool(s.config.Tools, "r42_collection_qc_verdict").Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "sufficient"}})
+		_, err = findTool(s.config.Tools, "r42_collection_qc_verdict").Handler(sdk.ToolInvocation{Arguments: map[string]any{
+			"assessments": []any{map[string]any{
+				"information_need_id": "NEED-001", "status": "sufficient",
+				"unsatisfied_condition_ids": []any{}, "evidence_progress": "material",
+			}},
+		}})
 		return &sdk.SessionEvent{}, err
 	default:
 		return &sdk.SessionEvent{}, nil

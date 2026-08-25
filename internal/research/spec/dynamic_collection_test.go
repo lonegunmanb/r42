@@ -97,7 +97,8 @@ func TestDecodeDynamicTaskCollectionDefaults(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, researchspec.DefaultCollectionBatchSize, config.CollectionBatchSize)
-	assert.Nil(t, config.MaxCollectionRounds)
+	require.NotNil(t, config.MaxCollectionRounds)
+	assert.Equal(t, researchspec.DefaultMaxCollectionRounds, *config.MaxCollectionRounds)
 	assert.Nil(t, config.CollectionQC)
 }
 

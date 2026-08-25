@@ -1062,7 +1062,8 @@ research "static" "market" {
 
 	require.NoError(t, err)
 	assert.Equal(t, researchspec.DefaultCollectionBatchSize, reconstructed.Config.CollectionBatchSize)
-	assert.Nil(t, reconstructed.Config.MaxCollectionRounds)
+	require.NotNil(t, reconstructed.Config.MaxCollectionRounds)
+	assert.Equal(t, researchspec.DefaultMaxCollectionRounds, *reconstructed.Config.MaxCollectionRounds)
 	assert.Nil(t, reconstructed.Config.CollectionQC)
 }
 
@@ -1227,7 +1228,8 @@ func TestDecodeResearchPlanDefaultsLegacyProfileToModel(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "legacy-model", planned.Config.Profile)
 	assert.Equal(t, researchspec.DefaultCollectionBatchSize, planned.Config.CollectionBatchSize)
-	assert.Nil(t, planned.Config.MaxCollectionRounds)
+	require.NotNil(t, planned.Config.MaxCollectionRounds)
+	assert.Equal(t, researchspec.DefaultMaxCollectionRounds, *planned.Config.MaxCollectionRounds)
 	assert.Nil(t, planned.Config.CollectionQC)
 }
 

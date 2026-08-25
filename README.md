@@ -477,7 +477,7 @@ that depend on its successful completion are not run.
 | `skills` | No | Skills eagerly loaded only during Research. Names come from `SKILL.md` frontmatter or the skill directory name. |
 | `disabled_skills` | No | Skills disabled only during Research. |
 | `collection_batch_size` | No | Number of newly registered unique snapshots that triggers `checkpoint_pending`. Defaults to `10`. |
-| `max_collection_rounds` | No | Maximum acquisition rounds, including the initial Collection phase. Omission means unlimited. |
+| `max_collection_rounds` | No | Maximum acquisition rounds, including the initial Collection phase. Defaults to `10`. |
 | `permission` | No | Tool permission policy. The current supported value and default is `approve_all`, which approves each otherwise valid tool request. |
 | `max_protocol_attempts` | No | Maximum repair budget for rejected terminal calls or completed turns that omit the required terminal call. Defaults to `10`; a new QC revision round resets the budget. |
 | `timeout` | No | Per-block deadline expressed as a Go duration such as `30m` or `2h`. It is bounded by the CLI and ancestor-module deadlines. |
@@ -488,14 +488,36 @@ filters. The mandatory registration, checkpoint, terminal, and verdict tools
 cannot be disabled.
 
 Every research block now starts in Collection, even when
-`collection_tool_ids` is empty. Collection registers useful material through
-`r42_register_artifact`, either from a workspace file path or from the retained
-result of a configured typed tool call, and ends each round through
-`r42_collection_checkpoint`. A checkpoint always contains every newly
-registered evidence artifact; an empty checkpoint must explain why no new evidence is
-needed. After `collection_batch_size` unique registrations, new acquisition
-calls pause until the checkpoint is submitted, while in-flight completion,
-registration, and checkpoint calls remain available.
+`collection_tool_ids` is empty. Before any collection or artifact-writing tool
+call, Collection must call `r42_set_information_needs` once to freeze the
+complete search plan: 1-10 information needs, each with 1-5 objective stop
+conditions. R42 assigns canonical IDs such as `NEED-001` and
+`NEED-001-SC-001`. The plan is permanently frozen after submission: later
+rounds may not add, edit, rename, delete, or split needs or conditions.
+
+Collection registers useful material through `r42_register_artifact`, either
+from a workspace file path or from the retained result of a configured typed
+tool call, and ends each round through `r42_collection_checkpoint`. Each
+Collection round must call `r42_collection_checkpoint` exactly once with one
+`continue` or `stalled` disposition for every active need; it is the final
+valid tool call of the round. `stalled` means Collection made a genuine search
+effort for that need and found no productive next search action. A checkpoint
+always contains every newly registered evidence artifact; an empty checkpoint
+must explain why no new evidence is needed. After `collection_batch_size`
+unique registrations, new acquisition calls pause until the checkpoint is
+submitted, while in-flight completion, registration, and checkpoint calls
+remain available.
+
+After the checkpoint is accepted, Collection's non-read-only tools lock and
+Collection QC runs. Collection QC assesses each active need against its frozen
+stop-condition IDs and returns `sufficient` or `needs_more` with the remaining
+unsatisfied condition IDs. Remaining IDs may only shrink between rounds; a
+satisfied condition is never reopened. A need becomes terminal as
+`search_stalled` after two consecutive rounds with no evidence progress, or as
+`budget_exhausted` when `max_collection_rounds` is reached. Terminal needs are
+frozen and never reopened. Once every need is terminal, closed Research begins
+with the full `information_need_outcomes`; unresolved needs must be represented
+as uncertainty, never as proven absence.
 
 By default, Collection, Collection QC, closed Research, and Final QC all reuse
 the research block's `model_provider`. Collection can override it with
@@ -675,9 +697,9 @@ authorized directories, is enforced by every read operation.
 | `r42_write_markdown` | Collection and Research | Write content to a declared file artifact using `artifact_id`; it does not accept a path or artifact name. |
 | `r42_save_artifact` | Collection | Save Markdown source material, add its `source` header, register it, and return `path` plus `artifact_id`. The source can be a URL or any non-empty identifier. |
 | `r42_register_artifact` | Collection | Register an existing workspace file or retained typed-tool result; optional `source` and `description` can supply missing metadata. Do not call it after `r42_save_artifact`. |
-| `r42_collection_checkpoint` | Collection | Submit newly registered evidence to Collection QC, or report that collection is exhausted. |
-| `r42_collection_qc_verdict` | Collection QC | Return `sufficient` or `needs_more` with semantic QC issues. |
-| `r42_qc_verdict` | Final QC, when configured | Return `pass`, `revise_research`, or `reopen_collection` with semantic QC issues. |
+| `r42_collection_checkpoint` | Collection | Submit newly registered evidence and one continue/stalled disposition for every active need to Collection QC. |
+| `r42_collection_qc_verdict` | Collection QC | Assess each active need as `sufficient` or `needs_more` with only remaining unsatisfied condition IDs. |
+| `r42_qc_verdict` | Final QC, when configured | Return `pass` or `revise_research` with semantic QC issues. |
 
 Collection is the only open-world phase: it can acquire evidence through the
 configured collection tools and save/register it. Collection QC, Research, and
@@ -704,12 +726,15 @@ default sufficiency criterion.
 | `retry` | No | One retry block layered over the selected Collection-QC provider policy and then the research-level retry override. |
 
 Collection QC can list and read registered evidence artifacts but cannot acquire or
-modify evidence. It reviews the current checkpoint plus prior issues and calls
-`r42_collection_qc_verdict` with either `sufficient` and no issues, or
-`needs_more` and at least one concrete issue. A valid verdict advances the
-reviewed cursor. `needs_more` starts another Collection round when budget
-remains; when the configured limit is exhausted, the unresolved issues are
-carried into closed Research instead.
+modify evidence. It reviews the current checkpoint and every active need's
+frozen stop-condition IDs and calls `r42_collection_qc_verdict` with one
+per-need assessment: `sufficient` lists no unsatisfied conditions, or
+`needs_more` lists the remaining IDs. Remaining condition IDs may only shrink
+between rounds; a satisfied condition is never reopened. A valid verdict
+advances the reviewed cursor. `needs_more` starts another Collection round when
+budget remains; when the configured limit is exhausted, the remaining needs
+become `budget_exhausted` and the full outcomes are carried into closed
+Research instead.
 
 ### `qc` (Final QC)
 
@@ -763,12 +788,17 @@ below reach QC in this form:
 The map does not create three QC sessions or three independently executed
 checks. One Final QC session receives the whole map and assesses every entry
 before calling the mandatory `r42_qc_verdict` typed tool. It returns one of
-three decisions:
+two decisions:
 
 - `pass`: no issues; complete the block.
 - `revise_research`: one or more issues; revise from existing snapshots.
-- `reopen_collection`: one or more evidence gaps; acquire another snapshot
-  batch before Research runs again.
+
+Final QC can never reopen Collection or adjudicate whether information needs
+have sufficient coverage. Collection QC owns that decision, and the complete
+`information_need_outcomes` are passed only to Research. Final QC reviews only
+claims actually present in the candidate; when one exceeds or misrepresents its
+cited evidence, it may return the candidate so Research deletes or narrows that
+claim. It cannot reject missing claims or demand additional evidence.
 
 For example:
 
@@ -797,19 +827,11 @@ are optional.
 
 r42 validates every non-pass verdict contains at least one issue and every
 issue has a non-empty `code` and `message`. `revise_research` sends those issues
-to the persistent closed Research session. `reopen_collection` first checks the
-shared Collection round budget. If a round remains, it returns to the persistent
-Collection session; that acquisition round alone increments the count, and the
-new checkpoint passes through Collection QC and Research before Final QC runs
-again.
-
-If `max_collection_rounds` is exhausted, the verdict tool returns an accepted
-protocol response containing the repairable
-`collection_round_budget_exhausted` issue. Final QC stays active and must choose
-`revise_research` or `pass` using existing snapshots. A rejected reopen does not
-consume a Collection round. If a non-pass decision arrives on the
-`max_qc_rounds` evaluation, r42 starts no unreviewable follow-up work and fails
-the block with `final qc rounds exhausted`.
+to the persistent closed Research session so an unsupported existing claim can
+be deleted or narrowed. Final QC cannot reject absent coverage, reopen
+Collection, or request additional evidence. If a non-pass decision arrives on
+the `max_qc_rounds` evaluation, r42 starts no unreviewable follow-up work and
+fails the block with `final qc rounds exhausted`.
 
 The following example asks closed Research to write an exchange-rate report and
 gives Final QC three explicit checks:
@@ -828,8 +850,8 @@ research "static" "exchange_rate" {
     URLs.
   EOT
 
-  collection_batch_size = 10
-  # max_collection_rounds is omitted, so Collection may reopen without a limit.
+	collection_batch_size = 10
+	# max_collection_rounds is omitted, so Collection uses the default 10-round cap.
 
   collection_qc {
     criteria = {

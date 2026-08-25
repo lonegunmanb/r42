@@ -50,6 +50,57 @@ research "static" "source" {
 	assert.Equal(t, 1, opener.qc.closeCalls)
 }
 
+func TestProductionRuntimeExposesCollectionQCCriteriaBeforePlan(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+research "static" "source" {
+  model = "test-model"
+  system_prompt = "Collect evidence."
+  collection_qc {
+    criteria = { primary_sources = "Use primary sources for every stop condition." }
+  }
+}
+`), 0o600))
+	opener := &qcOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+
+	require.NoError(t, err)
+	require.NotEmpty(t, opener.configs)
+	assert.Contains(t, opener.configs[0].SystemPrompt, "Collection QC evidence-quality criteria")
+	assert.Contains(t, opener.configs[0].SystemPrompt, "primary_sources")
+	assert.Contains(t, opener.configs[0].SystemPrompt, "Use primary sources for every stop condition.")
+}
+
+func TestProductionRuntimeKeepsFinalQCIssueTrackingOutOfResearchTools(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+research "static" "source" {
+  model = "test-model"
+  system_prompt = "Collect evidence."
+  qc { criteria = { accuracy = "Must be accurate" } }
+}
+`), 0o600))
+	opener := &qcOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+
+	require.NoError(t, err)
+	require.Len(t, opener.configs, 4)
+	assert.NotContains(t, toolNamesFromConfig(opener.configs[2]), "r42_report_qc_issue_resolutions")
+	assert.Contains(t, opener.configs[2].SystemPrompt, "Final QC may return this block to Research multiple times")
+	assert.Contains(t, opener.configs[2].SystemPrompt, "accepted terminal call completes only the current Research pass")
+}
+
 func TestProductionRuntimeReusesResearchProviderAcrossWorkflowSessions(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
@@ -143,6 +194,14 @@ research "static" "source" {
 	assert.Equal(t, 13, opener.configs[1].Retry.LifecycleRetries)
 	assert.Equal(t, 11, opener.configs[2].Retry.LifecycleRetries)
 	assert.Equal(t, 14, opener.configs[3].Retry.LifecycleRetries)
+	assert.Contains(t, opener.configs[3].SystemPrompt, "exhaustive audit")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "every configured criterion")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "all independent issues")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "do not stop after the first issue")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "Repeat the full audit after every revision")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "must not judge whether evidence coverage is sufficient")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "claims actually present in the candidate")
+	assert.NotContains(t, opener.configs[3].SystemPrompt, "if evidence is insufficient")
 }
 
 func TestProductionRuntimeAppliesResearchTimeoutAcrossQC(t *testing.T) {
@@ -236,8 +295,37 @@ research "static" "source" {
 	require.Len(t, opener.research.prompts, 2)
 	assert.Contains(t, opener.research.prompts[1], "add a citation")
 	assert.Equal(t, 2, opener.qc.sendCalls)
+	require.Len(t, opener.qc.prompts, 2)
+	assert.Contains(t, opener.qc.prompts[1], `"open_issues"`)
+	assert.Contains(t, opener.qc.prompts[1], `"message":"add a citation"`)
 	assert.Equal(t, 1, opener.research.closeCalls)
 	assert.Equal(t, 1, opener.qc.closeCalls)
+}
+
+func TestProductionRuntimeAllowsFinalQCToReportNewIssueAfterRevision(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+research "static" "source" {
+  model = "test-model"
+  system_prompt = "Collect evidence."
+  qc { criteria = { accuracy = "Must be accurate" } }
+}
+`), 0o600))
+	opener := &changingIssueQCOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+
+	require.NoError(t, err)
+	assert.Equal(t, 3, opener.research.sendCalls)
+	require.Len(t, opener.research.prompts, 3)
+	assert.Contains(t, opener.research.prompts[1], "add a citation")
+	assert.Contains(t, opener.research.prompts[2], "correct the changed total")
+	assert.Equal(t, 3, opener.qc.sendCalls)
 }
 
 type qcOpener struct {
@@ -353,6 +441,13 @@ type revisionQCOpener struct {
 	qc           revisionQCSession
 }
 
+type changingIssueQCOpener struct {
+	collection   countingSession
+	collectionQC countingSession
+	research     promptSession
+	qc           changingIssueQCSession
+}
+
 func (o *revisionQCOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
 	switch workflowSessionKind(config) {
 	case "collection":
@@ -360,6 +455,21 @@ func (o *revisionQCOpener) Open(_ context.Context, config copilot.SessionConfig)
 	case "collection_qc":
 		return &protocolFixtureSession{config: config, session: &o.collectionQC}, nil
 	case "research":
+		o.research.config = config
+		return &o.research, nil
+	}
+	o.qc.config = config
+	return &o.qc, nil
+}
+
+func (o *changingIssueQCOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
+	switch workflowSessionKind(config) {
+	case "collection":
+		return &protocolFixtureSession{config: config, session: &o.collection}, nil
+	case "collection_qc":
+		return &protocolFixtureSession{config: config, session: &o.collectionQC}, nil
+	case "research":
+		o.research.config = config
 		return &o.research, nil
 	}
 	o.qc.config = config
@@ -377,31 +487,68 @@ func toolNamesFromConfig(config copilot.SessionConfig) []string {
 type promptSession struct {
 	countingSession
 	prompts []string
+	config  copilot.SessionConfig
 }
 
 func (s *promptSession) SendAndWait(_ context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
 	s.mu.Lock()
 	s.sendCalls++
+	call := s.sendCalls
 	s.prompts = append(s.prompts, options.Prompt)
 	s.mu.Unlock()
+	_ = call
 	return &sdk.SessionEvent{}, nil
 }
 
 type revisionQCSession struct {
 	countingSession
+	config  copilot.SessionConfig
+	prompts []string
+}
+
+type changingIssueQCSession struct {
+	countingSession
 	config copilot.SessionConfig
 }
 
-func (s *revisionQCSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
+func (s *revisionQCSession) SendAndWait(_ context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
 	s.mu.Lock()
 	s.sendCalls++
 	call := s.sendCalls
+	s.prompts = append(s.prompts, options.Prompt)
 	s.mu.Unlock()
 	arguments := map[string]any{"decision": "pass"}
 	if call == 1 {
 		arguments = map[string]any{
 			"decision": "revise_research",
 			"issues":   []any{map[string]any{"code": "missing_source", "message": "add a citation"}},
+		}
+	}
+	for _, tool := range s.config.Tools {
+		if tool.Name == "r42_qc_verdict" {
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: arguments})
+			return &sdk.SessionEvent{}, err
+		}
+	}
+	return nil, assert.AnError
+}
+
+func (s *changingIssueQCSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	s.mu.Lock()
+	s.sendCalls++
+	call := s.sendCalls
+	s.mu.Unlock()
+	arguments := map[string]any{"decision": "pass"}
+	switch call {
+	case 1:
+		arguments = map[string]any{
+			"decision": "revise_research",
+			"issues":   []any{map[string]any{"code": "citation", "message": "add a citation"}},
+		}
+	case 2:
+		arguments = map[string]any{
+			"decision": "revise_research",
+			"issues":   []any{map[string]any{"code": "accuracy", "message": "correct the changed total"}},
 		}
 	}
 	for _, tool := range s.config.Tools {

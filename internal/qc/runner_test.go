@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	sdk "github.com/github/copilot-sdk/go"
@@ -58,6 +59,38 @@ func TestRunnerPassesCandidateWithIsolatedQCContext(t *testing.T) {
 	assert.Contains(t, session.prompts[0], "D:/work/report.md")
 }
 
+func TestRunnerInjectsOpenIssuesIntoFollowUpQCContext(t *testing.T) {
+	t.Parallel()
+
+	verdicts := qc.NewVerdictRecorder()
+	session := &fakeSession{onSend: func(_ int, _ string) error {
+		return verdicts.Record(qc.Verdict{Decision: qc.DecisionPass})
+	}}
+	runner := qc.NewRunner(&fakeResearch{results: []researchruntime.Result{{}}}, session, verdicts)
+	config := validConfig()
+	config.OpenIssues = []corespec.Issue{{
+		Code: "entailment", Message: "claim exceeds its source",
+	}}
+
+	_, err := runner.Run(t.Context(), config)
+
+	require.NoError(t, err)
+	require.Len(t, session.prompts, 1)
+	var document struct {
+		OpenIssues []corespec.Issue `json:"open_issues"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(session.prompts[0]), &document))
+	assert.Equal(t, config.OpenIssues, document.OpenIssues)
+}
+
+func TestConfigExcludesCollectionInformationNeedOutcomes(t *testing.T) {
+	t.Parallel()
+
+	_, exposed := reflect.TypeFor[qc.Config]().FieldByName("InformationNeedOutcomes")
+
+	assert.False(t, exposed, "Final QC must not receive Collection stop-condition outcomes")
+}
+
 func TestRunnerReturnsQCIssuesToResearchThenPassesRevision(t *testing.T) {
 	t.Parallel()
 
@@ -86,6 +119,36 @@ func TestRunnerReturnsQCIssuesToResearchThenPassesRevision(t *testing.T) {
 	require.Len(t, session.prompts, 2)
 	assert.Contains(t, session.prompts[0], "draft")
 	assert.Contains(t, session.prompts[1], "revised")
+}
+
+func TestRunnerCarriesIssuesIntoFollowUpQCContext(t *testing.T) {
+	t.Parallel()
+
+	research := &fakeResearch{results: []researchruntime.Result{{}, {}}}
+	verdicts := qc.NewVerdictRecorder()
+	session := &fakeSession{onSend: func(call int, _ string) error {
+		if call == 1 {
+			return verdicts.Record(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{
+				{Code: "source", Message: "add primary source"},
+				{Code: "entailment", Message: "narrow the claim"},
+			}})
+		}
+		return verdicts.Record(qc.Verdict{Decision: qc.DecisionPass})
+	}}
+	runner := qc.NewRunner(research, session, verdicts)
+
+	_, err := runner.Run(t.Context(), validConfig())
+
+	require.NoError(t, err)
+	require.Len(t, session.prompts, 2)
+	var document struct {
+		OpenIssues []corespec.Issue `json:"open_issues"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(session.prompts[1]), &document))
+	assert.Equal(t, []corespec.Issue{
+		{Code: "source", Message: "add primary source"},
+		{Code: "entailment", Message: "narrow the claim"},
+	}, document.OpenIssues)
 }
 
 func TestRunnerResetsVerdictProtocolBudgetForEachRevision(t *testing.T) {

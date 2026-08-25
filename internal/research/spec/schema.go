@@ -666,7 +666,7 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 		CollectionSkills:           slices.Clone(b.CollectionSkills),
 		CollectionDisabledSkills:   slices.Clone(b.CollectionDisabledSkills),
 		CollectionBatchSize:        DefaultCollectionBatchSize,
-		MaxCollectionRounds:        clonePointer(b.MaxCollectionRounds),
+		MaxCollectionRounds:        defaultMaxCollectionRounds(b.MaxCollectionRounds),
 	}
 	if config.Policy.DisallowedTools == nil {
 		config.Policy.DisallowedTools = []string{"ask_user"}
@@ -914,6 +914,17 @@ func clonePointer[T any](value *T) *T {
 	}
 	result := *value
 	return &result
+}
+
+// defaultMaxCollectionRounds returns the configured hard cap or the default
+// when the block omitted it. The default prevents an unbounded Collection loop
+// while still allowing an explicit positive override.
+func defaultMaxCollectionRounds(configured *int) *int {
+	if configured != nil {
+		return clonePointer(configured)
+	}
+	maximum := DefaultMaxCollectionRounds
+	return &maximum
 }
 
 var artifactValueType = cty.Object(map[string]cty.Type{

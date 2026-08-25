@@ -51,7 +51,9 @@ func TestSynthesizeReceivesExactFinalizedClaimPathsAndClosedInputQC(t *testing.T
 	assert.NotContains(t, synthesize, "claim_paths containing every claim file above")
 	assert.Contains(t, synthesize, "collection_qc {")
 	assert.Contains(t, synthesize, "closed-input synthesis")
-	assert.Contains(t, synthesize, "collection_exhausted=true")
+	assert.Contains(t, synthesize, "r42_set_information_needs")
+	assert.NotContains(t, synthesize, "collection_exhausted=true")
+	assert.NotContains(t, synthesize, "reopen_collection")
 }
 
 func TestGraphTracksUseDynamicTasksForDeferredInputs(t *testing.T) {
@@ -84,6 +86,29 @@ func TestClosedResearchPromptsUseAuthorizedArtifactIDs(t *testing.T) {
 	assert.GreaterOrEqual(t, strings.Count(configuration, "authorized artifact_id"), 3)
 }
 
+func TestPrimaryCoverageBelongsToCollectionQC(t *testing.T) {
+	t.Parallel()
+
+	payload, err := os.ReadFile("main.r42.hcl")
+	require.NoError(t, err)
+	configuration := string(payload)
+	baselineStart := strings.Index(configuration, `research "static" "primary_source_baseline"`)
+	require.NotEqual(t, -1, baselineStart)
+	baselineEnd := strings.Index(configuration[baselineStart+1:], `research "static"`)
+	require.NotEqual(t, -1, baselineEnd)
+	baseline := configuration[baselineStart : baselineStart+1+baselineEnd]
+	collectionQCStart := strings.Index(baseline, "\n  collection_qc {")
+	finalQCStart := strings.Index(baseline, "\n  qc {")
+	require.NotEqual(t, -1, collectionQCStart)
+	require.NotEqual(t, -1, finalQCStart)
+	require.Less(t, collectionQCStart, finalQCStart)
+
+	collectionQC := baseline[collectionQCStart:finalQCStart]
+	finalQC := baseline[finalQCStart:]
+	assert.Contains(t, collectionQC, "primary_coverage")
+	assert.NotContains(t, finalQC, "primary_coverage")
+}
+
 func TestTypedToolDescriptionsPublishAllowedValues(t *testing.T) {
 	t.Parallel()
 
@@ -103,9 +128,11 @@ func TestTypedToolDescriptionsPublishAllowedValues(t *testing.T) {
 		{file: "decision_tools.r42.hcl", tool: "submit_node_assessment", field: "scenarios", allowed: []string{"current_production", "expansion_upgrade", "product_branch"}},
 		{file: "decision_tools.r42.hcl", tool: "submit_supply_chain_map", field: "nodes.kind", allowed: []string{"product", "component", "material", "process", "equipment", "qualification", "service", "system"}},
 		{file: "decision_tools.r42.hcl", tool: "submit_supply_chain_map", field: "edges.relation", allowed: []string{"contains", "supplies", "transformed_into", "assembled_into", "processed_by", "tested_by", "qualified_by", "used_by"}},
-		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.role", allowed: []string{"existing_supplier", "qualified_alternative", "related_product_only", "unverified"}},
-		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.priority", allowed: []string{"A", "B", "C", "do_not_research"}},
+		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.role", allowed: []string{"existing_supplier", "qualified_alternative", "capability_match", "related_product_only", "unverified"}},
+		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.research_priority", allowed: []string{"A", "B", "C", "do_not_research"}},
 		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.economic_exposure.*.evidence_directness", allowed: []string{"none", "confirmed", "reported", "inferred"}},
+		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.exposure_signals.scope", allowed: []string{"company", "segment", "modality", "target_branch", "named_program"}},
+		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.exposure_signals.evidence_directness", allowed: []string{"confirmed", "reported", "inferred"}},
 		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.economic_exposure.customer_validation.status", allowed: []string{"unknown", "evaluation", "qualified", "ordered", "delivering", "production_use"}},
 		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.economic_exposure.revenue_materiality.status", allowed: []string{"unknown", "exposure_unquantified", "quantified_immaterial", "quantified_material"}},
 		{file: "decision_tools.r42.hcl", tool: "submit_company_priorities", field: "companies.economic_exposure.bottleneck_capture.status", allowed: []string{"unknown", "none", "plausible", "demonstrated"}},
@@ -139,7 +166,14 @@ func TestCompanyPriorityToolUseDescribesEconomicExposureInputs(t *testing.T) {
 	companiesBinding := toolUse[:end]
 
 	for _, required := range []string{
+		"role",
+		"capability_match",
+		"relationship_claim_ids",
+		"capability_claim_ids",
+		"research_priority",
 		"economic_exposure",
+		"exposure_signals",
+		"company, segment, modality, target_branch, or named_program",
 		"customer_validation",
 		"revenue_materiality",
 		"bottleneck_capture",
@@ -147,7 +181,7 @@ func TestCompanyPriorityToolUseDescribesEconomicExposureInputs(t *testing.T) {
 		"evidence_directness",
 		"claim_ids",
 		"current task",
-		"assessment.artifact",
+		"build_supply_chain.artifact",
 		"primary_source_baseline.artifact",
 		"graph_track.tasks",
 	} {
@@ -155,6 +189,44 @@ func TestCompanyPriorityToolUseDescribesEconomicExposureInputs(t *testing.T) {
 	}
 	assert.Contains(t, companiesBinding, "unknown")
 	assert.Contains(t, companiesBinding, "submit_claim_cards")
+}
+
+func TestCompanyPrioritiesFanOutFromMappingTargetsWithSupplyChainAuthority(t *testing.T) {
+	t.Parallel()
+
+	payload, err := os.ReadFile("main.r42.hcl")
+	require.NoError(t, err)
+	configuration := string(payload)
+	start := strings.Index(configuration, `research "dynamic" "prioritize_companies"`)
+	require.NotEqual(t, -1, start)
+	end := strings.Index(configuration[start:], `research "static" "synthesize"`)
+	require.NotEqual(t, -1, end)
+	companyResearch := configuration[start : start+end]
+
+	assert.Contains(t, companyResearch, "jsondecode(research.static.build_supply_chain.result).company_mapping_targets")
+	assert.NotContains(t, companyResearch, "research.dynamic.assess_nodes.tasks")
+	assert.Contains(t, companyResearch, "jsonencode(target)")
+	assert.Contains(t, companyResearch, "supply_chain_path")
+	assert.Contains(t, companyResearch, "target_node_id")
+	assert.Contains(t, companyResearch, "research.static.build_supply_chain.artifact.supply_chain.path")
+	assert.Contains(t, companyResearch, "values(research.static.build_supply_chain.artifact)")
+	assert.NotContains(t, companyResearch, "node_assessment_path")
+}
+
+func TestSynthesisMergesDuplicateCompaniesAcrossMappingTargets(t *testing.T) {
+	t.Parallel()
+
+	payload, err := os.ReadFile("main.r42.hcl")
+	require.NoError(t, err)
+	configuration := string(payload)
+	start := strings.Index(configuration, `research "static" "synthesize"`)
+	require.NotEqual(t, -1, start)
+	synthesize := configuration[start:]
+
+	assert.Contains(t, synthesize, "same legal entity and security")
+	assert.Contains(t, synthesize, "mapped nodes")
+	assert.Contains(t, synthesize, "relationship or capability evidence")
+	assert.Contains(t, synthesize, "research priority")
 }
 
 func TestFinalizeReportDescriptionPublishesPathContract(t *testing.T) {
@@ -165,6 +237,22 @@ func TestFinalizeReportDescriptionPublishesPathContract(t *testing.T) {
 	assert.Contains(t, description, "finalized `claims.json`")
 	assert.Contains(t, description, "artifact_kind")
 	assert.Contains(t, description, "r42_claim_cards")
+}
+
+func TestFinalQCPromptsScopeTerminalCallsToEachResearchPass(t *testing.T) {
+	t.Parallel()
+
+	payload, err := os.ReadFile("main.r42.hcl")
+	require.NoError(t, err)
+	configuration := string(payload)
+	assert.NotContains(t, configuration, "Finish once")
+	assert.NotContains(t, configuration, "once; r42 binds")
+	assert.NotContains(t, configuration, "After an accepted finalize, do not call finalize again")
+	assert.GreaterOrEqual(t, strings.Count(configuration, "each Research pass"), 4)
+
+	description := typedToolDescription(t, "decision_tools.r42.hcl", "finalize_claim_cards")
+	assert.Contains(t, description, "current Research pass")
+	assert.Contains(t, description, "later Final QC revision")
 }
 
 func typedToolDescription(t *testing.T, filename, toolName string) string {

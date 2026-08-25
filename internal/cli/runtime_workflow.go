@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -243,6 +244,19 @@ func (f *runtimeFactory) newResearchBlock(
 	if err != nil {
 		return nil, err
 	}
+	collectionQCProvider := phaseProvider(planned.CollectionQCProvider, planned.Provider)
+	collectionQCProviderRetry, err := researchRetry(collectionQCProvider, provider.RetryOverride{})
+	if err != nil {
+		return nil, err
+	}
+	effectiveCollectionQC, err := planned.Config.EffectiveCollectionQC(collectionQCProviderRetry)
+	if err != nil {
+		return nil, err
+	}
+	collectionQCCriteria, err := collectionQCCriteriaPrompt(effectiveCollectionQC.Criteria)
+	if err != nil {
+		return nil, err
+	}
 	if err = collectionContext.BeginWorkflow(); err != nil {
 		return nil, err
 	}
@@ -270,13 +284,15 @@ func (f *runtimeFactory) newResearchBlock(
 	if err != nil {
 		return cleanupSetup(err)
 	}
+	collectionArtifactTools = wrapCollectionMutationTools(collectionArtifactTools, collectionContext)
 	collectionTools = append(collectionTools, collectionArtifactTools...)
 	checkpoints := collection.NewCheckpointRecorder()
 	collectionTools = append(collectionTools, collectionProtocolTools(collectionContext, checkpoints)...)
 	collectionPrompt := appendBuiltInToolCallQuotaPrompt(
-		"You are the Collection phase. Acquire evidence and preserve complete source material. When source content is not already available as a workspace file or retained source-tool result, call r42_save_artifact with a non-empty source identifier; it saves and registers the evidence artifact, so use its returned artifact_id directly and do not call r42_register_artifact afterward. Use r42_register_artifact only for an existing workspace evidence file or retained source-tool result; supply its optional source when that content has no Source or legacy URL header. Call r42_collection_checkpoint before ending the round. If no more evidence can be acquired, submit an empty checkpoint with empty_reason and collection_exhausted=true.\n\n"+planned.Config.SystemPrompt,
+		"You are the Collection phase. Before any collection or artifact-writing tool call, call r42_set_information_needs once to freeze all search directions and objective stop conditions. In every Collection round, make a genuine search effort for every active need. Acquire evidence and preserve complete source material. When source content is not already available as a workspace file or retained source-tool result, call r42_save_artifact with a non-empty source identifier; it saves and registers the evidence artifact, so use its returned artifact_id directly and do not call r42_register_artifact afterward. Use r42_register_artifact only for an existing workspace evidence file or retained source-tool result; supply its optional source when that content has no Source or legacy URL header. End every round by calling r42_collection_checkpoint exactly once. Mark a need stalled only after genuine effort finds no productive next search action.\n\n"+planned.Config.SystemPrompt,
 		collectionBuiltInQuota,
 	)
+	collectionPrompt += "\n\nCollection QC evidence-quality criteria are visible before you freeze the plan. Use them only to define objective evidence quality; they do not add questions, conditions, or search scope:\n" + collectionQCCriteria
 	collectionSession, err := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionCollection, copilot.SessionConfig{
 		Provider: collectionProvider,
 		Retry:    collectionRetry, Model: planned.Config.Model, Profile: planned.Config.ProfileName(),
@@ -287,7 +303,7 @@ func (f *runtimeFactory) newResearchBlock(
 		ExcludedTools:    collectionDisallowedTools(planned.Config.Policy.DisallowedTools),
 		SkillDirectories: slices.Clone(planned.Config.CollectionSkillDirectories), Skills: slices.Clone(planned.Config.CollectionSkills),
 		DisabledSkills: slices.Clone(planned.Config.CollectionDisabledSkills),
-		Hooks:          collectionBuiltInHooks(newToolCallQuota(collectionBuiltInQuota), collectionContext.Gate()),
+		Hooks:          collectionBuiltInHooks(newToolCallQuota(collectionBuiltInQuota), collectionContext),
 	})
 	if err != nil {
 		return nil, err
@@ -296,15 +312,6 @@ func (f *runtimeFactory) newResearchBlock(
 	collectionRunner := collection.NewRunner(collectionSession, checkpoints)
 
 	// Collection QC is always present and has fixed read-only capabilities.
-	collectionQCProvider := phaseProvider(planned.CollectionQCProvider, planned.Provider)
-	collectionQCProviderRetry, err := researchRetry(collectionQCProvider, provider.RetryOverride{})
-	if err != nil {
-		return cleanupSetup(err)
-	}
-	effectiveCollectionQC, err := planned.Config.EffectiveCollectionQC(collectionQCProviderRetry)
-	if err != nil {
-		return cleanupSetup(err)
-	}
 	collectionQCReadTools, err := evidenceToolsWithArtifactRegistry(
 		workspace, planned.Config.Artifacts, false, artifactsRegistry, currentArtifactIDs, collectionContext.EvidenceArtifactIDs,
 	)
@@ -312,12 +319,12 @@ func (f *runtimeFactory) newResearchBlock(
 		return cleanupSetup(err)
 	}
 	collectionVerdicts := collectionqc.NewVerdictRecorder()
-	collectionQCReadTools = append(collectionQCReadTools, collectionQCVerdictTool(collectionVerdicts))
+	collectionQCReadTools = append(collectionQCReadTools, collectionQCVerdictTool(collectionContext, collectionVerdicts))
 	collectionQCSession, err := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionCollectionQC, copilot.SessionConfig{
 		Provider: collectionQCProvider,
 		Retry:    effectiveCollectionQC.Retry, Model: effectiveCollectionQC.Model,
 		Profile: effectiveCollectionQC.Profile, ReasoningEffort: pointerValue(effectiveCollectionQC.ReasoningEffort),
-		SystemPrompt:     "You are Collection QC. Semantically assess whether registered evidence artifacts are sufficient. Use r42 read tools or read-only view, grep, head, and tail, then submit a typed verdict.",
+		SystemPrompt:     "You are Collection QC. Assess only whether each frozen information need's existing stop conditions are sufficiently supported by registered evidence. Do not add search directions, condition text, or new issues. Use only the supplied r42 read tools, then submit one typed per-need verdict for this QC round.",
 		WorkingDirectory: workspace, Tools: collectionQCReadTools,
 		ExcludedTools: closedWorldDisallowedTools(nil),
 	})
@@ -330,6 +337,10 @@ func (f *runtimeFactory) newResearchBlock(
 	// Research is closed-world synthesis over registered evidence artifacts.
 	researchTypedQuota, researchBuiltInQuota := splitToolCallQuota(planned.Config.Policy.ToolCallQuota)
 	terminal := researchruntime.NewTerminalRecorder()
+	var finalVerdicts *qc.VerdictRecorder
+	if planned.Config.QC != nil {
+		finalVerdicts = qc.NewVerdictRecorder()
+	}
 	researchTools, terminalType, err := f.buildTools(ctx, executionAddress, debuglog.SessionResearch, workspace,
 		planned.Config.Policy.ToolIDs, planned.Config.TerminateToolID, terminal, newToolCallQuota(researchTypedQuota))
 	if err != nil {
@@ -365,8 +376,13 @@ func (f *runtimeFactory) newResearchBlock(
 	if err = planned.Config.ValidateResolved(resolved); err != nil {
 		return cleanupSetup(err)
 	}
+	researchSystemPrompt := closedResearchSystemPrompt(planned.Config.SystemPrompt)
+	if finalVerdicts != nil {
+		researchSystemPrompt += " Final QC may return this block to Research multiple times. An accepted terminal call completes only the current Research pass. " +
+			"If Final QC returns the block, revise the candidate and call the terminal tool again to complete that later pass."
+	}
 	researchPrompt := appendBuiltInToolCallQuotaPrompt(
-		closedResearchSystemPrompt(planned.Config.SystemPrompt),
+		researchSystemPrompt,
 		researchBuiltInQuota,
 	)
 	researchSession, err := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionResearch, copilot.SessionConfig{
@@ -451,14 +467,18 @@ func (f *runtimeFactory) newResearchBlock(
 			return cleanupSetup(toolsErr)
 		}
 		finalTools = append(finalTools, finalEvidenceTools...)
-		finalVerdicts := qc.NewVerdictRecorder()
 		finalTools = append(finalTools, qcVerdictTool(executionAddress, f.recorder, finalVerdicts))
 		finalSession, openErr := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionFinalQC, copilot.SessionConfig{
 			Provider: finalQCProvider,
 			Retry:    effectiveFinalQC.Retry, Model: effectiveFinalQC.Model, Profile: effectiveFinalQC.Profile,
 			ReasoningEffort: pointerValue(effectiveFinalQC.ReasoningEffort),
 			SystemPrompt: appendBuiltInToolCallQuotaPrompt(
-				"You are Final QC. Review evidence artifacts and candidate files with r42 read tools or read-only view, grep, head, and tail, then submit pass, revise_research, or reopen_collection. "+researchArtifactProtocol,
+				"You are Final QC. Before submitting a verdict, complete an exhaustive audit of the semantic support for claims actually present in the candidate against every configured criterion. "+
+					"Inspect the entire candidate and all relevant evidence with r42 read tools or read-only view, grep, head, and tail. "+
+					"Report all independent issues found in one verdict; do not stop after the first issue, the first failing criterion, or the most obvious category. "+
+					"Collection QC exclusively owns information-need sufficiency and primary-source coverage. Final QC must not judge whether evidence coverage is sufficient, inspect stop conditions, reject missing claims, or request additional evidence. "+
+					"Use revise_research only when a claim actually present exceeds or misrepresents its cited evidence, and direct Research to delete or narrow that claim. Pass when no such semantic issues remain. Final QC can never reopen Collection. "+
+					"Submit every issue found in this review. Repeat the full audit after every revision, rechecking every criterion and looking for regressions introduced by the repair. "+researchArtifactProtocol,
 				finalBuiltInQuota,
 			),
 			WorkingDirectory: workspace, Tools: finalTools,
@@ -472,7 +492,7 @@ func (f *runtimeFactory) newResearchBlock(
 		}
 		opened = append(opened, finalSession)
 		finalRunner := qc.NewRunner(nil, finalSession, finalVerdicts)
-		finalReviewer = &budgetedFinalReviewer{runner: finalRunner, recorder: finalVerdicts, state: collectionContext.State}
+		finalReviewer = finalRunner
 		workflowConfig.FinalQCEnabled = true
 		workflowConfig.MaxFinalQCRounds = effectiveFinalQC.MaxRounds
 		workflowConfig.FinalQC = qc.Config{
@@ -548,18 +568,17 @@ func (f *runtimeFactory) openRecordedWorkflowSession(ctx context.Context, addres
 	}, nil
 }
 
-type budgetedFinalReviewer struct {
-	runner   *qc.Runner
-	recorder *qc.VerdictRecorder
-	state    *workflow.State
-}
-
-func (r *budgetedFinalReviewer) Review(ctx context.Context, config qc.Config, candidate researchruntime.Result) (qc.Verdict, error) {
-	r.recorder.SetCollectionBudget(qc.CollectionBudget{
-		RoundsUsed: r.state.CollectionRoundsUsed(), MaxRounds: r.state.MaxCollectionRounds(),
-		Exhausted: r.state.CollectionExhausted(),
-	})
-	return r.runner.Review(ctx, config, candidate)
+func collectionQCCriteriaPrompt(criteria cty.Value) (string, error) {
+	unmarked, _ := criteria.UnmarkDeep()
+	values := make(map[string]string, unmarked.LengthInt())
+	for name, value := range unmarked.AsValueMap() {
+		values[name] = value.AsString()
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return "", fmt.Errorf("encode collection qc criteria: %w", err)
+	}
+	return string(encoded), nil
 }
 
 func pointerValue(value *string) string {

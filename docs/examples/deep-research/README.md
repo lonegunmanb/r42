@@ -129,9 +129,8 @@ under the task's declared source artifact directory and obtain its registered
 reviews those registered artifacts. R42 supplies the approved IDs to closed
 Research, which can inspect them through
 `r42_read_artifact`; submitted quotes retain `artifact_id` rather than filesystem
-paths. Final QC
-reviews semantic support; failed QC returns a revision or Collection-reopen
-decision up to `max_qc_rounds`.
+paths. Final QC reviews semantic support; failed QC returns a Research revision
+up to `max_qc_rounds`. Final QC cannot reopen Collection.
 
 Each materialized deep-dive task has its own fetch entry in `tool_call_quota`.
 The `web_fetch_tool_call_quota` input variable controls successful built-in

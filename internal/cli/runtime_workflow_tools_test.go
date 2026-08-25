@@ -38,6 +38,15 @@ func TestClosedWorldDisallowedToolsIncludesAcquisitionAndArbitraryIO(t *testing.
 	}
 }
 
+func freezeTestInformationNeeds(t *testing.T, context *collection.Context) {
+	t.Helper()
+	response := collection.NewInformationNeedsHandler(context).Set(collection.InformationNeedsArgs{InformationNeeds: []collection.InformationNeedInput{{
+		Question:       "test fixture need",
+		StopConditions: []collection.StopConditionInput{{Condition: "test fixture condition"}},
+	}}})
+	require.True(t, response.Accepted)
+}
+
 func TestClosedWorldAllowedToolsIncludesReadOnlyFileTools(t *testing.T) {
 	t.Parallel()
 
@@ -59,11 +68,11 @@ func TestCollectionDisallowedToolsBlocksDelegationAndShellFallbacks(t *testing.T
 		configured []string
 		expected   []string
 	}{
-		{name: "defaults", expected: []string{"task", "powershell", "curl"}},
+		{name: "defaults", expected: []string{"bash", "powershell", "read_powershell", "list_powershell", "shell", "edit", "create", "glob", "task", "ask_user", "curl"}},
 		{
 			name:       "preserves custom exclusions without duplicating defaults",
 			configured: []string{"custom", "curl"},
-			expected:   []string{"custom", "curl", "task", "powershell"},
+			expected:   []string{"custom", "curl", "bash", "powershell", "read_powershell", "list_powershell", "shell", "edit", "create", "glob", "task", "ask_user"},
 		},
 	}
 	for _, tt := range tests {
@@ -101,12 +110,20 @@ func TestCollectionBuiltInHooksEnforceCheckpointGate(t *testing.T) {
 	workspace := t.TempDir()
 	collectionContext := collection.NewContext(workspace, 1, nil)
 	require.NoError(t, collectionContext.BeginWorkflow())
-	hooks := collectionBuiltInHooks(newToolCallQuota(nil), collectionContext.Gate())
+	hooks := collectionBuiltInHooks(newToolCallQuota(nil), collectionContext)
 	require.NotNil(t, hooks)
 
+	deniedBeforePlan, err := hooks.OnPreToolUse(sdk.PreToolUseHookInput{ToolName: "web_fetch"}, sdk.HookInvocation{})
+	require.NoError(t, err)
+	assert.Equal(t, "deny", deniedBeforePlan.PermissionDecision)
+	assert.Contains(t, deniedBeforePlan.PermissionDecisionReason, "r42_set_information_needs")
+
+	freezeTestInformationNeeds(t, collectionContext)
 	allowed, err := hooks.OnPreToolUse(sdk.PreToolUseHookInput{ToolName: "web_fetch"}, sdk.HookInvocation{})
 	require.NoError(t, err)
 	assert.Equal(t, "allow", allowed.PermissionDecision)
+	_, err = hooks.OnPostToolUse(sdk.PostToolUseHookInput{ToolName: "web_fetch"}, sdk.HookInvocation{})
+	require.NoError(t, err)
 
 	path := filepath.Join(workspace, "evidence.md")
 	require.NoError(t, os.WriteFile(path, []byte("evidence"), 0o600))
@@ -119,16 +136,204 @@ func TestCollectionBuiltInHooksEnforceCheckpointGate(t *testing.T) {
 		assert.Equal(t, "deny", denied.PermissionDecision)
 		assert.Contains(t, denied.PermissionDecisionReason, "checkpoint pending")
 	}
+	checkpoint := collection.NewCheckpointHandler(collectionContext).Submit(collection.CheckpointArgs{
+		NeedDispositions: []collection.NeedDisposition{{
+			InformationNeedID: "NEED-001", SearchDisposition: collection.SearchDispositionContinue,
+		}},
+	})
+	require.True(t, checkpoint.Accepted)
+	afterCheckpoint, err := hooks.OnPreToolUse(sdk.PreToolUseHookInput{ToolName: "web_fetch"}, sdk.HookInvocation{})
+	require.NoError(t, err)
+	assert.Equal(t, "deny", afterCheckpoint.PermissionDecision)
+	assert.Contains(t, afterCheckpoint.PermissionDecisionReason, "checkpoint already accepted")
 
 	unrelated, err := hooks.OnPreToolUse(sdk.PreToolUseHookInput{ToolName: "some_read_only_tool"}, sdk.HookInvocation{})
 	require.NoError(t, err)
 	assert.Equal(t, "allow", unrelated.PermissionDecision)
 }
 
+func TestCollectionMarkdownWriterHonorsPlanAndCheckpointGate(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	record, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "report", Type: researchspec.ArtifactTypeFile, Path: "report.md", Description: "report",
+	})
+	require.NoError(t, err)
+	context := collection.NewContextWithArtifactRegistry(workspace, 10, nil, registry)
+	tools, err := evidenceToolsWithArtifactRegistry(workspace, nil, true, registry, []string{record.ID}, nil)
+	require.NoError(t, err)
+	writeTool := toolByName(t, wrapCollectionMutationTools(tools, context), "r42_write_markdown")
+	invocation := sdk.ToolInvocation{Arguments: map[string]any{"artifact_id": record.ID, "content": "# report"}}
+
+	beforePlan, err := writeTool.Handler(invocation)
+	require.NoError(t, err)
+	assert.Contains(t, beforePlan.TextResultForLLM, `"accepted":false`)
+	assert.NoFileExists(t, record.Path)
+
+	freezeTestInformationNeeds(t, context)
+	written, err := writeTool.Handler(invocation)
+	require.NoError(t, err)
+	assert.Contains(t, written.TextResultForLLM, `"accepted":true`)
+
+	checkpoint := collection.NewCheckpointHandler(context).Submit(collection.CheckpointArgs{
+		EmptyReason: "no evidence artifacts were added",
+		NeedDispositions: []collection.NeedDisposition{{
+			InformationNeedID: "NEED-001", SearchDisposition: collection.SearchDispositionContinue,
+		}},
+	})
+	require.True(t, checkpoint.Accepted)
+	afterCheckpoint, err := writeTool.Handler(invocation)
+	require.NoError(t, err)
+	assert.Contains(t, afterCheckpoint.TextResultForLLM, `"accepted":false`)
+}
+
+func TestCollectionCheckpointRejectsInFlightMarkdownWriter(t *testing.T) {
+	t.Parallel()
+
+	context := collection.NewContext(t.TempDir(), 10, nil)
+	freezeTestInformationNeeds(t, context)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	writer := sdk.Tool{Name: "r42_write_markdown", Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
+		close(started)
+		<-release
+		return sdk.ToolResult{ResultType: "success"}, nil
+	}}
+	wrapped := wrapCollectionMutationTools([]sdk.Tool{writer}, context)[0]
+	done := make(chan error, 1)
+	go func() {
+		_, err := wrapped.Handler(sdk.ToolInvocation{})
+		done <- err
+	}()
+	<-started
+
+	checkpoint := collection.NewCheckpointHandler(context).Submit(collection.CheckpointArgs{
+		EmptyReason: "no evidence artifacts were added",
+		NeedDispositions: []collection.NeedDisposition{{
+			InformationNeedID: "NEED-001", SearchDisposition: collection.SearchDispositionContinue,
+		}},
+	})
+	assert.False(t, checkpoint.Accepted)
+	require.NotEmpty(t, checkpoint.Issues)
+	assert.Equal(t, "collection_tools_in_flight", checkpoint.Issues[0].Code)
+
+	close(release)
+	require.NoError(t, <-done)
+	checkpoint = collection.NewCheckpointHandler(context).Submit(collection.CheckpointArgs{
+		EmptyReason: "no evidence artifacts were added",
+		NeedDispositions: []collection.NeedDisposition{{
+			InformationNeedID: "NEED-001", SearchDisposition: collection.SearchDispositionContinue,
+		}},
+	})
+	assert.True(t, checkpoint.Accepted)
+}
+
+func TestCollectionCheckpointRejectsInFlightAcquisitionTool(t *testing.T) {
+	t.Parallel()
+
+	context := collection.NewContext(t.TempDir(), 10, nil)
+	freezeTestInformationNeeds(t, context)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	acquisition := sdk.Tool{Name: "fetch", Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
+		close(started)
+		<-release
+		return sdk.ToolResult{ResultType: "success"}, nil
+	}}
+	wrapped := wrapCollectionAcquisitionTools([]sdk.Tool{acquisition}, context)[0]
+	done := make(chan error, 1)
+	go func() {
+		_, err := wrapped.Handler(sdk.ToolInvocation{})
+		done <- err
+	}()
+	<-started
+
+	checkpoint := collection.NewCheckpointHandler(context).Submit(collection.CheckpointArgs{
+		EmptyReason: "no evidence artifacts were added",
+		NeedDispositions: []collection.NeedDisposition{{
+			InformationNeedID: "NEED-001", SearchDisposition: collection.SearchDispositionContinue,
+		}},
+	})
+	assert.False(t, checkpoint.Accepted)
+	require.NotEmpty(t, checkpoint.Issues)
+	assert.Equal(t, "collection_tools_in_flight", checkpoint.Issues[0].Code)
+
+	close(release)
+	require.NoError(t, <-done)
+	checkpoint = collection.NewCheckpointHandler(context).Submit(collection.CheckpointArgs{
+		EmptyReason: "no evidence artifacts were added",
+		NeedDispositions: []collection.NeedDisposition{{
+			InformationNeedID: "NEED-001", SearchDisposition: collection.SearchDispositionContinue,
+		}},
+	})
+	assert.True(t, checkpoint.Accepted)
+}
+
+func TestCollectionBuiltInAcquisitionLeaseEndsAfterPostHook(t *testing.T) {
+	t.Parallel()
+
+	context := collection.NewContext(t.TempDir(), 10, nil)
+	freezeTestInformationNeeds(t, context)
+	hooks := collectionBuiltInHooks(newToolCallQuota(nil), context)
+
+	allowed, err := hooks.OnPreToolUse(sdk.PreToolUseHookInput{ToolName: "web_fetch"}, sdk.HookInvocation{})
+	require.NoError(t, err)
+	assert.Equal(t, "allow", allowed.PermissionDecision)
+	checkpoint := collection.NewCheckpointHandler(context).Submit(collection.CheckpointArgs{
+		EmptyReason: "no evidence artifacts were added",
+		NeedDispositions: []collection.NeedDisposition{{
+			InformationNeedID: "NEED-001", SearchDisposition: collection.SearchDispositionContinue,
+		}},
+	})
+	assert.False(t, checkpoint.Accepted)
+	require.NotEmpty(t, checkpoint.Issues)
+	assert.Equal(t, "collection_tools_in_flight", checkpoint.Issues[0].Code)
+
+	_, err = hooks.OnPostToolUse(sdk.PostToolUseHookInput{ToolName: "web_fetch"}, sdk.HookInvocation{})
+	require.NoError(t, err)
+	checkpoint = collection.NewCheckpointHandler(context).Submit(collection.CheckpointArgs{
+		EmptyReason: "no evidence artifacts were added",
+		NeedDispositions: []collection.NeedDisposition{{
+			InformationNeedID: "NEED-001", SearchDisposition: collection.SearchDispositionContinue,
+		}},
+	})
+	assert.True(t, checkpoint.Accepted)
+}
+
+func TestCollectionBuiltInAcquisitionLeaseEndsAfterFailureHook(t *testing.T) {
+	t.Parallel()
+
+	context := collection.NewContext(t.TempDir(), 10, nil)
+	freezeTestInformationNeeds(t, context)
+	hooks := collectionBuiltInHooks(newToolCallQuota(map[string]int{"web_fetch": 1}), context)
+
+	allowed, err := hooks.OnPreToolUse(sdk.PreToolUseHookInput{ToolName: "web_fetch"}, sdk.HookInvocation{})
+	require.NoError(t, err)
+	assert.Equal(t, "allow", allowed.PermissionDecision)
+	_, err = hooks.OnPostToolUseFailure(sdk.PostToolUseFailureHookInput{ToolName: "web_fetch"}, sdk.HookInvocation{})
+	require.NoError(t, err)
+
+	allowed, err = hooks.OnPreToolUse(sdk.PreToolUseHookInput{ToolName: "web_fetch"}, sdk.HookInvocation{})
+	require.NoError(t, err)
+	assert.Equal(t, "allow", allowed.PermissionDecision, "failed calls must release their lease and quota")
+	_, err = hooks.OnPostToolUse(sdk.PostToolUseHookInput{ToolName: "web_fetch"}, sdk.HookInvocation{})
+	require.NoError(t, err)
+	checkpoint := collection.NewCheckpointHandler(context).Submit(collection.CheckpointArgs{
+		EmptyReason: "no evidence artifacts were added",
+		NeedDispositions: []collection.NeedDisposition{{
+			InformationNeedID: "NEED-001", SearchDisposition: collection.SearchDispositionContinue,
+		}},
+	})
+	assert.True(t, checkpoint.Accepted)
+}
+
 func TestCollectionProtocolToolsRegisterRetainedResultAndCheckpoint(t *testing.T) {
 	t.Parallel()
 
 	context := collection.NewContext(t.TempDir(), 10, nil)
+	freezeTestInformationNeeds(t, context)
 	recorder := collection.NewCheckpointRecorder()
 	acquisition := sdk.Tool{Name: "fetch", Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
 		return sdk.ToolResult{TextResultForLLM: `{"title":"source"}`, ResultType: "success"}, nil
@@ -137,11 +342,13 @@ func TestCollectionProtocolToolsRegisterRetainedResultAndCheckpoint(t *testing.T
 	_, err := wrapped[0].Handler(sdk.ToolInvocation{ToolCallID: "call-1"})
 	require.NoError(t, err)
 	protocol := collectionProtocolTools(context, recorder)
-	registerProperties, ok := protocol[0].Parameters["properties"].(map[string]any)
+	registerTool := toolByName(t, protocol, "r42_register_artifact")
+	checkpointTool := toolByName(t, protocol, "r42_collection_checkpoint")
+	registerProperties, ok := registerTool.Parameters["properties"].(map[string]any)
 	require.True(t, ok)
 	assert.Contains(t, registerProperties, "source")
-	assert.Nil(t, protocol[0].Parameters["required"])
-	registered, err := protocol[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+	assert.Nil(t, registerTool.Parameters["required"])
+	registered, err := registerTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
 		"source_tool_call_id": "call-1",
 		"source":              "retained-result:call-1",
 	}})
@@ -156,7 +363,11 @@ func TestCollectionProtocolToolsRegisterRetainedResultAndCheckpoint(t *testing.T
 	content, err := os.ReadFile(registrationResponse.Output.Path)
 	require.NoError(t, err)
 	assert.Equal(t, "- Source: retained-result:call-1\n\n"+`{"title":"source"}`, string(content))
-	checkpoint, err := protocol[1].Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+	checkpoint, err := checkpointTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"need_dispositions": []any{map[string]any{
+			"information_need_id": "NEED-001", "search_disposition": "continue",
+		}},
+	}})
 	require.NoError(t, err)
 	assert.Contains(t, checkpoint.TextResultForLLM, "artifact-")
 }
@@ -166,27 +377,31 @@ func TestCollectionProtocolToolsSaveArtifactWithRequiredSource(t *testing.T) {
 
 	workspace := t.TempDir()
 	context := collection.NewContext(workspace, 10, nil)
+	freezeTestInformationNeeds(t, context)
 	require.NoError(t, context.AddArtifactTarget(filepath.Join(workspace, "evidence"), true))
 	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
-	assert.Equal(t, []string{"r42_register_artifact", "r42_collection_checkpoint", "r42_save_artifact"}, toolNames(protocol))
+	assert.Equal(t, []string{"r42_set_information_needs", "r42_register_artifact", "r42_collection_checkpoint", "r42_save_artifact"}, toolNames(protocol))
 	assert.Contains(t, phaseAllowedTools([]string{"web_fetch"}, toolNames(protocol)), "r42_save_artifact")
-	assert.ElementsMatch(t, []string{"artifact_path", "content", "source"}, protocol[2].Parameters["required"])
-	assert.Contains(t, protocol[2].Description, "Do not call r42_register_artifact")
-	assert.Contains(t, protocol[2].Description, "artifact_id")
-	assert.NotContains(t, protocol[2].Description, "default Collection evidence directory")
-	registerProperties, ok := protocol[0].Parameters["properties"].(map[string]any)
+	registerTool := toolByName(t, protocol, "r42_register_artifact")
+	checkpointTool := toolByName(t, protocol, "r42_collection_checkpoint")
+	saveTool := toolByName(t, protocol, "r42_save_artifact")
+	assert.ElementsMatch(t, []string{"artifact_path", "content", "source"}, saveTool.Parameters["required"])
+	assert.Contains(t, saveTool.Description, "Do not call r42_register_artifact")
+	assert.Contains(t, saveTool.Description, "artifact_id")
+	assert.NotContains(t, saveTool.Description, "default Collection evidence directory")
+	registerProperties, ok := registerTool.Parameters["properties"].(map[string]any)
 	require.True(t, ok)
 	assert.Contains(t, registerProperties, "description")
-	saveProperties, ok := protocol[2].Parameters["properties"].(map[string]any)
+	saveProperties, ok := saveTool.Parameters["properties"].(map[string]any)
 	require.True(t, ok)
 	assert.Contains(t, saveProperties, "description")
 	artifactPath, ok := saveProperties["artifact_path"].(map[string]any)
 	require.True(t, ok)
 	assert.NotContains(t, artifactPath["description"], "default evidence directory")
-	require.NotContains(t, protocol[2].Parameters["required"], "description")
+	require.NotContains(t, saveTool.Parameters["required"], "description")
 
 	path := filepath.Join(workspace, "evidence", "source.md")
-	result, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+	result, err := saveTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
 		"artifact_path": path,
 		"content":       "\n# Evidence\n\nCollected material.\n",
 		"source":        "local-record:42",
@@ -209,7 +424,11 @@ func TestCollectionProtocolToolsSaveArtifactWithRequiredSource(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "- Source: local-record:42\n\n\n# Evidence\n\nCollected material.\n", string(content))
 
-	checkpoint, err := protocol[1].Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+	checkpoint, err := checkpointTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"need_dispositions": []any{map[string]any{
+			"information_need_id": "NEED-001", "search_disposition": "continue",
+		}},
+	}})
 	require.NoError(t, err)
 	assert.Contains(t, checkpoint.TextResultForLLM, response.Output.ArtifactID)
 	require.Len(t, context.EvidenceArtifactIDs(), 1)
@@ -223,9 +442,11 @@ func TestCollectionProtocolToolsRejectsUndeclaredArtifactPath(t *testing.T) {
 
 	workspace := t.TempDir()
 	context := collection.NewContext(workspace, 10, nil)
+	freezeTestInformationNeeds(t, context)
 	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
+	saveTool := toolByName(t, protocol, "r42_save_artifact")
 
-	result, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+	result, err := saveTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
 		"artifact_path": filepath.Join(workspace, "evidence", "source.md"),
 		"content":       "# Evidence",
 		"source":        "local-record:42",
@@ -240,11 +461,13 @@ func TestCollectionProtocolToolsSaveArtifactBelowDeclaredDirectoryTarget(t *test
 
 	workspace := t.TempDir()
 	context := collection.NewContext(workspace, 10, nil)
+	freezeTestInformationNeeds(t, context)
 	directory := filepath.Join(workspace, "collected")
 	require.NoError(t, context.AddArtifactTarget(directory, true))
 	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
+	saveTool := toolByName(t, protocol, "r42_save_artifact")
 
-	result, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+	result, err := saveTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
 		"artifact_path": filepath.Join(directory, "source.md"),
 		"content":       "# Evidence",
 		"source":        "local-record:42",
@@ -259,11 +482,13 @@ func TestCollectionProtocolToolsSaveArtifactToDeclaredFileTarget(t *testing.T) {
 
 	workspace := t.TempDir()
 	context := collection.NewContext(workspace, 10, nil)
+	freezeTestInformationNeeds(t, context)
 	path := filepath.Join(workspace, "collected", "primary.md")
 	require.NoError(t, context.AddArtifactTarget(path, false))
 	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
+	saveTool := toolByName(t, protocol, "r42_save_artifact")
 
-	result, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+	result, err := saveTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
 		"artifact_path": path,
 		"content":       "# Evidence\n\nCollected material.",
 		"source":        "local-record:42",
@@ -891,10 +1116,12 @@ func TestCollectionProtocolToolsRejectArtifactWithoutSource(t *testing.T) {
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, "evidence", "source.md")
 	context := collection.NewContext(workspace, 10, nil)
+	freezeTestInformationNeeds(t, context)
 	require.NoError(t, context.AddArtifactTarget(filepath.Join(workspace, "evidence"), true))
 	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
+	saveTool := toolByName(t, protocol, "r42_save_artifact")
 
-	result, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+	result, err := saveTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
 		"artifact_path": path,
 		"content":       "Collected material.",
 	}})
@@ -909,8 +1136,10 @@ func TestCollectionProtocolToolsRejectInvalidArtifactPaths(t *testing.T) {
 
 	workspace := t.TempDir()
 	context := collection.NewContext(workspace, 10, nil)
+	freezeTestInformationNeeds(t, context)
 	require.NoError(t, context.AddArtifactTarget(filepath.Join(workspace, "evidence"), true))
 	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
+	saveTool := toolByName(t, protocol, "r42_save_artifact")
 	tests := []struct {
 		name string
 		path string
@@ -923,7 +1152,7 @@ func TestCollectionProtocolToolsRejectInvalidArtifactPaths(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			result, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+			result, err := saveTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
 				"artifact_path": tt.path,
 				"content":       "Collected material.",
 				"source":        "local-record:42",
@@ -949,10 +1178,12 @@ func TestCollectionProtocolToolsRejectArtifactSymlinkOutsideWorkspace(t *testing
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 	context := collection.NewContext(workspace, 10, nil)
+	freezeTestInformationNeeds(t, context)
 	require.NoError(t, context.AddArtifactTarget(filepath.Join(workspace, "evidence"), true))
 	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
+	saveTool := toolByName(t, protocol, "r42_save_artifact")
 
-	result, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+	result, err := saveTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
 		"artifact_path": path,
 		"content":       "replacement",
 		"source":        "local-record:42",
@@ -971,9 +1202,11 @@ func TestCollectionProtocolToolsDoNotOverwriteSavedArtifact(t *testing.T) {
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, "evidence", "source.md")
 	context := collection.NewContext(workspace, 10, nil)
+	freezeTestInformationNeeds(t, context)
 	require.NoError(t, context.AddArtifactTarget(filepath.Join(workspace, "evidence"), true))
 	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
-	first, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+	saveTool := toolByName(t, protocol, "r42_save_artifact")
+	first, err := saveTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
 		"artifact_path": path,
 		"content":       "original evidence",
 		"source":        "source:original",
@@ -981,7 +1214,7 @@ func TestCollectionProtocolToolsDoNotOverwriteSavedArtifact(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, first.TextResultForLLM, `"accepted":true`)
 
-	second, err := protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+	second, err := saveTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
 		"artifact_path": path,
 		"content":       "replacement evidence",
 		"source":        "source:replacement",
@@ -1000,8 +1233,10 @@ func TestCollectionProtocolToolsConcurrentSaveDoesNotOverwriteArtifact(t *testin
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, "evidence", "source.md")
 	context := collection.NewContext(workspace, 10, nil)
+	freezeTestInformationNeeds(t, context)
 	require.NoError(t, context.AddArtifactTarget(filepath.Join(workspace, "evidence"), true))
 	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
+	saveTool := toolByName(t, protocol, "r42_save_artifact")
 	contents := []string{"first evidence", "second evidence"}
 	sources := []string{"source:first", "source:second"}
 	results := make([]sdk.ToolResult, len(contents))
@@ -1013,7 +1248,7 @@ func TestCollectionProtocolToolsConcurrentSaveDoesNotOverwriteArtifact(t *testin
 		go func(index int) {
 			defer wg.Done()
 			<-start
-			results[index], errors[index] = protocol[2].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+			results[index], errors[index] = saveTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
 				"artifact_path": path,
 				"content":       contents[index],
 				"source":        sources[index],
@@ -1049,9 +1284,26 @@ func TestCollectionProtocolToolsConcurrentSaveDoesNotOverwriteArtifact(t *testin
 func TestCollectionQCVerdictToolRecordsTypedDecision(t *testing.T) {
 	t.Parallel()
 
+	context := collection.NewContext(t.TempDir(), 10, nil)
+	plan := collection.NewInformationNeedsHandler(context).Set(collection.InformationNeedsArgs{InformationNeeds: []collection.InformationNeedInput{{
+		Question: "supplier", StopConditions: []collection.StopConditionInput{{Condition: "relationship"}},
+	}}})
+	require.True(t, plan.Accepted)
+	// Register and checkpoint one artifact so the round reports material progress.
+	require.NoError(t, context.Artifacts.RetainToolResult("call-qc", "source evidence"))
+	registered := collection.NewRegisterHandler(context).Register(collection.RegisterArgs{SourceToolCallID: "call-qc"})
+	require.True(t, registered.Accepted)
+	checkpoint := collection.NewCheckpointHandler(context).Submit(collection.CheckpointArgs{
+		NeedDispositions: []collection.NeedDisposition{
+			{InformationNeedID: "NEED-001", SearchDisposition: collection.SearchDispositionContinue},
+		},
+	})
+	require.True(t, checkpoint.Accepted)
 	verdicts := collectionqc.NewVerdictRecorder()
-	tool := collectionQCVerdictTool(verdicts)
-	result, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "sufficient"}})
+	tool := collectionQCVerdictTool(context, verdicts)
+	result, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"assessments": []any{map[string]any{
+		"information_need_id": "NEED-001", "status": "sufficient", "unsatisfied_condition_ids": []any{}, "evidence_progress": "material",
+	}}}})
 
 	require.NoError(t, err)
 	var response map[string]any

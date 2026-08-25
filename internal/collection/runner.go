@@ -58,7 +58,7 @@ func (r *Runner) Run(ctx context.Context, config RunConfig) (CheckpointOutput, e
 			return CheckpointOutput{}, fmt.Errorf("collection checkpoint tool failed: %w", failure)
 		}
 		if len(outputs) > 0 {
-			return mergeCheckpoints(outputs), nil
+			return outputs[0], nil
 		}
 		if attempt >= config.MaxProtocolAttempts {
 			return CheckpointOutput{}, fmt.Errorf(
@@ -69,25 +69,6 @@ func (r *Runner) Run(ctx context.Context, config RunConfig) (CheckpointOutput, e
 		}
 		prompt = fmt.Sprintf("You must call the %q tool before this Collection round can finish.", config.CheckpointToolName)
 	}
-}
-
-func mergeCheckpoints(outputs []CheckpointOutput) CheckpointOutput {
-	merged := CheckpointOutput{}
-	seen := make(map[string]struct{})
-	for _, output := range outputs {
-		for _, id := range output.ArtifactIDs {
-			if _, exists := seen[id]; exists {
-				continue
-			}
-			seen[id] = struct{}{}
-			merged.ArtifactIDs = append(merged.ArtifactIDs, id)
-		}
-		if strings.TrimSpace(output.EmptyReason) != "" {
-			merged.EmptyReason = output.EmptyReason
-		}
-		merged.CollectionExhausted = merged.CollectionExhausted || output.CollectionExhausted
-	}
-	return merged
 }
 
 // CheckpointRecorder captures accepted checkpoint tool calls.
@@ -103,9 +84,13 @@ func NewCheckpointRecorder() *CheckpointRecorder { return &CheckpointRecorder{} 
 // Record records one accepted checkpoint.
 func (r *CheckpointRecorder) Record(output CheckpointOutput) error {
 	output.ArtifactIDs = append([]string{}, output.ArtifactIDs...)
+	output.NeedDispositions = append([]NeedDisposition{}, output.NeedDispositions...)
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.outputs) > 0 {
+		return errors.New("r42_collection_checkpoint may be accepted exactly once in each Collection round")
+	}
 	r.outputs = append(r.outputs, output)
-	r.mu.Unlock()
 	return nil
 }
 

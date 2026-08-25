@@ -44,10 +44,13 @@ research "static" "primary_source_baseline" {
     inferred cards use derived_from and no source_id, artifact_id, quote, or
     locator. Do not submit unknown as a claim card.
 
-    Finish once with ${go_tool.finalize_claim_cards.id}:
+    At the end of each Research pass, call
+    ${go_tool.finalize_claim_cards.id} exactly once:
     workspace_dir "${block_wd()}", claims_path "${artifact("claims").path}",
     source_registry_path "${artifact("source_registry").path}", as_of_date
-    "${var.as_of_date}", and allow_empty false.
+    "${var.as_of_date}", and allow_empty false. An accepted call completes only
+    that pass. If Final QC returns this block to Research, revise the staged
+    cards and call finalize again in the later pass.
   PROMPT
   collection_tool_ids = local.pplx_tool_ids
   artifact "sources" {
@@ -100,11 +103,13 @@ research "static" "primary_source_baseline" {
 
   collection_qc {
     model_provider = model_provider.qc
+    criteria = {
+      primary_coverage = "For each active information need and stop condition, judge whether the newest material primary documents available by the cutoff were retained and directly establish the required coverage. Mark unmet condition IDs needs_more and identify every omission that could change the study."
+    }
   }
 
   qc {
     criteria = {
-      primary_coverage = "Judge whether the newest material primary documents available by the cutoff were retained. Identify every omission that could change the study."
       entailment = "Judge whether every confirmed card is directly entailed by its authoritative source, including named parties, product variant, period, and qualifiers. Treat typed-tool path, URL, date, and quotation matching as authoritative."
       atomicity = "Judge whether each card makes one independently auditable assertion rather than bundling several facts behind one citation."
     }
@@ -287,11 +292,14 @@ research "dynamic" "graph_track" {
         described by the tool; record unresolved questions in the track narrative,
         not as fake claims.
 
-        Finish once with ${go_tool.finalize_claim_cards.id}: workspace_dir
+        At the end of each Research pass, call
+        ${go_tool.finalize_claim_cards.id} exactly once: workspace_dir
         "${block_wd()}/${index}", claims_path
         "${artifact("claims").path}", source_registry_path
         "${artifact("source_registry").path}", as_of_date
-        "${var.as_of_date}", and allow_empty false.
+        "${var.as_of_date}", and allow_empty false. An accepted call completes
+        only that pass. If Final QC returns this block to Research, revise the
+        staged cards and call finalize again in the later pass.
       PROMPT
       collection_tool_ids = local.pplx_tool_ids
       import_artifact = {
@@ -406,10 +414,12 @@ research "static" "build_supply_chain" {
     During Collection, do not acquire new evidence. The validated JSON above is
     complete for this stage, so submit an empty collection checkpoint.
 
-    During closed Research, use only the validated JSON above. Call
-    ${go_tool.submit_supply_chain_map.id} once; r42 binds its declared
+    During each Research pass, use only the validated JSON above and call
+    ${go_tool.submit_supply_chain_map.id} one time. r42 binds its declared
     supply-chain artifact_id, workspace_dir, exact topic and scope_path, and
     claim_paths containing the baseline plus all five track claim files.
+    If Final QC returns this block to Research, revise and submit the map again
+    in the later pass.
 
     Map ordinary nodes and edges across the full declared product boundary.
     Keep each node's stages and product branches explicit. Attach only claim IDs
@@ -417,6 +427,10 @@ research "static" "build_supply_chain" {
     assessment_targets is not a chokepoint list: include only nodes for which the
     next stage should separately test actual target dependency, alternatives,
     switching versus buffer time, applicable scenario, and falsification.
+    Separately select company_mapping_targets only from supplier-addressable
+    component, material, process, equipment, or service nodes where a later
+    stage can test public-company relationships or exact-node capabilities.
+    A company-mapping target need not be a continuity-risk assessment target.
   PROMPT
   import_artifact "baseline" {
     desc    = "Validated baseline claims used to build the supply-chain map."
@@ -457,6 +471,10 @@ research "static" "build_supply_chain" {
         desc = "Nodes that warrant a separate continuity-risk assessment."
         sources = flatten([values(research.static.brainstorm.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
       }
+      company_mapping_targets = {
+        desc = "Supplier-addressable component, material, process, equipment, or service nodes worth mapping to public companies. Each target has node_id, exact node_name, why_map, and supporting claim_ids; this list is independent of continuity-risk assessment_targets."
+        sources = flatten([values(research.static.brainstorm.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
+      }
       unknowns = {
         desc = "Evidence gaps and unresolved map questions."
         sources = flatten([values(research.static.brainstorm.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
@@ -469,7 +487,7 @@ research "static" "build_supply_chain" {
   artifact "supply_chain" {
     type      = "file"
     path      = "${block_wd()}/supply-chain.json"
-	description = "Structured supply-chain nodes, edges, and assessment targets"
+	description = "Structured supply-chain nodes, edges, continuity assessments, and company-mapping targets"
     required  = true
     non_empty = true
   }
@@ -482,6 +500,7 @@ research "static" "build_supply_chain" {
     criteria = {
       completeness = "Judge whether the map covers the decision-relevant product branches and stages defined by scope without becoming an encyclopedia."
       target_selection = "Judge whether every assessment target could plausibly affect continuity and whether important candidates were omitted. A required input or commercially attractive supplier is not automatically a risk node."
+      company_mapping = "Judge whether company_mapping_targets cover decision-relevant supplier-addressable nodes without conflating them with continuity-risk assessment_targets or putting companies into the graph."
       evidence = "Judge whether cited claims semantically support the mapped relationship and target rationale. Treat typed-tool graph references as authoritative."
     }
     model_provider   = model_provider.qc
@@ -636,7 +655,7 @@ research "dynamic" "assess_nodes" {
 
 research "dynamic" "prioritize_companies" {
   tasks = [
-    for index, assessment in research.dynamic.assess_nodes.tasks : {
+    for index, target in jsondecode(research.static.build_supply_chain.result).company_mapping_targets : {
       model_provider   = model_provider.primary
       model            = var.model
       reasoning_effort = var.reasoning_effort
@@ -645,8 +664,10 @@ research "dynamic" "prioritize_companies" {
         Topic: ${var.topic}
         Evidence cutoff: ${var.as_of_date}
         Market: ${var.market}
-        Validated node assessment JSON:
-        ${assessment.result}
+        Selected company-mapping target JSON:
+        ${jsonencode(target)}
+        Validated supply-chain JSON:
+        ${research.static.build_supply_chain.result}
         Validated existing claim JSON:
         ${research.static.primary_source_baseline.result}
         ${join("\n", [for item in research.dynamic.graph_track.tasks : item.result])}
@@ -655,10 +676,12 @@ research "dynamic" "prioritize_companies" {
         ${var.use_pplx ? format("Perplexity artifact_dir: %s", artifact("sources").path) : ""}
 
         During Collection, investigate whether any public company deserves more
-        research because of this exact assessed node. Investigate at most
+        research because of this exact supplier-addressable node. Investigate at most
         ${var.max_candidates_per_chokepoint} companies. For each, distinguish an
-        existing supplier, qualified alternative, related-product-only company,
-        or unverified lead. Verify the exact legal entity and security. Save
+        existing supplier, qualified alternative, exact-node capability match,
+        related-product-only company, or unverified lead. Verify the exact legal
+        entity and security. A capability_match means confirmed ability to supply
+        this exact node, not proof of a named customer relationship. Save
         every retained source at a unique .md path under "${artifact("sources").path}"
         with r42_save_artifact,
         then submit a collection checkpoint. If no new evidence is needed,
@@ -669,7 +692,7 @@ research "dynamic" "prioritize_companies" {
 
         Register retained sources with ${go_tool.register_evidence_source.id}
         using the authorized artifact_id and workspace_dir above.
-        Submit atomic relationship and economic-exposure cards with
+        Submit atomic relationship, capability, and economic-exposure cards with
         ${go_tool.submit_claim_cards.id}, using the registered source's same
         artifact_id for every direct card. If revision removes an earlier card,
         include its ID in remove_claim_ids in the same call; missing removal IDs
@@ -689,32 +712,43 @@ research "dynamic" "prioritize_companies" {
         within_12_months and beyond_12_months describe expected supplier revenue
         timing, not merely the target product's launch date.
 
-        Finalize the current staged card set once with
+        Also record any useful quantitative or qualitative exposure_signals
+        without forcing unlike scopes into one score. Each signal must name its
+        scope (company, segment, modality, target_branch, or named_program),
+        subject, metric, value, as_of, evidence_directness, and claim_ids. Omit
+        signals that cannot be supported by an atomic claim; do not translate a
+        segment or modality metric into named-program economics.
+
+        During each Research pass, finalize the current staged card set exactly
+        once with
         ${go_tool.finalize_claim_cards.id}, claims_path
         "${artifact("claims").path}",
         source_registry_path
         "${artifact("source_registry").path}",
         cutoff above, and allow_empty true. Exact duplicate cards are collapsed
-        automatically. After an accepted finalize, do not call finalize again or
-        read claims to inspect its contents.
+        automatically. Do not call finalize repeatedly within the same pass
+        merely to inspect its output. If Final QC returns this block to Research,
+        revise the staged cards and finalize again in the later pass.
 
         Then call ${go_tool.submit_company_priorities.id}; r42 binds its
         declared company-priorities artifact_id,
-        the node assessment path, and claim_paths containing the baseline, all
-        five track files, and this task's claims.json.
+        authoritative supply-chain path, selected target node ID, and claim_paths
+        containing the baseline, all five track files, and this task's claims.json.
 
-        A means the node matters, the exact company role and relationship are
-        confirmed, and economic impact still needs research. B means the node
-        matters but relationship, qualification, or benefit mechanism is
-        incomplete. C is only an industry or related-product lead.
+        research_priority is separate from role and evidence maturity. A means
+        the exact-node relationship or capability is confirmed and a high-value
+        unresolved question has an executable next_check; it does not require a
+        named target customer. B means the exact-node link is plausible but its
+        relationship, qualification, or benefit mechanism is incomplete. C is
+        only an industry or related-product lead.
         do_not_research means the node or company link is too weak. These are
         research priorities, never investment ratings. An empty list is valid.
       PROMPT
       collection_tool_ids = local.pplx_tool_ids
       import_artifact = {
-        node_assessment = {
-          desc    = "Validated assessment for this task's target node."
-          sources = values(assessment.artifact)
+        supply_chain = {
+          desc    = "Authoritative supply-chain map and selected company-mapping target."
+          sources = values(research.static.build_supply_chain.artifact)
         }
         baseline = {
           desc    = "Validated baseline claims for company evidence."
@@ -740,8 +774,8 @@ research "dynamic" "prioritize_companies" {
           }
           input_from_agent = {
             cards = {
-              desc = "Atomic relationship and economic-exposure claim cards grounded in current registered sources and the assessed node context."
-              sources = flatten([values(assessment.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
+              desc = "Atomic relationship, exact-node capability, and economic-exposure claim cards grounded in current registered sources and the selected supply-chain target."
+              sources = flatten([values(research.static.build_supply_chain.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
             }
           }
         }
@@ -762,7 +796,8 @@ research "dynamic" "prioritize_companies" {
             workspace_dir        = "${block_wd()}/${index}"
             artifact_id          = artifact("company_priorities").id
             _r42_artifact_path   = ""
-            node_assessment_path = assessment.artifact.node_assessment.path
+            supply_chain_path    = research.static.build_supply_chain.artifact.supply_chain.path
+            target_node_id       = target.node_id
             claim_paths = concat(
               [research.static.primary_source_baseline.artifact.claims.path],
               [for task in research.dynamic.graph_track.tasks : task.artifact.claims.path],
@@ -771,12 +806,12 @@ research "dynamic" "prioritize_companies" {
           }
           input_from_agent = {
           companies = {
-            desc = "Companies prioritized against the exact assessed node. For every company, provide role, priority, relationship_claim_ids, why_research, largest_unknown, next_check, and economic_exposure. Each economic dimension requires status, evidence_directness (none, confirmed, reported, or inferred), and claim_ids. customer_validation status: unknown, evaluation, qualified, ordered, delivering, or production_use. revenue_materiality status: unknown, exposure_unquantified, quantified_immaterial, or quantified_material. bottleneck_capture status: unknown, none, plausible, or demonstrated. commercialization_timing status: unknown, current, within_12_months, or beyond_12_months. Use the validated upstream evidence plus current task claim IDs returned by submit_claim_cards; use unknown/none/[] when evidence is absent."
-            sources = flatten([values(assessment.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
+            desc = "Companies mapped to the exact selected supply-chain node. For every public company provide exact legal company name, non-empty ticker, market, role (existing_supplier, qualified_alternative, capability_match, related_product_only, or unverified), research_priority, relationship_claim_ids, capability_claim_ids, why_research, largest_unknown, executable next_check, economic_exposure, and exposure_signals. Use relationship_claim_ids only for customer/supplier or qualification relationships; use capability_claim_ids for evidence that the company can supply the exact node without claiming a named customer. A requires confirmed evidence appropriate to the declared role but does not require a named target customer. Each economic dimension requires status, evidence_directness (none, confirmed, reported, or inferred), and claim_ids. customer_validation status: unknown, evaluation, qualified, ordered, delivering, or production_use. revenue_materiality status: unknown, exposure_unquantified, quantified_immaterial, or quantified_material. bottleneck_capture status: unknown, none, plausible, or demonstrated. commercialization_timing status: unknown, current, within_12_months, or beyond_12_months. Each optional exposure_signal has scope (company, segment, modality, target_branch, or named_program), subject, metric, value, as_of, evidence_directness, and claim_ids; preserve its actual scope and never promote a broad metric to a named program. The current task claim IDs returned earlier by submit_claim_cards are available in this session even though sources lists only authorized imported artifacts. Use validated upstream claims plus those current task IDs; use unknown/none/[] or an empty exposure_signals list when evidence is absent."
+            sources = flatten([values(research.static.build_supply_chain.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
             }
           conclusion = {
-            desc = "The concise conclusion for this node's company-priority list."
-            sources = flatten([values(assessment.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
+            desc = "The concise conclusion for this company-mapping target's priority list."
+            sources = flatten([values(research.static.build_supply_chain.artifact), values(research.static.primary_source_baseline.artifact), [for task in research.dynamic.graph_track.tasks : values(task.artifact)]])
             }
           }
         }
@@ -788,7 +823,7 @@ research "dynamic" "prioritize_companies" {
         sources = {
           type        = "directory"
           path        = "${block_wd()}/${index}/artifacts/sources"
-          description = "Company-specific source material for this node assessment."
+          description = "Company-specific source material for this supply-chain mapping target."
         }
         claims = {
           type      = "file"
@@ -807,7 +842,7 @@ research "dynamic" "prioritize_companies" {
         company_priorities = {
           type      = "file"
           path      = "${block_wd()}/${index}/company-priorities.json"
-		  description = "Companies prioritized for further research against this node"
+		  description = "Companies prioritized for further research against this mapping target"
           required  = true
           non_empty = true
         }
@@ -818,9 +853,10 @@ research "dynamic" "prioritize_companies" {
       }
       qc = {
         criteria = {
-          company_gate = "Judge whether each priority follows from the assessed node and the exact company's proven role. Industry relevance alone is C at most."
-          relationship = "Judge whether claims distinguish product availability, validation, orders, delivery, production use, and primary-supplier status without upgrading one into another."
+          company_gate = "Judge research_priority separately from role evidence. A requires confirmed exact-node relationship or capability plus a valuable executable next check; a named target customer is not required for capability_match. Industry relevance alone is C at most."
+          relationship = "Judge whether relationship_claim_ids and capability_claim_ids distinguish exact-node capability from customer validation, orders, delivery, production use, and primary-supplier status without upgrading one into another."
           exposure_dimensions = "Judge each company's customer_validation, revenue_materiality, bottleneck_capture, and commercialization_timing separately. Each non-unknown status must be semantically entailed by its own claim_ids at the declared evidence_directness; do not let evidence for one dimension support another."
+          exposure_signals = "Judge whether each exposure signal preserves its declared company, segment, modality, target_branch, or named_program scope and whether its metric, value, date, and directness are entailed by its claim IDs."
           economic_boundary = "Judge whether revenue, profit, order, capacity, and competitive significance remain unknown unless directly supported. A/B/C are follow-up priorities, not investment recommendations."
         }
         model_provider   = model_provider.qc
@@ -842,7 +878,9 @@ research "static" "synthesize" {
     Write a concise, company-first research-priority report. Every substantive
     clause must cite one original atomic claim ID. Do not create report-level
     claims, scores, investment ratings, or recommendations. Do not research new
-    facts. Preserve not-proven nodes, rejected companies, and unknowns.
+    facts. Preserve not-proven nodes, rejected companies, and unknowns. Merge
+    records for the same legal entity and security across company-mapping tasks,
+    while preserving every distinct mapped node and its evidence.
   PROMPT
   prompt = <<-PROMPT
     Topic: ${var.topic}
@@ -866,15 +904,18 @@ research "static" "synthesize" {
     baseline and track claims are listed once above.
 
     During Collection, do not acquire new evidence. The validated JSON above is
-    complete for synthesis. Submit an empty collection checkpoint with
-    empty_reason "validated upstream JSON is the complete closed input" and
-    collection_exhausted=true.
+    complete for synthesis. Call r42_set_information_needs once with a single
+    need whose stop condition is satisfied by the validated JSON, then submit
+    an empty collection checkpoint with empty_reason "validated upstream JSON
+    is the complete closed input" and mark that need stalled.
 
     During closed Research, use only the validated JSON above and write
     "${artifact("report").path}" in this order:
-    1. companies worth further research, showing A/B/C/do-not-research, exact
-       node and role, all four economic-exposure dimensions with their evidence
-       directness, strongest evidence, largest unknown, and next check;
+    1. companies worth further research, showing research priority separately
+       from relationship or capability evidence; merge the same legal entity and
+       security across tasks while preserving all mapped nodes, roles, all four
+       economic-exposure dimensions, scoped exposure signals, strongest evidence,
+       largest unknown, and next check;
     2. confirmed and candidate global or branch-specific risk nodes;
     3. separate views for current production, expansion/upgrade, and product
        branches;
@@ -928,7 +969,7 @@ research "static" "synthesize" {
 
   collection_qc {
     criteria = {
-      closed_input = "This is closed-input synthesis over already validated upstream JSON. An empty checkpoint with collection_exhausted=true is sufficient. Do not request new sources or re-review upstream evidence coverage."
+      closed_input = "This is closed-input synthesis over already validated upstream JSON. The single information need's stop condition is satisfied without new sources; assess it sufficient. Do not request new sources or re-review upstream evidence coverage."
     }
     model_provider   = model_provider.qc
     model            = local.qc_model
@@ -946,7 +987,7 @@ research "static" "synthesize" {
 
   qc {
     criteria = {
-      decision_usefulness = "Judge whether the first page gives a defensible company research-priority list with the exact node, role, customer validation, revenue materiality, bottleneck capture, commercialization timing, evidence directness, largest unknown, and next check."
+      decision_usefulness = "Judge whether the first page merges duplicate legal entities or securities across mapped nodes and gives a defensible research-priority list with priority separate from relationship/capability evidence, exact nodes, roles, scoped exposure signals, customer validation, revenue materiality, bottleneck capture, commercialization timing, largest unknown, and next check."
       entailment = "Judge whether each cited atomic claim semantically supports the adjacent report clause without concept, party, period, product-branch, or qualifier substitution. Treat marker, ID, path, URL, and quotation checks as authoritative."
       risk_scope = "Judge whether global versus branch scope and current production versus expansion/upgrade scenarios are separated from proof strength."
       restraint = "Reject investment recommendations, composite scores, false precision, and any company promotion based only on industry relevance or a related product."
@@ -972,7 +1013,7 @@ output "scope_path" {
 }
 
 output "supply_chain_path" {
-  description = "Machine-readable reference supply chain and node-assessment targets."
+  description = "Machine-readable reference supply chain with assessment and company-mapping targets."
   value       = research.static.build_supply_chain.artifact.supply_chain.path
 }
 
@@ -982,6 +1023,6 @@ output "node_assessment_paths" {
 }
 
 output "company_priority_paths" {
-  description = "Company follow-up research priorities by assessed node."
+  description = "Company follow-up research priorities by company-mapping target."
   value       = [for task in research.dynamic.prioritize_companies.tasks : task.artifact.company_priorities.path]
 }

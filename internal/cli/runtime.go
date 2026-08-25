@@ -1172,13 +1172,13 @@ func (f *runtimeFactory) publish(address string, value cty.Value) {
 func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.VerdictRecorder) sdk.Tool {
 	return sdk.Tool{
 		Name:        "r42_qc_verdict",
-		Description: "Pass, revise research, or reopen collection with concrete issues",
+		Description: "Submit pass with no issues, or revise_research with every issue found in this review. Final QC cannot reopen Collection.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"decision": map[string]any{
 					"type": "string",
-					"enum": []string{"pass", "revise_research", "reopen_collection"},
+					"enum": []string{"pass", "revise_research"},
 				},
 				"issues": map[string]any{
 					"type": "array",
@@ -1216,18 +1216,7 @@ func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.Ver
 				return sdk.ToolResult{TextResultForLLM: string(rejected), ResultType: "success"}, nil
 			}
 			if recordErr := verdicts.Record(verdict); recordErr != nil {
-				var exhausted *qc.CollectionRoundBudgetExhaustedError
-				if errors.As(recordErr, &exhausted) {
-					hint := "Choose revise_research or pass using existing evidence artifacts."
-					rejected, _ := json.Marshal(corespec.ToolResponse[any]{
-						Accepted: false,
-						Issues: []corespec.Issue{{
-							Code: "collection_round_budget_exhausted", Message: exhausted.Error(), RepairHint: &hint,
-						}},
-					})
-					return sdk.ToolResult{TextResultForLLM: string(rejected), ResultType: "success"}, nil
-				}
-				return sdk.ToolResult{}, recordErr
+				return rejectedToolResult("invalid_qc_issue_transition", recordErr.Error())
 			}
 			result, _ := json.Marshal(map[string]any{"accepted": true})
 			if recordErr := recorder.Record(debuglog.Event{

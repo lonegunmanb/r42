@@ -277,7 +277,8 @@ research "static" "market" {
 	require.NoError(t, config.RunPlan())
 	planned := golden.Blocks[*researchspec.ResearchBlock](config)[0].ResearchConfig()
 	assert.Equal(t, researchspec.DefaultCollectionBatchSize, planned.CollectionBatchSize)
-	assert.Nil(t, planned.MaxCollectionRounds)
+	require.NotNil(t, planned.MaxCollectionRounds)
+	assert.Equal(t, researchspec.DefaultMaxCollectionRounds, *planned.MaxCollectionRounds)
 	assert.Nil(t, planned.CollectionQC)
 }
 

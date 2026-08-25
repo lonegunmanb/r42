@@ -32,7 +32,10 @@ var closedWorldBuiltIns = []string{
 	"shell", "edit", "create", "glob", "task", "ask_user",
 }
 
-var collectionBlockedBuiltIns = []string{"task", "powershell", "curl"}
+var collectionBlockedBuiltIns = []string{
+	"bash", "powershell", "read_powershell", "list_powershell", "shell",
+	"edit", "create", "glob", "task", "ask_user", "curl",
+}
 
 var readOnlyFileBuiltIns = []string{"view", "grep", "head", "tail"}
 
@@ -73,34 +76,89 @@ func closedWorldAllowedTools(configured, mandatory []string) []string {
 	return phaseAllowedTools(result, mandatory)
 }
 
-func collectionBuiltInHooks(quota *toolCallQuota, gate *collection.AcquisitionGate) *sdk.SessionHooks {
+func collectionBuiltInHooks(quota *toolCallQuota, collectionContext *collection.Context) *sdk.SessionHooks {
+	var leaseMu sync.Mutex
+	leases := make(map[string][]func())
+	releaseLease := func(toolName string) {
+		leaseMu.Lock()
+		defer leaseMu.Unlock()
+		toolLeases := leases[toolName]
+		if len(toolLeases) == 0 {
+			return
+		}
+		toolLeases[0]()
+		if len(toolLeases) == 1 {
+			delete(leases, toolName)
+			return
+		}
+		leases[toolName] = toolLeases[1:]
+	}
 	return &sdk.SessionHooks{
 		OnPreToolUse: func(input sdk.PreToolUseHookInput, _ sdk.HookInvocation) (*sdk.PreToolUseHookOutput, error) {
-			if (input.ToolName == "web_search" || input.ToolName == "web_fetch") && gate != nil {
-				if reason := acquisitionGateDenial(gate); reason != "" {
+			if (input.ToolName == "web_search" || input.ToolName == "web_fetch") && collectionContext != nil {
+				release, denialReason := beginCollectionAcquisition(collectionContext)
+				if denialReason != "" {
 					return &sdk.PreToolUseHookOutput{
 						PermissionDecision:       "deny",
-						PermissionDecisionReason: reason,
+						PermissionDecisionReason: denialReason,
 					}, nil
 				}
+				decision := toolCallQuotaDecision(quota, input.ToolName)
+				if decision.PermissionDecision != "allow" {
+					release()
+					return decision, nil
+				}
+				leaseMu.Lock()
+				leases[input.ToolName] = append(leases[input.ToolName], release)
+				leaseMu.Unlock()
+				return decision, nil
 			}
 			return toolCallQuotaDecision(quota, input.ToolName), nil
+		},
+		OnPostToolUse: func(input sdk.PostToolUseHookInput, _ sdk.HookInvocation) (*sdk.PostToolUseHookOutput, error) {
+			releaseLease(input.ToolName)
+			return &sdk.PostToolUseHookOutput{}, nil
 		},
 		OnPostToolUseFailure: func(
 			input sdk.PostToolUseFailureHookInput,
 			_ sdk.HookInvocation,
 		) (*sdk.PostToolUseFailureHookOutput, error) {
+			releaseLease(input.ToolName)
 			quota.rollback(input.ToolName)
 			return &sdk.PostToolUseFailureHookOutput{}, nil
 		},
 	}
 }
 
-func acquisitionGateDenial(gate *collection.AcquisitionGate) string {
-	if err := gate.Acquire(); err != nil {
-		return err.Error()
+func beginCollectionAcquisition(collectionContext *collection.Context) (func(), string) {
+	release, err := collectionContext.BeginCollectionToolCall()
+	if err != nil {
+		return nil, err.Error()
 	}
-	return ""
+	if err = collectionContext.Gate().Acquire(); err != nil {
+		release()
+		return nil, err.Error()
+	}
+	return release, ""
+}
+
+func wrapCollectionMutationTools(tools []sdk.Tool, collectionContext *collection.Context) []sdk.Tool {
+	result := slices.Clone(tools)
+	for index := range result {
+		if result[index].Name != "r42_write_markdown" {
+			continue
+		}
+		original := result[index].Handler
+		result[index].Handler = func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			release, err := collectionContext.BeginCollectionToolCall()
+			if err != nil {
+				return rejectedToolResult("collection_tool_gate", err.Error())
+			}
+			defer release()
+			return original(invocation)
+		}
+	}
+	return result
 }
 
 func toolNames(tools []sdk.Tool) []string {
@@ -119,6 +177,11 @@ func wrapCollectionAcquisitionTools(tools []sdk.Tool, context *collection.Contex
 			if err := context.BeginWorkflow(); err != nil {
 				return rejectedToolResult("context_validation", err.Error())
 			}
+			release, err := context.BeginCollectionToolCall()
+			if err != nil {
+				return rejectedToolResult("collection_tool_gate", err.Error())
+			}
+			defer release()
 			if err := context.Gate().Acquire(); err != nil {
 				return rejectedToolResult("checkpoint_pending", err.Error())
 			}
@@ -140,7 +203,27 @@ func wrapCollectionAcquisitionTools(tools []sdk.Tool, context *collection.Contex
 func collectionProtocolTools(context *collection.Context, checkpoints *collection.CheckpointRecorder) []sdk.Tool {
 	register := collection.NewRegisterHandler(context)
 	checkpoint := collection.NewCheckpointHandler(context)
+	informationNeeds := collection.NewInformationNeedsHandler(context)
 	return []sdk.Tool{
+		{
+			Name: "r42_set_information_needs", Description: "Before any collection or artifact-writing tool call, freeze this Collection task's complete search plan. " +
+				"List every information need and its objective stop conditions. R42 assigns canonical IDs. This successful call is permanent: later rounds may not add, edit, rename, delete, or split needs or conditions.",
+			Parameters: objectSchema(map[string]any{
+				"information_needs": map[string]any{"type": "array", "items": objectSchema(map[string]any{
+					"question": map[string]any{"type": "string", "description": "The fixed question Collection will investigate"},
+					"stop_conditions": map[string]any{"type": "array", "items": objectSchema(map[string]any{
+						"condition": map[string]any{"type": "string", "description": "Evidence condition that makes this question sufficient"},
+					}, []string{"condition"})},
+				}, []string{"question", "stop_conditions"})},
+			}, []string{"information_needs"}),
+			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+				args, err := decodeArguments[collection.InformationNeedsArgs](invocation.Arguments)
+				if err != nil {
+					return rejectedToolResult("invalid_arguments", err.Error())
+				}
+				return responseToolResult(informationNeeds.Set(args))
+			},
+		},
 		{
 			Name: "r42_register_artifact", Description: "Register an existing workspace evidence artifact path or retained source tool call result. " +
 				"Optional source may be a URL or any other source identifier; when supplied, it is added as a compatible Source header only if the artifact has no non-empty Source or legacy URL header. " +
@@ -160,11 +243,15 @@ func collectionProtocolTools(context *collection.Context, checkpoints *collectio
 			},
 		},
 		{
-			Name: "r42_collection_checkpoint", Description: "Submit all unreviewed evidence artifacts for Collection QC, or report that Collection is exhausted",
+			Name: "r42_collection_checkpoint", Description: "Exactly once in each Collection round, submit all unreviewed evidence artifacts and one continue or stalled disposition for every active information need. " +
+				"This is the final valid tool call of this round; after acceptance Collection QC starts. stalled means you made a genuine search effort for that need and found no productive next search action.",
 			Parameters: objectSchema(map[string]any{
-				"empty_reason":         map[string]any{"type": "string"},
-				"collection_exhausted": map[string]any{"type": "boolean"},
-			}, nil),
+				"empty_reason": map[string]any{"type": "string", "description": "Required only when this round added no evidence artifacts"},
+				"need_dispositions": map[string]any{"type": "array", "items": objectSchema(map[string]any{
+					"information_need_id": map[string]any{"type": "string"},
+					"search_disposition":  map[string]any{"type": "string", "enum": []string{"continue", "stalled"}},
+				}, []string{"information_need_id", "search_disposition"})},
+			}, []string{"need_dispositions"}),
 			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
 				args, err := decodeArguments[collection.CheckpointArgs](invocation.Arguments)
 				if err != nil {
@@ -219,6 +306,11 @@ func collectionSaveArtifactTool(context *collection.Context) sdk.Tool {
 }
 
 func saveCollectionArtifact(context *collection.Context, args saveArtifactArgs) (sdk.ToolResult, error) {
+	release, err := context.BeginCollectionToolCall()
+	if err != nil {
+		return rejectedToolResult("collection_tool_gate", err.Error())
+	}
+	defer release()
 	issues := make([]corespec.Issue, 0, 3)
 	workspace := ""
 	if context != nil {
@@ -281,17 +373,25 @@ func collectionArtifactPath(context *collection.Context, raw string) (string, bo
 	return path, context.AllowsArtifactPath(path)
 }
 
-func collectionQCVerdictTool(verdicts *collectionqc.VerdictRecorder) sdk.Tool {
+func collectionQCVerdictTool(collectionContext *collection.Context, verdicts *collectionqc.VerdictRecorder) sdk.Tool {
 	return sdk.Tool{
-		Name: "r42_collection_qc_verdict", Description: "Report whether the checkpoint evidence is sufficient",
+		Name: "r42_collection_qc_verdict", Description: "Exactly once in each Collection QC round, assess every active information need against only its frozen stop-condition IDs. " +
+			"sufficient lists no unsatisfied conditions; needs_more lists the remaining IDs. After the first QC round, remaining IDs must be a subset of the previous round; never introduce, reopen, rename, or restate conditions. evidence_progress is material only when this checkpoint materially improves the need.",
 		Parameters: objectSchema(map[string]any{
-			"decision": map[string]any{"type": "string", "enum": []string{"sufficient", "needs_more"}},
-			"issues":   issueArraySchema(),
-		}, []string{"decision"}),
+			"assessments": map[string]any{"type": "array", "items": objectSchema(map[string]any{
+				"information_need_id":       map[string]any{"type": "string"},
+				"status":                    map[string]any{"type": "string", "enum": []string{"sufficient", "needs_more"}},
+				"unsatisfied_condition_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"evidence_progress":         map[string]any{"type": "string", "enum": []string{"material", "none"}},
+			}, []string{"information_need_id", "status", "unsatisfied_condition_ids", "evidence_progress"})},
+		}, []string{"assessments"}),
 		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
 			verdict, err := decodeArguments[collectionqc.Verdict](invocation.Arguments)
 			if err != nil {
 				return rejectedToolResult("invalid_arguments", err.Error())
+			}
+			if issues := collectionContext.ValidateQCAssessments(verdict.Assessments, collectionContext.LastRoundHadArtifacts()); len(issues) > 0 {
+				return responseToolResult(corespec.ToolResponse[collectionqc.Verdict]{Issues: issues})
 			}
 			if err = verdicts.Record(verdict); err != nil {
 				return rejectedToolResult("invalid_verdict", err.Error())
@@ -1597,13 +1697,6 @@ func objectSchema(properties map[string]any, required []string) map[string]any {
 		schema["required"] = required
 	}
 	return schema
-}
-
-func issueArraySchema() map[string]any {
-	return map[string]any{"type": "array", "items": objectSchema(map[string]any{
-		"code": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"},
-		"path": map[string]any{"type": "string"}, "repair_hint": map[string]any{"type": "string"},
-	}, []string{"code", "message"})}
 }
 
 func decodeArguments[T any](arguments any) (T, error) {

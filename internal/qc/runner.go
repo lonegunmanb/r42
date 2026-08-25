@@ -35,6 +35,7 @@ type Config struct {
 	MaxRounds           int
 	MaxProtocolAttempts int
 	VerdictToolName     string
+	OpenIssues          []corespec.Issue
 }
 
 type Result struct {
@@ -45,9 +46,8 @@ type Result struct {
 type Decision string
 
 const (
-	DecisionPass             Decision = "pass"
-	DecisionReviseResearch   Decision = "revise_research"
-	DecisionReopenCollection Decision = "reopen_collection"
+	DecisionPass           Decision = "pass"
+	DecisionReviseResearch Decision = "revise_research"
 )
 
 type Verdict struct {
@@ -64,10 +64,6 @@ func (v Verdict) Validate() error {
 	case DecisionReviseResearch:
 		if len(v.Issues) == 0 {
 			return fmt.Errorf("revise_research verdict must contain at least one issue")
-		}
-	case DecisionReopenCollection:
-		if len(v.Issues) == 0 {
-			return fmt.Errorf("reopen_collection verdict must contain at least one issue")
 		}
 	default:
 		return fmt.Errorf("unsupported final qc decision %q", v.Decision)
@@ -127,12 +123,10 @@ func (r *Runner) Run(ctx context.Context, config Config) (Result, error) {
 		if verdict.Decision == DecisionPass {
 			return Result{Candidate: candidate, Rounds: round}, nil
 		}
-		if verdict.Decision == DecisionReopenCollection {
-			return Result{}, fmt.Errorf("reopen_collection requires the research workflow coordinator")
-		}
 		if round == config.MaxRounds {
 			return Result{}, fmt.Errorf("qc rounds exhausted after %d rounds", round)
 		}
+		config.OpenIssues = cloneIssues(verdict.Issues)
 		revision := config.Research
 		revision.InitialPrompt = revisionPrompt(verdict.Issues)
 		candidate, err = r.research.Run(ctx, revision)
@@ -204,29 +198,6 @@ type VerdictRecorder struct {
 	verdicts          []Verdict
 	failure           error
 	completionVersion uint64
-	collectionBudget  CollectionBudget
-}
-
-// CollectionBudget is the Final-QC view of the shared Collection round
-// budget. A nil MaxRounds means Collection may be reopened without a limit.
-type CollectionBudget struct {
-	RoundsUsed int
-	MaxRounds  *int
-	Exhausted  bool
-}
-
-// CollectionRoundBudgetExhaustedError rejects a Final-QC reopen request while
-// leaving the verdict protocol active for a repair attempt.
-type CollectionRoundBudgetExhaustedError struct {
-	Rounds             int
-	CollectorExhausted bool
-}
-
-func (e *CollectionRoundBudgetExhaustedError) Error() string {
-	if e.CollectorExhausted {
-		return "cannot reopen collection: the Collection session reported that no further evidence can be collected"
-	}
-	return fmt.Sprintf("cannot reopen collection: all %d collection rounds have been used", e.Rounds)
 }
 
 func NewVerdictRecorder() *VerdictRecorder {
@@ -238,46 +209,11 @@ func (r *VerdictRecorder) Record(verdict Verdict) error {
 		return fmt.Errorf("record qc verdict: %w", err)
 	}
 	r.mu.Lock()
-	if verdict.Decision == DecisionReopenCollection && !collectionCanReopen(r.collectionBudget) {
-		rejection := &CollectionRoundBudgetExhaustedError{
-			Rounds: r.collectionBudget.RoundsUsed, CollectorExhausted: r.collectionBudget.Exhausted,
-		}
-		if r.collectionBudget.MaxRounds != nil {
-			rejection.Rounds = *r.collectionBudget.MaxRounds
-		}
-		r.mu.Unlock()
-		return rejection
-	}
 	verdict.Issues = cloneIssues(verdict.Issues)
 	r.verdicts = append(r.verdicts, verdict)
 	r.completionVersion++
 	r.mu.Unlock()
 	return nil
-}
-
-// SetCollectionBudget updates the budget used to validate reopen decisions.
-func (r *VerdictRecorder) SetCollectionBudget(budget CollectionBudget) {
-	if budget.MaxRounds != nil {
-		maximum := *budget.MaxRounds
-		budget.MaxRounds = &maximum
-	}
-	r.mu.Lock()
-	r.collectionBudget = budget
-	r.mu.Unlock()
-}
-
-// CollectionCanReopen reports whether another Collection round is available.
-func (r *VerdictRecorder) CollectionCanReopen() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return collectionCanReopen(r.collectionBudget)
-}
-
-func collectionCanReopen(budget CollectionBudget) bool {
-	if budget.Exhausted {
-		return false
-	}
-	return budget.MaxRounds == nil || budget.RoundsUsed < *budget.MaxRounds
 }
 
 func (r *VerdictRecorder) RecordError(err error) {
@@ -310,10 +246,11 @@ func (r *VerdictRecorder) drain() ([]Verdict, error) {
 }
 
 type contextDocument struct {
-	Task      Task               `json:"task"`
-	Criteria  map[string]string  `json:"criteria"`
-	Candidate candidateDocument  `json:"candidate"`
-	Artifacts []artifactDocument `json:"artifacts"`
+	Task       Task               `json:"task"`
+	Criteria   map[string]string  `json:"criteria"`
+	Candidate  candidateDocument  `json:"candidate"`
+	Artifacts  []artifactDocument `json:"artifacts"`
+	OpenIssues []corespec.Issue   `json:"open_issues,omitempty"`
 }
 
 type candidateDocument struct {
@@ -334,10 +271,11 @@ func contextPrompt(config Config, candidate researchruntime.Result) (string, err
 		return "", err
 	}
 	document := contextDocument{
-		Task:      config.Task,
-		Criteria:  criteria,
-		Candidate: candidateDocument{Result: cloneString(candidate.Value)},
-		Artifacts: make([]artifactDocument, len(config.Artifacts)),
+		Task:       config.Task,
+		Criteria:   criteria,
+		Candidate:  candidateDocument{Result: cloneString(candidate.Value)},
+		Artifacts:  make([]artifactDocument, len(config.Artifacts)),
+		OpenIssues: cloneIssues(config.OpenIssues),
 	}
 	for index, declared := range config.Artifacts {
 		document.Artifacts[index] = artifactDocument{

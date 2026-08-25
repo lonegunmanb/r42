@@ -290,7 +290,7 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 		Artifacts:                  slices.Clone(snapshot.Artifacts),
 		TerminateToolID:            clonePointer(snapshot.TerminateToolID),
 		CollectionBatchSize:        researchspec.DefaultCollectionBatchSize,
-		MaxCollectionRounds:        clonePointer(snapshot.MaxCollectionRounds),
+		MaxCollectionRounds:        restoreMaxCollectionRounds(snapshot.MaxCollectionRounds),
 		CollectionToolIDs:          slices.Clone(snapshot.CollectionToolIDs),
 		CollectionSkillDirectories: slices.Clone(snapshot.CollectionSkillDirectories),
 		CollectionSkills:           slices.Clone(snapshot.CollectionSkills),
@@ -803,4 +803,14 @@ func clonePointer[T any](value *T) *T {
 	}
 	result := *value
 	return &result
+}
+
+// restoreMaxCollectionRounds restores the configured hard cap, falling back to
+// the research default for legacy snapshots that predate the default.
+func restoreMaxCollectionRounds(configured *int) *int {
+	if configured != nil {
+		return clonePointer(configured)
+	}
+	maximum := researchspec.DefaultMaxCollectionRounds
+	return &maximum
 }

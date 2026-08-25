@@ -335,7 +335,7 @@ Research session fields include:
   `collection_disabled_skills`, used only by Collection.
 - `skill_directories`, `skills`, and `disabled_skills`, used only by Research.
 - `collection_batch_size`, defaulting to 10.
-- `max_collection_rounds`; omission means unlimited.
+- `max_collection_rounds`; omission uses the default hard cap of 10 rounds.
 - zero or one `collection_qc` block. Collection QC is still mandatory when the
   block is absent; the block only overrides criteria, provider/model/reasoning,
   retry, and permission.
@@ -393,9 +393,9 @@ Collection, Research, and Final QC configure typed-tool quotas independently. A
 successful call consumes one unit only after its arguments pass schema
 validation and the tool returns an accepted response. Execution errors and
 `accepted = false` responses roll back the reservation. A zero quota disables
-that tool for the session. Collection rounds are a separate control: only
-entering the initial acquisition phase or reopening it consumes a round; an
-empty checkpoint does not consume an extra round.
+that tool for the session. Collection rounds are a separate control: each
+`needs_more` return to Collection after the initial phase consumes a round, and
+an empty checkpoint does not consume an extra round.
 
 `one(collection)` follows Terraform's zero-or-one convention: an empty list,
 set, or tuple returns null, one element returns that element, and more than one
@@ -559,59 +559,78 @@ Collection --checkpoint--> Collection QC --sufficient--> Research
     |--------- needs_more -------|                           | candidate
                                                              v
                                       complete <---pass--- Final QC
-                                                        /       \
-                                         revise_research         reopen_collection
-                                               |                         |
-                                               +----> Research           +----> Collection
+                                                              |
+                                                              | revise_research
+                                                              v
+                                                             Research
 ```
 
 Collection is the only open-world phase. It uses only
 its effective provider, `collection_tool_ids`, Collection skills, the shared
 built-in policy, and the
-mandatory `r42_save_artifact`, `r42_register_artifact`, and
-`r42_collection_checkpoint` tools. `r42_save_artifact` accepts complete
-Markdown content plus a required source identifier, which may be a URL or a
-non-URL value, writes the identifier into the artifact header, registers the
-evidence artifact, and returns its path and artifact ID. The returned artifact ID is
-ready to use; Collection must not register the returned path again. A
-configured typed acquisition result is retained by tool-call ID so registration
-can materialize it as a managed file; a tool that already wrote a file can
-register that workspace path instead. `r42_register_artifact` accepts an
-optional `source`; when supplied and the target has no non-empty `- Source:` or
-legacy `- URL:` header, registration prepends `- Source: <source>`. Registration validates source exclusivity,
-existence, non-empty content, and ownership. Each saved artifact receives a run-scoped artifact ID.
+mandatory `r42_set_information_needs`, `r42_save_artifact`,
+`r42_register_artifact`, and
+`r42_collection_checkpoint` tools. Before any collection or artifact-writing
+tool call, Collection must call `r42_set_information_needs` once to freeze the
+complete search plan: 1-10 information needs, each with 1-5 objective stop
+conditions, assigned canonical IDs such as `NEED-001` and `NEED-001-SC-001`.
+The plan is permanently frozen after submission: later rounds may not add,
+edit, rename, delete, or split needs or conditions. Before the plan is frozen,
+every non-read-only Collection tool is rejected. `r42_save_artifact` accepts
+complete Markdown content plus a required source identifier, which may be a URL
+or a non-URL value, writes the identifier into the artifact header, registers
+the evidence artifact, and returns its path and artifact ID. The returned
+artifact ID is ready to use; Collection must not register the returned path
+again. A configured typed acquisition result is retained by tool-call ID so
+registration can materialize it as a managed file; a tool that already wrote a
+file can register that workspace path instead. `r42_register_artifact` accepts
+an optional `source`; when supplied and the target has no non-empty
+`- Source:` or legacy `- URL:` header, registration prepends `- Source:
+<source>`. Registration validates source exclusivity, existence, non-empty
+content, and ownership. Each saved artifact receives a run-scoped artifact ID.
 Path-based source immutability is not guaranteed.
 
-A checkpoint includes every newly registered evidence artifact. An empty checkpoint is
-valid only with a non-empty `empty_reason`. Reaching `collection_batch_size`
-sets `checkpoint_pending`: new acquisition calls are rejected, but already
-in-flight work may finish and registration/checkpoint remain callable. The
-default batch size is 10.
+Each Collection round must call `r42_collection_checkpoint` exactly once with
+one `continue` or `stalled` disposition for every active need; it is the final
+valid tool call of the round, after which Collection's non-read-only tools
+lock. `stalled` means Collection made a genuine search effort for that need and
+found no productive next search action. A checkpoint includes every newly
+registered evidence artifact. An empty checkpoint is valid only with a
+non-empty `empty_reason`. Reaching `collection_batch_size` sets
+`checkpoint_pending`: new acquisition calls are rejected, but already in-flight
+work may finish and registration/checkpoint remain callable. The default batch
+size is 10.
 
-When configured source tools cannot obtain any more useful material, Collection
-can submit an empty checkpoint with `collection_exhausted = true` and a concrete
-`empty_reason`. This is an explicit terminal statement from the persistent
-Collection session, not an inference from an unchanged snapshot set. Collection
-QC receives both fields together with `collection_can_reopen = false`; it may
-still return `needs_more` with semantic gaps, but the workflow then advances to
-closed Research with those issues instead of reopening Collection.
-
-Collection QC is mandatory even when no `collection_qc` block is declared. It
-uses a persistent session with fixed read-only snapshot/artifact projections and
-the mandatory `r42_collection_qc_verdict` tool. It performs semantic sufficiency
+There is no global "collection exhausted" declaration. Collection's inability
+to find more is expressed per need through the `stalled` disposition. Collection
+QC is mandatory even when no `collection_qc` block is declared. It uses a
+persistent session with fixed read-only snapshot/artifact projections and the
+mandatory `r42_collection_qc_verdict` tool. It performs semantic sufficiency
 review only; the registration and checkpoint tools are authoritative for
-mechanical validation. A `sufficient` verdict has no issues. `needs_more`
-requires concrete issues and reopens Collection when its round budget permits.
-Malformed verdicts do not advance the reviewed cursor; valid verdicts do.
+mechanical validation. Each QC round submits one assessment per active need:
+`sufficient` lists no unsatisfied conditions, or `needs_more` lists only
+remaining frozen condition IDs. Remaining condition IDs may only shrink between
+rounds; a satisfied condition is never reopened. Malformed verdicts do not
+advance the reviewed cursor; valid verdicts do.
+
+Each need keeps its own lifecycle:
+
+```text
+ACTIVE -> SATISFIED
+        -> UNRESOLVED / SEARCH_STALLED
+        -> UNRESOLVED / BUDGET_EXHAUSTED
+```
+
+A need becomes `search_stalled` after two consecutive rounds where Collection
+reports `stalled`, QC reports `needs_more`, and QC reports `none` evidence
+progress. A need becomes `budget_exhausted` at the tenth Collection round (the
+default hard cap). Terminal needs are frozen and never reopened.
 
 `max_collection_rounds` counts actual entries into Collection, including the
-initial phase and later reopens. Omission means unlimited. When Collection QC
-requests more after the configured limit is exhausted, Research proceeds with
-the unresolved issues and existing snapshots. A collector-declared exhaustion
-has the same no-reopen effect independently of this numeric limit. Final QC gets
-a typed rejection if it requests `reopen_collection` after either condition;
-the rejection distinguishes the configured round limit from the Collection
-session's explicit exhaustion. Merely revising Research or
+initial phase. The default is 10. When the limit is exhausted, every remaining
+active need becomes `budget_exhausted` and Research proceeds with the full
+`information_need_outcomes`. The same no-reopen rule applies to Final QC, which
+has no `reopen_collection` decision at all. Merely revising Research or
 retrying a verdict does not consume a Collection round.
 
 Research is closed-world synthesis. It can read all registered evidence artifacts by ID,
@@ -620,22 +639,26 @@ use explicitly configured trusted `tool_ids`, and call its optional termination
 tool. Obvious network, shell, write/edit, glob, task/sub-agent, and user-input
 built-ins are always denied; read-only `view`, `grep`, `head`, and `tail`
 remain available. Protocol and artifact failures are repairable in the same
-persistent Research session.
+persistent Research session. Research receives the complete
+`information_need_outcomes`; unresolved needs must be represented as
+uncertainty, never as proven absence.
 
 Final QC exists only when `qc` is configured. It receives the original task,
-non-empty `criteria`, candidate result, declared artifact metadata, and read-only
-snapshot/artifact projections, but not the Research transcript. Its mandatory
-`r42_qc_verdict` decision is one of:
+non-empty semantic `criteria`, candidate result, declared artifact metadata,
+and read-only snapshot/artifact projections, but not the Research transcript,
+information-need outcomes, or stop conditions. Collection QC exclusively owns
+evidence-sufficiency and primary-coverage decisions; Final QC reviews only the
+claims actually present in the candidate. Its mandatory `r42_qc_verdict`
+decision is one of:
 
 - `pass`, with no issues, completes the workflow;
-- `revise_research`, with one or more issues, returns to closed Research;
-- `reopen_collection`, with one or more evidence gaps, returns to Collection.
+- `revise_research`, with one or more issues, returns to closed Research.
 
-Before accepting `reopen_collection`, the verdict tool checks the shared round
-state. If the budget is exhausted, it returns a repairable
-`collection_round_budget_exhausted` response, keeps Final QC active, and asks it
-to choose `revise_research` or `pass` from existing snapshots. The rejected
-request consumes no Collection round. `max_qc_rounds` defaults to 10; a non-pass
+Final QC can never reopen Collection and must not reject a candidate for
+missing coverage. It may return the candidate only when a claim actually
+present exceeds or misrepresents its cited evidence; Research must then delete
+or narrow that claim rather than collect or add evidence. `max_qc_rounds`
+defaults to 10; a non-pass
 decision on the last review fails without starting work that cannot be reviewed.
 
 Final QC inherits only effective provider/model/reasoning/retry/permission
