@@ -172,7 +172,7 @@ func TestPlanRoundTripPreservesBlockOrigin(t *testing.T) {
 		Filename: "main.r42.hcl", StartLine: 12, StartColumn: 1,
 		EndLine: 18, EndColumn: 2, Source: "research \"static\" \"baseline\" { ... }",
 	}
-	planned, err := plan.NewForRun("D:/research", "D:/run", []plan.NodeSpec{{
+	planned, err := plan.NewForRun(t.TempDir(), t.TempDir(), []plan.NodeSpec{{
 		Address: "research.static.baseline", Kind: "research", Config: cty.EmptyObjectVal, Origin: origin,
 	}}, nil, nil, nil)
 	require.NoError(t, err)
