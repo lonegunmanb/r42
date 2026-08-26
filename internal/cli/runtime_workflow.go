@@ -219,6 +219,16 @@ func (f *runtimeFactory) newResearchBlock(
 		artifactIDs[declared.Name] = record.ID
 		currentArtifactIDs = append(currentArtifactIDs, record.ID)
 	}
+	if planned.Config.EffectivePhaseMode() == researchspec.PhaseModeResearchOnly {
+		block, err := f.newResearchOnlyBlock(
+			ctx, address, executionAddress, workspace, planned, publish,
+			artifactsRegistry, artifactIDs, currentArtifactIDs, blockCancel,
+		)
+		if err == nil {
+			keepContext = true
+		}
+		return block, err
+	}
 	collectionContext := collection.NewContextWithArtifactRegistry(
 		workspace, planned.Config.CollectionBatchSize, planned.Config.MaxCollectionRounds, artifactsRegistry,
 	)
@@ -471,16 +481,8 @@ func (f *runtimeFactory) newResearchBlock(
 		finalSession, openErr := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionFinalQC, copilot.SessionConfig{
 			Provider: finalQCProvider,
 			Retry:    effectiveFinalQC.Retry, Model: effectiveFinalQC.Model, Profile: effectiveFinalQC.Profile,
-			ReasoningEffort: pointerValue(effectiveFinalQC.ReasoningEffort),
-			SystemPrompt: appendBuiltInToolCallQuotaPrompt(
-				"You are Final QC. Before submitting a verdict, complete an exhaustive audit of the semantic support for claims actually present in the candidate against every configured criterion. "+
-					"Inspect the entire candidate and all relevant evidence with r42 read tools or read-only view, grep, head, and tail. "+
-					"Report all independent issues found in one verdict; do not stop after the first issue, the first failing criterion, or the most obvious category. "+
-					"Collection QC exclusively owns information-need sufficiency and primary-source coverage. Final QC must not judge whether evidence coverage is sufficient, inspect stop conditions, reject missing claims, or request additional evidence. "+
-					"Use revise_research only when a claim actually present exceeds or misrepresents its cited evidence, and direct Research to delete or narrow that claim. Pass when no such semantic issues remain. Final QC can never reopen Collection. "+
-					"Submit every issue found in this review. Repeat the full audit after every revision, rechecking every criterion and looking for regressions introduced by the repair. "+researchArtifactProtocol,
-				finalBuiltInQuota,
-			),
+			ReasoningEffort:  pointerValue(effectiveFinalQC.ReasoningEffort),
+			SystemPrompt:     appendBuiltInToolCallQuotaPrompt(finalQCSystemPrompt(), finalBuiltInQuota),
 			WorkingDirectory: workspace, Tools: finalTools,
 			AvailableTools:   closedWorldAllowedTools(effectiveFinalQC.AllowedTools, toolNames(finalTools)),
 			ExcludedTools:    closedWorldDisallowedTools(effectiveFinalQC.DisallowedTools),
@@ -521,6 +523,178 @@ func (f *runtimeFactory) newResearchBlock(
 	}
 	keepContext = true
 	return block, nil
+}
+
+// newResearchOnlyBlock opens the closed-world half of a workflow without
+// constructing Collection state or protocol tools.
+func (f *runtimeFactory) newResearchOnlyBlock(
+	ctx context.Context,
+	address, executionAddress, workspace string,
+	planned modulespec.ResearchPlan,
+	publish func(string, cty.Value),
+	artifactsRegistry *artifactpkg.Registry,
+	artifactIDs map[string]string,
+	currentArtifactIDs []string,
+	blockCancel context.CancelFunc,
+) (golden.ApplyBlock, error) {
+	planned.Config.ToolUses = materializeArtifactReferences(planned.Config.ToolUses, artifactIDs)
+	importedIDs, err := importedArtifactIDs(planned.Config.Imports)
+	if err != nil {
+		return nil, err
+	}
+	researchArtifactIDs := append(slices.Clone(currentArtifactIDs), importedIDs...)
+	if err = validateToolUseArtifactAccess(planned.Config.ToolUses, researchArtifactIDs); err != nil {
+		return nil, err
+	}
+	researchPhaseRetry, err := researchRetry(planned.Provider, planned.Config.Retry)
+	if err != nil {
+		return nil, err
+	}
+
+	opened := make([]Session, 0, 2)
+	cleanupSetup := func(cause error) (golden.ApplyBlock, error) {
+		for _, session := range slices.Backward(opened) {
+			if closeErr := session.Close(context.WithoutCancel(ctx)); closeErr != nil {
+				f.state.addWarning(fmt.Errorf("close workflow session after setup failure: %w", closeErr))
+			}
+		}
+		return nil, cause
+	}
+
+	typedQuota, builtInQuota := splitToolCallQuota(planned.Config.Policy.ToolCallQuota)
+	terminal := researchruntime.NewTerminalRecorder()
+	researchTools, terminalType, err := f.buildTools(ctx, executionAddress, debuglog.SessionResearch, workspace,
+		planned.Config.Policy.ToolIDs, planned.Config.TerminateToolID, terminal, newToolCallQuota(typedQuota))
+	if err != nil {
+		return nil, err
+	}
+	readWriteTools, err := evidenceToolsWithDynamicArtifacts(
+		workspace, planned.Config.Artifacts, true, artifactsRegistry, researchArtifactIDs, nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	terminateName := ""
+	if planned.Config.TerminateToolID != nil {
+		terminateName = *planned.Config.TerminateToolID
+	}
+	researchTools, err = bindResearchToolUses(researchTools, planned.Config.ToolUses, func() (*evidence.ArtifactEvidenceAccess, error) {
+		return evidence.NewArtifactEvidenceAccess(artifactsRegistry, researchArtifactIDs)
+	}, artifactsRegistry, workspace, terminateName, terminal)
+	if err != nil {
+		return nil, err
+	}
+	researchTools = append(researchTools, readWriteTools...)
+	resolved := researchspec.ResolvedTools{}
+	if planned.Config.TerminateToolID != nil {
+		definition := f.tools[terminateName]
+		resolved.Terminate = &researchspec.ToolPolicyRef{ID: definition.ID, Address: definition.Address, OutputType: terminalType}
+		resolved.TerminateSDKName = terminateName
+	}
+	if planned.Config.QC != nil {
+		resolved.QCVerdictSDKName = finalQCVerdictToolName
+	}
+	if err = planned.Config.ValidateResolved(resolved); err != nil {
+		return nil, err
+	}
+
+	researchSystemPrompt := closedResearchSystemPrompt(planned.Config.SystemPrompt)
+	if planned.Config.QC != nil {
+		researchSystemPrompt += " Final QC may return this block to Research multiple times. An accepted terminal call completes only the current Research pass. " +
+			"If Final QC returns the block, revise the candidate and call the terminal tool again to complete that later pass."
+	}
+	researchSession, err := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionResearch, copilot.SessionConfig{
+		Provider: planned.Provider, Retry: researchPhaseRetry, Model: planned.Config.Model, Profile: planned.Config.ProfileName(),
+		ReasoningEffort: pointerValue(planned.Config.ReasoningEffort), SystemPrompt: appendBuiltInToolCallQuotaPrompt(researchSystemPrompt, builtInQuota), WorkingDirectory: workspace,
+		Tools: researchTools, AvailableTools: closedWorldAllowedTools(planned.Config.Policy.AllowedTools, toolNames(researchTools)),
+		ExcludedTools:    closedWorldDisallowedTools(planned.Config.Policy.DisallowedTools),
+		SkillDirectories: slices.Clone(planned.Config.Policy.SkillDirectories), Skills: slices.Clone(planned.Config.Policy.Skills),
+		DisabledSkills: slices.Clone(planned.Config.Policy.DisabledSkills), Hooks: builtInToolCallQuotaHooks(newToolCallQuota(builtInQuota)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	opened = append(opened, researchSession)
+	researchRunner := researchruntime.NewRunner(researchSession, terminalIfConfigured(planned.Config.TerminateToolID, terminal))
+	researchConfig := researchruntime.Config{
+		InitialPrompt: initialResearchPrompt(planned.Config.Prompt), TerminateToolName: terminateName,
+		MaxProtocolAttempts: planned.Config.MaxProtocolAttempts, Workspace: workspace, Artifacts: planned.Config.Artifacts, ArtifactIDs: artifactIDs,
+	}
+	block := &researchApplyBlock{
+		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: address, session: researchSession, runner: researchRunner,
+		config: researchConfig, publish: publish, cancel: blockCancel,
+	}
+	if planned.Config.QC == nil {
+		return block, nil
+	}
+
+	finalQCProvider := phaseProvider(planned.QCProvider, planned.Provider)
+	finalQCRetry, err := researchRetry(finalQCProvider, provider.RetryOverride{})
+	if err != nil {
+		return cleanupSetup(err)
+	}
+	effectiveFinalQC, err := planned.Config.EffectiveQC(finalQCRetry)
+	if err != nil {
+		return cleanupSetup(err)
+	}
+	finalTypedQuota, finalBuiltInQuota := splitToolCallQuota(effectiveFinalQC.ToolCallQuota)
+	finalTools, _, err := f.buildTools(ctx, executionAddress, debuglog.SessionFinalQC, workspace,
+		effectiveFinalQC.ToolIDs, nil, researchruntime.NewTerminalRecorder(), newToolCallQuota(finalTypedQuota))
+	if err != nil {
+		return cleanupSetup(err)
+	}
+	finalEvidenceTools, err := evidenceToolsWithDynamicArtifacts(
+		workspace, planned.Config.Artifacts, false, artifactsRegistry, researchArtifactIDs, nil,
+	)
+	if err != nil {
+		return cleanupSetup(err)
+	}
+	finalVerdicts := qc.NewVerdictRecorder()
+	finalTools = append(finalTools, finalEvidenceTools...)
+	finalTools = append(finalTools, qcVerdictTool(executionAddress, f.recorder, finalVerdicts))
+	finalSession, err := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionFinalQC, copilot.SessionConfig{
+		Provider: finalQCProvider, Retry: effectiveFinalQC.Retry, Model: effectiveFinalQC.Model, Profile: effectiveFinalQC.Profile,
+		ReasoningEffort:  pointerValue(effectiveFinalQC.ReasoningEffort),
+		SystemPrompt:     appendBuiltInToolCallQuotaPrompt(finalQCSystemPrompt(), finalBuiltInQuota),
+		WorkingDirectory: workspace, Tools: finalTools,
+		AvailableTools:   closedWorldAllowedTools(effectiveFinalQC.AllowedTools, toolNames(finalTools)),
+		ExcludedTools:    closedWorldDisallowedTools(effectiveFinalQC.DisallowedTools),
+		SkillDirectories: slices.Clone(effectiveFinalQC.SkillDirectories), Skills: slices.Clone(effectiveFinalQC.Skills),
+		DisabledSkills: slices.Clone(effectiveFinalQC.DisabledSkills), Hooks: builtInToolCallQuotaHooks(newToolCallQuota(finalBuiltInQuota)),
+	})
+	if err != nil {
+		return cleanupSetup(err)
+	}
+	opened = append(opened, finalSession)
+	recordedResearch, ok := researchSession.(*recordingSession)
+	if !ok {
+		return cleanupSetup(fmt.Errorf("research session does not support phase recording"))
+	}
+	block.qcSession = finalSession
+	block.qcRunner = qc.NewRunner(&phasedResearch{research: researchRunner, session: recordedResearch}, finalSession, finalVerdicts)
+	block.qcConfig = qc.Config{
+		Task:     qc.Task{SystemPrompt: planned.Config.SystemPrompt, Prompt: planned.Config.Prompt},
+		Criteria: effectiveFinalQC.Criteria, Artifacts: planned.Config.Artifacts, Research: researchConfig,
+		MaxRounds: effectiveFinalQC.MaxRounds, MaxProtocolAttempts: researchspec.DefaultMaxProtocolAttempts,
+		VerdictToolName: finalQCVerdictToolName,
+	}
+	return block, nil
+}
+
+func initialResearchPrompt(prompt *string) string {
+	if prompt != nil {
+		return *prompt
+	}
+	return "Begin the configured research task."
+}
+
+func finalQCSystemPrompt() string {
+	return "You are Final QC. Before submitting a verdict, complete an exhaustive audit of the semantic support for claims actually present in the candidate against every configured criterion. " +
+		"Inspect the entire candidate and all relevant evidence with r42 read tools or read-only view, grep, head, and tail. " +
+		"Report all independent issues found in one verdict; do not stop after the first issue, the first failing criterion, or the most obvious category. " +
+		"Collection QC exclusively owns information-need sufficiency and primary-source coverage. Final QC must not judge whether evidence coverage is sufficient, inspect stop conditions, reject missing claims, or request additional evidence. " +
+		"Use revise_research only when a claim actually present exceeds or misrepresents its cited evidence, and direct Research to delete or narrow that claim. Pass when no such semantic issues remain. Final QC can never reopen Collection. " +
+		"Submit every issue found in this review. Repeat the full audit after every revision, rechecking every criterion and looking for regressions introduced by the repair. " + researchArtifactProtocol
 }
 
 func addCollectionArtifactTargets(
