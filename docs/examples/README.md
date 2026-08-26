@@ -64,3 +64,14 @@ knowledge artifacts and records resolved or preserved contradictions. A final
 block synthesizes a Markdown report and runs one last QC pass. See
 [`deep-research/README.md`](deep-research/README.md) for the variable file and
 commands.
+
+## SecJury DCF
+
+The `secjury` example runs one `collection_only` LLM session to acquire inputs,
+calculate a complete frozen `dcf-model.v2` payload through the isolated
+Starlark calculator, and submit it. It then expands the original 20-member
+persona roster into concurrent `research_only` review tasks before a final
+`research_only` synthesis writes `report.md`. The builder switches between
+built-in web tools and PPLX finance/pro/fetch tools with `use_pplx`; no QC
+sessions are created. See [`secjury/README.md`](secjury/README.md) for the
+exact parity boundary and run commands.
