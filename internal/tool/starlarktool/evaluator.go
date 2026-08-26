@@ -28,11 +28,11 @@ const (
 
 // Config bounds a single evaluator invocation.
 type Config struct {
-	MaxSteps       int
-	MaxSourceBytes int
-	MaxDataBytes   int
-	MaxResultBytes int
-	MaxStdoutBytes int
+	MaxSteps       int `json:"max_steps"`
+	MaxSourceBytes int `json:"max_source_bytes"`
+	MaxDataBytes   int `json:"max_data_bytes"`
+	MaxResultBytes int `json:"max_result_bytes"`
+	MaxStdoutBytes int `json:"max_stdout_bytes"`
 }
 
 // DefaultConfig returns the resource defaults declared by starlark_tool.
@@ -46,9 +46,9 @@ func DefaultConfig() Config {
 
 // Result is the fixed successful evaluator response.
 type Result struct {
-	ResultJSON string
-	Stdout     string
-	Steps      uint64
+	ResultJSON string `json:"result_json"`
+	Stdout     string `json:"stdout"`
+	Steps      uint64 `json:"steps"`
 }
 
 // Error is a repairable evaluator failure with a stable code.

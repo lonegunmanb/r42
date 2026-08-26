@@ -11,6 +11,7 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/lonegunmanb/r42/internal/cli"
+	"github.com/lonegunmanb/r42/internal/tool/starlarktool"
 )
 
 func main() {
@@ -21,7 +22,7 @@ func mainExitCode() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	restoreInterruptHandling(ctx, stop)
-	return run(ctx, os.Args[1:], os.Stdout, os.Stderr, cli.NewRuntime())
+	return run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, cli.NewRuntime())
 }
 
 func restoreInterruptHandling(ctx context.Context, stop context.CancelFunc) {
@@ -31,7 +32,14 @@ func restoreInterruptHandling(ctx context.Context, stop context.CancelFunc) {
 	}()
 }
 
-func run(ctx context.Context, args []string, stdout, stderr io.Writer, runtime cli.Runtime) int {
+func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer, runtime cli.Runtime) int {
+	if len(args) == 1 && args[0] == "--internal-starlark-worker" {
+		if err := starlarktool.Serve(ctx, stdin, stdout); err != nil {
+			writeError(stderr, err)
+			return cli.ExitFailure
+		}
+		return cli.ExitSuccess
+	}
 	args = append([]string(nil), args...)
 	for index, arg := range args {
 		if arg == "-var" || arg == "-var-file" ||

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
 )
 
@@ -37,12 +39,41 @@ func TestRunMapsErrorsToProcessExitCodesAndStderr(t *testing.T) {
 			t.Parallel()
 			var stdout bytes.Buffer
 			var stderr bytes.Buffer
-			code := run(test.ctx, test.args, &stdout, &stderr, test.runtime)
+			code := run(test.ctx, test.args, nil, &stdout, &stderr, test.runtime)
 			assert.Equal(t, test.want, code)
 			assert.Equal(t, test.wantPlan, strings.Contains(stdout.String(), `"nodes"`))
 			assert.NotEmpty(t, stderr.String())
 		})
 	}
+}
+
+func TestRunDispatchesInternalStarlarkWorkerBeforeCLI(t *testing.T) {
+	t.Parallel()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := run(
+		t.Context(),
+		[]string{"--internal-starlark-worker"},
+		bytes.NewBufferString(`{"code":"result = 4","data_json":"null"}`),
+		&stdout,
+		&stderr,
+		stubRuntime{},
+	)
+
+	assert.Equal(t, cli.ExitSuccess, code)
+	var response struct {
+		Result struct {
+			ResultJSON string `json:"result_json"`
+			Stdout     string `json:"stdout"`
+			Steps      uint64 `json:"steps"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &response))
+	assert.Equal(t, "4", response.Result.ResultJSON)
+	assert.Empty(t, response.Result.Stdout)
+	assert.Positive(t, response.Result.Steps)
+	assert.Empty(t, stderr.String())
 }
 
 func TestRestoreInterruptHandlingAfterFirstCancellation(t *testing.T) {
@@ -80,6 +111,7 @@ func TestRunDisplaysEveryHCLDiagnostic(t *testing.T) {
 	code := run(
 		t.Context(),
 		[]string{"apply"},
+		nil,
 		&stdout,
 		&stderr,
 		stubRuntime{applyErr: fmt.Errorf("validate configuration: %w", diagnostics)},
@@ -114,7 +146,7 @@ func TestRunAcceptsTerraformStyleVariableFlags(t *testing.T) {
 			var stderr bytes.Buffer
 			runtime := new(variableCapturingRuntime)
 
-			code := run(t.Context(), test.args, &stdout, &stderr, runtime)
+			code := run(t.Context(), test.args, nil, &stdout, &stderr, runtime)
 
 			assert.Equal(t, cli.ExitSuccess, code)
 			assert.Len(t, runtime.variables, 2)
