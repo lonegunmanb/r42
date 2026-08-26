@@ -13,7 +13,7 @@ require (
 	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/itchyny/gojq v0.12.16
 	github.com/lonegunmanb/go-defaults v1.4.0
-	github.com/lonegunmanb/golden v0.0.0-20260804110449-b79b3b09385c
+	github.com/lonegunmanb/golden v0.0.0-20260826125548-8e5f71c491f1
 	github.com/lonegunmanb/hclfuncs v0.12.0
 	github.com/spf13/cobra v1.10.1
 	github.com/stretchr/testify v1.11.1

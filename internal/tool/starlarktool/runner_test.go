@@ -76,6 +76,24 @@ func TestRunnerReturnsWorkerTimeoutAsRepairableResponse(t *testing.T) {
 	assert.Equal(t, "starlark_timeout", response.Error.Code)
 }
 
+func TestRunnerAllowsWorkerStartupBeforeEvaluationTimeout(t *testing.T) {
+	t.Parallel()
+	runner := testRunner(t)
+	runner.environment = append(runner.environment, "R42_STARLARK_WORKER_START_DELAY=2s")
+
+	response, err := runner.Run(t.Context(), WorkerRequest{
+		Code:         "def calculate():\n  total = 0\n  for item in range(100000000):\n    total += item\n  return total\nresult = calculate()",
+		DataJSON:     "null",
+		Config:       Config{MaxSteps: 10_000_000},
+		TimeoutNanos: int64(10 * time.Millisecond),
+	})
+
+	require.NoError(t, err)
+	require.Nil(t, response.Result)
+	require.NotNil(t, response.Error)
+	assert.Equal(t, "starlark_timeout", response.Error.Code)
+}
+
 func TestRunnerReturnsUnexpectedWorkerExitAsRepairableResponse(t *testing.T) {
 	t.Parallel()
 	runner := testRunner(t)
@@ -93,6 +111,9 @@ func TestRunnerReturnsUnexpectedWorkerExitAsRepairableResponse(t *testing.T) {
 func TestWorkerProcessServesExactlyOneInternalRequest(t *testing.T) {
 	if os.Getenv("R42_STARLARK_WORKER_HELPER") != "1" {
 		return
+	}
+	if delay, err := time.ParseDuration(os.Getenv("R42_STARLARK_WORKER_START_DELAY")); err == nil && delay > 0 {
+		time.Sleep(delay)
 	}
 	if os.Getenv("R42_STARLARK_WORKER_STALL") == "1" {
 		time.Sleep(time.Second)
