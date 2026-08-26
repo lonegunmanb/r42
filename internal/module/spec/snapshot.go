@@ -37,37 +37,41 @@ type ResearchPlan struct {
 }
 
 type researchSnapshot struct {
-	Expression                 string                       `json:"expression,omitempty"`
-	Providers                  map[string]*providerSnapshot `json:"providers,omitempty"`
-	PhaseMode                  researchspec.PhaseMode       `json:"phase_mode,omitempty"`
-	Model                      string                       `json:"model"`
-	Profile                    string                       `json:"profile,omitempty"`
-	ReasoningEffort            *string                      `json:"reasoning_effort,omitempty"`
-	SystemPrompt               string                       `json:"system_prompt"`
-	Prompt                     *string                      `json:"prompt,omitempty"`
-	MaxProtocolAttempts        int                          `json:"max_protocol_attempts"`
-	TimeoutNanoseconds         *int64                       `json:"timeout_nanoseconds,omitempty"`
-	Retry                      provider.RetryOverride       `json:"retry"`
-	Policy                     policySnapshot               `json:"policy"`
-	Artifacts                  []researchspec.Artifact      `json:"artifacts"`
-	Imports                    []importArtifactSnapshot     `json:"imports,omitempty"`
-	ToolUses                   []toolUseSnapshot            `json:"tool_uses,omitempty"`
-	QC                         *qcSnapshot                  `json:"qc,omitempty"`
-	Provider                   *providerSnapshot            `json:"provider,omitempty"`
-	CollectionProvider         *providerSnapshot            `json:"collection_provider,omitempty"`
-	TerminateToolID            *string                      `json:"terminate_tool_id,omitempty"`
-	TerminateToolIDSet         bool                         `json:"terminate_tool_id_set,omitempty"`
-	QCProvider                 *providerSnapshot            `json:"qc_provider,omitempty"`
-	CollectionToolIDs          []string                     `json:"collection_tool_ids,omitempty"`
-	CollectionSkillDirectories []string                     `json:"collection_skill_directories,omitempty"`
-	CollectionSkills           []string                     `json:"collection_skills,omitempty"`
-	CollectionDisabledSkills   []string                     `json:"collection_disabled_skills,omitempty"`
-	CollectionBatchSize        int                          `json:"collection_batch_size,omitempty"`
-	CollectionBatchSizeSet     bool                         `json:"collection_batch_size_set,omitempty"`
-	MaxCollectionRounds        *int                         `json:"max_collection_rounds,omitempty"`
-	MaxCollectionRoundsSet     bool                         `json:"max_collection_rounds_set,omitempty"`
-	CollectionQC               *collectionQCSnapshot        `json:"collection_qc,omitempty"`
-	CollectionQCProvider       *providerSnapshot            `json:"collection_qc_provider,omitempty"`
+	Expression                      string                       `json:"expression,omitempty"`
+	Providers                       map[string]*providerSnapshot `json:"providers,omitempty"`
+	PhaseMode                       researchspec.PhaseMode       `json:"phase_mode,omitempty"`
+	Model                           string                       `json:"model"`
+	Profile                         string                       `json:"profile,omitempty"`
+	ReasoningEffort                 *string                      `json:"reasoning_effort,omitempty"`
+	SystemPrompt                    string                       `json:"system_prompt"`
+	Prompt                          *string                      `json:"prompt,omitempty"`
+	MaxProtocolAttempts             int                          `json:"max_protocol_attempts"`
+	TimeoutNanoseconds              *int64                       `json:"timeout_nanoseconds,omitempty"`
+	Retry                           provider.RetryOverride       `json:"retry"`
+	Policy                          policySnapshot               `json:"policy"`
+	Artifacts                       []researchspec.Artifact      `json:"artifacts"`
+	Imports                         []importArtifactSnapshot     `json:"imports,omitempty"`
+	ToolUses                        []toolUseSnapshot            `json:"tool_uses,omitempty"`
+	QC                              *qcSnapshot                  `json:"qc,omitempty"`
+	Provider                        *providerSnapshot            `json:"provider,omitempty"`
+	CollectionProvider              *providerSnapshot            `json:"collection_provider,omitempty"`
+	TerminateToolID                 *string                      `json:"terminate_tool_id,omitempty"`
+	TerminateToolIDSet              bool                         `json:"terminate_tool_id_set,omitempty"`
+	QCProvider                      *providerSnapshot            `json:"qc_provider,omitempty"`
+	CollectionToolIDs               []string                     `json:"collection_tool_ids,omitempty"`
+	CollectionAllowedBuiltinTools   []string                     `json:"collection_allowed_builtin_tools,omitempty"`
+	CollectionQCAllowedBuiltinTools []string                     `json:"collection_qc_allowed_builtin_tools,omitempty"`
+	ResearchAllowedBuiltinTools     []string                     `json:"research_allowed_builtin_tools,omitempty"`
+	FinalQCAllowedBuiltinTools      []string                     `json:"final_qc_allowed_builtin_tools,omitempty"`
+	CollectionSkillDirectories      []string                     `json:"collection_skill_directories,omitempty"`
+	CollectionSkills                []string                     `json:"collection_skills,omitempty"`
+	CollectionDisabledSkills        []string                     `json:"collection_disabled_skills,omitempty"`
+	CollectionBatchSize             int                          `json:"collection_batch_size,omitempty"`
+	CollectionBatchSizeSet          bool                         `json:"collection_batch_size_set,omitempty"`
+	MaxCollectionRounds             *int                         `json:"max_collection_rounds,omitempty"`
+	MaxCollectionRoundsSet          bool                         `json:"max_collection_rounds_set,omitempty"`
+	CollectionQC                    *collectionQCSnapshot        `json:"collection_qc,omitempty"`
+	CollectionQCProvider            *providerSnapshot            `json:"collection_qc_provider,omitempty"`
 }
 
 type toolUseSnapshot struct {
@@ -110,19 +114,20 @@ type policySnapshot struct {
 }
 
 type qcSnapshot struct {
-	Criteria         map[string]string        `json:"criteria"`
-	Model            *string                  `json:"model,omitempty"`
-	ReasoningEffort  *string                  `json:"reasoning_effort,omitempty"`
-	Retry            provider.RetryOverride   `json:"retry"`
-	ToolIDs          []string                 `json:"tool_ids,omitempty"`
-	ToolCallQuota    map[string]int           `json:"tool_call_quota,omitempty"`
-	AllowedTools     []string                 `json:"allowed_tools,omitempty"`
-	DisallowedTools  []string                 `json:"disallowed_tools,omitempty"`
-	SkillDirectories []string                 `json:"skill_directories,omitempty"`
-	Skills           []string                 `json:"skills,omitempty"`
-	DisabledSkills   []string                 `json:"disabled_skills,omitempty"`
-	Permission       *researchspec.Permission `json:"permission,omitempty"`
-	MaxRounds        int                      `json:"max_rounds"`
+	Criteria           map[string]string        `json:"criteria"`
+	Model              *string                  `json:"model,omitempty"`
+	ReasoningEffort    *string                  `json:"reasoning_effort,omitempty"`
+	Retry              provider.RetryOverride   `json:"retry"`
+	ToolIDs            []string                 `json:"tool_ids,omitempty"`
+	ToolCallQuota      map[string]int           `json:"tool_call_quota,omitempty"`
+	AllowedTools       []string                 `json:"allowed_tools,omitempty"`
+	DisallowedTools    []string                 `json:"disallowed_tools,omitempty"`
+	DisallowedToolsSet bool                     `json:"disallowed_tools_set,omitempty"`
+	SkillDirectories   []string                 `json:"skill_directories,omitempty"`
+	Skills             []string                 `json:"skills,omitempty"`
+	DisabledSkills     []string                 `json:"disabled_skills,omitempty"`
+	Permission         *researchspec.Permission `json:"permission,omitempty"`
+	MaxRounds          int                      `json:"max_rounds"`
 }
 
 type providerSnapshot struct {
@@ -173,28 +178,32 @@ func EncodeResearchPlan(
 		return cty.NilVal, err
 	}
 	snapshot := researchSnapshot{
-		PhaseMode:                  config.EffectivePhaseMode(),
-		Model:                      config.Model,
-		Profile:                    config.ProfileName(),
-		ReasoningEffort:            clonePointer(config.ReasoningEffort),
-		SystemPrompt:               config.SystemPrompt,
-		Prompt:                     clonePointer(config.Prompt),
-		MaxProtocolAttempts:        config.MaxProtocolAttempts,
-		TimeoutNanoseconds:         durationNanoseconds(config.Timeout),
-		Retry:                      config.Retry,
-		Policy:                     snapshotPolicy(config.Policy),
-		Artifacts:                  slices.Clone(config.Artifacts),
-		Provider:                   providerConfig,
-		TerminateToolID:            clonePointer(config.TerminateToolID),
-		TerminateToolIDSet:         config.TerminateToolIDSet,
-		CollectionToolIDs:          slices.Clone(config.CollectionToolIDs),
-		CollectionSkillDirectories: slices.Clone(config.CollectionSkillDirectories),
-		CollectionSkills:           slices.Clone(config.CollectionSkills),
-		CollectionDisabledSkills:   slices.Clone(config.CollectionDisabledSkills),
-		CollectionBatchSize:        config.CollectionBatchSize,
-		CollectionBatchSizeSet:     config.CollectionBatchSizeSet,
-		MaxCollectionRounds:        clonePointer(config.MaxCollectionRounds),
-		MaxCollectionRoundsSet:     config.MaxCollectionRoundsSet,
+		PhaseMode:                       config.EffectivePhaseMode(),
+		Model:                           config.Model,
+		Profile:                         config.ProfileName(),
+		ReasoningEffort:                 clonePointer(config.ReasoningEffort),
+		SystemPrompt:                    config.SystemPrompt,
+		Prompt:                          clonePointer(config.Prompt),
+		MaxProtocolAttempts:             config.MaxProtocolAttempts,
+		TimeoutNanoseconds:              durationNanoseconds(config.Timeout),
+		Retry:                           config.Retry,
+		Policy:                          snapshotPolicy(config.Policy),
+		Artifacts:                       slices.Clone(config.Artifacts),
+		Provider:                        providerConfig,
+		TerminateToolID:                 clonePointer(config.TerminateToolID),
+		TerminateToolIDSet:              config.TerminateToolIDSet,
+		CollectionToolIDs:               slices.Clone(config.CollectionToolIDs),
+		CollectionAllowedBuiltinTools:   slices.Clone(config.CollectionAllowedBuiltinTools),
+		CollectionQCAllowedBuiltinTools: slices.Clone(config.CollectionQCAllowedBuiltinTools),
+		ResearchAllowedBuiltinTools:     slices.Clone(config.ResearchAllowedBuiltinTools),
+		FinalQCAllowedBuiltinTools:      slices.Clone(config.FinalQCAllowedBuiltinTools),
+		CollectionSkillDirectories:      slices.Clone(config.CollectionSkillDirectories),
+		CollectionSkills:                slices.Clone(config.CollectionSkills),
+		CollectionDisabledSkills:        slices.Clone(config.CollectionDisabledSkills),
+		CollectionBatchSize:             config.CollectionBatchSize,
+		CollectionBatchSizeSet:          config.CollectionBatchSizeSet,
+		MaxCollectionRounds:             clonePointer(config.MaxCollectionRounds),
+		MaxCollectionRoundsSet:          config.MaxCollectionRoundsSet,
 	}
 	var importSensitive bool
 	snapshot.Imports, importSensitive, err = snapshotImports(config.Imports)
@@ -225,7 +234,8 @@ func EncodeResearchPlan(
 			ToolIDs:       slices.Clone(config.QC.ToolIDs),
 			ToolCallQuota: maps.Clone(config.QC.ToolCallQuota),
 			AllowedTools:  slices.Clone(config.QC.AllowedTools), DisallowedTools: slices.Clone(config.QC.DisallowedTools),
-			SkillDirectories: slices.Clone(config.QC.SkillDirectories), Skills: slices.Clone(config.QC.Skills),
+			DisallowedToolsSet: config.QC.DisallowedToolsSet,
+			SkillDirectories:   slices.Clone(config.QC.SkillDirectories), Skills: slices.Clone(config.QC.Skills),
 			DisabledSkills: slices.Clone(config.QC.DisabledSkills), Permission: clonePointer(config.QC.Permission),
 			MaxRounds: config.QC.MaxRounds,
 		}
@@ -296,17 +306,21 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 		SystemPrompt: snapshot.SystemPrompt, Prompt: clonePointer(snapshot.Prompt),
 		MaxProtocolAttempts: snapshot.MaxProtocolAttempts, Timeout: nanosecondsDuration(snapshot.TimeoutNanoseconds),
 		Retry: snapshot.Retry, Policy: restorePolicy(snapshot.Policy),
-		Artifacts:                  slices.Clone(snapshot.Artifacts),
-		TerminateToolID:            clonePointer(snapshot.TerminateToolID),
-		TerminateToolIDSet:         snapshot.TerminateToolIDSet,
-		CollectionBatchSize:        researchspec.DefaultCollectionBatchSize,
-		CollectionBatchSizeSet:     snapshot.CollectionBatchSizeSet,
-		MaxCollectionRounds:        restoreMaxCollectionRounds(snapshot.MaxCollectionRounds),
-		MaxCollectionRoundsSet:     snapshot.MaxCollectionRoundsSet,
-		CollectionToolIDs:          slices.Clone(snapshot.CollectionToolIDs),
-		CollectionSkillDirectories: slices.Clone(snapshot.CollectionSkillDirectories),
-		CollectionSkills:           slices.Clone(snapshot.CollectionSkills),
-		CollectionDisabledSkills:   slices.Clone(snapshot.CollectionDisabledSkills),
+		Artifacts:                       slices.Clone(snapshot.Artifacts),
+		TerminateToolID:                 clonePointer(snapshot.TerminateToolID),
+		TerminateToolIDSet:              snapshot.TerminateToolIDSet,
+		CollectionBatchSize:             researchspec.DefaultCollectionBatchSize,
+		CollectionBatchSizeSet:          snapshot.CollectionBatchSizeSet,
+		MaxCollectionRounds:             restoreMaxCollectionRounds(snapshot.MaxCollectionRounds),
+		MaxCollectionRoundsSet:          snapshot.MaxCollectionRoundsSet,
+		CollectionToolIDs:               slices.Clone(snapshot.CollectionToolIDs),
+		CollectionAllowedBuiltinTools:   slices.Clone(snapshot.CollectionAllowedBuiltinTools),
+		CollectionQCAllowedBuiltinTools: slices.Clone(snapshot.CollectionQCAllowedBuiltinTools),
+		ResearchAllowedBuiltinTools:     slices.Clone(snapshot.ResearchAllowedBuiltinTools),
+		FinalQCAllowedBuiltinTools:      slices.Clone(snapshot.FinalQCAllowedBuiltinTools),
+		CollectionSkillDirectories:      slices.Clone(snapshot.CollectionSkillDirectories),
+		CollectionSkills:                slices.Clone(snapshot.CollectionSkills),
+		CollectionDisabledSkills:        slices.Clone(snapshot.CollectionDisabledSkills),
 	}
 	toolUses, err := restoreToolUses(snapshot.ToolUses)
 	if err != nil {
@@ -331,7 +345,8 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 			ToolIDs: slices.Clone(snapshot.QC.ToolIDs), AllowedTools: slices.Clone(snapshot.QC.AllowedTools),
 			ToolCallQuota:   maps.Clone(snapshot.QC.ToolCallQuota),
 			DisallowedTools: slices.Clone(snapshot.QC.DisallowedTools), SkillDirectories: slices.Clone(snapshot.QC.SkillDirectories),
-			Skills: slices.Clone(snapshot.QC.Skills), DisabledSkills: slices.Clone(snapshot.QC.DisabledSkills),
+			DisallowedToolsSet: snapshot.QC.DisallowedToolsSet,
+			Skills:             slices.Clone(snapshot.QC.Skills), DisabledSkills: slices.Clone(snapshot.QC.DisabledSkills),
 			Permission: clonePointer(snapshot.QC.Permission), MaxRounds: snapshot.QC.MaxRounds,
 		}
 	}

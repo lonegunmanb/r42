@@ -22,7 +22,8 @@ var researchAttributeNames = map[string]struct{}{
 	"disallowed_tools": {}, "skill_directories": {}, "skills": {}, "disabled_skills": {},
 	"permission": {}, "max_protocol_attempts": {}, "timeout": {},
 	"collection_model_provider": {}, "collection_tool_ids": {}, "collection_skill_directories": {}, "collection_skills": {},
-	"collection_disabled_skills": {}, "collection_batch_size": {}, "max_collection_rounds": {},
+	"collection_disabled_skills": {}, "collection_allowed_builtin_tools": {}, "collection_qc_allowed_builtin_tools": {},
+	"research_allowed_builtin_tools": {}, "final_qc_allowed_builtin_tools": {}, "collection_batch_size": {}, "max_collection_rounds": {},
 }
 
 func (b *ResearchBlock) Decode(block *golden.HclBlock, context *hcl.EvalContext) error {
@@ -412,14 +413,18 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 		"disabled_skills": cty.EmptyTupleVal, "permission": cty.NullVal(cty.String),
 		"max_protocol_attempts": cty.NullVal(cty.Number), "timeout": cty.NullVal(cty.String),
 		"retry": cty.EmptyTupleVal, "artifact": cty.EmptyObjectVal, "tool_use": cty.EmptyTupleVal, "qc": cty.EmptyTupleVal,
-		"collection_model_provider":    cty.NullVal(cty.EmptyObject),
-		"collection_tool_ids":          cty.EmptyTupleVal,
-		"collection_skill_directories": cty.EmptyTupleVal,
-		"collection_skills":            cty.EmptyTupleVal,
-		"collection_disabled_skills":   cty.EmptyTupleVal,
-		"collection_batch_size":        cty.NumberIntVal(DefaultCollectionBatchSize),
-		"max_collection_rounds":        cty.NullVal(cty.Number),
-		"collection_qc":                cty.EmptyTupleVal,
+		"collection_model_provider":           cty.NullVal(cty.EmptyObject),
+		"collection_tool_ids":                 cty.EmptyTupleVal,
+		"collection_allowed_builtin_tools":    cty.EmptyTupleVal,
+		"collection_qc_allowed_builtin_tools": cty.EmptyTupleVal,
+		"research_allowed_builtin_tools":      cty.EmptyTupleVal,
+		"final_qc_allowed_builtin_tools":      cty.EmptyTupleVal,
+		"collection_skill_directories":        cty.EmptyTupleVal,
+		"collection_skills":                   cty.EmptyTupleVal,
+		"collection_disabled_skills":          cty.EmptyTupleVal,
+		"collection_batch_size":               cty.NumberIntVal(DefaultCollectionBatchSize),
+		"max_collection_rounds":               cty.NullVal(cty.Number),
+		"collection_qc":                       cty.EmptyTupleVal,
 	}
 	if task.IsKnown() && task.Type().IsObjectType() {
 		for name, value := range task.AsValueMap() {

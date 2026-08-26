@@ -40,7 +40,32 @@ research "static" "builder" {
 	assert.Equal(t, "tool_fixture_submit", *planned.TerminateToolID)
 	assert.Equal(t, []string{"tool_fixture_collect"}, planned.CollectionToolIDs)
 	assert.Equal(t, []string{"dcf-model"}, planned.CollectionSkills)
+	assert.Empty(t, planned.CollectionAllowedBuiltinTools)
 	assert.Equal(t, "collection_only", block.Values()["phase_mode"].AsString())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockPlansExplicitCollectionShellTools(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+fixture_tool "submit" {}
+
+research "static" "builder" {
+  phase_mode                       = "collection_only"
+  model                            = "model"
+  system_prompt                    = "Collect and calculate."
+  collection_allowed_builtin_tools = ["powershell", "shell"]
+
+  tool_use "submit" {
+    tool_id   = fixture_tool.submit.id
+    terminate = true
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	planned := golden.Blocks[*researchspec.ResearchBlock](config)[0].ResearchConfig()
+	assert.Equal(t, []string{"powershell", "shell"}, planned.CollectionAllowedBuiltinTools)
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -82,6 +107,35 @@ research "static" "juror" {
 
 `,
 			expectedError: "research_only forbids collection_tool_ids",
+		},
+		{
+			name: "collection only research builtin settings",
+			source: `
+fixture_tool "submit" {}
+research "static" "builder" {
+  phase_mode                     = "collection_only"
+  model                          = "model"
+  system_prompt                  = "Collect and calculate."
+  research_allowed_builtin_tools = ["shell"]
+  tool_use "submit" {
+    tool_id   = fixture_tool.submit.id
+    terminate = true
+  }
+}
+`,
+			expectedError: "collection_only forbids research_allowed_builtin_tools",
+		},
+		{
+			name: "research only collection builtin settings",
+			source: `
+research "static" "juror" {
+  phase_mode                       = "research_only"
+  model                            = "model"
+  system_prompt                    = "Review frozen data."
+  collection_allowed_builtin_tools = ["shell"]
+}
+`,
+			expectedError: "research_only forbids collection_allowed_builtin_tools",
 		},
 	}
 

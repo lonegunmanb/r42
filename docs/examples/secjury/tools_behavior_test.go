@@ -91,12 +91,218 @@ func TestSubmitDCFJurorOpinionValidatesAndWritesOpinion(t *testing.T) {
 	})
 }
 
+func TestSubmitReverseDCFValidatesCalculationsAndWritesArtifact(t *testing.T) {
+	t.Parallel()
+
+	program := compileTool(t, "submit_reverse_dcf")
+	t.Run("valid", func(t *testing.T) {
+		t.Parallel()
+
+		workspace := t.TempDir()
+		path := filepath.Join(workspace, "reverse-dcf.json")
+		response := invokeTool(t, program, validReverseDCFInput(path), workspace)
+		assert.True(t, response.Accepted, "issues: %#v", response.Issues)
+		assert.FileExists(t, path)
+	})
+
+	tests := []struct {
+		name   string
+		change func(*testing.T, map[string]any)
+		code   string
+	}{
+		{
+			name: "missing workflow path",
+			change: func(_ *testing.T, input map[string]any) {
+				input["reverse_dcf_path"] = " "
+			},
+			code: "reverse_path",
+		},
+		{
+			name: "invalid schema",
+			change: func(_ *testing.T, input map[string]any) {
+				input["schema_version"] = "reverse-dcf.v2"
+			},
+			code: "reverse_schema",
+		},
+		{
+			name: "missing identity",
+			change: func(_ *testing.T, input map[string]any) {
+				input["currency"] = " "
+			},
+			code: "reverse_identity",
+		},
+		{
+			name: "invalid market snapshot",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				market := requireFixtureValue[map[string]any](t, input, "market_snapshot")
+				market["price"] = 0.0
+			},
+			code: "reverse_market_snapshot",
+		},
+		{
+			name: "market cap does not reconcile",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				market := requireFixtureValue[map[string]any](t, input, "market_snapshot")
+				market["market_cap"] = 100.0
+			},
+			code: "reverse_market_cap",
+		},
+		{
+			name: "market EV does not reconcile",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				market := requireFixtureValue[map[string]any](t, input, "market_snapshot")
+				market["market_implied_enterprise_value"] = 100.0
+			},
+			code: "reverse_market_ev",
+		},
+		{
+			name: "invalid fixed assumptions",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				assumptions := requireFixtureValue[map[string]any](t, input, "fixed_assumptions")
+				assumptions["wacc"] = 0.03
+			},
+			code: "reverse_assumptions",
+		},
+		{
+			name: "EV gap does not reconcile",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				implied := requireFixtureValue[map[string]any](t, input, "implied_expectations")
+				implied["enterprise_value_gap"] = 100.0
+			},
+			code: "reverse_ev_gap",
+		},
+		{
+			name: "terminal FCF does not reconcile",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				implied := requireFixtureValue[map[string]any](t, input, "implied_expectations")
+				implied["terminal_fcf"] = 100.0
+			},
+			code: "reverse_terminal_fcf",
+		},
+		{
+			name: "terminal FCF does not explain market EV",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				base := requireFixtureValue[map[string]any](t, input, "base_case")
+				base["pv_explicit_fcf"] = 0.0
+			},
+			code: "reverse_implied_fcf",
+		},
+		{
+			name: "implied FCF margin does not reconcile",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				implied := requireFixtureValue[map[string]any](t, input, "implied_expectations")
+				implied["fcf_to_modeled_revenue"] = 0.2
+			},
+			code: "reverse_implied_margin",
+		},
+		{
+			name: "too few revenue scenarios",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				scenarios := requireFixtureValue[[]map[string]any](t, input, "revenue_scenarios")
+				input["revenue_scenarios"] = scenarios[:2]
+			},
+			code: "reverse_revenue_scenarios",
+		},
+		{
+			name: "invalid revenue scenario",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				scenarios := requireFixtureValue[[]map[string]any](t, input, "revenue_scenarios")
+				scenarios[0]["fcf_margin"] = 0.0
+			},
+			code: "reverse_revenue_scenario",
+		},
+		{
+			name: "revenue scenario does not reconcile",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				scenarios := requireFixtureValue[[]map[string]any](t, input, "revenue_scenarios")
+				scenarios[0]["required_revenue"] = 100.0
+			},
+			code: "reverse_revenue_scenario",
+		},
+		{
+			name: "optionality gap does not reconcile",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				optionality := requireFixtureValue[map[string]any](t, input, "optionality")
+				optionality["unexplained_enterprise_value"] = 100.0
+			},
+			code: "reverse_optionality_gap",
+		},
+		{
+			name: "positive gap has no unproven requirements",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				optionality := requireFixtureValue[map[string]any](t, input, "optionality")
+				optionality["unproven_requirements"] = []string{}
+			},
+			code: "reverse_optionality",
+		},
+		{
+			name: "optionality driver has no source",
+			change: func(t *testing.T, input map[string]any) {
+				t.Helper()
+
+				optionality := requireFixtureValue[map[string]any](t, input, "optionality")
+				drivers := requireFixtureValue[[]map[string]any](t, optionality, "drivers")
+				drivers[0]["supporting_source_ids"] = []string{}
+			},
+			code: "reverse_optionality_driver",
+		},
+		{
+			name: "missing conclusion",
+			change: func(_ *testing.T, input map[string]any) {
+				input["conclusion"] = " "
+			},
+			code: "reverse_conclusion",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			workspace := t.TempDir()
+			path := filepath.Join(workspace, "reverse-dcf.json")
+			input := validReverseDCFInput(path)
+			tt.change(t, input)
+			response := invokeTool(t, program, input, workspace)
+			assert.False(t, response.Accepted)
+			assert.Contains(t, issueCodes(response), tt.code)
+			assert.NoFileExists(t, path)
+		})
+	}
+}
+
 func TestSubmitDCFReportRendersFrozenModelAndOrderedOpinions(t *testing.T) {
 	t.Parallel()
 
 	workspace := t.TempDir()
 	modelPath := filepath.Join(workspace, "model.json")
 	sourcesPath := filepath.Join(workspace, "sources.json")
+	reverseDCFPath := filepath.Join(workspace, "reverse-dcf.json")
 	opinionOnePath := filepath.Join(workspace, "buffett.json")
 	opinionTwoPath := filepath.Join(workspace, "munger.json")
 	model := validDCFSubmissionInput(workspace)["model"]
@@ -105,6 +311,9 @@ func TestSubmitDCFReportRendersFrozenModelAndOrderedOpinions(t *testing.T) {
 		"id": "src-1", "title": "Filing | annual", "url": "https://example.com/filing",
 		"published_date": "2026-08-01", "accessed_date": "2026-08-26",
 	}})
+	reverseDCF := validReverseDCFInput(reverseDCFPath)
+	delete(reverseDCF, "reverse_dcf_path")
+	writeJSONFixture(t, reverseDCFPath, reverseDCF)
 	writeJSONFixture(t, opinionOnePath, map[string]any{
 		"juror_id": "buffett", "verdict": "revise", "confidence": 0.8,
 		"summary": "Demand a margin of safety.", "findings": []map[string]any{},
@@ -117,11 +326,21 @@ func TestSubmitDCFReportRendersFrozenModelAndOrderedOpinions(t *testing.T) {
 	reportJSONPath := filepath.Join(workspace, "report.json")
 	input := map[string]any{
 		"report_json_path": reportJSONPath, "report_path": reportPath,
-		"model_path": modelPath, "sources_path": sourcesPath,
+		"model_path": modelPath, "sources_path": sourcesPath, "reverse_dcf_path": reverseDCFPath,
 		"opinion_paths": []string{opinionOnePath, opinionTwoPath},
 		"jurors": []map[string]any{
-			{"id": "buffett", "name": "Warren Buffett", "group": "value_quality", "persona_line": "Value", "method_rules": []string{"margin of safety"}},
-			{"id": "munger", "name": "Charlie Munger", "group": "value_quality", "persona_line": "Invert", "method_rules": []string{"invert"}},
+			{
+				"id": "buffett", "name": "Warren Buffett", "group": "value_quality",
+				"lens_name": "Durable cash generation", "plain_question": "Can this business reliably turn its advantages into cash?",
+				"mandate": "Test cash durability.", "required_tests": []string{"cash conversion"},
+				"out_of_scope": []string{"accounting forensics"}, "decision_rule": "Require a margin of safety.",
+			},
+			{
+				"id": "munger", "name": "Charlie Munger", "group": "value_quality",
+				"lens_name": "Failure-mode inversion", "plain_question": "What must go wrong for this valuation to fail?",
+				"mandate": "Invert the thesis.", "required_tests": []string{"failure conditions"},
+				"out_of_scope": []string{"source traceability"}, "decision_rule": "Reject fragile cases.",
+			},
 		},
 		"decision": "revise", "headline": "Value | needs work", "summary": "Model output\nand jury judgment differ.",
 		"key_findings": []string{"Terminal | dependence"}, "limitations": []string{"Frozen evidence only"},
@@ -138,12 +357,70 @@ func TestSubmitDCFReportRendersFrozenModelAndOrderedOpinions(t *testing.T) {
 	assert.Contains(t, report, "- Terminal \\| dependence")
 	assert.Contains(t, report, "## DCF Model")
 	assert.Contains(t, report, "### Sensitivity Analysis")
+	reverseHeading := "## Market-Implied Expectations (Reverse DCF)"
+	assert.Contains(t, report, reverseHeading)
+	assert.Less(t, indexOf(t, report, reverseHeading), indexOf(t, report, "### Sensitivity Analysis"))
+	assert.Contains(t, report, "Market-implied enterprise value")
+	assert.Contains(t, report, "Implied terminal FCF")
+	assert.Contains(t, report, "20% sustainable FCF margin")
+	assert.Contains(t, report, "mRNA pipeline")
+	assert.Contains(t, report, "Current contribution")
+	assert.Contains(t, report, "11.38% of product revenue")
 	assert.Contains(t, report, "Filing \\| annual")
-	buffett := "### Warren Buffett (buffett)"
-	munger := "### Charlie Munger (munger)"
+	assert.Contains(t, report, "Celebrity names are familiar analytical mnemonics")
+	assert.Contains(t, report, "The real people did not participate in or endorse this report.")
+	buffett := "### Warren Buffett · Durable cash generation"
+	munger := "### Charlie Munger · Failure-mode inversion"
 	assert.Contains(t, report, buffett)
 	assert.Contains(t, report, munger)
 	assert.Less(t, indexOf(t, report, buffett), indexOf(t, report, munger))
+	assert.Contains(t, report, "**Question this role represents:** Can this business reliably turn its advantages into cash?")
+	assert.Contains(t, report, "**Review result:** revise")
+	assert.Contains(t, report, "**Plain-language takeaway:** Demand a margin of safety.")
+}
+
+func validReverseDCFInput(path string) map[string]any {
+	return map[string]any{
+		"reverse_dcf_path": path,
+		"schema_version":   "reverse-dcf.v1",
+		"valuation_date":   "2026-08-26",
+		"currency":         "CNY",
+		"monetary_unit":    "millions",
+		"market_snapshot": map[string]any{
+			"price": 83.99, "diluted_shares": 70.18, "market_cap": 5894.4182,
+			"net_debt": -656.0, "market_implied_enterprise_value": 5238.4182,
+			"price_source_ids": []string{"src-price"},
+		},
+		"base_case": map[string]any{
+			"enterprise_value": -16.0, "pv_explicit_fcf": 165.0027964274, "implied_value_per_share": 9.13,
+			"final_projection_period": "2030", "final_revenue": 288.0, "final_ufcf": -5.0,
+		},
+		"fixed_assumptions": map[string]any{
+			"wacc": 0.11, "terminal_growth": 0.03, "terminal_discount_period": 5.0,
+		},
+		"implied_expectations": map[string]any{
+			"terminal_fcf": 683.92, "final_year_fcf": 664.0,
+			"fcf_to_modeled_revenue": 2.3055555556, "enterprise_value_gap": 5254.4182,
+		},
+		"revenue_scenarios": []map[string]any{
+			{"name": "10% sustainable FCF margin", "fcf_margin": 0.10, "required_revenue": 6640.0, "revenue_multiple_vs_modeled": 23.0555555556, "interpretation": "Requires a radically larger business."},
+			{"name": "20% sustainable FCF margin", "fcf_margin": 0.20, "required_revenue": 3320.0, "revenue_multiple_vs_modeled": 11.5277777778, "interpretation": "Still far above the base forecast."},
+			{"name": "30% sustainable FCF margin", "fcf_margin": 0.30, "required_revenue": 2213.3333333333, "revenue_multiple_vs_modeled": 7.6851851852, "interpretation": "Needs exceptional scale and cash conversion."},
+		},
+		"optionality": map[string]any{
+			"unexplained_enterprise_value": 5254.4182,
+			"drivers": []map[string]any{{
+				"name": "mRNA pipeline", "current_evidence": "The company reports RNA vaccine product activity.",
+				"current_contribution": "11.38% of product revenue", "stage": "Early commercial contribution",
+				"supporting_source_ids":        []string{"src-rna"},
+				"required_scale_or_milestones": []string{"commercial scale and durable margins"},
+				"assessment":                   "Existence is supported, but the scale required by market EV is not yet demonstrated.",
+			}},
+			"unproven_requirements": []string{"The combined drivers must close the enterprise-value gap."},
+		},
+		"conclusion":  "The current price implies a business scale absent from the base forecast.",
+		"limitations": []string{"Reverse DCF identifies required expectations; it does not prove they will occur."},
+	}
 }
 
 func TestSubmitDCFReportRejectsInvalidSynthesis(t *testing.T) {
@@ -166,6 +443,14 @@ func TestSubmitDCFReportRejectsInvalidSynthesis(t *testing.T) {
 			assert.Contains(t, issueCodes(response), tt.code)
 		})
 	}
+}
+
+func requireFixtureValue[T any](t *testing.T, values map[string]any, key string) T {
+	t.Helper()
+
+	value, ok := values[key].(T)
+	require.True(t, ok, "fixture key %q has unexpected type", key)
+	return value
 }
 
 func validOpinionInput(path, jurorID string) map[string]any {

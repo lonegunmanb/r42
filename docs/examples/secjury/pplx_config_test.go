@@ -39,12 +39,16 @@ func TestPPLXSwitchesOnlyDCFCollectionAwayFromBuiltInWebTools(t *testing.T) {
 	require.NotEqual(t, -1, reviewStart)
 	buildDCF := configuration[buildStart:reviewStart]
 
-	assert.Contains(t, buildDCF, "collection_tool_ids          = local.dcf_collection_tool_ids")
+	assert.NotContains(t, buildDCF, "collection_tool_ids")
+	assert.Contains(t, buildDCF, `tool_use "pplx_finance_search"`)
+	assert.Contains(t, buildDCF, `tool_use "pplx_pro_search"`)
+	assert.Contains(t, buildDCF, `tool_use "pplx_fetch"`)
 	assert.Contains(t, buildDCF, "tool_call_quota")
 	assert.Contains(t, buildDCF, "disallowed_tools")
 	assert.Contains(t, buildDCF, "local.source_tool_guidance")
 	assert.Contains(t, configuration, `var.use_pplx ? ["web_search", "web_fetch"] : []`)
-	assert.Contains(t, configuration, "dcf_collection_tool_ids = concat([starlark_tool.calculator.id], local.pplx_tool_ids)")
+	assert.NotContains(t, configuration, "dcf_collection_tool_ids")
+	assert.Contains(t, configuration, "var.use_pplx ? [] : local.pplx_tool_ids")
 	assert.Contains(t, configuration, "Use pplx_finance_search first")
 	assert.Contains(t, configuration, "r42_register_artifact")
 	assert.Contains(t, configuration, "built-in web_search")

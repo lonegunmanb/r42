@@ -227,6 +227,18 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 	if block.CollectionToolIDs, err = dynamicStringList(unmarked, "collection_tool_ids"); err != nil {
 		return Config{}, err
 	}
+	if block.CollectionAllowedBuiltinTools, err = dynamicStringList(unmarked, "collection_allowed_builtin_tools"); err != nil {
+		return Config{}, err
+	}
+	if block.CollectionQCAllowedBuiltinTools, err = dynamicStringList(unmarked, "collection_qc_allowed_builtin_tools"); err != nil {
+		return Config{}, err
+	}
+	if block.ResearchAllowedBuiltinTools, err = dynamicStringList(unmarked, "research_allowed_builtin_tools"); err != nil {
+		return Config{}, err
+	}
+	if block.FinalQCAllowedBuiltinTools, err = dynamicStringList(unmarked, "final_qc_allowed_builtin_tools"); err != nil {
+		return Config{}, err
+	}
 	if block.CollectionSkillDirectories, err = dynamicStringList(unmarked, "collection_skill_directories"); err != nil {
 		return Config{}, err
 	}

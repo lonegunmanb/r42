@@ -16,15 +16,19 @@ func TestDecodeDynamicTaskDecodesCollectionFields(t *testing.T) {
 	providerRef := referenceValue("model_provider.qc", "provider")
 	collectionProviderRef := referenceValue("model_provider.collection", "provider")
 	task := cty.ObjectVal(map[string]cty.Value{
-		"model":                        cty.StringVal("wire-model"),
-		"system_prompt":                cty.StringVal("Collect and synthesize."),
-		"collection_model_provider":    collectionProviderRef,
-		"collection_tool_ids":          cty.TupleVal([]cty.Value{cty.StringVal("tool_fixture_source")}),
-		"collection_skill_directories": cty.TupleVal([]cty.Value{cty.StringVal("skills/collection")}),
-		"collection_skills":            cty.TupleVal([]cty.Value{cty.StringVal("source-evaluation")}),
-		"collection_disabled_skills":   cty.TupleVal([]cty.Value{cty.StringVal("dangerous")}),
-		"collection_batch_size":        cty.NumberIntVal(5),
-		"max_collection_rounds":        cty.NumberIntVal(3),
+		"model":                               cty.StringVal("wire-model"),
+		"system_prompt":                       cty.StringVal("Collect and synthesize."),
+		"collection_model_provider":           collectionProviderRef,
+		"collection_tool_ids":                 cty.TupleVal([]cty.Value{cty.StringVal("tool_fixture_source")}),
+		"collection_allowed_builtin_tools":    cty.TupleVal([]cty.Value{cty.StringVal("powershell")}),
+		"collection_qc_allowed_builtin_tools": cty.TupleVal([]cty.Value{cty.StringVal("web_fetch")}),
+		"research_allowed_builtin_tools":      cty.TupleVal([]cty.Value{cty.StringVal("shell")}),
+		"final_qc_allowed_builtin_tools":      cty.TupleVal([]cty.Value{cty.StringVal("edit")}),
+		"collection_skill_directories":        cty.TupleVal([]cty.Value{cty.StringVal("skills/collection")}),
+		"collection_skills":                   cty.TupleVal([]cty.Value{cty.StringVal("source-evaluation")}),
+		"collection_disabled_skills":          cty.TupleVal([]cty.Value{cty.StringVal("dangerous")}),
+		"collection_batch_size":               cty.NumberIntVal(5),
+		"max_collection_rounds":               cty.NumberIntVal(3),
 		"collection_qc": cty.ObjectVal(map[string]cty.Value{
 			"criteria":         cty.ObjectVal(map[string]cty.Value{"coverage": cty.StringVal("cover the task")}),
 			"model_provider":   providerRef,
@@ -45,6 +49,10 @@ func TestDecodeDynamicTaskDecodesCollectionFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, collectionProviderRef.RawEquals(config.CollectionModelProvider))
 	assert.Equal(t, []string{"tool_fixture_source"}, config.CollectionToolIDs)
+	assert.Equal(t, []string{"powershell"}, config.CollectionAllowedBuiltinTools)
+	assert.Equal(t, []string{"web_fetch"}, config.CollectionQCAllowedBuiltinTools)
+	assert.Equal(t, []string{"shell"}, config.ResearchAllowedBuiltinTools)
+	assert.Equal(t, []string{"edit"}, config.FinalQCAllowedBuiltinTools)
 	assert.Equal(t, []string{"skills/collection"}, config.CollectionSkillDirectories)
 	assert.Equal(t, []string{"source-evaluation"}, config.CollectionSkills)
 	assert.Equal(t, []string{"dangerous"}, config.CollectionDisabledSkills)
@@ -178,14 +186,18 @@ func TestStaticAndDynamicMembersProduceEquivalentConfigs(t *testing.T) {
 
 	static := decodeStaticCollectionConfig(t)
 	dynamic, err := researchspec.DecodeDynamicTask(cty.ObjectVal(map[string]cty.Value{
-		"model":                        cty.StringVal("model"),
-		"system_prompt":                cty.StringVal("Collect and synthesize."),
-		"collection_tool_ids":          cty.TupleVal([]cty.Value{cty.StringVal("tool_fixture_source")}),
-		"collection_skill_directories": cty.TupleVal([]cty.Value{cty.StringVal("skills/collection")}),
-		"collection_skills":            cty.TupleVal([]cty.Value{cty.StringVal("source-evaluation")}),
-		"collection_disabled_skills":   cty.TupleVal([]cty.Value{cty.StringVal("dangerous")}),
-		"collection_batch_size":        cty.NumberIntVal(5),
-		"max_collection_rounds":        cty.NumberIntVal(3),
+		"model":                               cty.StringVal("model"),
+		"system_prompt":                       cty.StringVal("Collect and synthesize."),
+		"collection_tool_ids":                 cty.TupleVal([]cty.Value{cty.StringVal("tool_fixture_source")}),
+		"collection_allowed_builtin_tools":    cty.TupleVal([]cty.Value{cty.StringVal("powershell")}),
+		"collection_qc_allowed_builtin_tools": cty.TupleVal([]cty.Value{cty.StringVal("web_fetch")}),
+		"research_allowed_builtin_tools":      cty.TupleVal([]cty.Value{cty.StringVal("shell")}),
+		"final_qc_allowed_builtin_tools":      cty.TupleVal([]cty.Value{cty.StringVal("edit")}),
+		"collection_skill_directories":        cty.TupleVal([]cty.Value{cty.StringVal("skills/collection")}),
+		"collection_skills":                   cty.TupleVal([]cty.Value{cty.StringVal("source-evaluation")}),
+		"collection_disabled_skills":          cty.TupleVal([]cty.Value{cty.StringVal("dangerous")}),
+		"collection_batch_size":               cty.NumberIntVal(5),
+		"max_collection_rounds":               cty.NumberIntVal(3),
 		"collection_qc": cty.ObjectVal(map[string]cty.Value{
 			"criteria": cty.ObjectVal(map[string]cty.Value{"coverage": cty.StringVal("cover the task")}),
 			"model":    cty.StringVal("qc-model"),
@@ -197,6 +209,10 @@ func TestStaticAndDynamicMembersProduceEquivalentConfigs(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, static.CollectionToolIDs, dynamic.CollectionToolIDs)
+	assert.Equal(t, static.CollectionAllowedBuiltinTools, dynamic.CollectionAllowedBuiltinTools)
+	assert.Equal(t, static.CollectionQCAllowedBuiltinTools, dynamic.CollectionQCAllowedBuiltinTools)
+	assert.Equal(t, static.ResearchAllowedBuiltinTools, dynamic.ResearchAllowedBuiltinTools)
+	assert.Equal(t, static.FinalQCAllowedBuiltinTools, dynamic.FinalQCAllowedBuiltinTools)
 	assert.Equal(t, static.CollectionSkillDirectories, dynamic.CollectionSkillDirectories)
 	assert.Equal(t, static.CollectionSkills, dynamic.CollectionSkills)
 	assert.Equal(t, static.CollectionDisabledSkills, dynamic.CollectionDisabledSkills)
@@ -254,6 +270,10 @@ research "static" "market" {
   collection_tool_ids = [
     fixture_tool.source.id,
   ]
+  collection_allowed_builtin_tools    = ["powershell"]
+  collection_qc_allowed_builtin_tools = ["web_fetch"]
+  research_allowed_builtin_tools      = ["shell"]
+  final_qc_allowed_builtin_tools      = ["edit"]
   collection_skill_directories = ["skills/collection"]
   collection_skills            = ["source-evaluation"]
   collection_disabled_skills   = ["dangerous"]

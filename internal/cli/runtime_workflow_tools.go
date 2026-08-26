@@ -27,21 +27,14 @@ import (
 	ctyjson "github.com/zclconf/go-cty/cty/json"
 )
 
-var closedWorldBuiltIns = []string{
-	"web_search", "web_fetch", "bash", "powershell", "read_powershell", "list_powershell",
-	"shell", "edit", "create", "glob", "task", "ask_user",
-}
-
-var collectionBlockedBuiltIns = []string{
-	"bash", "powershell", "read_powershell", "list_powershell", "shell",
-	"edit", "create", "glob", "task", "ask_user", "curl",
-}
-
 var readOnlyFileBuiltIns = []string{"view", "grep", "head", "tail"}
 
-func collectionDisallowedTools(configured []string) []string {
+func collectionDisallowedTools(configured, allowed []string) []string {
 	result := slices.Clone(configured)
-	for _, name := range collectionBlockedBuiltIns {
+	for _, name := range researchspec.CollectionBlockedBuiltinTools() {
+		if slices.Contains(allowed, name) {
+			continue
+		}
 		if !slices.Contains(result, name) {
 			result = append(result, name)
 		}
@@ -56,14 +49,25 @@ func collectionAllowedTools(configured, mandatory []string) []string {
 	return phaseAllowedTools(configured, append(slices.Clone(readOnlyFileBuiltIns), mandatory...))
 }
 
-func closedWorldDisallowedTools(configured []string) []string {
+func closedWorldDisallowedTools(configured, allowed []string) []string {
 	result := slices.Clone(configured)
-	for _, name := range closedWorldBuiltIns {
+	for _, name := range researchspec.ClosedWorldBuiltinTools() {
+		if slices.Contains(allowed, name) {
+			continue
+		}
 		if !slices.Contains(result, name) {
 			result = append(result, name)
 		}
 	}
 	return result
+}
+
+func finalQCDisallowedTools(effective researchspec.EffectiveQC, explicitlyConfigured bool, allowed []string) []string {
+	configured := []string(nil)
+	if explicitlyConfigured {
+		configured = effective.DisallowedTools
+	}
+	return closedWorldDisallowedTools(configured, allowed)
 }
 
 func closedWorldAllowedTools(configured, mandatory []string) []string {

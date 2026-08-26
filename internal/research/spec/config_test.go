@@ -162,6 +162,69 @@ func TestConfigValidateRequiredFields(t *testing.T) {
 	}
 }
 
+func TestConfigValidateAllowedBuiltinTools(t *testing.T) {
+	t.Parallel()
+
+	newConfig := func() researchspec.Config {
+		return researchspec.Config{
+			Model:               "model",
+			SystemPrompt:        "research carefully",
+			CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
+			Policy:              researchspec.SessionPolicy{Permission: researchspec.PermissionApproveAll},
+		}
+	}
+	tests := []struct {
+		name          string
+		configure     func(*researchspec.Config)
+		expectedError string
+	}{
+		{
+			name: "allows phase fixed exclusions",
+			configure: func(config *researchspec.Config) {
+				config.CollectionAllowedBuiltinTools = []string{"powershell"}
+				config.CollectionQCAllowedBuiltinTools = []string{"web_fetch"}
+				config.ResearchAllowedBuiltinTools = []string{"shell"}
+				config.FinalQCAllowedBuiltinTools = []string{"edit"}
+			},
+		},
+		{
+			name: "rejects builtin not fixed blocked for collection",
+			configure: func(config *researchspec.Config) {
+				config.CollectionAllowedBuiltinTools = []string{"web_fetch"}
+			},
+			expectedError: "research collection_allowed_builtin_tools may only allow fixed blocked built-in tools",
+		},
+		{
+			name: "rejects blank builtin",
+			configure: func(config *researchspec.Config) {
+				config.CollectionQCAllowedBuiltinTools = []string{" "}
+			},
+			expectedError: "research collection_qc_allowed_builtin_tools must not contain empty values",
+		},
+		{
+			name: "rejects duplicate builtin",
+			configure: func(config *researchspec.Config) {
+				config.ResearchAllowedBuiltinTools = []string{"shell", "shell"}
+			},
+			expectedError: "research research_allowed_builtin_tools must not contain duplicate value \"shell\"",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			config := newConfig()
+			tt.configure(&config)
+			if tt.expectedError == "" {
+				assert.NoError(t, config.Validate())
+				return
+			}
+			assert.EqualError(t, config.Validate(), tt.expectedError)
+		})
+	}
+}
+
 func TestConfigValidateRejectsLegacyAgentInputDescription(t *testing.T) {
 	t.Parallel()
 

@@ -25,7 +25,7 @@ import (
 func TestClosedWorldDisallowedToolsIncludesAcquisitionAndArbitraryIO(t *testing.T) {
 	t.Parallel()
 
-	tools := closedWorldDisallowedTools(nil)
+	tools := closedWorldDisallowedTools(nil, nil)
 
 	for _, name := range []string{
 		"web_search", "web_fetch", "bash", "powershell", "read_powershell", "list_powershell",
@@ -80,7 +80,7 @@ func TestCollectionDisallowedToolsBlocksDelegationAndShellFallbacks(t *testing.T
 			t.Parallel()
 			input := slices.Clone(tt.configured)
 
-			tools := collectionDisallowedTools(input)
+			tools := collectionDisallowedTools(input, nil)
 
 			assert.ElementsMatch(t, tt.expected, tools)
 			for _, name := range []string{"view", "grep", "head", "tail"} {
@@ -89,6 +89,55 @@ func TestCollectionDisallowedToolsBlocksDelegationAndShellFallbacks(t *testing.T
 			assert.Equal(t, tt.configured, input)
 		})
 	}
+}
+
+func TestCollectionDisallowedToolsAllowsExplicitShellTools(t *testing.T) {
+	t.Parallel()
+
+	tools := collectionDisallowedTools(nil, []string{"powershell", "shell"})
+
+	assert.NotContains(t, tools, "powershell")
+	assert.NotContains(t, tools, "shell")
+	for _, name := range []string{
+		"bash", "read_powershell", "list_powershell", "edit", "create", "glob", "task", "ask_user", "curl",
+	} {
+		assert.Contains(t, tools, name)
+	}
+}
+
+func TestClosedWorldDisallowedToolsAllowsExplicitBuiltIns(t *testing.T) {
+	t.Parallel()
+
+	tools := closedWorldDisallowedTools(nil, []string{"web_search", "shell"})
+
+	assert.NotContains(t, tools, "web_search")
+	assert.NotContains(t, tools, "shell")
+	for _, name := range []string{
+		"web_fetch", "bash", "powershell", "read_powershell", "list_powershell",
+		"edit", "create", "glob", "task", "ask_user",
+	} {
+		assert.Contains(t, tools, name)
+	}
+}
+
+func TestExplicitDisallowedToolsOverrideBuiltinOptIn(t *testing.T) {
+	t.Parallel()
+
+	collection := collectionDisallowedTools([]string{"shell"}, []string{"powershell", "shell"})
+	assert.NotContains(t, collection, "powershell")
+	assert.Contains(t, collection, "shell")
+
+	closedWorld := closedWorldDisallowedTools([]string{"web_search"}, []string{"web_search", "shell"})
+	assert.Contains(t, closedWorld, "web_search")
+	assert.NotContains(t, closedWorld, "shell")
+}
+
+func TestFinalQCDisallowedToolsDistinguishesDefaultAndExplicitDenials(t *testing.T) {
+	t.Parallel()
+
+	effective := researchspec.EffectiveQC{DisallowedTools: []string{"edit"}}
+	assert.NotContains(t, finalQCDisallowedTools(effective, false, []string{"edit"}), "edit")
+	assert.Contains(t, finalQCDisallowedTools(effective, true, []string{"edit"}), "edit")
 }
 
 func TestCollectionAllowedToolsPreservesReadOnlyFileTools(t *testing.T) {

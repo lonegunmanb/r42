@@ -22,9 +22,13 @@ func TestProductionRuntimeRunsPersistentQCSessionWithVerdictTool(t *testing.T) {
 	directory := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
 research "static" "source" {
-  model = "test-model"
-  profile = "gpt-5.4"
-  system_prompt = "Collect evidence."
+  model                              = "test-model"
+  profile                            = "gpt-5.4"
+  system_prompt                      = "Collect evidence."
+  collection_allowed_builtin_tools   = ["powershell"]
+  collection_qc_allowed_builtin_tools = ["web_fetch"]
+  research_allowed_builtin_tools     = ["shell"]
+  final_qc_allowed_builtin_tools     = ["edit"]
   qc { criteria = { accuracy = "Must be accurate" } }
 }
 `), 0o600))
@@ -42,6 +46,14 @@ research "static" "source" {
 	assert.Contains(t, toolNamesFromConfig(opener.configs[0]), "r42_collection_checkpoint")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[1]), "r42_collection_qc_verdict")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_verdict")
+	assert.NotContains(t, opener.configs[0].ExcludedTools, "powershell")
+	assert.Contains(t, opener.configs[0].ExcludedTools, "shell")
+	assert.NotContains(t, opener.configs[1].ExcludedTools, "web_fetch")
+	assert.Contains(t, opener.configs[1].ExcludedTools, "shell")
+	assert.NotContains(t, opener.configs[2].ExcludedTools, "shell")
+	assert.Contains(t, opener.configs[2].ExcludedTools, "edit")
+	assert.NotContains(t, opener.configs[3].ExcludedTools, "edit")
+	assert.Contains(t, opener.configs[3].ExcludedTools, "shell")
 	assert.Equal(t, 1, opener.research.sendCalls)
 	assert.Equal(t, 1, opener.qc.sendCalls)
 	assert.Equal(t, 1, opener.collection.closeCalls)

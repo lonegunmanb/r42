@@ -29,37 +29,41 @@ var (
 
 type ResearchBlock struct {
 	*golden.BaseBlock
-	PhaseMode                  PhaseMode             `hcl:"phase_mode,optional"`
-	ModelProvider              cty.Value             `hcl:"model_provider,optional"`
-	Model                      string                `hcl:"model"`
-	Profile                    *string               `hcl:"profile,optional"`
-	ReasoningEffort            *string               `hcl:"reasoning_effort,optional"`
-	SystemPrompt               string                `hcl:"system_prompt"`
-	Prompt                     *string               `hcl:"prompt,optional"`
-	ToolIDs                    []string              `hcl:"tool_ids,optional"`
-	ToolCallQuota              map[string]int        `hcl:"tool_call_quota,optional"`
-	TerminateToolID            *string               `hcl:"terminate_tool_id,optional"`
-	AllowedTools               []string              `hcl:"allowed_tools,optional"`
-	DisallowedTools            []string              `hcl:"disallowed_tools,optional"`
-	SkillDirectories           []string              `hcl:"skill_directories,optional"`
-	Skills                     []string              `hcl:"skills,optional"`
-	DisabledSkills             []string              `hcl:"disabled_skills,optional"`
-	Permission                 *Permission           `hcl:"permission,optional"`
-	MaxProtocolAttempts        *int                  `hcl:"max_protocol_attempts,optional"`
-	Timeout                    *string               `hcl:"timeout,optional"`
-	RetryBlocks                []RetryBlock          `hcl:"retry,block"`
-	ArtifactBlocks             []ArtifactBlock       `hcl:"artifact,block"`
-	ImportArtifactBlocks       []ImportArtifactBlock `hcl:"import_artifact,block"`
-	ToolUseBlocks              []ToolUseBlock        `hcl:"tool_use,block"`
-	QCBlocks                   []QCBlock             `hcl:"qc,block"`
-	CollectionModelProvider    cty.Value             `hcl:"collection_model_provider,optional"`
-	CollectionToolIDs          []string              `hcl:"collection_tool_ids,optional"`
-	CollectionSkillDirectories []string              `hcl:"collection_skill_directories,optional"`
-	CollectionSkills           []string              `hcl:"collection_skills,optional"`
-	CollectionDisabledSkills   []string              `hcl:"collection_disabled_skills,optional"`
-	CollectionBatchSize        *int                  `hcl:"collection_batch_size,optional"`
-	MaxCollectionRounds        *int                  `hcl:"max_collection_rounds,optional"`
-	CollectionQCBlocks         []CollectionQCBlock   `hcl:"collection_qc,block"`
+	PhaseMode                       PhaseMode             `hcl:"phase_mode,optional"`
+	ModelProvider                   cty.Value             `hcl:"model_provider,optional"`
+	Model                           string                `hcl:"model"`
+	Profile                         *string               `hcl:"profile,optional"`
+	ReasoningEffort                 *string               `hcl:"reasoning_effort,optional"`
+	SystemPrompt                    string                `hcl:"system_prompt"`
+	Prompt                          *string               `hcl:"prompt,optional"`
+	ToolIDs                         []string              `hcl:"tool_ids,optional"`
+	ToolCallQuota                   map[string]int        `hcl:"tool_call_quota,optional"`
+	TerminateToolID                 *string               `hcl:"terminate_tool_id,optional"`
+	AllowedTools                    []string              `hcl:"allowed_tools,optional"`
+	DisallowedTools                 []string              `hcl:"disallowed_tools,optional"`
+	SkillDirectories                []string              `hcl:"skill_directories,optional"`
+	Skills                          []string              `hcl:"skills,optional"`
+	DisabledSkills                  []string              `hcl:"disabled_skills,optional"`
+	Permission                      *Permission           `hcl:"permission,optional"`
+	MaxProtocolAttempts             *int                  `hcl:"max_protocol_attempts,optional"`
+	Timeout                         *string               `hcl:"timeout,optional"`
+	RetryBlocks                     []RetryBlock          `hcl:"retry,block"`
+	ArtifactBlocks                  []ArtifactBlock       `hcl:"artifact,block"`
+	ImportArtifactBlocks            []ImportArtifactBlock `hcl:"import_artifact,block"`
+	ToolUseBlocks                   []ToolUseBlock        `hcl:"tool_use,block"`
+	QCBlocks                        []QCBlock             `hcl:"qc,block"`
+	CollectionModelProvider         cty.Value             `hcl:"collection_model_provider,optional"`
+	CollectionToolIDs               []string              `hcl:"collection_tool_ids,optional"`
+	CollectionAllowedBuiltinTools   []string              `hcl:"collection_allowed_builtin_tools,optional"`
+	CollectionQCAllowedBuiltinTools []string              `hcl:"collection_qc_allowed_builtin_tools,optional"`
+	ResearchAllowedBuiltinTools     []string              `hcl:"research_allowed_builtin_tools,optional"`
+	FinalQCAllowedBuiltinTools      []string              `hcl:"final_qc_allowed_builtin_tools,optional"`
+	CollectionSkillDirectories      []string              `hcl:"collection_skill_directories,optional"`
+	CollectionSkills                []string              `hcl:"collection_skills,optional"`
+	CollectionDisabledSkills        []string              `hcl:"collection_disabled_skills,optional"`
+	CollectionBatchSize             *int                  `hcl:"collection_batch_size,optional"`
+	MaxCollectionRounds             *int                  `hcl:"max_collection_rounds,optional"`
+	CollectionQCBlocks              []CollectionQCBlock   `hcl:"collection_qc,block"`
 
 	planned                Config
 	deferredTaskExpression string
@@ -197,7 +201,9 @@ func (b *ResearchBlock) validateNativeStringFields() error {
 	}
 	if err := validateStringCollections(root, b.EvalContext(), "research", []string{
 		"tool_ids", "allowed_tools", "disallowed_tools", "skill_directories", "skills", "disabled_skills",
-		"collection_tool_ids", "collection_skill_directories", "collection_skills", "collection_disabled_skills",
+		"collection_tool_ids", "collection_allowed_builtin_tools", "collection_qc_allowed_builtin_tools",
+		"research_allowed_builtin_tools", "final_qc_allowed_builtin_tools", "collection_skill_directories",
+		"collection_skills", "collection_disabled_skills",
 	}); err != nil {
 		return err
 	}
@@ -372,36 +378,40 @@ func (b *ResearchBlock) Values() map[string]cty.Value {
 		return deferredStaticResearchValues(b.plannedTaskValue)
 	}
 	values := map[string]cty.Value{
-		"phase_mode":                   cty.StringVal(string(b.planned.EffectivePhaseMode())),
-		"model_provider":               optionalObjectValue(b.ModelProvider),
-		"model":                        cty.StringVal(b.Model),
-		"profile":                      cty.StringVal(b.planned.ProfileName()),
-		"reasoning_effort":             optionalStringValue(b.ReasoningEffort),
-		"system_prompt":                cty.StringVal(b.SystemPrompt),
-		"prompt":                       optionalStringValue(b.Prompt),
-		"tool_ids":                     stringListValue(b.ToolIDs),
-		"tool_call_quota":              intMapValue(b.ToolCallQuota),
-		"terminate_tool_id":            optionalStringValue(b.TerminateToolID),
-		"allowed_tools":                stringListValue(b.AllowedTools),
-		"disallowed_tools":             stringListValue(b.DisallowedTools),
-		"skill_directories":            stringListValue(b.SkillDirectories),
-		"skills":                       stringListValue(b.Skills),
-		"disabled_skills":              stringListValue(b.DisabledSkills),
-		"permission":                   optionalPermissionValue(b.Permission),
-		"max_protocol_attempts":        optionalIntValue(b.MaxProtocolAttempts),
-		"timeout":                      optionalStringValue(b.Timeout),
-		"retry":                        retryBlockValues(b.RetryBlocks),
-		"artifact":                     ArtifactsValue(b.planned.Artifacts, nil),
-		"tool_use":                     toolUseValues(b.planned.ToolUses),
-		"qc":                           qcBlockValues(b.QCBlocks),
-		"collection_model_provider":    optionalObjectValue(b.CollectionModelProvider),
-		"collection_tool_ids":          stringListValue(b.CollectionToolIDs),
-		"collection_skill_directories": stringListValue(b.CollectionSkillDirectories),
-		"collection_skills":            stringListValue(b.CollectionSkills),
-		"collection_disabled_skills":   stringListValue(b.CollectionDisabledSkills),
-		"collection_batch_size":        optionalIntValue(b.CollectionBatchSize),
-		"max_collection_rounds":        optionalIntValue(b.MaxCollectionRounds),
-		"collection_qc":                collectionQCBlockValues(b.CollectionQCBlocks),
+		"phase_mode":                          cty.StringVal(string(b.planned.EffectivePhaseMode())),
+		"model_provider":                      optionalObjectValue(b.ModelProvider),
+		"model":                               cty.StringVal(b.Model),
+		"profile":                             cty.StringVal(b.planned.ProfileName()),
+		"reasoning_effort":                    optionalStringValue(b.ReasoningEffort),
+		"system_prompt":                       cty.StringVal(b.SystemPrompt),
+		"prompt":                              optionalStringValue(b.Prompt),
+		"tool_ids":                            stringListValue(b.ToolIDs),
+		"tool_call_quota":                     intMapValue(b.ToolCallQuota),
+		"terminate_tool_id":                   optionalStringValue(b.TerminateToolID),
+		"allowed_tools":                       stringListValue(b.AllowedTools),
+		"disallowed_tools":                    stringListValue(b.DisallowedTools),
+		"skill_directories":                   stringListValue(b.SkillDirectories),
+		"skills":                              stringListValue(b.Skills),
+		"disabled_skills":                     stringListValue(b.DisabledSkills),
+		"permission":                          optionalPermissionValue(b.Permission),
+		"max_protocol_attempts":               optionalIntValue(b.MaxProtocolAttempts),
+		"timeout":                             optionalStringValue(b.Timeout),
+		"retry":                               retryBlockValues(b.RetryBlocks),
+		"artifact":                            ArtifactsValue(b.planned.Artifacts, nil),
+		"tool_use":                            toolUseValues(b.planned.ToolUses),
+		"qc":                                  qcBlockValues(b.QCBlocks),
+		"collection_model_provider":           optionalObjectValue(b.CollectionModelProvider),
+		"collection_tool_ids":                 stringListValue(b.CollectionToolIDs),
+		"collection_allowed_builtin_tools":    stringListValue(b.CollectionAllowedBuiltinTools),
+		"collection_qc_allowed_builtin_tools": stringListValue(b.CollectionQCAllowedBuiltinTools),
+		"research_allowed_builtin_tools":      stringListValue(b.ResearchAllowedBuiltinTools),
+		"final_qc_allowed_builtin_tools":      stringListValue(b.FinalQCAllowedBuiltinTools),
+		"collection_skill_directories":        stringListValue(b.CollectionSkillDirectories),
+		"collection_skills":                   stringListValue(b.CollectionSkills),
+		"collection_disabled_skills":          stringListValue(b.CollectionDisabledSkills),
+		"collection_batch_size":               optionalIntValue(b.CollectionBatchSize),
+		"max_collection_rounds":               optionalIntValue(b.MaxCollectionRounds),
+		"collection_qc":                       collectionQCBlockValues(b.CollectionQCBlocks),
 	}
 	if b.planned.TerminateToolID != nil {
 		values["result"] = cty.UnknownVal(cty.String)
@@ -664,15 +674,19 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 			DisabledSkills:   slices.Clone(b.DisabledSkills),
 			Permission:       PermissionApproveAll,
 		},
-		CollectionToolIDs:          slices.Clone(b.CollectionToolIDs),
-		CollectionModelProvider:    b.CollectionModelProvider,
-		CollectionSkillDirectories: slices.Clone(b.CollectionSkillDirectories),
-		CollectionSkills:           slices.Clone(b.CollectionSkills),
-		CollectionDisabledSkills:   slices.Clone(b.CollectionDisabledSkills),
-		CollectionBatchSize:        DefaultCollectionBatchSize,
-		CollectionBatchSizeSet:     b.CollectionBatchSize != nil,
-		MaxCollectionRounds:        defaultMaxCollectionRounds(b.MaxCollectionRounds),
-		MaxCollectionRoundsSet:     b.MaxCollectionRounds != nil,
+		CollectionToolIDs:               slices.Clone(b.CollectionToolIDs),
+		CollectionAllowedBuiltinTools:   slices.Clone(b.CollectionAllowedBuiltinTools),
+		CollectionQCAllowedBuiltinTools: slices.Clone(b.CollectionQCAllowedBuiltinTools),
+		ResearchAllowedBuiltinTools:     slices.Clone(b.ResearchAllowedBuiltinTools),
+		FinalQCAllowedBuiltinTools:      slices.Clone(b.FinalQCAllowedBuiltinTools),
+		CollectionModelProvider:         b.CollectionModelProvider,
+		CollectionSkillDirectories:      slices.Clone(b.CollectionSkillDirectories),
+		CollectionSkills:                slices.Clone(b.CollectionSkills),
+		CollectionDisabledSkills:        slices.Clone(b.CollectionDisabledSkills),
+		CollectionBatchSize:             DefaultCollectionBatchSize,
+		CollectionBatchSizeSet:          b.CollectionBatchSize != nil,
+		MaxCollectionRounds:             defaultMaxCollectionRounds(b.MaxCollectionRounds),
+		MaxCollectionRoundsSet:          b.MaxCollectionRounds != nil,
 	}
 	if config.Policy.DisallowedTools == nil {
 		config.Policy.DisallowedTools = []string{"ask_user"}
@@ -801,19 +815,20 @@ func (b QCBlock) toConfig() (*QCConfig, error) {
 		return nil, err
 	}
 	config := &QCConfig{
-		Criteria:         criteria,
-		ModelProvider:    b.ModelProvider,
-		Model:            clonePointer(b.Model),
-		ReasoningEffort:  clonePointer(b.ReasoningEffort),
-		ToolIDs:          slices.Clone(b.ToolIDs),
-		ToolCallQuota:    maps.Clone(b.ToolCallQuota),
-		AllowedTools:     slices.Clone(b.AllowedTools),
-		DisallowedTools:  slices.Clone(b.DisallowedTools),
-		SkillDirectories: slices.Clone(b.SkillDirectories),
-		Skills:           slices.Clone(b.Skills),
-		DisabledSkills:   slices.Clone(b.DisabledSkills),
-		Permission:       clonePointer(b.Permission),
-		MaxRounds:        DefaultMaxQCRounds,
+		Criteria:           criteria,
+		ModelProvider:      b.ModelProvider,
+		Model:              clonePointer(b.Model),
+		ReasoningEffort:    clonePointer(b.ReasoningEffort),
+		ToolIDs:            slices.Clone(b.ToolIDs),
+		ToolCallQuota:      maps.Clone(b.ToolCallQuota),
+		AllowedTools:       slices.Clone(b.AllowedTools),
+		DisallowedTools:    slices.Clone(b.DisallowedTools),
+		DisallowedToolsSet: b.DisallowedTools != nil,
+		SkillDirectories:   slices.Clone(b.SkillDirectories),
+		Skills:             slices.Clone(b.Skills),
+		DisabledSkills:     slices.Clone(b.DisabledSkills),
+		Permission:         clonePointer(b.Permission),
+		MaxRounds:          DefaultMaxQCRounds,
 	}
 	if config.DisallowedTools == nil {
 		config.DisallowedTools = DefaultQCDisallowedTools()
@@ -996,6 +1011,10 @@ func cloneConfig(config Config) Config {
 	result.Policy.DisabledSkills = slices.Clone(config.Policy.DisabledSkills)
 	result.CollectionToolIDs = slices.Clone(config.CollectionToolIDs)
 	result.CollectionModelProvider = config.CollectionModelProvider
+	result.CollectionAllowedBuiltinTools = slices.Clone(config.CollectionAllowedBuiltinTools)
+	result.CollectionQCAllowedBuiltinTools = slices.Clone(config.CollectionQCAllowedBuiltinTools)
+	result.ResearchAllowedBuiltinTools = slices.Clone(config.ResearchAllowedBuiltinTools)
+	result.FinalQCAllowedBuiltinTools = slices.Clone(config.FinalQCAllowedBuiltinTools)
 	result.CollectionSkillDirectories = slices.Clone(config.CollectionSkillDirectories)
 	result.CollectionSkills = slices.Clone(config.CollectionSkills)
 	result.CollectionDisabledSkills = slices.Clone(config.CollectionDisabledSkills)

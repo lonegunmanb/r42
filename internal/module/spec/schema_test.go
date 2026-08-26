@@ -1098,6 +1098,10 @@ research "static" "market" {
 
   collection_model_provider = model_provider.collection
   collection_tool_ids = [external_tool.collect.id]
+  collection_allowed_builtin_tools    = ["powershell"]
+  collection_qc_allowed_builtin_tools = ["web_fetch"]
+  research_allowed_builtin_tools      = ["shell"]
+  final_qc_allowed_builtin_tools      = ["edit"]
   collection_skill_directories = ["skills/collection"]
   collection_skills            = ["source-evaluation"]
   collection_disabled_skills   = ["dangerous"]
@@ -1126,6 +1130,10 @@ research "static" "market" {
 	registry := planned.Saved.Tools()
 	require.Contains(t, registry, reconstructed.Config.CollectionToolIDs[0])
 	assert.Equal(t, "external_tool.collect", registry[reconstructed.Config.CollectionToolIDs[0]].Address)
+	assert.Equal(t, []string{"powershell"}, reconstructed.Config.CollectionAllowedBuiltinTools)
+	assert.Equal(t, []string{"web_fetch"}, reconstructed.Config.CollectionQCAllowedBuiltinTools)
+	assert.Equal(t, []string{"shell"}, reconstructed.Config.ResearchAllowedBuiltinTools)
+	assert.Equal(t, []string{"edit"}, reconstructed.Config.FinalQCAllowedBuiltinTools)
 	assert.Equal(t, []string{"skills/collection"}, reconstructed.Config.CollectionSkillDirectories)
 	assert.Equal(t, []string{"source-evaluation"}, reconstructed.Config.CollectionSkills)
 	assert.Equal(t, []string{"dangerous"}, reconstructed.Config.CollectionDisabledSkills)

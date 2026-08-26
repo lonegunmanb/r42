@@ -320,7 +320,7 @@ func (f *runtimeFactory) newResearchBlock(
 		Tools: collectionTools, AvailableTools: collectionAllowedTools(
 			planned.Config.Policy.AllowedTools, toolNames(collectionTools),
 		),
-		ExcludedTools:    collectionDisallowedTools(planned.Config.Policy.DisallowedTools),
+		ExcludedTools:    collectionDisallowedTools(planned.Config.Policy.DisallowedTools, planned.Config.CollectionAllowedBuiltinTools),
 		SkillDirectories: slices.Clone(planned.Config.CollectionSkillDirectories), Skills: slices.Clone(planned.Config.CollectionSkills),
 		DisabledSkills: slices.Clone(planned.Config.CollectionDisabledSkills),
 		Hooks:          collectionBuiltInHooks(newToolCallQuota(collectionBuiltInQuota), collectionContext),
@@ -346,7 +346,7 @@ func (f *runtimeFactory) newResearchBlock(
 		Profile: effectiveCollectionQC.Profile, ReasoningEffort: pointerValue(effectiveCollectionQC.ReasoningEffort),
 		SystemPrompt:     "You are Collection QC. Assess only whether each frozen information need's existing stop conditions are sufficiently supported by registered evidence. Do not add search directions, condition text, or new issues. Use only the supplied r42 read tools, then submit one typed per-need verdict for this QC round.",
 		WorkingDirectory: workspace, Tools: collectionQCReadTools,
-		ExcludedTools: closedWorldDisallowedTools(nil),
+		ExcludedTools: closedWorldDisallowedTools(nil, planned.Config.CollectionQCAllowedBuiltinTools),
 	})
 	if err != nil {
 		return cleanupSetup(err)
@@ -409,7 +409,7 @@ func (f *runtimeFactory) newResearchBlock(
 		Provider: planned.Provider, Retry: researchPhaseRetry, Model: planned.Config.Model, Profile: planned.Config.ProfileName(),
 		ReasoningEffort: pointerValue(planned.Config.ReasoningEffort), SystemPrompt: researchPrompt, WorkingDirectory: workspace,
 		Tools: researchTools, AvailableTools: closedWorldAllowedTools(planned.Config.Policy.AllowedTools, toolNames(researchTools)),
-		ExcludedTools:    closedWorldDisallowedTools(planned.Config.Policy.DisallowedTools),
+		ExcludedTools:    closedWorldDisallowedTools(planned.Config.Policy.DisallowedTools, planned.Config.ResearchAllowedBuiltinTools),
 		SkillDirectories: slices.Clone(planned.Config.Policy.SkillDirectories), Skills: slices.Clone(planned.Config.Policy.Skills),
 		DisabledSkills: slices.Clone(planned.Config.Policy.DisabledSkills), Hooks: builtInToolCallQuotaHooks(newToolCallQuota(researchBuiltInQuota)),
 	})
@@ -494,8 +494,12 @@ func (f *runtimeFactory) newResearchBlock(
 			ReasoningEffort:  pointerValue(effectiveFinalQC.ReasoningEffort),
 			SystemPrompt:     appendBuiltInToolCallQuotaPrompt(finalQCSystemPrompt(), finalBuiltInQuota),
 			WorkingDirectory: workspace, Tools: finalTools,
-			AvailableTools:   closedWorldAllowedTools(effectiveFinalQC.AllowedTools, toolNames(finalTools)),
-			ExcludedTools:    closedWorldDisallowedTools(effectiveFinalQC.DisallowedTools),
+			AvailableTools: closedWorldAllowedTools(effectiveFinalQC.AllowedTools, toolNames(finalTools)),
+			ExcludedTools: finalQCDisallowedTools(
+				effectiveFinalQC,
+				planned.Config.QC.DisallowedToolsSet,
+				planned.Config.FinalQCAllowedBuiltinTools,
+			),
 			SkillDirectories: slices.Clone(effectiveFinalQC.SkillDirectories), Skills: slices.Clone(effectiveFinalQC.Skills),
 			DisabledSkills: slices.Clone(effectiveFinalQC.DisabledSkills), Hooks: builtInToolCallQuotaHooks(newToolCallQuota(finalBuiltInQuota)),
 		})
@@ -612,7 +616,7 @@ func (f *runtimeFactory) newCollectionOnlyBlock(
 		Provider: collectionProvider, Retry: collectionRetry, Model: planned.Config.Model, Profile: planned.Config.ProfileName(),
 		ReasoningEffort: pointerValue(planned.Config.ReasoningEffort), SystemPrompt: appendBuiltInToolCallQuotaPrompt(prompt, builtInQuota), WorkingDirectory: workspace,
 		Tools: tools, AvailableTools: collectionAllowedTools(planned.Config.Policy.AllowedTools, toolNames(tools)),
-		ExcludedTools:    collectionDisallowedTools(planned.Config.Policy.DisallowedTools),
+		ExcludedTools:    collectionDisallowedTools(planned.Config.Policy.DisallowedTools, planned.Config.CollectionAllowedBuiltinTools),
 		SkillDirectories: slices.Clone(planned.Config.CollectionSkillDirectories), Skills: slices.Clone(planned.Config.CollectionSkills),
 		DisabledSkills: slices.Clone(planned.Config.CollectionDisabledSkills), Hooks: builtInToolCallQuotaHooks(newToolCallQuota(builtInQuota)),
 	})
@@ -712,7 +716,7 @@ func (f *runtimeFactory) newResearchOnlyBlock(
 		Provider: planned.Provider, Retry: researchPhaseRetry, Model: planned.Config.Model, Profile: planned.Config.ProfileName(),
 		ReasoningEffort: pointerValue(planned.Config.ReasoningEffort), SystemPrompt: appendBuiltInToolCallQuotaPrompt(researchSystemPrompt, builtInQuota), WorkingDirectory: workspace,
 		Tools: researchTools, AvailableTools: closedWorldAllowedTools(planned.Config.Policy.AllowedTools, toolNames(researchTools)),
-		ExcludedTools:    closedWorldDisallowedTools(planned.Config.Policy.DisallowedTools),
+		ExcludedTools:    closedWorldDisallowedTools(planned.Config.Policy.DisallowedTools, planned.Config.ResearchAllowedBuiltinTools),
 		SkillDirectories: slices.Clone(planned.Config.Policy.SkillDirectories), Skills: slices.Clone(planned.Config.Policy.Skills),
 		DisabledSkills: slices.Clone(planned.Config.Policy.DisabledSkills), Hooks: builtInToolCallQuotaHooks(newToolCallQuota(builtInQuota)),
 	})
@@ -762,8 +766,12 @@ func (f *runtimeFactory) newResearchOnlyBlock(
 		ReasoningEffort:  pointerValue(effectiveFinalQC.ReasoningEffort),
 		SystemPrompt:     appendBuiltInToolCallQuotaPrompt(finalQCSystemPrompt(), finalBuiltInQuota),
 		WorkingDirectory: workspace, Tools: finalTools,
-		AvailableTools:   closedWorldAllowedTools(effectiveFinalQC.AllowedTools, toolNames(finalTools)),
-		ExcludedTools:    closedWorldDisallowedTools(effectiveFinalQC.DisallowedTools),
+		AvailableTools: closedWorldAllowedTools(effectiveFinalQC.AllowedTools, toolNames(finalTools)),
+		ExcludedTools: finalQCDisallowedTools(
+			effectiveFinalQC,
+			planned.Config.QC.DisallowedToolsSet,
+			planned.Config.FinalQCAllowedBuiltinTools,
+		),
 		SkillDirectories: slices.Clone(effectiveFinalQC.SkillDirectories), Skills: slices.Clone(effectiveFinalQC.Skills),
 		DisabledSkills: slices.Clone(effectiveFinalQC.DisabledSkills), Hooks: builtInToolCallQuotaHooks(newToolCallQuota(finalBuiltInQuota)),
 	})

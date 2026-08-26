@@ -22,6 +22,28 @@ const (
 	DefaultCollectionQCCriterion = "The registered evidence artifacts must provide sufficient evidence to answer the research task."
 )
 
+var collectionBlockedBuiltIns = []string{
+	"bash", "powershell", "read_powershell", "list_powershell", "shell",
+	"edit", "create", "glob", "task", "ask_user", "curl",
+}
+
+var closedWorldBuiltIns = []string{
+	"web_search", "web_fetch", "bash", "powershell", "read_powershell", "list_powershell",
+	"shell", "edit", "create", "glob", "task", "ask_user",
+}
+
+// CollectionBlockedBuiltinTools returns the built-ins denied by default in a
+// Collection session.
+func CollectionBlockedBuiltinTools() []string {
+	return slices.Clone(collectionBlockedBuiltIns)
+}
+
+// ClosedWorldBuiltinTools returns the built-ins denied by default in a closed
+// Research or QC session.
+func ClosedWorldBuiltinTools() []string {
+	return slices.Clone(closedWorldBuiltIns)
+}
+
 type Permission string
 
 const PermissionApproveAll Permission = "approve_all"
@@ -47,33 +69,37 @@ type SessionPolicy struct {
 }
 
 type Config struct {
-	PhaseMode                  PhaseMode
-	ModelProvider              cty.Value
-	Model                      string
-	Profile                    string
-	ReasoningEffort            *string
-	SystemPrompt               string
-	Prompt                     *string
-	TerminateToolID            *string
-	TerminateToolIDSet         bool
-	MaxProtocolAttempts        int
-	Timeout                    *time.Duration
-	Retry                      provider.RetryOverride
-	Policy                     SessionPolicy
-	Artifacts                  []Artifact
-	Imports                    []ImportArtifact
-	ToolUses                   []ToolUse
-	QC                         *QCConfig
-	CollectionModelProvider    cty.Value
-	CollectionToolIDs          []string
-	CollectionSkillDirectories []string
-	CollectionSkills           []string
-	CollectionDisabledSkills   []string
-	CollectionBatchSize        int
-	CollectionBatchSizeSet     bool
-	MaxCollectionRounds        *int
-	MaxCollectionRoundsSet     bool
-	CollectionQC               *CollectionQCConfig
+	PhaseMode                       PhaseMode
+	ModelProvider                   cty.Value
+	Model                           string
+	Profile                         string
+	ReasoningEffort                 *string
+	SystemPrompt                    string
+	Prompt                          *string
+	TerminateToolID                 *string
+	TerminateToolIDSet              bool
+	MaxProtocolAttempts             int
+	Timeout                         *time.Duration
+	Retry                           provider.RetryOverride
+	Policy                          SessionPolicy
+	Artifacts                       []Artifact
+	Imports                         []ImportArtifact
+	ToolUses                        []ToolUse
+	QC                              *QCConfig
+	CollectionModelProvider         cty.Value
+	CollectionToolIDs               []string
+	CollectionAllowedBuiltinTools   []string
+	CollectionQCAllowedBuiltinTools []string
+	ResearchAllowedBuiltinTools     []string
+	FinalQCAllowedBuiltinTools      []string
+	CollectionSkillDirectories      []string
+	CollectionSkills                []string
+	CollectionDisabledSkills        []string
+	CollectionBatchSize             int
+	CollectionBatchSizeSet          bool
+	MaxCollectionRounds             *int
+	MaxCollectionRoundsSet          bool
+	CollectionQC                    *CollectionQCConfig
 }
 
 // ImportArtifact grants a block read access to artifacts declared by another block.
@@ -125,6 +151,18 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := validateToolIDs(c.CollectionToolIDs, "research collection_tool_ids"); err != nil {
+		return err
+	}
+	if err := validateAllowedBuiltinTools(c.CollectionAllowedBuiltinTools, "research collection_allowed_builtin_tools", CollectionBlockedBuiltinTools()); err != nil {
+		return err
+	}
+	if err := validateAllowedBuiltinTools(c.CollectionQCAllowedBuiltinTools, "research collection_qc_allowed_builtin_tools", ClosedWorldBuiltinTools()); err != nil {
+		return err
+	}
+	if err := validateAllowedBuiltinTools(c.ResearchAllowedBuiltinTools, "research research_allowed_builtin_tools", ClosedWorldBuiltinTools()); err != nil {
+		return err
+	}
+	if err := validateAllowedBuiltinTools(c.FinalQCAllowedBuiltinTools, "research final_qc_allowed_builtin_tools", ClosedWorldBuiltinTools()); err != nil {
 		return err
 	}
 	if err := validateOptionalProviderReference(c.CollectionModelProvider, "research collection_model_provider"); err != nil {
@@ -242,6 +280,15 @@ func (c Config) validateCollectionOnly() error {
 	if c.QC != nil {
 		return errors.New("collection_only forbids qc")
 	}
+	if len(c.CollectionQCAllowedBuiltinTools) > 0 {
+		return errors.New("collection_only forbids collection_qc_allowed_builtin_tools")
+	}
+	if len(c.ResearchAllowedBuiltinTools) > 0 {
+		return errors.New("collection_only forbids research_allowed_builtin_tools")
+	}
+	if len(c.FinalQCAllowedBuiltinTools) > 0 {
+		return errors.New("collection_only forbids final_qc_allowed_builtin_tools")
+	}
 	return nil
 }
 
@@ -251,6 +298,12 @@ func (c Config) validateResearchOnly() error {
 	}
 	if len(c.CollectionToolIDs) > 0 {
 		return errors.New("research_only forbids collection_tool_ids")
+	}
+	if len(c.CollectionAllowedBuiltinTools) > 0 {
+		return errors.New("research_only forbids collection_allowed_builtin_tools")
+	}
+	if len(c.CollectionQCAllowedBuiltinTools) > 0 {
+		return errors.New("research_only forbids collection_qc_allowed_builtin_tools")
 	}
 	if len(c.CollectionSkillDirectories) > 0 || len(c.CollectionSkills) > 0 || len(c.CollectionDisabledSkills) > 0 {
 		return errors.New("research_only forbids collection skills")
@@ -288,6 +341,23 @@ func hasResearchToolIDs(toolIDs []string, toolUses []ToolUse) bool {
 		}
 	}
 	return false
+}
+
+func validateAllowedBuiltinTools(values []string, field string, blocked []string) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s must not contain empty values", field)
+		}
+		if !slices.Contains(blocked, value) {
+			return fmt.Errorf("%s may only allow fixed blocked built-in tools", field)
+		}
+		if _, exists := seen[value]; exists {
+			return fmt.Errorf("%s must not contain duplicate value %q", field, value)
+		}
+		seen[value] = struct{}{}
+	}
+	return nil
 }
 
 func validateToolUses(toolUses []ToolUse) error {
@@ -423,20 +493,21 @@ func toolUseObject(value cty.Value, name string) (cty.Value, error) {
 }
 
 type QCConfig struct {
-	Criteria         cty.Value
-	ModelProvider    cty.Value
-	Model            *string
-	ReasoningEffort  *string
-	Retry            provider.RetryOverride
-	ToolIDs          []string
-	ToolCallQuota    map[string]int
-	AllowedTools     []string
-	DisallowedTools  []string
-	SkillDirectories []string
-	Skills           []string
-	DisabledSkills   []string
-	Permission       *Permission
-	MaxRounds        int
+	Criteria           cty.Value
+	ModelProvider      cty.Value
+	Model              *string
+	ReasoningEffort    *string
+	Retry              provider.RetryOverride
+	ToolIDs            []string
+	ToolCallQuota      map[string]int
+	AllowedTools       []string
+	DisallowedTools    []string
+	DisallowedToolsSet bool
+	SkillDirectories   []string
+	Skills             []string
+	DisabledSkills     []string
+	Permission         *Permission
+	MaxRounds          int
 }
 
 func (c QCConfig) Validate() error {

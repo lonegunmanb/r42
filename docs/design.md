@@ -1,18 +1,20 @@
 # r42 Research DAG DSL Design
 
-Status: current implementation contract
+Status: current contract plus approved `phase_mode`/`starlark_tool` target
 
-This document records the implemented r42 execution contract. It is the
-normative source for the current implementation. When this document and an
-example disagree, the explicit rules in this document win.
+This document is the normative r42 execution contract. The `phase_mode`,
+`starlark_tool`, and revised SecJury sections describe the approved target that
+is not implemented yet; their delivery sequence is tracked in
+[phase-modes-starlark-development-plan.md](phase-modes-starlark-development-plan.md).
+When this document and an example disagree, the explicit rules here win.
 
 ## 1. Purpose
 
 r42 is a high-level HCL DSL and execution engine for research DAGs. Azure/golden
 provides configuration evaluation, implicit dependency discovery, Plan hooks,
-and the Apply block protocol. A leaf `research` block owns persistent Collection,
-Collection QC, and closed Research sessions and, when configured, one persistent
-Final QC session.
+and the Apply block protocol. A leaf `research` block owns the persistent
+sessions selected by its `phase_mode` and, when that mode permits it and `qc` is
+configured, one persistent Final QC session.
 
 The Go implementation must use the official upstream
 `github.com/github/copilot-sdk/go` module directly. It must not introduce a
@@ -22,7 +24,8 @@ third-party fork or adapter.
 
 - Describe static research DAGs with typed inputs, outputs, tools, and artifacts.
 - Produce an immutable Plan before Apply starts.
-- Keep every workflow phase session persistent for the lifetime of one block.
+- Keep every selected workflow phase session persistent for the lifetime of one
+  block.
 - Support reusable, statically planned modules with Terraform-like variables and
   outputs.
 - Run independent research blocks concurrently within global and module limits.
@@ -89,8 +92,9 @@ The first version has these root-level declarations:
 - `model_provider`: model API transport and retry policy, but not a model name.
 - `go_tool`: a typed tool implemented by inline Go source.
 - `external_tool`: a typed tool implemented by a child process.
-- `research`: a Collection -> Collection QC -> closed Research workflow with an
-  optional nested Final QC session.
+- `starlark_tool`: an isolated, resource-bounded numerical scratchpad.
+- `research`: a `full`, `collection_only`, or `research_only` workflow, with
+  optional Final QC where the selected mode permits it.
 - `module`: a statically planned child directory.
 - `variable`: a module input.
 - `locals`: Plan-time names for derived expressions.
@@ -301,15 +305,26 @@ All retry delays respect the active context deadline.
 
 ## 6. Session Configuration
 
-Every `research` block is one workflow with three mandatory logical sessions:
-Collection, Collection QC, and closed Research. A nested `qc` block adds Final
-QC. Each session is created once and reused whenever the state machine returns
-to that phase. Static and dynamic research use the same coordinator; every
-dynamic member owns isolated sessions, artifact registry, cursor, quotas, and
-round state.
+Every `research` block is one workflow. `phase_mode` selects which logical
+sessions exist:
+
+- `full` is the default and preserves the Collection, Collection QC, closed
+  Research, and optional Final QC workflow.
+- `collection_only` runs one Collection session and completes through its
+  terminating `tool_use`. It is intended for tasks that must acquire data and
+  calculate against it in one evolving context.
+- `research_only` starts directly in closed Research and may optionally run
+  Final QC. It is intended for downstream work over already frozen inputs.
+
+Static research and every materialized dynamic task support all three modes.
+They use the same coordinator, but every dynamic member owns isolated sessions,
+artifact registry, quotas, protocol-attempt budget, and, in `full` mode,
+information-need and Collection-round state.
 
 Research session fields include:
 
+- `phase_mode`: optional `full`, `collection_only`, or `research_only`;
+  omission means `full`.
 - `model_provider`: optional provider reference; omission uses the SDK's
   default provider behavior. It is the default provider for all workflow
   phases.
@@ -325,7 +340,17 @@ Research session fields include:
   omission reuses `model_provider`.
 - `collection_tool_ids`: typed acquisition or snapshot-producing tool IDs used
   only by Collection.
+- `collection_allowed_builtin_tools`: built-in tool names to remove from
+  Collection's fixed denylist only. It applies in `full` and
+  `collection_only`.
+- `collection_qc_allowed_builtin_tools`: built-in tool names to remove from
+  Collection QC's fixed denylist only. It applies in `full`.
 - `tool_ids`: trusted typed tool IDs used only by closed Research.
+- `research_allowed_builtin_tools`: built-in tool names to remove from
+  Research's fixed denylist only. It applies in `full` and `research_only`.
+- `final_qc_allowed_builtin_tools`: built-in tool names to remove from Final
+  QC's fixed denylist only. It applies when Final QC exists in `full` or
+  `research_only`.
 - `tool_call_quota`: optional call limits. Keys may name configured Collection
   or Research typed tools, the terminate tool, or Copilot built-ins. Collection
   and Research maintain separate counters.
@@ -344,18 +369,62 @@ Research session fields include:
 - `timeout`, with no default.
 - retry overrides.
 
-r42 shares the author's task instructions between Collection and Research while
-prepending a phase-specific fixed protocol. The optional `prompt` starts both
-the initial Collection turn and the initial Research turn. When it is absent,
-r42 sends a fixed start message. r42 does not validate whether a model supports
-a given reasoning effort; unsupported parameters are surfaced by the provider,
-with HTTP 400 failing immediately.
+The mode-specific configuration contract is:
+
+| Configuration | `full` | `collection_only` | `research_only` |
+| --- | --- | --- | --- |
+| `collection_tool_ids`, `collection_model_provider`, Collection skills | Collection | Sole session | Forbidden |
+| `collection_allowed_builtin_tools` | Collection | Sole session | Forbidden |
+| `collection_qc_allowed_builtin_tools` | Collection QC | Forbidden | Forbidden |
+| `tool_ids`, `terminate_tool_id`, Research skills | Research | Forbidden | Research |
+| `research_allowed_builtin_tools` | Research | Forbidden | Research |
+| `final_qc_allowed_builtin_tools` | Final QC | Forbidden | Final QC |
+| `tool_use` | Research | Sole session | Research |
+| `collection_batch_size`, `max_collection_rounds`, `collection_qc` | Allowed | Forbidden | Forbidden |
+| `qc` | Optional | Forbidden | Optional |
+| Information-needs and checkpoint protocol | Required | Not created | Not created |
+
+`collection_only` requires one or more `tool_use` blocks and exactly one with
+`terminate = true`. Other non-terminating tool uses are allowed. It rejects
+`tool_ids` and `terminate_tool_id`; the terminal contract must be explicit so
+HCL-owned arguments, agent-owned arguments, validation, and declared artifacts
+remain available. `full` and `research_only` retain the existing choice between
+`terminate_tool_id` and `tool_use`.
+
+Static and dynamic syntax use the same string field:
+
+```hcl
+research "static" "builder" {
+  phase_mode = "collection_only"
+  # ...
+}
+
+research "dynamic" "jurors" {
+  tasks = [
+    for juror in local.jurors : {
+      id         = juror.id
+      phase_mode = "research_only"
+      # ...
+    }
+  ]
+}
+```
+
+r42 prepends a fixed protocol for each session that exists in the selected
+mode. In `full`, the optional `prompt` starts both the initial Collection turn
+and the initial Research turn. In either single-phase mode it starts the sole
+initial turn. When it is absent, r42 sends the applicable fixed start message.
+r42 does not validate whether a model supports a given reasoning effort;
+unsupported parameters are surfaced by the provider, with HTTP 400 failing
+immediately.
 
 Provider selection is resolved per phase. Collection uses
 `collection_model_provider` when present, Collection QC uses its nested
 `model_provider` when present, and Final QC uses its nested `model_provider`
 when present. Every omitted phase override reuses the research block's
 top-level `model_provider`; closed Research always uses that top-level provider.
+The sole `collection_only` session follows Collection provider selection, while
+the initial `research_only` session follows Research provider selection.
 Retry composition starts from the selected phase provider, then applies the
 research-level retry override and, for either QC phase, its nested retry
 override.
@@ -363,16 +432,24 @@ override.
 ### Tool policy
 
 There is no default allowlist. When present, `allowed_tools` first narrows the
-available set. `disallowed_tools` is then applied and always wins. Collection is
-the only open-world phase, but it always denies `task`, `powershell`, and `curl`
-to prevent delegation and command-line network fallbacks. Research always adds a fixed denylist for obvious
-network, shell, write/edit, glob, task/sub-agent, and user-input built-ins.
-Read-only `view`, `grep`, `head`, and `tail` file tools remain available.
-Explicit custom typed tools remain an author trust boundary.
+available set. `disallowed_tools` is then applied and always wins.
+`*_allowed_builtin_tools` does not participate in the allowlist: it may name
+only a built-in that is in that phase's fixed denylist, and removes that name
+from the fixed portion for that one session. An explicit `disallowed_tools`
+entry still wins. Collection in `full`, and the sole session in
+`collection_only`, deny by default `bash`, `powershell`, `read_powershell`,
+`list_powershell`, `shell`, `edit`, `create`, `glob`, `task`, `ask_user`, and
+`curl`. Collection QC, Research, and Final QC deny by default `web_search`,
+`web_fetch`, `bash`, `powershell`, `read_powershell`, `list_powershell`,
+`shell`, `edit`, `create`, `glob`, `task`, and `ask_user`. Read-only `view`,
+`grep`, `head`, and `tail` file tools remain available. Explicit custom typed
+tools remain an author trust boundary.
 
 `approve_all` automatically approves every otherwise valid tool call.
-Registration, checkpoint, terminate, and both verdict tools are protocol tools:
-r42 always registers the applicable tools and configuration cannot exclude them.
+Registration, checkpoint, terminate, and verdict tools are protocol tools. r42
+registers only those applicable to the selected mode, and configuration cannot
+exclude them. `collection_only` has registration and save-artifact helpers but
+does not receive information-needs, checkpoint, or QC-verdict tools.
 
 Each typed tool receives a deterministic, SDK-safe ID from its canonical block
 address. Workflow snapshots store only those IDs; the Plan stores the complete
@@ -393,17 +470,19 @@ Collection, Research, and Final QC configure typed-tool quotas independently. A
 successful call consumes one unit only after its arguments pass schema
 validation and the tool returns an accepted response. Execution errors and
 `accepted = false` responses roll back the reservation. A zero quota disables
-that tool for the session. Collection rounds are a separate control: each
-`needs_more` return to Collection after the initial phase consumes a round, and
-an empty checkpoint does not consume an extra round.
+that tool for the session. In `collection_only`, `tool_call_quota` belongs to
+the sole Collection session. Collection rounds are a separate `full`-mode
+control: each `needs_more` return to Collection after the initial phase consumes
+a round, and an empty checkpoint does not consume an extra round.
 
 `one(collection)` follows Terraform's zero-or-one convention: an empty list,
 set, or tuple returns null, one element returns that element, and more than one
 element is an error.
 
 The generated ID is also the SDK registration name. It has the form
-`tool_<go_tool|external_tool>_<name>_<uuid>`, is at most 64 characters, and is
-derived from the canonical address so module instances cannot collide.
+`tool_<go_tool|external_tool|starlark_tool>_<name>_<uuid>`, is at most 64
+characters, and is derived from the canonical address so module instances
+cannot collide.
 
 ### Working directory
 
@@ -530,15 +609,182 @@ the original error.
 Without `--debug`, a failed tool includes at most the final 64 KiB of stderr in
 the CLI diagnostic and does not persist full stderr. Debug mode persists it.
 
+### Isolated `starlark_tool`
+
+`starlark_tool` is a generic numerical scratchpad for LLM-generated programs.
+It is not a DCF engine and has no business-specific input or output schema. It
+uses `github.com/google/starlark-go` through the `go.starlark.net` module and is
+declared as follows:
+
+```hcl
+starlark_tool "calculator" {
+  description      = "Execute isolated numerical Starlark programs."
+  max_steps        = 1000000
+  timeout          = "5s"
+  max_source_bytes = 65536
+  max_data_bytes   = 1048576
+  max_result_bytes = 1048576
+  max_stdout_bytes = 16384
+  memory_limit     = 134217728
+}
+```
+
+The registered typed-tool input is fixed:
+
+```json
+{
+  "code": "def main(data):\n    return stats.mean(data[\"values\"])\n\nresult = main(data)",
+  "data_json": "{\"values\":[1,2,3]}"
+}
+```
+
+Both fields are strings. `data_json` must contain exactly one valid JSON value;
+callers that need no input pass `"null"`. The parsed value is converted to a
+frozen Starlark value and predeclared as `data`. The script must assign a
+top-level `result`. A successful response has this fixed output:
+
+```json
+{
+  "result_json": "2.0",
+  "stdout": ""
+}
+```
+
+`result_json` is canonical JSON text rather than a statically declared business
+type. A caller may pass it as a later call's `data_json`, or persist it through
+an explicitly declared artifact. Every invocation is otherwise stateless.
+JSON null, booleans, strings, arrays, and objects map to Starlark `None`, bool,
+string, list, and dictionary values. Integral JSON numbers map to arbitrary
+precision Starlark integers; other JSON numbers map to finite Starlark floats.
+The reverse conversion follows the same distinction; arbitrary-precision
+integers are emitted as base-10 JSON numbers in the returned JSON text.
+
+r42 appends the following facts and links to the author-supplied model-facing
+description so an agent can recover from unfamiliar syntax without guessing:
+
+```text
+Write Starlark, a deterministic Python-like language. Define top-level result
+as a JSON-compatible value. Available host values: data, math, stats, matrix,
+and fail. No import, load, filesystem, network, process, clock, or randomness
+is available.
+
+Exact implementation specification:
+https://github.com/google/starlark-go/blob/master/doc/spec.md
+
+Getting started and examples:
+https://github.com/google/starlark-go
+
+Go API reference:
+https://pkg.go.dev/go.starlark.net/starlark
+
+Secondary language introduction (may include Bazel-specific behavior):
+https://bazel.build/rules/language
+```
+
+When a Collection session has an author-configured `web_fetch`, `pplx_fetch`,
+or equivalent acquisition tool, the fixed Collection prompt permits temporary
+access to those documentation URLs to resolve a Starlark syntax or API problem.
+This does not inject a network tool into the session, bypass its configured
+allowlist/quota, or give the Starlark worker network access. Documentation
+lookups are operational help and need not be registered as business artifacts.
+The exact `starlark-go` specification takes precedence; the Bazel introduction
+is secondary because it can describe Bazel-specific behavior.
+
+Each call launches the current r42 executable as a fresh hidden worker process.
+The parent sends one request on stdin and receives one response on stdout. Code
+and data never become temporary source files; diagnostics use the virtual name
+`calculator.star`. The worker receives no arbitrary module loader and exposes
+no filesystem, environment, network, subprocess, clock, randomness, or mutable
+host object. Cancellation and timeout terminate the worker process tree.
+
+The execution environment predeclares:
+
+- `data`, the frozen value decoded from `data_json`;
+- `math`, the read-only `starlark-go` math module;
+- `stats`, a read-only module with `mean`, `median`, sample `variance`,
+  population `pvariance`, sample `stdev`, population `pstdev`, and sample
+  `covariance`;
+- `matrix`, a read-only module with `shape`, `transpose`, and `matmul`;
+- `fail`, which terminates evaluation with the supplied message.
+
+The normal Starlark `print` function writes only to the worker's bounded
+captured `stdout`; it never writes directly to the r42 terminal or tool protocol
+stream.
+
+The first version accepts only numeric Starlark `int` and `float` elements in
+`stats` and `matrix`; `bool` is not numeric. It rejects non-finite values, empty
+vectors, ragged or non-two-dimensional matrices, and matrix products with
+incompatible dimensions or excessive output size. Sample variance, sample
+standard deviation, and covariance require at least two observations;
+covariance vectors must have equal length. `stats` and `matrix` are bundled
+in-memory Starlark modules, rather than opaque Go loops, so their loops consume
+the same execution-step budget as user code. The first version deliberately
+omits inverse, regression, eigenvalue, SVD, finance, and DCF-specific helpers.
+
+Only JSON-compatible `result` values are accepted: null, bool, finite number,
+string, list/tuple, and dictionaries with string keys. Functions, sets, bytes,
+non-string dictionary keys, cycles, NaN, and infinity are rejected. Output
+validation happens before the accepted `ToolResponse` is returned.
+
+Resource settings use these defaults and hard caps:
+
+| Resource | Default | Hard cap |
+| --- | ---: | ---: |
+| Evaluation steps | 1,000,000 | 10,000,000 |
+| Wall-clock timeout | 5 seconds | 30 seconds |
+| Source bytes | 64 KiB | 256 KiB |
+| Input data bytes | 1 MiB | 8 MiB |
+| Result JSON bytes | 1 MiB | 8 MiB |
+| Captured stdout bytes | 16 KiB | 64 KiB |
+| Worker memory target | 128 MiB | 256 MiB |
+
+Plan validates positive values, duration syntax, and hard caps. The worker calls
+`Thread.SetMaxExecutionSteps`, reports `Thread.ExecutionSteps`, and uses
+`Thread.Cancel` for timeout/cancellation. It also applies Go's memory limit and
+reliable OS process limits where available. Go's memory limit is not a portable
+strict RSS ceiling, so process isolation remains the correctness boundary and
+the documentation does not promise exact cross-platform RSS enforcement.
+
+Parse, name, runtime, limit, and result-validation failures are normal
+repairable typed-tool rejections, not Go errors that fail the research block.
+They use these stable issue codes:
+
+| Code | Meaning |
+| --- | --- |
+| `starlark_code_required` | `code` is empty |
+| `starlark_parse_error` | Source cannot be parsed |
+| `starlark_name_error` | A referenced name is unavailable |
+| `starlark_runtime_error` | Evaluation failed, including explicit `fail` |
+| `starlark_step_limit` | Evaluation exceeded `max_steps` |
+| `starlark_timeout` | Evaluation exceeded the tool timeout |
+| `starlark_data_json` | `data_json` is invalid or cannot be converted |
+| `starlark_result_missing` | No top-level `result` was assigned |
+| `starlark_result_type` | `result` is not JSON-compatible |
+| `starlark_result_non_finite` | `result` contains NaN or infinity |
+| `starlark_output_limit` | Result JSON or stdout exceeded its configured limit |
+| `starlark_worker_exited` | Worker exited before returning a valid response |
+
+Issues include bounded line/column parser diagnostics, an `EvalError`
+backtrace where available, the relevant bounded stdout tail, and an actionable
+repair hint. The response should expose all diagnostics useful to repairing one
+call without leaking unbounded output. Parent/block cancellation and failures
+to start or communicate with the worker remain infrastructure errors. An
+unexpected worker exit is reported with `starlark_worker_exited` when the
+parent can still return a valid rejection envelope; protocol corruption or a
+parent-side I/O failure fails the block.
+
 ## 8. Research Completion Protocol
 
-Without `terminate_tool_id`, a normal assistant completion ends research and the
-block exposes no direct `result` value. Artifacts remain available.
+Without `terminate_tool_id`, or a terminating `tool_use`, a normal assistant
+completion ends Research and the block exposes no direct `result` value.
+Artifacts remain available. This form is valid only in `full` and
+`research_only`; `collection_only` always requires exactly one terminating
+`tool_use`.
 
-With `terminate_tool_id`, the block completes only after an accepted call. The
-terminal tool's output type must be string-compatible. Its optional output
-becomes the block's optional string `result`; complex results belong in files in
-the block workspace.
+With `terminate_tool_id` or a terminating `tool_use`, the active phase completes
+only after an accepted call. The terminal tool's output type must be
+string-compatible. Its optional output becomes the block's optional string
+`result`; complex results belong in files in the block workspace.
 
 When a turn ends without the required terminal call, r42 sends a user message
 that explicitly requires the model to call it. An `accepted = false` response is
@@ -546,12 +792,15 @@ returned as issues so the same session can repair its arguments and call again.
 Every rejected terminal call and every completed turn without a terminal call
 consumes one protocol attempt. `max_protocol_attempts` defaults to 10.
 
-Required artifact failures are also repairable issues returned to the research
-session. A new QC revision round resets the protocol-attempt budget.
+Required artifact failures are also repairable issues returned to the active
+Collection or Research session. A new QC revision round resets the
+protocol-attempt budget.
 
 ## 9. Research Workflow and QC Protocols
 
-The state machine is:
+### Mode selection and state machines
+
+The `full` state machine is:
 
 ```text
 Collection --checkpoint--> Collection QC --sufficient--> Research
@@ -565,7 +814,33 @@ Collection --checkpoint--> Collection QC --sufficient--> Research
                                                              Research
 ```
 
-Collection is the only open-world phase. It uses only
+`collection_only` has one phase and no QC transition:
+
+```text
+Collection --accepted terminating tool_use--> complete
+```
+
+`research_only` starts from frozen inputs:
+
+```text
+Research --accepted completion-------------------------> complete
+    |
+    | candidate, when qc is configured
+    v
+Final QC --pass----------------------------------------> complete
+    |
+    | revise_research
+    v
+Research
+```
+
+The coordinator creates only the sessions reachable in the selected mode. A
+skipped phase does not open an SDK session, receive a prompt, register protocol
+tools, consume retry/round budgets, or emit a synthetic verdict.
+
+### Full mode
+
+Collection in `full` is the open-world phase. It uses only
 its effective provider, `collection_tool_ids`, Collection skills, the shared
 built-in policy, and the
 mandatory `r42_set_information_needs`, `r42_save_artifact`,
@@ -643,13 +918,50 @@ persistent Research session. Research receives the complete
 `information_need_outcomes`; unresolved needs must be represented as
 uncertainty, never as proven absence.
 
-Final QC exists only when `qc` is configured. It receives the original task,
-non-empty semantic `criteria`, candidate result, declared artifact metadata,
-and read-only snapshot/artifact projections, but not the Research transcript,
-information-need outcomes, or stop conditions. Collection QC exclusively owns
-evidence-sufficiency and primary-coverage decisions; Final QC reviews only the
-claims actually present in the candidate. Its mandatory `r42_qc_verdict`
-decision is one of:
+### Collection-only mode
+
+`collection_only` uses the Collection provider, `collection_tool_ids`,
+Collection skills, applicable built-ins, `tool_use` tools, and artifact
+save/registration helpers in one persistent session. It deliberately does not
+create information needs, stop conditions, Collection checkpoints, Collection
+QC, Research, or Final QC. The agent may interleave acquisition and calculation
+until it can submit its final structured result; discovering a missing input
+during calculation therefore does not require reopening another phase.
+
+All retained business data is an artifact. There is no separate evidence
+pending/reviewed/approved lifecycle in this mode. Acquisition results are not
+automatically materialized merely because a tool returned them: the agent must
+explicitly save/register data that needs to persist, or submit it through a
+configured typed tool that writes declared artifacts. Documentation fetched to
+repair Starlark code is operational context and does not need registration.
+
+Exactly one `tool_use` must have `terminate = true`; non-terminating tool uses
+may provide progress checkpoints or other task-specific operations. Ordinary
+assistant completion without an accepted terminal call is invalid and consumes
+the same bounded completion-protocol attempt budget as the existing Research
+terminal protocol. A rejected terminal call returns all mechanical issues to
+the same session for repair. Declared required artifacts are validated before
+the workflow completes.
+
+### Research-only mode
+
+`research_only` opens the existing closed-world Research session directly. It
+uses `tool_ids`, Research skills, imported and declared artifacts, and
+`tool_use` exactly as Research in `full` does. Collection fields and Collection
+protocols are absent, rather than emulated with an empty checkpoint. With no
+`qc` block, accepted Research completion ends the workflow. With `qc`, the
+candidate follows the existing Research/Final-QC revision loop.
+
+### Final QC semantic boundary
+
+Final QC exists in `full` or `research_only` only when `qc` is configured. It
+receives the original task, non-empty semantic `criteria`, candidate result,
+declared artifact metadata, and read-only artifact projections, but not the
+Research transcript. In `full`, it also does not receive information-need
+outcomes or stop conditions. Collection QC exclusively owns evidence
+sufficiency and primary-coverage decisions; Final QC reviews only the claims
+actually present in the candidate. Its mandatory `r42_qc_verdict` decision is
+one of:
 
 - `pass`, with no issues, completes the workflow;
 - `revise_research`, with one or more issues, returns to closed Research.
@@ -665,6 +977,63 @@ Final QC inherits only effective provider/model/reasoning/retry/permission
 values. Its tools, skills, quotas, allowlist, and denylist are explicitly scoped
 to `qc`; custom typed tools remain an author trust boundary. Fixed r42 evidence
 readers are read-only, and the mandatory verdict tool cannot be filtered out.
+
+### SecJury composition
+
+The SecJury example uses the new modes and calculator without adding a special
+SecJury runtime:
+
+```text
+collection_only build_dcf
+  search + artifact registration + Starlark calculation + submit DCF
+       |
+       v
+research_only dynamic jurors (serial = false, same frozen DCF)
+       |
+       v
+research_only synthesis --> report.md
+```
+
+`build_dcf` is one LLM session and preserves the earlier Go SecJury
+`dcf-model.v2` generation process one-for-one: 3-5 historical periods, 5-10
+projection periods, explicit UFCF construction, WACC, mid-year discounting
+unless source data justifies another convention, perpetuity-growth terminal
+value, equity bridge, implied return, and a complete odd square WACC/terminal
+growth sensitivity grid. It is not upgraded to a different DCF version.
+
+Acquisition and calculation happen in the same Collection context. All derived
+numeric work must be performed through the configured `starlark_tool`; the LLM
+may write the program required by the data available at that moment, inspect a
+repairable rejection, and retry. Raw source retrieval and extraction are not
+numerical calculations. If a calculation exposes a missing raw input, the same
+session resumes acquisition and then recalculates. The calculator has no DCF
+formula API, no network, and no hidden independent valuation engine.
+
+The DCF builder retains the non-terminating monotonic progress tool and finishes
+only through `submit_dcf_model`. That terminal tool remains authoritative for
+mechanical schema checks, period counts, sensitivity-grid shape and base-case
+alignment, progress completion, and artifact writes. It does not independently
+recompute every DCF formula or maintain a second calculation ledger. The frozen
+model, source declarations, progress state, and other retained business data
+are declared artifacts.
+
+With `use_pplx = false`, the builder uses configured `web_search` and
+`web_fetch`. With `use_pplx = true`, it uses `pplx_finance_search` first for
+financial data, `pplx_pro_search` for filings/general discovery and fallback,
+and `pplx_fetch` for selected URLs instead of the built-in web tools. In either
+mode, the session may fetch the Starlark documentation URLs from section 7 when
+necessary; those lookups are not DCF source artifacts unless explicitly saved.
+
+Every dynamic juror uses `research_only`, receives the identical frozen DCF,
+runs concurrently under the normal global and module parallelism limits, and
+submits one structured opinion from its configured investor/operator persona.
+Jurors may challenge evidence quality, assumptions, formula interpretation,
+reinvestment, terminal dependence, sensitivity, and margin of safety, but do
+not acquire new data or modify the DCF. The synthesizer also uses
+`research_only`, consumes the frozen model and ordered opinions, and writes the
+deterministically rendered `report.md`. SecJury configures no Final QC for the
+builder, jurors, or synthesis because those phases could not repair missing
+acquisition and the typed terminal tools already enforce mechanical contracts.
 
 ## 10. Artifacts and Paths
 
@@ -804,8 +1173,8 @@ Fail-fast cancellation follows this order:
 
 1. Cancel the root context and stop scheduling new research blocks.
 2. Propagate cancellation through nested module executors.
-3. Terminate active tool child-process trees.
-4. Close Collection, Collection QC, Research, and Final QC sessions.
+3. Terminate active external, inline Go, and Starlark worker process trees.
+4. Close every session created by the selected `phase_mode`.
 5. Release parallelism permits and flush debug files.
 
 The original error remains primary; cleanup errors are additional diagnostics.
@@ -859,7 +1228,7 @@ contain:
 
 - Complete r42 and user system prompts.
 - Every user and assistant message.
-- Complete Collection, Collection QC, Research, and Final QC transcripts.
+- Complete transcripts for every session created by the selected `phase_mode`.
 - Tool arguments, results, stdout, and stderr.
 
 Raw SDK payloads and complete tool arguments/results are written to files only.
@@ -1002,6 +1371,8 @@ Plan validates all information that is structurally available:
 - ToolResponse shape and static invariants.
 - Typed-tool IDs, registry membership, and `tool_name()` argument kind.
 - Duration syntax and non-negative retry/attempt/concurrency values.
+- `phase_mode` and all mode-specific required/forbidden field combinations.
+- `starlark_tool` resource values and hard caps.
 
 Plan deliberately does not validate:
 
@@ -1009,6 +1380,7 @@ Plan deliberately does not validate:
 - Whether a model supports a reasoning-effort value.
 - Provider-specific tool-name restrictions beyond r42's generated 64-character IDs.
 - External content hashes or future file contents.
+- Exact cross-platform Starlark worker RSS enforcement.
 
 Apply validates runtime values, child-process protocol, artifacts, SDK behavior,
 credentials, and external resources. Business rejection is repairable only when
