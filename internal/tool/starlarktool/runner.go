@@ -15,7 +15,7 @@ import (
 
 const maxWorkerResponseBytes = 32 << 20
 
-const workerTimeoutGracePeriod = time.Second
+const workerTimeoutGracePeriod = 5 * time.Second
 
 // Runner invokes the current r42 executable as a fresh calculator worker.
 type Runner struct {
