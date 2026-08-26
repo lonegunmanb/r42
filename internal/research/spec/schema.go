@@ -29,6 +29,7 @@ var (
 
 type ResearchBlock struct {
 	*golden.BaseBlock
+	PhaseMode                  PhaseMode             `hcl:"phase_mode,optional"`
 	ModelProvider              cty.Value             `hcl:"model_provider,optional"`
 	Model                      string                `hcl:"model"`
 	Profile                    *string               `hcl:"profile,optional"`
@@ -371,6 +372,7 @@ func (b *ResearchBlock) Values() map[string]cty.Value {
 		return deferredStaticResearchValues(b.plannedTaskValue)
 	}
 	values := map[string]cty.Value{
+		"phase_mode":                   cty.StringVal(string(b.planned.EffectivePhaseMode())),
 		"model_provider":               optionalObjectValue(b.ModelProvider),
 		"model":                        cty.StringVal(b.Model),
 		"profile":                      cty.StringVal(b.planned.ProfileName()),
@@ -641,6 +643,7 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 		return Config{}, err
 	}
 	config := Config{
+		PhaseMode:           b.PhaseMode,
 		ModelProvider:       b.ModelProvider,
 		Model:               b.Model,
 		Profile:             profile,
@@ -648,6 +651,7 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 		SystemPrompt:        b.SystemPrompt,
 		Prompt:              clonePointer(b.Prompt),
 		TerminateToolID:     cloneStringPointer(b.TerminateToolID),
+		TerminateToolIDSet:  b.TerminateToolID != nil,
 		MaxProtocolAttempts: DefaultMaxProtocolAttempts,
 		Timeout:             timeout,
 		Policy: SessionPolicy{
@@ -666,7 +670,9 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 		CollectionSkills:           slices.Clone(b.CollectionSkills),
 		CollectionDisabledSkills:   slices.Clone(b.CollectionDisabledSkills),
 		CollectionBatchSize:        DefaultCollectionBatchSize,
+		CollectionBatchSizeSet:     b.CollectionBatchSize != nil,
 		MaxCollectionRounds:        defaultMaxCollectionRounds(b.MaxCollectionRounds),
+		MaxCollectionRoundsSet:     b.MaxCollectionRounds != nil,
 	}
 	if config.Policy.DisallowedTools == nil {
 		config.Policy.DisallowedTools = []string{"ask_user"}

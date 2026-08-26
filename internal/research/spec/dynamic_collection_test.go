@@ -100,6 +100,77 @@ func TestDecodeDynamicTaskCollectionDefaults(t *testing.T) {
 	require.NotNil(t, config.MaxCollectionRounds)
 	assert.Equal(t, researchspec.DefaultMaxCollectionRounds, *config.MaxCollectionRounds)
 	assert.Nil(t, config.CollectionQC)
+	assert.Equal(t, researchspec.PhaseModeFull, config.EffectivePhaseMode())
+}
+
+func TestDecodeDynamicTaskDecodesPhaseModes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		phaseMode     researchspec.PhaseMode
+		task          cty.Value
+		expectedError string
+	}{
+		{
+			name:      "collection only",
+			phaseMode: researchspec.PhaseModeCollectionOnly,
+			task: cty.ObjectVal(map[string]cty.Value{
+				"phase_mode":          cty.StringVal("collection_only"),
+				"model":               cty.StringVal("wire-model"),
+				"system_prompt":       cty.StringVal("Collect and calculate."),
+				"collection_tool_ids": cty.TupleVal([]cty.Value{cty.StringVal("tool_fixture_collect")}),
+				"tool_use": cty.ObjectVal(map[string]cty.Value{
+					"submit": cty.ObjectVal(map[string]cty.Value{
+						"tool_id":   cty.StringVal("tool_fixture_submit"),
+						"terminate": cty.BoolVal(true),
+					}),
+				}),
+				"artifact": cty.EmptyObjectVal,
+				"retry":    cty.NullVal(cty.DynamicPseudoType),
+				"qc":       cty.NullVal(cty.DynamicPseudoType),
+			}),
+		},
+		{
+			name:      "research only",
+			phaseMode: researchspec.PhaseModeResearchOnly,
+			task: cty.ObjectVal(map[string]cty.Value{
+				"phase_mode":    cty.StringVal("research_only"),
+				"model":         cty.StringVal("wire-model"),
+				"system_prompt": cty.StringVal("Review frozen data."),
+				"artifact":      cty.EmptyObjectVal,
+				"retry":         cty.NullVal(cty.DynamicPseudoType),
+				"qc":            cty.NullVal(cty.DynamicPseudoType),
+			}),
+		},
+		{
+			name: "research only rejects collection qc",
+			task: cty.ObjectVal(map[string]cty.Value{
+				"phase_mode":    cty.StringVal("research_only"),
+				"model":         cty.StringVal("wire-model"),
+				"system_prompt": cty.StringVal("Review frozen data."),
+				"collection_qc": cty.ObjectVal(map[string]cty.Value{"model": cty.StringVal("qc-model")}),
+				"artifact":      cty.EmptyObjectVal,
+				"retry":         cty.NullVal(cty.DynamicPseudoType),
+				"qc":            cty.NullVal(cty.DynamicPseudoType),
+			}),
+			expectedError: "research_only forbids collection_qc",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			config, err := researchspec.DecodeDynamicTask(tt.task)
+			if tt.expectedError != "" {
+				assert.EqualError(t, err, tt.expectedError)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.phaseMode, config.EffectivePhaseMode())
+		})
+	}
 }
 
 func TestStaticAndDynamicMembersProduceEquivalentConfigs(t *testing.T) {

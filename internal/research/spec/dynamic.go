@@ -143,6 +143,13 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 
 	block := &ResearchBlock{ModelProvider: cty.NilVal}
 	var err error
+	phaseMode, err := dynamicOptionalString(unmarked, "phase_mode")
+	if err != nil {
+		return Config{}, err
+	}
+	if phaseMode != nil {
+		block.PhaseMode = PhaseMode(*phaseMode)
+	}
 	if block.ModelProvider, err = dynamicOptionalValue(unmarked, "model_provider"); err != nil {
 		return Config{}, err
 	}
@@ -649,6 +656,7 @@ func dynamicAttribute(object cty.Value, name string) (cty.Value, bool) {
 
 func plannedDynamicTaskValue(task cty.Value, config Config) cty.Value {
 	values, marks := dynamicTaskValuesWithProfile(task)
+	values["phase_mode"] = cty.StringVal(string(config.EffectivePhaseMode()))
 	values["artifact"] = ArtifactsValue(config.Artifacts, nil)
 	if config.TerminateToolID != nil {
 		values["result"] = cty.UnknownVal(cty.String)
@@ -709,6 +717,7 @@ func dynamicTaskOutputType(taskType cty.Type, hasTerminatingToolUse bool) cty.Ty
 		return cty.DynamicPseudoType
 	}
 	attributes := taskType.AttributeTypes()
+	attributes["phase_mode"] = cty.String
 	attributes["profile"] = cty.String
 	attributes["artifact"] = cty.Map(artifactValueType)
 	if taskType.HasAttribute("terminate_tool_id") || hasTerminatingToolUse {

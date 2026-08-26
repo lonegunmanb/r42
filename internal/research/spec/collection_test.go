@@ -276,6 +276,7 @@ research "static" "market" {
 `)
 	require.NoError(t, config.RunPlan())
 	planned := golden.Blocks[*researchspec.ResearchBlock](config)[0].ResearchConfig()
+	assert.Equal(t, researchspec.PhaseModeFull, planned.EffectivePhaseMode())
 	assert.Equal(t, researchspec.DefaultCollectionBatchSize, planned.CollectionBatchSize)
 	require.NotNil(t, planned.MaxCollectionRounds)
 	assert.Equal(t, researchspec.DefaultMaxCollectionRounds, *planned.MaxCollectionRounds)
@@ -307,6 +308,7 @@ research "static" "market" {
 	require.NoError(t, config.RunPlan())
 	block := golden.Blocks[*researchspec.ResearchBlock](config)[0]
 	values := block.Values()
+	assert.Equal(t, "full", values["phase_mode"].AsString())
 	assertReference(t, values["collection_model_provider"], "model_provider.collection", "provider")
 	batchSize, _ := values["collection_batch_size"].AsBigFloat().Int64()
 	assert.Equal(t, int64(5), batchSize)

@@ -39,6 +39,7 @@ type ResearchPlan struct {
 type researchSnapshot struct {
 	Expression                 string                       `json:"expression,omitempty"`
 	Providers                  map[string]*providerSnapshot `json:"providers,omitempty"`
+	PhaseMode                  researchspec.PhaseMode       `json:"phase_mode,omitempty"`
 	Model                      string                       `json:"model"`
 	Profile                    string                       `json:"profile,omitempty"`
 	ReasoningEffort            *string                      `json:"reasoning_effort,omitempty"`
@@ -55,13 +56,16 @@ type researchSnapshot struct {
 	Provider                   *providerSnapshot            `json:"provider,omitempty"`
 	CollectionProvider         *providerSnapshot            `json:"collection_provider,omitempty"`
 	TerminateToolID            *string                      `json:"terminate_tool_id,omitempty"`
+	TerminateToolIDSet         bool                         `json:"terminate_tool_id_set,omitempty"`
 	QCProvider                 *providerSnapshot            `json:"qc_provider,omitempty"`
 	CollectionToolIDs          []string                     `json:"collection_tool_ids,omitempty"`
 	CollectionSkillDirectories []string                     `json:"collection_skill_directories,omitempty"`
 	CollectionSkills           []string                     `json:"collection_skills,omitempty"`
 	CollectionDisabledSkills   []string                     `json:"collection_disabled_skills,omitempty"`
 	CollectionBatchSize        int                          `json:"collection_batch_size,omitempty"`
+	CollectionBatchSizeSet     bool                         `json:"collection_batch_size_set,omitempty"`
 	MaxCollectionRounds        *int                         `json:"max_collection_rounds,omitempty"`
+	MaxCollectionRoundsSet     bool                         `json:"max_collection_rounds_set,omitempty"`
 	CollectionQC               *collectionQCSnapshot        `json:"collection_qc,omitempty"`
 	CollectionQCProvider       *providerSnapshot            `json:"collection_qc_provider,omitempty"`
 }
@@ -169,6 +173,7 @@ func EncodeResearchPlan(
 		return cty.NilVal, err
 	}
 	snapshot := researchSnapshot{
+		PhaseMode:                  config.EffectivePhaseMode(),
 		Model:                      config.Model,
 		Profile:                    config.ProfileName(),
 		ReasoningEffort:            clonePointer(config.ReasoningEffort),
@@ -181,12 +186,15 @@ func EncodeResearchPlan(
 		Artifacts:                  slices.Clone(config.Artifacts),
 		Provider:                   providerConfig,
 		TerminateToolID:            clonePointer(config.TerminateToolID),
+		TerminateToolIDSet:         config.TerminateToolIDSet,
 		CollectionToolIDs:          slices.Clone(config.CollectionToolIDs),
 		CollectionSkillDirectories: slices.Clone(config.CollectionSkillDirectories),
 		CollectionSkills:           slices.Clone(config.CollectionSkills),
 		CollectionDisabledSkills:   slices.Clone(config.CollectionDisabledSkills),
 		CollectionBatchSize:        config.CollectionBatchSize,
+		CollectionBatchSizeSet:     config.CollectionBatchSizeSet,
 		MaxCollectionRounds:        clonePointer(config.MaxCollectionRounds),
+		MaxCollectionRoundsSet:     config.MaxCollectionRoundsSet,
 	}
 	var importSensitive bool
 	snapshot.Imports, importSensitive, err = snapshotImports(config.Imports)
@@ -283,14 +291,18 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 		}, nil
 	}
 	configValue := researchspec.Config{
-		Model: snapshot.Model, Profile: snapshot.Profile, ReasoningEffort: clonePointer(snapshot.ReasoningEffort),
+		PhaseMode: snapshot.PhaseMode,
+		Model:     snapshot.Model, Profile: snapshot.Profile, ReasoningEffort: clonePointer(snapshot.ReasoningEffort),
 		SystemPrompt: snapshot.SystemPrompt, Prompt: clonePointer(snapshot.Prompt),
 		MaxProtocolAttempts: snapshot.MaxProtocolAttempts, Timeout: nanosecondsDuration(snapshot.TimeoutNanoseconds),
 		Retry: snapshot.Retry, Policy: restorePolicy(snapshot.Policy),
 		Artifacts:                  slices.Clone(snapshot.Artifacts),
 		TerminateToolID:            clonePointer(snapshot.TerminateToolID),
+		TerminateToolIDSet:         snapshot.TerminateToolIDSet,
 		CollectionBatchSize:        researchspec.DefaultCollectionBatchSize,
+		CollectionBatchSizeSet:     snapshot.CollectionBatchSizeSet,
 		MaxCollectionRounds:        restoreMaxCollectionRounds(snapshot.MaxCollectionRounds),
+		MaxCollectionRoundsSet:     snapshot.MaxCollectionRoundsSet,
 		CollectionToolIDs:          slices.Clone(snapshot.CollectionToolIDs),
 		CollectionSkillDirectories: slices.Clone(snapshot.CollectionSkillDirectories),
 		CollectionSkills:           slices.Clone(snapshot.CollectionSkills),

@@ -26,6 +26,15 @@ type Permission string
 
 const PermissionApproveAll Permission = "approve_all"
 
+// PhaseMode selects the sessions that a research workflow creates.
+type PhaseMode string
+
+const (
+	PhaseModeFull           PhaseMode = "full"
+	PhaseModeCollectionOnly PhaseMode = "collection_only"
+	PhaseModeResearchOnly   PhaseMode = "research_only"
+)
+
 type SessionPolicy struct {
 	ToolIDs          []string
 	ToolCallQuota    map[string]int
@@ -38,6 +47,7 @@ type SessionPolicy struct {
 }
 
 type Config struct {
+	PhaseMode                  PhaseMode
 	ModelProvider              cty.Value
 	Model                      string
 	Profile                    string
@@ -45,6 +55,7 @@ type Config struct {
 	SystemPrompt               string
 	Prompt                     *string
 	TerminateToolID            *string
+	TerminateToolIDSet         bool
 	MaxProtocolAttempts        int
 	Timeout                    *time.Duration
 	Retry                      provider.RetryOverride
@@ -59,7 +70,9 @@ type Config struct {
 	CollectionSkills           []string
 	CollectionDisabledSkills   []string
 	CollectionBatchSize        int
+	CollectionBatchSizeSet     bool
 	MaxCollectionRounds        *int
+	MaxCollectionRoundsSet     bool
 	CollectionQC               *CollectionQCConfig
 }
 
@@ -85,6 +98,14 @@ func (c Config) ProfileName() string {
 		return c.Model
 	}
 	return c.Profile
+}
+
+// EffectivePhaseMode returns the explicit mode or the legacy-compatible full workflow.
+func (c Config) EffectivePhaseMode() PhaseMode {
+	if c.PhaseMode == "" {
+		return PhaseModeFull
+	}
+	return c.PhaseMode
 }
 
 func (c Config) Validate() error {
@@ -180,7 +201,93 @@ func (c Config) Validate() error {
 			return err
 		}
 	}
+	return c.validatePhaseMode()
+}
+
+func (c Config) validatePhaseMode() error {
+	switch c.EffectivePhaseMode() {
+	case PhaseModeFull:
+		return nil
+	case PhaseModeCollectionOnly:
+		return c.validateCollectionOnly()
+	case PhaseModeResearchOnly:
+		return c.validateResearchOnly()
+	default:
+		return errors.New("research phase_mode must be full, collection_only, or research_only")
+	}
+}
+
+func (c Config) validateCollectionOnly() error {
+	if len(terminatingToolUses(c.ToolUses)) != 1 {
+		return errors.New("collection_only requires exactly one terminating tool_use")
+	}
+	if hasResearchToolIDs(c.Policy.ToolIDs, c.ToolUses) {
+		return errors.New("collection_only forbids tool_ids")
+	}
+	if c.TerminateToolIDSet {
+		return errors.New("collection_only forbids terminate_tool_id")
+	}
+	if len(c.Policy.SkillDirectories) > 0 || len(c.Policy.Skills) > 0 || len(c.Policy.DisabledSkills) > 0 {
+		return errors.New("collection_only forbids research skills")
+	}
+	if c.CollectionBatchSizeSet {
+		return errors.New("collection_only forbids collection_batch_size")
+	}
+	if c.MaxCollectionRoundsSet {
+		return errors.New("collection_only forbids max_collection_rounds")
+	}
+	if c.CollectionQC != nil {
+		return errors.New("collection_only forbids collection_qc")
+	}
+	if c.QC != nil {
+		return errors.New("collection_only forbids qc")
+	}
 	return nil
+}
+
+func (c Config) validateResearchOnly() error {
+	if hasValue(c.CollectionModelProvider) {
+		return errors.New("research_only forbids collection_model_provider")
+	}
+	if len(c.CollectionToolIDs) > 0 {
+		return errors.New("research_only forbids collection_tool_ids")
+	}
+	if len(c.CollectionSkillDirectories) > 0 || len(c.CollectionSkills) > 0 || len(c.CollectionDisabledSkills) > 0 {
+		return errors.New("research_only forbids collection skills")
+	}
+	if c.CollectionBatchSizeSet {
+		return errors.New("research_only forbids collection_batch_size")
+	}
+	if c.MaxCollectionRoundsSet {
+		return errors.New("research_only forbids max_collection_rounds")
+	}
+	if c.CollectionQC != nil {
+		return errors.New("research_only forbids collection_qc")
+	}
+	return nil
+}
+
+func terminatingToolUses(toolUses []ToolUse) []ToolUse {
+	result := make([]ToolUse, 0, 1)
+	for _, toolUse := range toolUses {
+		if toolUse.Terminate {
+			result = append(result, toolUse)
+		}
+	}
+	return result
+}
+
+func hasResearchToolIDs(toolIDs []string, toolUses []ToolUse) bool {
+	configuredToolUses := make(map[string]struct{}, len(toolUses))
+	for _, toolUse := range toolUses {
+		configuredToolUses[toolUse.ToolID] = struct{}{}
+	}
+	for _, toolID := range toolIDs {
+		if _, exists := configuredToolUses[toolID]; !exists {
+			return true
+		}
+	}
+	return false
 }
 
 func validateToolUses(toolUses []ToolUse) error {

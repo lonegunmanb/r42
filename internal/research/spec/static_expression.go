@@ -16,6 +16,7 @@ import (
 )
 
 var researchAttributeNames = map[string]struct{}{
+	"phase_mode":     {},
 	"model_provider": {}, "model": {}, "profile": {}, "reasoning_effort": {}, "system_prompt": {}, "prompt": {},
 	"tool_ids": {}, "tool_call_quota": {}, "terminate_tool_id": {}, "allowed_tools": {},
 	"disallowed_tools": {}, "skill_directories": {}, "skills": {}, "disabled_skills": {},
@@ -401,6 +402,7 @@ func sortedKeys[T any](values map[string]T) []string {
 
 func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 	values := map[string]cty.Value{
+		"phase_mode":     cty.StringVal(string(PhaseModeFull)),
 		"model_provider": cty.NullVal(cty.EmptyObject), "profile": cty.UnknownVal(cty.String),
 		"reasoning_effort": cty.NullVal(cty.String),
 		"prompt":           cty.NullVal(cty.String), "tool_ids": cty.EmptyTupleVal,

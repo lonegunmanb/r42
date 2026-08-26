@@ -1035,8 +1035,10 @@ research "static" "market" {
 	assert.Equal(t, []string{"source-evaluation"}, reconstructed.Config.CollectionSkills)
 	assert.Equal(t, []string{"dangerous"}, reconstructed.Config.CollectionDisabledSkills)
 	assert.Equal(t, 5, reconstructed.Config.CollectionBatchSize)
+	assert.True(t, reconstructed.Config.CollectionBatchSizeSet)
 	require.NotNil(t, reconstructed.Config.MaxCollectionRounds)
 	assert.Equal(t, 3, *reconstructed.Config.MaxCollectionRounds)
+	assert.True(t, reconstructed.Config.MaxCollectionRoundsSet)
 	require.NotNil(t, reconstructed.Config.CollectionQC)
 	assert.Equal(t, "qc-model", *reconstructed.Config.CollectionQC.Model)
 	assert.Equal(t, "high", *reconstructed.Config.CollectionQC.ReasoningEffort)
@@ -1054,6 +1056,7 @@ research "static" "market" {
   model         = "test-model"
   system_prompt = "Collect and synthesize."
 }
+
 `)
 
 	planned, err := planSource(directory, executor.ResearchConfigOptions{})
@@ -1061,10 +1064,68 @@ research "static" "market" {
 	reconstructed, err := modulespec.DecodeResearchPlan(planned.Saved.Nodes()[0].Config)
 
 	require.NoError(t, err)
+	assert.Equal(t, researchspec.PhaseModeFull, reconstructed.Config.EffectivePhaseMode())
 	assert.Equal(t, researchspec.DefaultCollectionBatchSize, reconstructed.Config.CollectionBatchSize)
 	require.NotNil(t, reconstructed.Config.MaxCollectionRounds)
 	assert.Equal(t, researchspec.DefaultMaxCollectionRounds, *reconstructed.Config.MaxCollectionRounds)
 	assert.Nil(t, reconstructed.Config.CollectionQC)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestSavedResearchPlansPreservePhaseMode(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	golden.RegisterBlock(new(researchspec.DynamicResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+external_tool "submit" {
+  description = "Submit the calculation"
+  program     = ["submit", "--json"]
+  input_type  = object({})
+  output_type = string
+}
+
+research "static" "builder" {
+  phase_mode    = "collection_only"
+  model         = "test-model"
+  system_prompt = "Collect and calculate."
+
+  tool_use "submit" {
+    tool_id   = external_tool.submit.id
+    terminate = true
+  }
+}
+
+research "dynamic" "jurors" {
+  tasks = [{
+    phase_mode    = "research_only"
+    model         = "test-model"
+    system_prompt = "Review frozen data."
+  }]
+}
+`)
+
+	planned, err := planSource(directory, executor.ResearchConfigOptions{})
+	require.NoError(t, err)
+	nodes := planned.Saved.Nodes()
+	require.Len(t, nodes, 2)
+	nodesByAddress := map[string]internalplan.NodeSpec{}
+	for _, node := range nodes {
+		nodesByAddress[node.Address] = node
+	}
+
+	staticPlan, err := modulespec.DecodeResearchPlan(nodesByAddress["research.static.builder"].Config)
+	require.NoError(t, err)
+	assert.Equal(t, researchspec.PhaseModeCollectionOnly, staticPlan.Config.EffectivePhaseMode())
+	assert.False(t, staticPlan.Config.CollectionBatchSizeSet)
+	assert.False(t, staticPlan.Config.MaxCollectionRoundsSet)
+
+	dynamicPlan, err := modulespec.DecodeDynamicResearchPlan(nodesByAddress["research.dynamic.jurors"].Config)
+	require.NoError(t, err)
+	configs, _, err := researchspec.DecodeDynamicTasks(dynamicPlan.Tasks)
+	require.NoError(t, err)
+	require.Len(t, configs, 1)
+	assert.Equal(t, researchspec.PhaseModeResearchOnly, configs[0].EffectivePhaseMode())
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
