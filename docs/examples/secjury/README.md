@@ -82,13 +82,22 @@ Install r42 and authenticate the local GitHub Copilot CLI, then run from the
 repository root:
 
 ```powershell
+$env:OPENROUTER_API_KEY = "..."
 r42 init ./docs/examples/secjury
 r42 plan `
   -var 'target="Microsoft MSFT NASDAQ"' `
   -var 'valuation_date="2026-08-26"' `
+  -var 'model="openai/gpt-5.6"' `
+  -var 'model_provider={ api_key_ref = "OPENROUTER_API_KEY" }' `
   --out ./secjury.r42plan
 r42 apply ./secjury.r42plan --parallelism 20 --timeout 6h
 ```
+
+`model` selects the LLM name, while `model_provider` selects its transport,
+endpoint, credentials, headers, and retry behavior. Its default protocol is
+OpenAI-compatible OpenRouter; replace the object fields to use another
+provider. `api_key_ref` names an environment variable, so credentials never
+need to appear in a variable file or plan.
 
 To use Perplexity tools instead of the built-in web tools:
 
@@ -97,6 +106,7 @@ $env:PPLX_API_KEY = "..."
 r42 plan `
   -var 'target="Microsoft MSFT NASDAQ"' `
   -var 'valuation_date="2026-08-26"' `
+  -var 'model_provider={ api_key_ref = "OPENROUTER_API_KEY" }' `
   -var 'use_pplx=true' `
   --out ./secjury-pplx.r42plan
 ```

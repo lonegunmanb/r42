@@ -144,6 +144,7 @@ starlark_tool "calculator" {
 
 research "static" "build_dcf" {
   phase_mode       = "collection_only"
+  model_provider   = model_provider.primary
   model            = var.model
   reasoning_effort = var.reasoning_effort
   system_prompt    = "You are the sole DCF modeling agent for secjury."
@@ -266,6 +267,7 @@ research "dynamic" "review_dcf" {
     for index, juror in local.jurors : {
       id               = juror.id
       phase_mode       = "research_only"
+      model_provider   = model_provider.primary
       model            = var.model
       reasoning_effort = var.reasoning_effort
       system_prompt    = "You are one isolated valuation juror. Review only the frozen DCF through the supplied persona."
@@ -335,6 +337,7 @@ research "dynamic" "review_dcf" {
 
 research "static" "synthesize" {
   phase_mode       = "research_only"
+  model_provider   = model_provider.primary
   model            = var.model
   reasoning_effort = var.reasoning_effort
   system_prompt    = "Synthesize the frozen DCF and submitted persona opinions. Never change model values or invent consensus."

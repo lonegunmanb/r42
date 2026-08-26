@@ -24,6 +24,7 @@ func TestSecJuryHCLParses(t *testing.T) {
 
 	for _, filename := range []string{
 		"main.r42.hcl",
+		"provider.r42.hcl",
 		"variables.r42.hcl",
 		"tools.r42.hcl",
 		"modules/pplx_tools/main.r42.hcl",
@@ -55,6 +56,7 @@ func TestSecJuryPlansWithBuiltInAndPPLXCollectionTools(t *testing.T) {
 				Variables: []golden.CliFlagAssignedVariables{
 					golden.NewCliFlagAssignedVariable("target", `"Microsoft MSFT NASDAQ"`),
 					golden.NewCliFlagAssignedVariable("valuation_date", `"2026-08-26"`),
+					golden.NewCliFlagAssignedVariable("model_provider", `{ api_key_ref = "SECJURY_TEST_API_KEY" }`),
 					golden.NewCliFlagAssignedVariable("use_pplx", usePPLX),
 				},
 			})
@@ -63,6 +65,27 @@ func TestSecJuryPlansWithBuiltInAndPPLXCollectionTools(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func TestSecJuryUsesConfigurablePrimaryModelProvider(t *testing.T) {
+	t.Parallel()
+
+	provider := readText(t, "provider.r42.hcl")
+	for _, required := range []string{
+		`model_provider "primary"`,
+		"var.model_provider.endpoint",
+		"var.model_provider.api_key_ref",
+		"var.model_provider.retry.model_call_retries",
+	} {
+		assert.Contains(t, provider, required)
+	}
+
+	variables := readText(t, "variables.r42.hcl")
+	assert.Contains(t, variables, `variable "model_provider"`)
+	assert.Contains(t, variables, "BYOK model provider")
+
+	configuration := readText(t, "main.r42.hcl")
+	assert.Equal(t, 3, strings.Count(configuration, "model_provider.primary"))
 }
 
 func TestDCFSkillMatchesCopiedSource(t *testing.T) {

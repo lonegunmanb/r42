@@ -24,6 +24,28 @@ variable "model" {
   default     = "gpt-5.6-sol"
 }
 
+variable "model_provider" {
+  description = "BYOK model provider and retry configuration shared by the DCF builder, jurors, and synthesizer."
+  type = object({
+    type             = optional(string, "openai")
+    endpoint         = optional(string, "https://openrouter.ai/api/v1")
+    wire_api         = optional(string, "completions")
+    transport        = optional(string)
+    headers          = optional(map(string))
+    api_key          = optional(string)
+    api_key_ref      = optional(string)
+    bearer_token     = optional(string)
+    bearer_token_ref = optional(string)
+    retry = optional(object({
+      lifecycle_retries    = optional(number, 3)
+      model_call_retries   = optional(number, 6)
+      interval_seconds     = optional(number, 2)
+      max_interval_seconds = optional(number, 30)
+      error_message_regex  = optional(list(string), [])
+    }), {})
+  })
+}
+
 variable "reasoning_effort" {
   type        = string
   description = "Reasoning effort used by all secjury sessions."
