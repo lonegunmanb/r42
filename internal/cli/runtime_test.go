@@ -486,6 +486,14 @@ type protocolFixtureSession struct {
 	session cli.Session
 }
 
+type recoveringProtocolFixtureSession struct {
+	*protocolFixtureSession
+	recovery interface {
+		Abort(context.Context) error
+		Resume(context.Context) error
+	}
+}
+
 func (s *protocolFixtureSession) SendAndWait(ctx context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
 	if handled, err := handleDefaultWorkflowProtocol(s.config); handled {
 		return &sdk.SessionEvent{}, err
@@ -494,6 +502,14 @@ func (s *protocolFixtureSession) SendAndWait(ctx context.Context, options sdk.Me
 }
 
 func (s *protocolFixtureSession) Close(ctx context.Context) error { return s.session.Close(ctx) }
+
+func (s *recoveringProtocolFixtureSession) Abort(ctx context.Context) error {
+	return s.recovery.Abort(ctx)
+}
+
+func (s *recoveringProtocolFixtureSession) Resume(ctx context.Context) error {
+	return s.recovery.Resume(ctx)
+}
 
 type fakeSession struct {
 	mu                    sync.Mutex
