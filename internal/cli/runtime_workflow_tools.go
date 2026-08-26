@@ -270,6 +270,141 @@ func collectionProtocolTools(context *collection.Context, checkpoints *collectio
 	}
 }
 
+// collectionOnlyArtifactTools provides explicit persistence without importing
+// the information-needs and checkpoint state machines from full workflows.
+func collectionOnlyArtifactTools(workspace string, registry *artifactpkg.Registry, targets []artifactpkg.Record) []sdk.Tool {
+	allowsPath := func(raw string) (string, bool) {
+		path := filepath.Clean(strings.TrimSpace(raw))
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(workspace, path)
+		}
+		absolute, err := filepath.Abs(path)
+		if err != nil || !strings.HasSuffix(strings.ToLower(absolute), ".md") {
+			return "", false
+		}
+		for _, target := range targets {
+			if target.Type == researchspec.ArtifactTypeDirectory && artifactPathWithin(target.Path, absolute) {
+				return absolute, true
+			}
+			if target.Type == researchspec.ArtifactTypeFile && filepath.Clean(target.Path) == filepath.Clean(absolute) {
+				return absolute, true
+			}
+		}
+		return "", false
+	}
+	register := func(args collection.RegisterArgs) corespec.ToolResponse[collection.RegistrationOutput] {
+		hasPath := strings.TrimSpace(args.Path) != ""
+		hasRetained := strings.TrimSpace(args.SourceToolCallID) != ""
+		if hasPath == hasRetained {
+			return corespec.ToolResponse[collection.RegistrationOutput]{Issues: []corespec.Issue{{
+				Code: "exactly_one_source", Message: "provide exactly one of path or source_tool_call_id",
+			}}}
+		}
+		var (
+			record artifactpkg.Record
+			err    error
+		)
+		if hasPath {
+			record, _, err = registry.RegisterEvidence(workspace, args.Path, args.Source, args.Description)
+		} else {
+			record, _, err = registry.RegisterRetainedEvidence(workspace, args.SourceToolCallID, args.Source, args.Description)
+		}
+		if err != nil {
+			return corespec.ToolResponse[collection.RegistrationOutput]{Issues: []corespec.Issue{{
+				Code: "invalid_evidence_artifact", Message: err.Error(),
+			}}}
+		}
+		return corespec.ToolResponse[collection.RegistrationOutput]{Accepted: true, Output: &collection.RegistrationOutput{
+			ID: record.ID, Path: record.Path, Description: record.Description,
+		}}
+	}
+	return []sdk.Tool{
+		{
+			Name: "r42_register_artifact", Description: "Register existing workspace source material or a retained acquisition result as an evidence artifact. " +
+				"Provide exactly one of path or source_tool_call_id. No checkpoint is required.",
+			Parameters: objectSchema(map[string]any{
+				"path":                map[string]any{"type": "string"},
+				"source_tool_call_id": map[string]any{"type": "string"},
+				"source":              map[string]any{"type": "string"},
+				"description":         map[string]any{"type": "string"},
+			}, nil),
+			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+				args, err := decodeArguments[collection.RegisterArgs](invocation.Arguments)
+				if err != nil {
+					return rejectedToolResult("invalid_arguments", err.Error())
+				}
+				return responseToolResult(register(args))
+			},
+		},
+		{
+			Name: "r42_save_artifact", Description: "Save and register complete source material as Markdown at a declared artifact target. " +
+				"A source identifier is required; no checkpoint is required.",
+			Parameters: objectSchema(map[string]any{
+				"artifact_path": map[string]any{"type": "string"},
+				"content":       map[string]any{"type": "string"},
+				"source":        map[string]any{"type": "string"},
+				"description":   map[string]any{"type": "string"},
+			}, []string{"artifact_path", "content", "source"}),
+			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+				args, err := decodeArguments[saveArtifactArgs](invocation.Arguments)
+				if err != nil {
+					return rejectedToolResult("invalid_arguments", err.Error())
+				}
+				path, allowed := allowsPath(args.ArtifactPath)
+				if !allowed {
+					return rejectedToolResult("artifact_path", "artifact_path must be a .md path at a declared artifact target")
+				}
+				source := strings.Join(strings.Fields(args.Source), " ")
+				if source == "" || strings.TrimSpace(args.Content) == "" {
+					return rejectedToolResult("invalid_artifact", "content and source must not be empty")
+				}
+				writer, err := evidence.NewMarkdownWriter(workspace)
+				if err != nil {
+					return sdk.ToolResult{}, err
+				}
+				written, err := writer.WriteNew(path, "- Source: "+source+"\n\n"+args.Content)
+				if err != nil {
+					if errors.Is(err, os.ErrExist) {
+						return rejectedToolResult("artifact_write_failed", "artifact_path already exists; use a new path")
+					}
+					return rejectedToolResult("artifact_write_failed", err.Error())
+				}
+				response := register(collection.RegisterArgs{Path: written, Description: args.Description})
+				if !response.Accepted {
+					return responseToolResult(corespec.ToolResponse[saveArtifactOutput]{Issues: response.Issues})
+				}
+				return acceptedToolResult(saveArtifactOutput{Path: response.Output.Path, ArtifactID: response.Output.ID})
+			},
+		},
+	}
+}
+
+func artifactPathWithin(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func retainCollectionToolResults(tools []sdk.Tool, registry *artifactpkg.Registry, allowed map[string]struct{}) []sdk.Tool {
+	result := slices.Clone(tools)
+	for index := range result {
+		if _, retain := allowed[result[index].Name]; !retain {
+			continue
+		}
+		original := result[index].Handler
+		result[index].Handler = func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			toolResult, err := original(invocation)
+			if err != nil || invocation.ToolCallID == "" || toolResult.ResultType != "success" || toolResult.TextResultForLLM == "" {
+				return toolResult, err
+			}
+			if err = registry.RetainToolResult(invocation.ToolCallID, toolResult.TextResultForLLM); err != nil {
+				return sdk.ToolResult{}, err
+			}
+			return toolResult, nil
+		}
+	}
+	return result
+}
+
 type saveArtifactArgs struct {
 	ArtifactPath string `json:"artifact_path"`
 	Content      string `json:"content"`

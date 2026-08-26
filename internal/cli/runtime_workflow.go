@@ -229,6 +229,16 @@ func (f *runtimeFactory) newResearchBlock(
 		}
 		return block, err
 	}
+	if planned.Config.EffectivePhaseMode() == researchspec.PhaseModeCollectionOnly {
+		block, err := f.newCollectionOnlyBlock(
+			ctx, address, executionAddress, workspace, planned, publish,
+			artifactsRegistry, artifactIDs, currentArtifactIDs, blockCancel,
+		)
+		if err == nil {
+			keepContext = true
+		}
+		return block, err
+	}
 	collectionContext := collection.NewContextWithArtifactRegistry(
 		workspace, planned.Config.CollectionBatchSize, planned.Config.MaxCollectionRounds, artifactsRegistry,
 	)
@@ -523,6 +533,101 @@ func (f *runtimeFactory) newResearchBlock(
 	}
 	keepContext = true
 	return block, nil
+}
+
+// newCollectionOnlyBlock opens one open-world Collection-policy session without
+// the information-needs, checkpoint, or QC protocols used by full workflows.
+func (f *runtimeFactory) newCollectionOnlyBlock(
+	ctx context.Context,
+	address, executionAddress, workspace string,
+	planned modulespec.ResearchPlan,
+	publish func(string, cty.Value),
+	artifactsRegistry *artifactpkg.Registry,
+	artifactIDs map[string]string,
+	currentArtifactIDs []string,
+	blockCancel context.CancelFunc,
+) (golden.ApplyBlock, error) {
+	planned.Config.ToolUses = materializeArtifactReferences(planned.Config.ToolUses, artifactIDs)
+	importedIDs, err := importedArtifactIDs(planned.Config.Imports)
+	if err != nil {
+		return nil, err
+	}
+	authorizedArtifacts := append(slices.Clone(currentArtifactIDs), importedIDs...)
+	if err = validateToolUseArtifactAccess(planned.Config.ToolUses, authorizedArtifacts); err != nil {
+		return nil, err
+	}
+	collectionProvider := phaseProvider(planned.CollectionProvider, planned.Provider)
+	collectionRetry, err := researchRetry(collectionProvider, planned.Config.Retry)
+	if err != nil {
+		return nil, err
+	}
+	toolIDs := append(slices.Clone(planned.Config.CollectionToolIDs), planned.Config.Policy.ToolIDs...)
+	typedQuota, builtInQuota := splitToolCallQuota(planned.Config.Policy.ToolCallQuota)
+	terminal := researchruntime.NewTerminalRecorder()
+	tools, terminalType, err := f.buildTools(ctx, executionAddress, debuglog.SessionCollection, workspace,
+		toolIDs, planned.Config.TerminateToolID, terminal, newToolCallQuota(typedQuota))
+	if err != nil {
+		return nil, err
+	}
+	terminateName := pointerValue(planned.Config.TerminateToolID)
+	tools, err = bindResearchToolUses(tools, planned.Config.ToolUses, func() (*evidence.ArtifactEvidenceAccess, error) {
+		return evidence.NewArtifactEvidenceAccess(artifactsRegistry, authorizedArtifacts)
+	}, artifactsRegistry, workspace, terminateName, terminal)
+	if err != nil {
+		return nil, err
+	}
+	collectionToolNames := make(map[string]struct{}, len(planned.Config.CollectionToolIDs))
+	for _, id := range planned.Config.CollectionToolIDs {
+		collectionToolNames[id] = struct{}{}
+	}
+	tools = retainCollectionToolResults(tools, artifactsRegistry, collectionToolNames)
+	artifactTools, err := evidenceToolsWithDynamicArtifacts(
+		workspace, planned.Config.Artifacts, true, artifactsRegistry, authorizedArtifacts, nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	tools = append(tools, artifactTools...)
+	targets := make([]artifactpkg.Record, 0, len(currentArtifactIDs))
+	for _, id := range currentArtifactIDs {
+		record, recordErr := artifactsRegistry.Record(id)
+		if recordErr != nil {
+			return nil, recordErr
+		}
+		targets = append(targets, record)
+	}
+	tools = append(tools, collectionOnlyArtifactTools(workspace, artifactsRegistry, targets)...)
+	definition := f.tools[terminateName]
+	if err = planned.Config.ValidateResolved(researchspec.ResolvedTools{
+		Terminate:        &researchspec.ToolPolicyRef{ID: definition.ID, Address: definition.Address, OutputType: terminalType},
+		TerminateSDKName: terminateName,
+	}); err != nil {
+		return nil, err
+	}
+
+	prompt := "You are the sole Collection session. Acquire, inspect, and calculate as the task requires. " +
+		"There is no information-needs plan, checkpoint, Collection QC, or Research phase. " +
+		"Persist only the artifacts explicitly required by the task, then call the configured terminating tool_use.\n\n" + planned.Config.SystemPrompt
+	session, err := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionCollection, copilot.SessionConfig{
+		Provider: collectionProvider, Retry: collectionRetry, Model: planned.Config.Model, Profile: planned.Config.ProfileName(),
+		ReasoningEffort: pointerValue(planned.Config.ReasoningEffort), SystemPrompt: appendBuiltInToolCallQuotaPrompt(prompt, builtInQuota), WorkingDirectory: workspace,
+		Tools: tools, AvailableTools: collectionAllowedTools(planned.Config.Policy.AllowedTools, toolNames(tools)),
+		ExcludedTools:    collectionDisallowedTools(planned.Config.Policy.DisallowedTools),
+		SkillDirectories: slices.Clone(planned.Config.CollectionSkillDirectories), Skills: slices.Clone(planned.Config.CollectionSkills),
+		DisabledSkills: slices.Clone(planned.Config.CollectionDisabledSkills), Hooks: builtInToolCallQuotaHooks(newToolCallQuota(builtInQuota)),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &researchApplyBlock{
+		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: address, session: session,
+		runner: researchruntime.NewRunner(session, terminal),
+		config: researchruntime.Config{
+			InitialPrompt: initialResearchPrompt(planned.Config.Prompt), TerminateToolName: terminateName,
+			MaxProtocolAttempts: planned.Config.MaxProtocolAttempts, Workspace: workspace, Artifacts: planned.Config.Artifacts, ArtifactIDs: artifactIDs,
+		},
+		publish: publish, cancel: blockCancel,
+	}, nil
 }
 
 // newResearchOnlyBlock opens the closed-world half of a workflow without
