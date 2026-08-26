@@ -1,0 +1,914 @@
+go_tool "update_dcf_progress" {
+  description = "Replace progress.json with the complete current DCF plan and its persisted stage results. Completed steps cannot return to pending or lose recorded evidence."
+
+  source = <<-GO
+    import (
+      "context"
+      "encoding/json"
+      "fmt"
+      "os"
+      "path/filepath"
+      "strings"
+    )
+
+    const (
+      progressSchemaVersion = "dcf-progress.v1"
+      progressPending       = "pending"
+      progressCompleted     = "completed"
+    )
+
+    type ProgressStep struct {
+      ID                  string   `json:"id"`
+      Task                string   `json:"task"`
+      Status              string   `json:"status"`
+      Results             []string `json:"results,omitempty"`
+      SourceIDs           []string `json:"source_ids,omitempty"`
+      SourceURLs          []string `json:"source_urls,omitempty"`
+      LocalReferences     []string `json:"local_references,omitempty"`
+      Calculations        []string `json:"calculations,omitempty"`
+      Assumptions         []string `json:"assumptions,omitempty"`
+      UnresolvedQuestions []string `json:"unresolved_questions,omitempty"`
+    }
+
+    type Input struct {
+      ProgressPath  string         `json:"progress_path"`
+      Target        string         `json:"target"`
+      ValuationDate string         `json:"valuation_date"`
+      Steps         []ProgressStep `json:"steps"`
+    }
+
+    type ProgressDocument struct {
+      SchemaVersion string         `json:"schema_version"`
+      Target        string         `json:"target"`
+      ValuationDate string         `json:"valuation_date"`
+      Steps         []ProgressStep `json:"steps"`
+    }
+
+    type Output struct {
+      Path           string `json:"path"`
+      StepCount      int    `json:"step_count"`
+      CompletedCount int    `json:"completed_count"`
+    }
+
+    func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
+      issues := validateProgressSteps(input.Steps)
+      if len(issues) > 0 {
+        return ToolResponse[Output]{Accepted: false, Issues: issues}, nil
+      }
+      if strings.TrimSpace(input.ProgressPath) == "" {
+        path := "progress_path"
+        repair := "Use the workflow-owned progress artifact path."
+        return ToolResponse[Output]{Accepted: false, Issues: []Issue{{Code: "progress_path", Message: "progress path is required", Path: &path, RepairHint: &repair}}}, nil
+      }
+
+      document := ProgressDocument{
+        SchemaVersion: progressSchemaVersion,
+        Target: input.Target, ValuationDate: input.ValuationDate, Steps: input.Steps,
+      }
+      previous, exists, err := readProgressDocument(input.ProgressPath)
+      if err != nil {
+        return ToolResponse[Output]{}, err
+      }
+      if exists {
+        if transitionIssues := validateProgressTransition(previous, document); len(transitionIssues) > 0 {
+          return ToolResponse[Output]{Accepted: false, Issues: transitionIssues}, nil
+        }
+      }
+
+      payload, err := json.MarshalIndent(document, "", "  ")
+      if err != nil {
+        return ToolResponse[Output]{}, fmt.Errorf("encode DCF progress: %w", err)
+      }
+      if err := os.MkdirAll(filepath.Dir(input.ProgressPath), 0700); err != nil {
+        return ToolResponse[Output]{}, fmt.Errorf("create DCF progress directory: %w", err)
+      }
+      if err := os.WriteFile(input.ProgressPath, append(payload, '\n'), 0600); err != nil {
+        return ToolResponse[Output]{}, fmt.Errorf("write DCF progress %q: %w", input.ProgressPath, err)
+      }
+
+      completed := 0
+      for _, step := range input.Steps {
+        if step.Status == progressCompleted {
+          completed++
+        }
+      }
+      output := Output{Path: input.ProgressPath, StepCount: len(input.Steps), CompletedCount: completed}
+      return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+    }
+
+    func validateProgressSteps(steps []ProgressStep) []Issue {
+      issues := make([]Issue, 0)
+      if len(steps) == 0 {
+        return append(issues, progressIssue("steps", "steps", "at least one step is required"))
+      }
+      for index, step := range steps {
+        base := fmt.Sprintf("steps[%d]", index)
+        if strings.TrimSpace(step.ID) == "" {
+          issues = append(issues, progressIssue("step_id", base+".id", "id is required"))
+        }
+        if strings.TrimSpace(step.Task) == "" {
+          issues = append(issues, progressIssue("step_task", base+".task", "task is required"))
+        }
+        switch step.Status {
+        case progressPending:
+        case progressCompleted:
+          if len(step.Results) == 0 {
+            issues = append(issues, progressIssue("step_results", base+".results", "completed step must record results"))
+          }
+        default:
+          issues = append(issues, progressIssue("step_status", base+".status", "status must be pending or completed"))
+        }
+      }
+      return issues
+    }
+
+    func readProgressDocument(path string) (ProgressDocument, bool, error) {
+      payload, err := os.ReadFile(path)
+      if os.IsNotExist(err) {
+        return ProgressDocument{}, false, nil
+      }
+      if err != nil {
+        return ProgressDocument{}, false, fmt.Errorf("read DCF progress %q: %w", path, err)
+      }
+      var document ProgressDocument
+      if err := json.Unmarshal(payload, &document); err != nil {
+        return ProgressDocument{}, false, fmt.Errorf("decode invalid progress checkpoint %q: %w", path, err)
+      }
+      return document, true, nil
+    }
+
+    func validateProgressTransition(previous, next ProgressDocument) []Issue {
+      if previous.SchemaVersion != next.SchemaVersion || previous.Target != next.Target || previous.ValuationDate != next.ValuationDate {
+        return []Issue{progressIssue("progress_identity", "steps", "updates must preserve schema, target, and valuation date")}
+      }
+      if len(previous.Steps) != len(next.Steps) {
+        return []Issue{progressIssue("progress_plan", "steps", "updates must keep the same ordered plan")}
+      }
+      issues := make([]Issue, 0)
+      for index := range previous.Steps {
+        before, after := previous.Steps[index], next.Steps[index]
+        path := fmt.Sprintf("steps[%d]", index)
+        if before.ID != after.ID || before.Task != after.Task {
+          issues = append(issues, progressIssue("progress_plan", path, "updates must keep the same ordered plan"))
+          continue
+        }
+        if before.Status != progressCompleted {
+          continue
+        }
+        if after.Status != progressCompleted {
+          issues = append(issues, progressIssue("progress_status", path+".status", "completed step cannot return to pending"))
+        }
+        if !containsAllProgressEvidence(before, after) {
+          issues = append(issues, progressIssue("progress_evidence", path, "completed step cannot remove recorded evidence"))
+        }
+      }
+      return issues
+    }
+
+    func containsAllProgressEvidence(previous, next ProgressStep) bool {
+      nextEvidence := make(map[string]struct{})
+      for _, evidence := range progressEvidence(next) {
+        nextEvidence[evidence] = struct{}{}
+      }
+      for _, evidence := range progressEvidence(previous) {
+        if _, exists := nextEvidence[evidence]; !exists {
+          return false
+        }
+      }
+      return true
+    }
+
+    func progressEvidence(step ProgressStep) []string {
+      evidence := make([]string, 0)
+      appendValues := func(field string, values []string) {
+        for _, value := range values {
+          evidence = append(evidence, field+":"+value)
+        }
+      }
+      appendValues("results", step.Results)
+      appendValues("source_ids", step.SourceIDs)
+      appendValues("source_urls", step.SourceURLs)
+      appendValues("local_references", step.LocalReferences)
+      appendValues("calculations", step.Calculations)
+      appendValues("assumptions", step.Assumptions)
+      return evidence
+    }
+
+    func progressIssue(code, path, message string) Issue {
+      repair := "Submit the complete current ordered plan without removing completed work."
+      return Issue{Code: code, Message: message, Path: &path, RepairHint: &repair}
+    }
+  GO
+}
+
+go_tool "submit_dcf_model" {
+  description = "Accept one complete dcf-model.v2 payload after the progress checkpoint is complete, then write the combined payload, frozen model, and source list."
+
+  source = <<-GO
+    import (
+      "context"
+      "encoding/json"
+      "fmt"
+      "math"
+      "os"
+      "path/filepath"
+      "sort"
+      "strings"
+    )
+
+    type DCFCompany struct {
+      Name     string `json:"name"`
+      Ticker   string `json:"ticker"`
+      Exchange string `json:"exchange"`
+      Currency string `json:"currency"`
+    }
+
+    type DCFAssumptions struct {
+      WACC           float64 `json:"wacc"`
+      TerminalGrowth float64 `json:"terminal_growth"`
+    }
+
+    type DCFPeriod struct {
+      Period         string  `json:"period"`
+      Revenue        float64 `json:"revenue"`
+      RevenueGrowth  float64 `json:"revenue_growth"`
+      EBIT           float64 `json:"ebit"`
+      EBITMargin     float64 `json:"ebit_margin"`
+      TaxRate        float64 `json:"tax_rate"`
+      NOPAT          float64 `json:"nopat"`
+      DA             float64 `json:"da"`
+      CapEx          float64 `json:"capex"`
+      ChangeNWC      float64 `json:"change_nwc"`
+      UFCF           float64 `json:"ufcf"`
+      DiscountPeriod float64 `json:"discount_period"`
+      DiscountFactor float64 `json:"discount_factor"`
+      PVUFCF         float64 `json:"pv_ufcf"`
+    }
+
+    type DCFValuation struct {
+      PVExplicitFCF        float64 `json:"pv_explicit_fcf"`
+      TerminalFCF          float64 `json:"terminal_fcf"`
+      TerminalValue        float64 `json:"terminal_value"`
+      PVTerminalValue      float64 `json:"pv_terminal_value"`
+      EnterpriseValue      float64 `json:"enterprise_value"`
+      NetDebt              float64 `json:"net_debt"`
+      EquityValue          float64 `json:"equity_value"`
+      DilutedShares        float64 `json:"diluted_shares"`
+      ImpliedValuePerShare float64 `json:"implied_value_per_share"`
+      CurrentPrice         float64 `json:"current_price"`
+      ImpliedReturn        float64 `json:"implied_return"`
+    }
+
+    type DCFSensitivityPoint struct {
+      WACC                 float64 `json:"wacc"`
+      TerminalGrowth       float64 `json:"terminal_growth"`
+      ImpliedValuePerShare float64 `json:"implied_value_per_share"`
+    }
+
+    type DCFSource struct {
+      ID            string `json:"id"`
+      Title         string `json:"title"`
+      URL           string `json:"url"`
+      PublishedDate string `json:"published_date"`
+      AccessedDate  string `json:"accessed_date"`
+    }
+
+    type DCFModel struct {
+      SchemaVersion string                `json:"schema_version"`
+      Company       DCFCompany            `json:"company"`
+      ValuationDate string                `json:"valuation_date"`
+      Assumptions   DCFAssumptions        `json:"assumptions"`
+      Historical    []DCFPeriod           `json:"historical"`
+      Projections   []DCFPeriod           `json:"projections"`
+      Valuation     DCFValuation          `json:"valuation"`
+      Sensitivity   []DCFSensitivityPoint `json:"sensitivity"`
+    }
+
+    type ProgressStep struct {
+      Status string `json:"status"`
+    }
+
+    type ProgressDocument struct {
+      SchemaVersion string         `json:"schema_version"`
+      Target        string         `json:"target"`
+      ValuationDate string         `json:"valuation_date"`
+      Steps         []ProgressStep `json:"steps"`
+    }
+
+    type Input struct {
+      CombinedPath  string      `json:"combined_path"`
+      ModelPath     string      `json:"model_path"`
+      SourcesPath   string      `json:"sources_path"`
+      ProgressPath  string      `json:"progress_path"`
+      Target        string      `json:"target"`
+      ValuationDate string      `json:"valuation_date"`
+      Model         DCFModel    `json:"model"`
+      Sources       []DCFSource `json:"sources"`
+    }
+
+    type DCFOutput struct {
+      Model   DCFModel    `json:"model"`
+      Sources []DCFSource `json:"sources"`
+    }
+
+    type Output string
+
+    func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
+      issues := validateSubmission(input)
+      if len(issues) > 0 {
+        return ToolResponse[Output]{Accepted: false, Issues: issues}, nil
+      }
+      outputDocument := DCFOutput{Model: input.Model, Sources: input.Sources}
+      combined, err := json.MarshalIndent(outputDocument, "", "  ")
+      if err != nil {
+        return ToolResponse[Output]{}, fmt.Errorf("encode DCF output: %w", err)
+      }
+      model, err := json.MarshalIndent(input.Model, "", "  ")
+      if err != nil {
+        return ToolResponse[Output]{}, fmt.Errorf("encode DCF model: %w", err)
+      }
+      sources, err := json.MarshalIndent(input.Sources, "", "  ")
+      if err != nil {
+        return ToolResponse[Output]{}, fmt.Errorf("encode DCF sources: %w", err)
+      }
+      for _, artifact := range []struct {
+        path    string
+        payload []byte
+      }{
+        {input.CombinedPath, combined},
+        {input.ModelPath, model},
+        {input.SourcesPath, sources},
+      } {
+        if err := os.MkdirAll(filepath.Dir(artifact.path), 0700); err != nil {
+          return ToolResponse[Output]{}, fmt.Errorf("create DCF artifact directory: %w", err)
+        }
+        if err := os.WriteFile(artifact.path, append(artifact.payload, '\n'), 0600); err != nil {
+          return ToolResponse[Output]{}, fmt.Errorf("write DCF artifact %q: %w", artifact.path, err)
+        }
+      }
+      result := Output(combined)
+      return ToolResponse[Output]{Accepted: true, Output: &result}, nil
+    }
+
+    func validateSubmission(input Input) []Issue {
+      issues := make([]Issue, 0)
+      if input.Model.SchemaVersion != "dcf-model.v2" {
+        issues = append(issues, modelIssue("schema_version", "model.schema_version", "must equal dcf-model.v2"))
+      }
+      if input.Model.ValuationDate != input.ValuationDate {
+        issues = append(issues, modelIssue("valuation_date", "model.valuation_date", "must equal the workflow valuation date"))
+      }
+      if strings.TrimSpace(input.Model.Company.Name) == "" || strings.TrimSpace(input.Model.Company.Currency) == "" {
+        issues = append(issues, modelIssue("company", "model.company", "name and currency are required"))
+      }
+      if len(input.Model.Historical) < 3 || len(input.Model.Historical) > 5 {
+        issues = append(issues, modelIssue("historical_periods", "model.historical", "must contain 3-5 periods"))
+      }
+      if len(input.Model.Projections) < 5 || len(input.Model.Projections) > 10 {
+        issues = append(issues, modelIssue("projection_periods", "model.projections", "must contain 5-10 periods"))
+      }
+      issues = append(issues, validateSensitivityGrid(input.Model)...)
+      if len(input.Sources) == 0 {
+        issues = append(issues, modelIssue("sources", "sources", "must contain at least one source"))
+      }
+      progress, err := os.ReadFile(input.ProgressPath)
+      if err != nil {
+        issues = append(issues, modelIssue("progress", "progress_path", "completed progress checkpoint is required"))
+        return issues
+      }
+      var document ProgressDocument
+      if json.Unmarshal(progress, &document) != nil || document.SchemaVersion != "dcf-progress.v1" || document.Target != input.Target || document.ValuationDate != input.ValuationDate || len(document.Steps) == 0 {
+        issues = append(issues, modelIssue("progress", "progress_path", "checkpoint must match target and valuation date"))
+        return issues
+      }
+      for index, step := range document.Steps {
+        if step.Status != "completed" {
+          issues = append(issues, modelIssue("progress", fmt.Sprintf("progress.steps[%d].status", index), "all progress steps must be completed"))
+        }
+      }
+      return issues
+    }
+
+    func validateSensitivityGrid(model DCFModel) []Issue {
+      path := "model.sensitivity"
+      invalid := func(message string) []Issue {
+        return []Issue{modelIssue("sensitivity_grid", path, message)}
+      }
+      if len(model.Sensitivity) == 0 {
+        return invalid("must contain an odd square WACC/terminal-growth grid")
+      }
+
+      waccSet := make(map[float64]struct{})
+      growthSet := make(map[float64]struct{})
+      points := make(map[[2]float64]float64, len(model.Sensitivity))
+      for _, point := range model.Sensitivity {
+        key := [2]float64{point.WACC, point.TerminalGrowth}
+        if _, duplicate := points[key]; duplicate {
+          return invalid("must not contain duplicate WACC/terminal-growth points")
+        }
+        if point.WACC <= 0 || point.TerminalGrowth >= point.WACC {
+          return invalid("every point must use positive WACC greater than terminal growth")
+        }
+        points[key] = point.ImpliedValuePerShare
+        waccSet[point.WACC] = struct{}{}
+        growthSet[point.TerminalGrowth] = struct{}{}
+      }
+
+      side := len(waccSet)
+      if side < 3 || side != len(growthSet) || side%2 == 0 || len(points) != side*side {
+        return invalid("must contain every point in an odd square WACC/terminal-growth grid of at least 3x3")
+      }
+      waccs := sortedSensitivityKeys(waccSet)
+      growths := sortedSensitivityKeys(growthSet)
+
+      center := side / 2
+      if waccs[center] != model.Assumptions.WACC || growths[center] != model.Assumptions.TerminalGrowth {
+        return invalid("base WACC and terminal growth must be the exact center point")
+      }
+      baseValue := points[[2]float64{model.Assumptions.WACC, model.Assumptions.TerminalGrowth}]
+      if math.Abs(baseValue-model.Valuation.ImpliedValuePerShare) > 0.01 {
+        return invalid("base-case value must equal valuation.implied_value_per_share within rounding tolerance")
+      }
+      return nil
+    }
+
+    func sortedSensitivityKeys(values map[float64]struct{}) []float64 {
+      keys := make([]float64, 0, len(values))
+      for value := range values {
+        keys = append(keys, value)
+      }
+      sort.Float64s(keys)
+      return keys
+    }
+
+    func modelIssue(code, path, message string) Issue {
+      repair := "Correct the complete DCF payload or progress checkpoint and call the tool again."
+      return Issue{Code: code, Message: message, Path: &path, RepairHint: &repair}
+    }
+  GO
+}
+
+go_tool "submit_dcf_juror_opinion" {
+  description = "Submit one persona's structured review of the frozen DCF. Verdict allowed values: accept, revise, reject, abstain. Confidence must be between 0 and 1."
+
+  source = <<-GO
+    import (
+      "context"
+      "encoding/json"
+      "fmt"
+      "os"
+      "path/filepath"
+      "strings"
+    )
+
+    type DCFJurorFinding struct {
+      Severity   string   `json:"severity"`
+      Category   string   `json:"category"`
+      Message    string   `json:"message"`
+      ModelPaths []string `json:"model_paths"`
+    }
+
+    type Input struct {
+      OpinionPath string             `json:"opinion_path"`
+      JurorID     string             `json:"juror_id"`
+      Verdict     string             `json:"verdict"`
+      Confidence  float64            `json:"confidence"`
+      Summary     string             `json:"summary"`
+      Findings    []DCFJurorFinding `json:"findings"`
+    }
+
+    type Opinion struct {
+      JurorID    string             `json:"juror_id"`
+      Verdict    string             `json:"verdict"`
+      Confidence float64            `json:"confidence"`
+      Summary    string             `json:"summary"`
+      Findings   []DCFJurorFinding `json:"findings"`
+    }
+
+    type Output string
+
+    func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
+      opinion := Opinion{
+        JurorID: input.JurorID, Verdict: input.Verdict, Confidence: input.Confidence,
+        Summary: input.Summary, Findings: input.Findings,
+      }
+      issues := validateOpinion(opinion)
+      if len(issues) > 0 {
+        return ToolResponse[Output]{Accepted: false, Issues: issues}, nil
+      }
+      payload, err := json.MarshalIndent(opinion, "", "  ")
+      if err != nil {
+        return ToolResponse[Output]{}, fmt.Errorf("encode DCF juror opinion: %w", err)
+      }
+      if err := os.MkdirAll(filepath.Dir(input.OpinionPath), 0700); err != nil {
+        return ToolResponse[Output]{}, fmt.Errorf("create DCF juror directory: %w", err)
+      }
+      if err := os.WriteFile(input.OpinionPath, append(payload, '\n'), 0600); err != nil {
+        return ToolResponse[Output]{}, fmt.Errorf("write DCF juror opinion: %w", err)
+      }
+      output := Output(payload)
+      return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+    }
+
+    func validateOpinion(opinion Opinion) []Issue {
+      issues := make([]Issue, 0)
+      if strings.TrimSpace(opinion.JurorID) == "" {
+        issues = append(issues, opinionIssue("juror_id", "juror_id", "juror ID is required"))
+      }
+      switch opinion.Verdict {
+      case "accept", "revise", "reject", "abstain":
+      default:
+        issues = append(issues, opinionIssue("juror_verdict", "verdict", "must be accept, revise, reject, or abstain"))
+      }
+      if opinion.Confidence < 0 || opinion.Confidence > 1 {
+        issues = append(issues, opinionIssue("juror_confidence", "confidence", "must be between zero and one"))
+      }
+      if strings.TrimSpace(opinion.Summary) == "" {
+        issues = append(issues, opinionIssue("juror_summary", "summary", "summary is required"))
+      }
+      return issues
+    }
+
+    func opinionIssue(code, path, message string) Issue {
+      repair := "Correct the structured opinion and call the tool again."
+      return Issue{Code: code, Message: message, Path: &path, RepairHint: &repair}
+    }
+  GO
+}
+
+go_tool "submit_dcf_report" {
+  description = "Accept the structured synthesis and render the original SecJury DCF report layout from the frozen model, sources, and ordered juror opinions. Decision allowed values: accept, revise, reject."
+
+  source = <<-GO
+    import (
+      "bytes"
+      "context"
+      "encoding/json"
+      "fmt"
+      "os"
+      "path/filepath"
+      "sort"
+      "strings"
+    )
+
+    type DCFCompany struct {
+      Name     string `json:"name"`
+      Ticker   string `json:"ticker"`
+      Exchange string `json:"exchange"`
+      Currency string `json:"currency"`
+    }
+
+    type DCFAssumptions struct {
+      WACC           float64 `json:"wacc"`
+      TerminalGrowth float64 `json:"terminal_growth"`
+    }
+
+    type DCFPeriod struct {
+      Period         string  `json:"period"`
+      Revenue        float64 `json:"revenue"`
+      RevenueGrowth  float64 `json:"revenue_growth"`
+      EBIT           float64 `json:"ebit"`
+      EBITMargin     float64 `json:"ebit_margin"`
+      TaxRate        float64 `json:"tax_rate"`
+      NOPAT          float64 `json:"nopat"`
+      DA             float64 `json:"da"`
+      CapEx          float64 `json:"capex"`
+      ChangeNWC      float64 `json:"change_nwc"`
+      UFCF           float64 `json:"ufcf"`
+      DiscountPeriod float64 `json:"discount_period"`
+      DiscountFactor float64 `json:"discount_factor"`
+      PVUFCF         float64 `json:"pv_ufcf"`
+    }
+
+    type DCFValuation struct {
+      PVExplicitFCF        float64 `json:"pv_explicit_fcf"`
+      TerminalFCF          float64 `json:"terminal_fcf"`
+      TerminalValue        float64 `json:"terminal_value"`
+      PVTerminalValue      float64 `json:"pv_terminal_value"`
+      EnterpriseValue      float64 `json:"enterprise_value"`
+      NetDebt              float64 `json:"net_debt"`
+      EquityValue          float64 `json:"equity_value"`
+      DilutedShares        float64 `json:"diluted_shares"`
+      ImpliedValuePerShare float64 `json:"implied_value_per_share"`
+      CurrentPrice         float64 `json:"current_price"`
+      ImpliedReturn        float64 `json:"implied_return"`
+    }
+
+    type DCFSensitivityPoint struct {
+      WACC                 float64 `json:"wacc"`
+      TerminalGrowth       float64 `json:"terminal_growth"`
+      ImpliedValuePerShare float64 `json:"implied_value_per_share"`
+    }
+
+    type DCFModel struct {
+      SchemaVersion string                `json:"schema_version"`
+      Company       DCFCompany            `json:"company"`
+      ValuationDate string                `json:"valuation_date"`
+      Assumptions   DCFAssumptions        `json:"assumptions"`
+      Historical    []DCFPeriod           `json:"historical"`
+      Projections   []DCFPeriod           `json:"projections"`
+      Valuation     DCFValuation          `json:"valuation"`
+      Sensitivity   []DCFSensitivityPoint `json:"sensitivity"`
+    }
+
+    type DCFSource struct {
+      ID            string `json:"id"`
+      Title         string `json:"title"`
+      URL           string `json:"url"`
+      PublishedDate string `json:"published_date"`
+      AccessedDate  string `json:"accessed_date"`
+    }
+
+    type DCFJurorFinding struct {
+      Severity   string   `json:"severity"`
+      Category   string   `json:"category"`
+      Message    string   `json:"message"`
+      ModelPaths []string `json:"model_paths"`
+    }
+
+    type DCFJurorOpinion struct {
+      JurorID    string             `json:"juror_id"`
+      Verdict    string             `json:"verdict"`
+      Confidence float64            `json:"confidence"`
+      Summary    string             `json:"summary"`
+      Findings   []DCFJurorFinding `json:"findings"`
+    }
+
+    type DCFPersona struct {
+      ID          string   `json:"id"`
+      Name        string   `json:"name"`
+      Group       string   `json:"group"`
+      PersonaLine string   `json:"persona_line"`
+      MethodRules []string `json:"method_rules"`
+    }
+
+    type DCFReport struct {
+      Decision    string   `json:"decision"`
+      Headline    string   `json:"headline"`
+      Summary     string   `json:"summary"`
+      KeyFindings []string `json:"key_findings"`
+      Limitations []string `json:"limitations"`
+    }
+
+    type Input struct {
+      ReportJSONPath string       `json:"report_json_path"`
+      ReportPath     string       `json:"report_path"`
+      ModelPath      string       `json:"model_path"`
+      SourcesPath    string       `json:"sources_path"`
+      OpinionPaths   []string     `json:"opinion_paths"`
+      Jurors         []DCFPersona `json:"jurors"`
+      Decision       string       `json:"decision"`
+      Headline       string       `json:"headline"`
+      Summary        string       `json:"summary"`
+      KeyFindings    []string     `json:"key_findings"`
+      Limitations    []string     `json:"limitations"`
+    }
+
+    type Output string
+
+    func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
+      report := DCFReport{
+        Decision: input.Decision, Headline: input.Headline, Summary: input.Summary,
+        KeyFindings: input.KeyFindings, Limitations: input.Limitations,
+      }
+      issues := validateReport(report)
+      if len(issues) > 0 {
+        return ToolResponse[Output]{Accepted: false, Issues: issues}, nil
+      }
+
+      var model DCFModel
+      if err := readStrictJSON(input.ModelPath, &model); err != nil {
+        return ToolResponse[Output]{}, fmt.Errorf("read frozen DCF model: %w", err)
+      }
+      var sources []DCFSource
+      if err := readStrictJSON(input.SourcesPath, &sources); err != nil {
+        return ToolResponse[Output]{}, fmt.Errorf("read frozen DCF sources: %w", err)
+      }
+      opinions := make([]DCFJurorOpinion, 0, len(input.OpinionPaths))
+      for _, path := range input.OpinionPaths {
+        var opinion DCFJurorOpinion
+        if err := readStrictJSON(path, &opinion); err != nil {
+          return ToolResponse[Output]{}, fmt.Errorf("read DCF juror opinion %q: %w", path, err)
+        }
+        opinions = append(opinions, opinion)
+      }
+
+      reportJSON, err := json.MarshalIndent(report, "", "  ")
+      if err != nil {
+        return ToolResponse[Output]{}, fmt.Errorf("encode DCF report: %w", err)
+      }
+      markdown := renderDCFReport(model, sources, input.Jurors, opinions, report)
+      for _, artifact := range []struct {
+        path    string
+        payload []byte
+      }{
+        {input.ReportJSONPath, append(reportJSON, '\n')},
+        {input.ReportPath, []byte(markdown)},
+      } {
+        if err := os.MkdirAll(filepath.Dir(artifact.path), 0700); err != nil {
+          return ToolResponse[Output]{}, fmt.Errorf("create DCF report directory: %w", err)
+        }
+        if err := os.WriteFile(artifact.path, artifact.payload, 0600); err != nil {
+          return ToolResponse[Output]{}, fmt.Errorf("write DCF report %q: %w", artifact.path, err)
+        }
+      }
+      output := Output(reportJSON)
+      return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+    }
+
+    func validateReport(report DCFReport) []Issue {
+      issues := make([]Issue, 0)
+      switch report.Decision {
+      case "accept", "revise", "reject":
+      default:
+        issues = append(issues, reportIssue("report_decision", "decision", "must be accept, revise, or reject"))
+      }
+      if strings.TrimSpace(report.Headline) == "" || strings.TrimSpace(report.Summary) == "" {
+        issues = append(issues, reportIssue("report_text", "summary", "headline and summary are required"))
+      }
+      return issues
+    }
+
+    func readStrictJSON(path string, target interface{}) error {
+      payload, err := os.ReadFile(path)
+      if err != nil {
+        return err
+      }
+      decoder := json.NewDecoder(bytes.NewReader(payload))
+      decoder.DisallowUnknownFields()
+      return decoder.Decode(target)
+    }
+
+    func renderDCFReport(model DCFModel, sources []DCFSource, personas []DCFPersona, opinions []DCFJurorOpinion, report DCFReport) string {
+      var output strings.Builder
+      fmt.Fprintf(&output, "# %s\n\n%s\n\n**Decision:** %s\n", markdownCell(report.Headline), markdownCell(report.Summary), markdownCell(report.Decision))
+      if len(report.KeyFindings) > 0 {
+        output.WriteString("\n## Key Findings\n\n")
+        for _, finding := range report.KeyFindings {
+          fmt.Fprintf(&output, "- %s\n", markdownCell(finding))
+        }
+      }
+      if len(report.Limitations) > 0 {
+        output.WriteString("\n## Limitations\n\n")
+        for _, limitation := range report.Limitations {
+          fmt.Fprintf(&output, "- %s\n", markdownCell(limitation))
+        }
+      }
+      renderHumanDCFModel(&output, model, sources)
+      personaNames := make(map[string]string, len(personas))
+      for _, persona := range personas {
+        personaNames[persona.ID] = persona.Name
+      }
+      output.WriteString("\n## Jury Opinions\n")
+      for _, opinion := range opinions {
+        name := strings.TrimSpace(personaNames[opinion.JurorID])
+        if name == "" {
+          name = opinion.JurorID
+        }
+        fmt.Fprintf(&output, "\n### %s (%s)\n\n**Verdict:** %s  \n**Confidence:** %.0f%%\n\n%s\n", markdownCell(name), markdownCell(opinion.JurorID), markdownCell(opinion.Verdict), opinion.Confidence*100, markdownCell(opinion.Summary))
+        if len(opinion.Findings) == 0 {
+          output.WriteString("\n_No specific findings._\n")
+          continue
+        }
+        output.WriteString("\n| Severity | Category | Finding | Model paths |\n|---|---|---|---|\n")
+        for _, finding := range opinion.Findings {
+          fmt.Fprintf(&output, "| %s | %s | %s | %s |\n", markdownCell(finding.Severity), markdownCell(finding.Category), markdownCell(finding.Message), markdownCell(strings.Join(finding.ModelPaths, ", ")))
+        }
+      }
+      return output.String()
+    }
+
+    func renderHumanDCFModel(output *strings.Builder, model DCFModel, sources []DCFSource) {
+      output.WriteString("\n## DCF Model\n\n### Company\n\n| Field | Value |\n|---|---|\n")
+      for _, row := range [][2]string{
+        {"Name", model.Company.Name}, {"Ticker", model.Company.Ticker},
+        {"Exchange", model.Company.Exchange}, {"Currency", model.Company.Currency},
+        {"Valuation date", model.ValuationDate},
+      } {
+        fmt.Fprintf(output, "| %s | %s |\n", row[0], markdownCell(row[1]))
+      }
+      output.WriteString("\n### Assumptions\n\n| Assumption | Value |\n|---|---:|\n")
+      fmt.Fprintf(output, "| WACC | %s |\n| Terminal growth | %s |\n", formatPercent(model.Assumptions.WACC), formatPercent(model.Assumptions.TerminalGrowth))
+
+      output.WriteString("\n### Historical Financials\n\n")
+      if len(model.Historical) == 0 {
+        output.WriteString("_No historical periods supplied._\n")
+      } else {
+        output.WriteString("| Period | Revenue | Growth | EBIT | EBIT margin | Tax | NOPAT | D&A | CapEx | Change NWC | UFCF |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        for _, period := range model.Historical {
+          renderDCFPeriodRow(output, period)
+        }
+      }
+
+      output.WriteString("\n### Projected Cash Flow\n\n")
+      if len(model.Projections) == 0 {
+        output.WriteString("_No projection periods supplied._\n")
+      } else {
+        output.WriteString("| Period | Revenue | Growth | EBIT | EBIT margin | Tax | NOPAT | D&A | CapEx | Change NWC | UFCF | Discount period | Discount factor | PV UFCF |\n|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        for _, period := range model.Projections {
+          fmt.Fprintf(output, "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %.2f | %.4f | %s |\n", markdownCell(period.Period), formatNumber(period.Revenue), formatPercent(period.RevenueGrowth), formatNumber(period.EBIT), formatPercent(period.EBITMargin), formatPercent(period.TaxRate), formatNumber(period.NOPAT), formatNumber(period.DA), formatNumber(period.CapEx), formatNumber(period.ChangeNWC), formatNumber(period.UFCF), period.DiscountPeriod, period.DiscountFactor, formatNumber(period.PVUFCF))
+        }
+      }
+
+      output.WriteString("\n### Valuation Summary\n\n| Component | Value |\n|---|---:|\n")
+      for _, row := range []struct {
+        label string
+        value float64
+      }{
+        {"PV explicit FCF", model.Valuation.PVExplicitFCF},
+        {"Terminal FCF", model.Valuation.TerminalFCF},
+        {"Terminal value", model.Valuation.TerminalValue},
+        {"PV terminal value", model.Valuation.PVTerminalValue},
+        {"Enterprise value", model.Valuation.EnterpriseValue},
+        {"Net debt", model.Valuation.NetDebt},
+        {"Equity value", model.Valuation.EquityValue},
+        {"Diluted shares", model.Valuation.DilutedShares},
+        {"Implied value per share", model.Valuation.ImpliedValuePerShare},
+        {"Current price", model.Valuation.CurrentPrice},
+      } {
+        fmt.Fprintf(output, "| %s | %s |\n", row.label, formatNumber(row.value))
+      }
+      fmt.Fprintf(output, "| Implied return | %s |\n", formatPercent(model.Valuation.ImpliedReturn))
+      renderSensitivityTable(output, model.Sensitivity)
+
+      output.WriteString("\n### Sources\n\n")
+      if len(sources) == 0 {
+        output.WriteString("_No sources supplied._\n")
+      } else {
+        output.WriteString("| ID | Title | URL | Published | Accessed |\n|---|---|---|---|---|\n")
+        for _, source := range sources {
+          fmt.Fprintf(output, "| %s | %s | %s | %s | %s |\n", markdownCell(source.ID), markdownCell(source.Title), markdownCell(source.URL), markdownCell(source.PublishedDate), markdownCell(source.AccessedDate))
+        }
+      }
+    }
+
+    func renderDCFPeriodRow(output *strings.Builder, period DCFPeriod) {
+      fmt.Fprintf(output, "| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", markdownCell(period.Period), formatNumber(period.Revenue), formatPercent(period.RevenueGrowth), formatNumber(period.EBIT), formatPercent(period.EBITMargin), formatPercent(period.TaxRate), formatNumber(period.NOPAT), formatNumber(period.DA), formatNumber(period.CapEx), formatNumber(period.ChangeNWC), formatNumber(period.UFCF))
+    }
+
+    func renderSensitivityTable(output *strings.Builder, points []DCFSensitivityPoint) {
+      output.WriteString("\n### Sensitivity Analysis\n\n")
+      if len(points) == 0 {
+        output.WriteString("_No sensitivity points supplied._\n")
+        return
+      }
+      waccSet := map[float64]struct{}{}
+      growthSet := map[float64]struct{}{}
+      values := map[[2]float64]float64{}
+      for _, point := range points {
+        waccSet[point.WACC] = struct{}{}
+        growthSet[point.TerminalGrowth] = struct{}{}
+        values[[2]float64{point.WACC, point.TerminalGrowth}] = point.ImpliedValuePerShare
+      }
+      waccs := sortedFloatKeys(waccSet)
+      growths := sortedFloatKeys(growthSet)
+      output.WriteString("| WACC / Terminal growth |")
+      for _, growth := range growths {
+        fmt.Fprintf(output, " %s |", formatPercent(growth))
+      }
+      output.WriteString("\n|---|")
+      for range growths {
+        output.WriteString("---:|")
+      }
+      output.WriteString("\n")
+      for _, wacc := range waccs {
+        fmt.Fprintf(output, "| %s |", formatPercent(wacc))
+        for _, growth := range growths {
+          value, exists := values[[2]float64{wacc, growth}]
+          if exists {
+            fmt.Fprintf(output, " %s |", formatNumber(value))
+          } else {
+            output.WriteString(" - |")
+          }
+        }
+        output.WriteString("\n")
+      }
+    }
+
+    func sortedFloatKeys(values map[float64]struct{}) []float64 {
+      keys := make([]float64, 0, len(values))
+      for value := range values {
+        keys = append(keys, value)
+      }
+      sort.Float64s(keys)
+      return keys
+    }
+
+    func formatNumber(value float64) string {
+      return fmt.Sprintf("%.2f", value)
+    }
+
+    func formatPercent(value float64) string {
+      return fmt.Sprintf("%.1f%%", value*100)
+    }
+
+    func markdownCell(value string) string {
+      return strings.NewReplacer("\\", "\\\\", "|", "\\|", "\r", " ", "\n", " ").Replace(strings.TrimSpace(value))
+    }
+
+    func reportIssue(code, path, message string) Issue {
+      repair := "Correct the structured synthesis and call the tool again."
+      return Issue{Code: code, Message: message, Path: &path, RepairHint: &repair}
+    }
+  GO
+}
