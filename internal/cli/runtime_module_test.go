@@ -87,6 +87,21 @@ func TestProductionRuntimePropagatesSessionStallTimeoutToChildSession(t *testing
 	assert.Equal(t, 1, resumeCalls)
 }
 
+func TestRecoveringProtocolFixtureSessionForwardsRecovery(t *testing.T) {
+	t.Parallel()
+	session := &moduleRecoveringSession{}
+	fixture := &recoveringProtocolFixtureSession{
+		protocolFixtureSession: &protocolFixtureSession{session: session},
+		recovery:               session,
+	}
+
+	require.NoError(t, fixture.Abort(t.Context()))
+	require.NoError(t, fixture.Resume(t.Context()))
+	_, abortCalls, resumeCalls := session.counts()
+	assert.Equal(t, 1, abortCalls)
+	assert.Equal(t, 1, resumeCalls)
+}
+
 func TestProductionRuntimePropagatesModuleTimeoutToChildSession(t *testing.T) {
 	t.Parallel()
 	root := writeModuleFixture(t, `timeout = "50ms"`)
@@ -165,7 +180,10 @@ func (o *moduleRecoveringOpener) Open(_ context.Context, config copilot.SessionC
 	if workflowSessionKind(config) == "research" {
 		return &o.session, nil
 	}
-	return &protocolFixtureSession{config: config, session: &fakeSession{}}, nil
+	return &recoveringProtocolFixtureSession{
+		protocolFixtureSession: &protocolFixtureSession{config: config, session: &o.session},
+		recovery:               &o.session,
+	}, nil
 }
 
 type moduleRecoveringSession struct {
