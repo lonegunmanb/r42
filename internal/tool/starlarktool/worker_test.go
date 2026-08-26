@@ -50,3 +50,18 @@ func TestServeRejectsMultipleRequests(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "expected exactly one JSON value")
 }
+
+func TestServeIncludesCapturedOutputInEvaluatorRejection(t *testing.T) {
+	t.Parallel()
+	input := bytes.NewBufferString(`{"code":"print(\"partial\")\nfail(\"stop\")","data_json":"null"}`)
+	var output bytes.Buffer
+
+	err := Serve(context.Background(), input, &output)
+
+	require.NoError(t, err)
+	var response WorkerResponse
+	require.NoError(t, json.Unmarshal(output.Bytes(), &response))
+	require.NotNil(t, response.Error)
+	assert.Equal(t, "partial\n", response.Error.Stdout)
+	assert.Positive(t, response.Error.Steps)
+}

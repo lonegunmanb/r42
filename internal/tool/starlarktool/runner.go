@@ -15,6 +15,8 @@ import (
 
 const maxWorkerResponseBytes = 32 << 20
 
+const workerTimeoutGracePeriod = time.Second
+
 // Runner invokes the current r42 executable as a fresh calculator worker.
 type Runner struct {
 	executable  func() (string, error)
@@ -47,7 +49,9 @@ func (r *Runner) Run(ctx context.Context, request WorkerRequest) (WorkerResponse
 	commandContext := ctx
 	cancel := func() {}
 	if request.TimeoutNanos > 0 {
-		commandContext, cancel = context.WithTimeout(ctx, time.Duration(request.TimeoutNanos))
+		// The worker owns the configured timeout so it can return a repairable typed-tool rejection.
+		// The parent retains a small grace period to kill a wedged worker tree.
+		commandContext, cancel = context.WithTimeout(ctx, time.Duration(request.TimeoutNanos)+workerTimeoutGracePeriod)
 	}
 	defer cancel()
 
@@ -81,6 +85,13 @@ func (r *Runner) Run(ctx context.Context, request WorkerRequest) (WorkerResponse
 		return WorkerResponse{}, &InvocationError{cause: err, stdout: stdout.String(), stderr: stderr.String()}
 	}
 	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) && len(stdout.Bytes()) == 0 {
+			return WorkerResponse{Error: &WorkerError{
+				Code: "starlark_worker_exited", Message: "worker exited before returning a valid response",
+				Stdout: stdout.String(),
+			}}, nil
+		}
 		return WorkerResponse{}, &InvocationError{
 			cause:  fmt.Errorf("running starlark worker: %w", runErr),
 			stdout: stdout.String(),

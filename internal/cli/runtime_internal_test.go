@@ -20,6 +20,8 @@ import (
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/qc"
 	researchruntime "github.com/lonegunmanb/r42/internal/research/runtime"
+	corespec "github.com/lonegunmanb/r42/internal/spec"
+	"github.com/lonegunmanb/r42/internal/tool/starlarktool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
@@ -301,6 +303,112 @@ func TestTypedToolHandlerConsumesOnlySuccessfulCalls(t *testing.T) {
 
 	_, err = tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Mode": "accept"}})
 	assert.ErrorContains(t, err, `tool "tool_lookup" per-session call quota exhausted (limit 1 successful calls)`)
+}
+
+func TestStarlarkToolHandlerReturnsRepairableFailuresAndRecordsCalls(t *testing.T) {
+	t.Parallel()
+	recorder, err := debuglog.NewRecorder(t.TempDir(), true)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+	const toolID = "tool_starlark_tool_calculator_12345678-1234-8234-9234-123456789abc"
+	runner := &fakeStarlarkRunner{responses: []starlarktool.WorkerResponse{
+		{Error: &starlarktool.WorkerError{
+			Code: "starlark_parse_error", Message: "calculator.star:1:10: got EOF", Stdout: "partial output\n",
+		}},
+		{Result: &starlarktool.Result{ResultJSON: `{"answer":42}`, Stdout: "calculated\n", Steps: 21}},
+	}}
+	factory := &runtimeFactory{
+		recorder: recorder, state: new(runtimeState), starlarkRunner: runner,
+		tools: map[string]plan.ToolSpec{toolID: {
+			ID: toolID, Address: "starlark_tool.calculator", Kind: "starlark", Description: "Calculate values.",
+			Starlark: &plan.StarlarkToolSpec{MaxSteps: 100, TimeoutNanos: int64(time.Second), MaxSourceBytes: 1000, MaxDataBytes: 1000, MaxResultBytes: 1000, MaxStdoutBytes: 100, MemoryLimit: 1024},
+		}},
+	}
+	tools, _, err := factory.buildTools(
+		t.Context(), "research.static.source", debuglog.SessionResearch, t.TempDir(), []string{toolID}, nil, nil,
+		newToolCallQuota(map[string]int{toolID: 1}),
+	)
+	require.NoError(t, err)
+	require.Len(t, tools, 1)
+
+	schema, err := json.Marshal(tools[0].Parameters)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"type":"object","properties":{"code":{"type":"string"},"data_json":{"type":"string"}},"required":["code","data_json"],"additionalProperties":false}`, string(schema))
+	rejected, err := tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{"code": "result = (", "data_json": "null"}})
+	require.NoError(t, err)
+	assert.Contains(t, rejected.TextResultForLLM, `"accepted":false`)
+	assert.Contains(t, rejected.TextResultForLLM, `"code":"starlark_parse_error"`)
+	assert.Contains(t, rejected.TextResultForLLM, "partial output")
+	assert.Contains(t, rejected.TextResultForLLM, "Repair the Starlark source")
+
+	accepted, err := tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{"code": "result = 42", "data_json": "null"}})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"accepted":true,"output":{"result_json":"{\"answer\":42}","stdout":"calculated\n","steps":21}}`, accepted.TextResultForLLM)
+	assert.Len(t, runner.requests, 2)
+
+	_, err = tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{"code": "result = 1", "data_json": "null"}})
+	assert.ErrorContains(t, err, "per-session call quota exhausted")
+}
+
+func TestStarlarkToolIssueProvidesBoundedRepairGuidance(t *testing.T) {
+	t.Parallel()
+	issues := map[string]corespec.Issue{}
+	for _, code := range []string{
+		"starlark_code_required", "starlark_parse_error", "starlark_name_error", "starlark_runtime_error",
+		"starlark_step_limit", "starlark_timeout", "starlark_data_json", "starlark_result_missing",
+		"starlark_result_type", "starlark_result_non_finite", "starlark_output_limit", "starlark_worker_exited",
+	} {
+		issues[code] = starlarkToolIssue(starlarktool.WorkerError{Code: code, Message: strings.Repeat("m", 5_000), Stdout: strings.Repeat("s", 3_000)})
+	}
+
+	for code, issue := range issues {
+		assert.Equal(t, code, issue.Code)
+		assert.NotNil(t, issue.RepairHint)
+		assert.LessOrEqual(t, len(issue.Message), 4_096+len("\nstdout tail:\n")+2_048)
+	}
+	assert.Contains(t, *issues["starlark_timeout"].RepairHint, "Reduce")
+	assert.Contains(t, *issues["starlark_data_json"].RepairHint, "valid JSON")
+}
+
+func TestStarlarkToolHandlerKeepsWorkerExitRepairable(t *testing.T) {
+	t.Parallel()
+	recorder, err := debuglog.NewRecorder(t.TempDir(), false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+	runner := &fakeStarlarkRunner{responses: []starlarktool.WorkerResponse{{
+		Error: &starlarktool.WorkerError{Code: "starlark_worker_exited", Message: "worker exited before returning a response"},
+	}}}
+	factory := &runtimeFactory{
+		recorder: recorder, state: new(runtimeState), starlarkRunner: runner,
+		tools: map[string]plan.ToolSpec{"tool_calculator": {
+			ID: "tool_calculator", Address: "starlark_tool.calculator", Kind: "starlark", Description: "Calculate values.",
+			Starlark: &plan.StarlarkToolSpec{MaxSteps: 100, TimeoutNanos: int64(time.Second), MaxSourceBytes: 1000, MaxDataBytes: 1000, MaxResultBytes: 1000, MaxStdoutBytes: 100, MemoryLimit: 1024},
+		}},
+	}
+	tools, _, err := factory.buildTools(t.Context(), "research.static.source", debuglog.SessionResearch, t.TempDir(), []string{"tool_calculator"}, nil, nil, newToolCallQuota(nil))
+	require.NoError(t, err)
+
+	result, err := tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{"code": "result = 1", "data_json": "null"}})
+
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"accepted":false`)
+	assert.Contains(t, result.TextResultForLLM, `"code":"starlark_worker_exited"`)
+}
+
+type fakeStarlarkRunner struct {
+	responses []starlarktool.WorkerResponse
+	requests  []starlarktool.WorkerRequest
+	err       error
+}
+
+func (r *fakeStarlarkRunner) Run(_ context.Context, request starlarktool.WorkerRequest) (starlarktool.WorkerResponse, error) {
+	r.requests = append(r.requests, request)
+	if r.err != nil {
+		return starlarktool.WorkerResponse{}, r.err
+	}
+	response := r.responses[0]
+	r.responses = r.responses[1:]
+	return response, nil
 }
 
 func TestResearchAndQCTypedToolQuotasAreIndependent(t *testing.T) {

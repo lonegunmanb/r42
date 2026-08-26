@@ -23,6 +23,8 @@ type WorkerRequest struct {
 type WorkerError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	Stdout  string `json:"stdout,omitempty"`
+	Steps   uint64 `json:"steps,omitempty"`
 }
 
 // WorkerResponse is the sole worker stdout document.
@@ -60,7 +62,10 @@ func Serve(ctx context.Context, input io.Reader, output io.Writer) error {
 			return fmt.Errorf("evaluate starlark worker request: %w", err)
 		}
 		response.Result = nil
-		response.Error = &WorkerError{Code: evaluationErr.Code, Message: evaluationErr.Error()}
+		response.Error = &WorkerError{
+			Code: evaluationErr.Code, Message: evaluationErr.Error(),
+			Stdout: evaluationErr.Stdout, Steps: evaluationErr.Steps,
+		}
 	}
 	encoder := json.NewEncoder(output)
 	if err := encoder.Encode(response); err != nil {

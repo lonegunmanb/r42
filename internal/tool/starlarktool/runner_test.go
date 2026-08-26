@@ -59,6 +59,36 @@ func TestRunnerDoesNotRetainStateBetweenWorkers(t *testing.T) {
 	assert.Equal(t, "starlark_name_error", second.Error.Code)
 }
 
+func TestRunnerReturnsWorkerTimeoutAsRepairableResponse(t *testing.T) {
+	t.Parallel()
+	runner := testRunner(t)
+
+	response, err := runner.Run(t.Context(), WorkerRequest{
+		Code:         "def calculate():\n  total = 0\n  for item in range(100000000):\n    total += item\n  return total\nresult = calculate()",
+		DataJSON:     "null",
+		Config:       Config{MaxSteps: 10_000_000},
+		TimeoutNanos: int64(10 * time.Millisecond),
+	})
+
+	require.NoError(t, err)
+	require.Nil(t, response.Result)
+	require.NotNil(t, response.Error)
+	assert.Equal(t, "starlark_timeout", response.Error.Code)
+}
+
+func TestRunnerReturnsUnexpectedWorkerExitAsRepairableResponse(t *testing.T) {
+	t.Parallel()
+	runner := testRunner(t)
+	runner.environment = append(runner.environment, "R42_STARLARK_WORKER_EXIT=1")
+
+	response, err := runner.Run(t.Context(), WorkerRequest{Code: "result = 1", DataJSON: "null"})
+
+	require.NoError(t, err)
+	require.Nil(t, response.Result)
+	require.NotNil(t, response.Error)
+	assert.Equal(t, "starlark_worker_exited", response.Error.Code)
+}
+
 //nolint:paralleltest // The test worker calls os.Exit after serving its protocol request.
 func TestWorkerProcessServesExactlyOneInternalRequest(t *testing.T) {
 	if os.Getenv("R42_STARLARK_WORKER_HELPER") != "1" {
@@ -66,6 +96,9 @@ func TestWorkerProcessServesExactlyOneInternalRequest(t *testing.T) {
 	}
 	if os.Getenv("R42_STARLARK_WORKER_STALL") == "1" {
 		time.Sleep(time.Second)
+	}
+	if os.Getenv("R42_STARLARK_WORKER_EXIT") == "1" {
+		os.Exit(7)
 	}
 	if err := Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
 		_, _ = os.Stderr.WriteString(err.Error())

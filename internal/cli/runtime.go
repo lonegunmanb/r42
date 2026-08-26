@@ -36,6 +36,7 @@ import (
 	externaltool "github.com/lonegunmanb/r42/internal/tool/external"
 	"github.com/lonegunmanb/r42/internal/tool/gotool"
 	toolspec "github.com/lonegunmanb/r42/internal/tool/spec"
+	"github.com/lonegunmanb/r42/internal/tool/starlarktool"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
 	ctyjson "github.com/zclconf/go-cty/cty/json"
@@ -292,6 +293,11 @@ type runtimeFactory struct {
 	localExpressions    map[string]string
 	sessionStallTimeout time.Duration
 	artifactRegistry    *artifactpkg.Registry
+	starlarkRunner      starlarkRunner
+}
+
+type starlarkRunner interface {
+	Run(context.Context, starlarktool.WorkerRequest) (starlarktool.WorkerResponse, error)
 }
 
 type runtimeState struct {
@@ -423,6 +429,7 @@ func (f *runtimeFactory) newModuleBlock(
 		directory: node.Module.Plan.Directory(), contextValues: node.Module.Plan.Context(),
 		localExpressions:    node.Module.Plan.LocalExpressions(),
 		sessionStallTimeout: f.sessionStallTimeout,
+		starlarkRunner:      f.starlarkRunner,
 	}
 	return &moduleApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address,
@@ -494,6 +501,14 @@ func (f *runtimeFactory) buildTools(
 	result := make([]sdk.Tool, 0, len(definitions))
 	terminalType := cty.NilType
 	for _, definition := range definitions {
+		if definition.Kind == string(config.AddressKindStarlark) {
+			tool, err := f.buildStarlarkTool(ctx, blockAddress, sessionKind, definition, quota)
+			if err != nil {
+				return nil, cty.NilType, err
+			}
+			result = append(result, tool)
+			continue
+		}
 		if definition.Kind == string(config.AddressKindExternal) {
 			tool, outputType, err := f.buildExternalTool(
 				ctx, blockAddress, sessionKind, workspace, definition, terminateToolID, terminal, quota,
@@ -622,6 +637,135 @@ func (f *runtimeFactory) buildTools(
 		})
 	}
 	return result, terminalType, nil
+}
+
+func (f *runtimeFactory) buildStarlarkTool(
+	ctx context.Context,
+	blockAddress string,
+	sessionKind debuglog.SessionKind,
+	definition plan.ToolSpec,
+	quota *toolCallQuota,
+) (sdk.Tool, error) {
+	if definition.Starlark == nil {
+		return sdk.Tool{}, fmt.Errorf("starlark tool %s has no settings", definition.Address)
+	}
+	input := toolspec.NewConstraint(cty.Object(map[string]cty.Type{"code": cty.String, "data_json": cty.String}))
+	parameters, err := input.JSONSchema()
+	if err != nil {
+		return sdk.Tool{}, fmt.Errorf("schema %s: %w", definition.Address, err)
+	}
+	runner := f.starlarkRunner
+	if runner == nil {
+		runner = starlarktool.NewRunner()
+	}
+	settings := *definition.Starlark
+	return sdk.Tool{
+		Name: definition.ID, Description: quota.describe(definition.ID, definition.Description), Parameters: parameters,
+		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			arguments, marshalErr := json.Marshal(invocation.Arguments)
+			if marshalErr != nil {
+				return f.rejectedArguments(blockAddress, sessionKind, definition.ID, definition.Address, nil, marshalErr, false, nil)
+			}
+			value, decodeErr := ctyjson.Unmarshal(arguments, input.Type())
+			if decodeErr != nil {
+				return f.rejectedArguments(blockAddress, sessionKind, definition.ID, definition.Address, arguments, decodeErr, false, nil)
+			}
+			value, validateErr := input.Apply(value)
+			if validateErr != nil {
+				return f.rejectedArguments(blockAddress, sessionKind, definition.ID, definition.Address, arguments, validateErr, false, nil)
+			}
+			arguments, marshalErr = ctyjson.Marshal(value, input.Type())
+			if marshalErr != nil {
+				return sdk.ToolResult{}, fmt.Errorf("encode validated %s arguments: %w", definition.Address, marshalErr)
+			}
+			if reserveErr := quota.reserve(definition.ID); reserveErr != nil {
+				return sdk.ToolResult{}, reserveErr
+			}
+			fields := value.AsValueMap()
+			response, runErr := runner.Run(ctx, starlarktool.WorkerRequest{
+				Code: fields["code"].AsString(), DataJSON: fields["data_json"].AsString(),
+				Config: starlarktool.Config{
+					MaxSteps: settings.MaxSteps, MaxSourceBytes: settings.MaxSourceBytes,
+					MaxDataBytes: settings.MaxDataBytes, MaxResultBytes: settings.MaxResultBytes,
+					MaxStdoutBytes: settings.MaxStdoutBytes,
+				},
+				TimeoutNanos: settings.TimeoutNanos, MemoryLimit: int64(settings.MemoryLimit),
+			})
+			if runErr != nil {
+				quota.rollback(definition.ID)
+				var stdout string
+				var stderr string
+				var invocationErr *starlarktool.InvocationError
+				if errors.As(runErr, &invocationErr) {
+					stdout = invocationErr.Stdout()
+					stderr = invocationErr.Stderr()
+				}
+				if recordErr := f.recordToolFailure(blockAddress, sessionKind, definition.ID, definition.Address, arguments, runErr, stdout, stderr); recordErr != nil {
+					return sdk.ToolResult{}, errors.Join(runErr, recordErr)
+				}
+				return sdk.ToolResult{}, runErr
+			}
+			if response.Error != nil {
+				quota.rollback(definition.ID)
+				issue := starlarkToolIssue(*response.Error)
+				wire := corespec.ToolResponse[starlarktool.Result]{Issues: []corespec.Issue{issue}}
+				return f.recordStarlarkToolResponse(blockAddress, sessionKind, definition, arguments, wire)
+			}
+			if response.Result == nil {
+				quota.rollback(definition.ID)
+				err := errors.New("starlark worker exited without a result or error")
+				if recordErr := f.recordToolFailure(blockAddress, sessionKind, definition.ID, definition.Address, arguments, err, "", ""); recordErr != nil {
+					return sdk.ToolResult{}, errors.Join(err, recordErr)
+				}
+				return sdk.ToolResult{}, err
+			}
+			wire := corespec.ToolResponse[starlarktool.Result]{Accepted: true, Output: response.Result}
+			return f.recordStarlarkToolResponse(blockAddress, sessionKind, definition, arguments, wire)
+		},
+	}, nil
+}
+
+func (f *runtimeFactory) recordStarlarkToolResponse(
+	blockAddress string,
+	sessionKind debuglog.SessionKind,
+	definition plan.ToolSpec,
+	arguments []byte,
+	wire corespec.ToolResponse[starlarktool.Result],
+) (sdk.ToolResult, error) {
+	encoded, err := json.Marshal(wire)
+	if err != nil {
+		return sdk.ToolResult{}, fmt.Errorf("encode %s response: %w", definition.Address, err)
+	}
+	if err = f.recorder.Record(debuglog.Event{
+		Kind: debuglog.EventTool, BlockAddress: blockAddress, Session: sessionKind,
+		ToolName: definition.ID, ToolAddress: definition.Address, Arguments: arguments, Result: encoded,
+	}); err != nil {
+		return sdk.ToolResult{}, err
+	}
+	return sdk.ToolResult{TextResultForLLM: string(encoded), ResultType: "success"}, nil
+}
+
+func starlarkToolIssue(workerError starlarktool.WorkerError) corespec.Issue {
+	message := boundedDiagnostic(workerError.Message, 4_096)
+	if stdout := boundedDiagnostic(workerError.Stdout, 2_048); stdout != "" {
+		message += "\nstdout tail:\n" + stdout
+	}
+	repairHint := "Repair the Starlark source or input JSON, then call the calculator again."
+	switch workerError.Code {
+	case "starlark_step_limit", "starlark_timeout", "starlark_output_limit":
+		repairHint = "Reduce the calculation size or output, then call the calculator again."
+	case "starlark_data_json":
+		repairHint = "Provide one valid JSON value in data_json, then call the calculator again."
+	}
+	return corespec.Issue{Code: workerError.Code, Message: message, RepairHint: &repairHint}
+}
+
+func boundedDiagnostic(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= limit {
+		return value
+	}
+	return value[len(value)-limit:]
 }
 
 func (f *runtimeFactory) resolveToolDefinitions(

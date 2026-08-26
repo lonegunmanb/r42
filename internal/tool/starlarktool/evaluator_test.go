@@ -3,6 +3,7 @@ package starlarktool
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -185,4 +186,30 @@ func TestEvaluateClassifiesRepairableFailures(t *testing.T) {
 			assert.Equal(t, tt.want, evaluationErr.Code)
 		})
 	}
+}
+
+func TestEvaluateClassifiesContextDeadlineAsTimeout(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	cancel()
+
+	_, err := Evaluate(ctx, DefaultConfig(), "result = 1", "null")
+
+	require.Error(t, err)
+	var evaluationErr *Error
+	require.ErrorAs(t, err, &evaluationErr)
+	assert.Equal(t, "starlark_timeout", evaluationErr.Code)
+}
+
+func TestEvaluateStopsAnActiveProgramWhenTimeoutExpires(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+	defer cancel()
+
+	_, err := Evaluate(ctx, Config{MaxSteps: 10_000_000}, "def calculate():\n  total = 0\n  for item in range(100000000):\n    total += item\n  return total\nresult = calculate()", "null")
+
+	require.Error(t, err)
+	var evaluationErr *Error
+	require.ErrorAs(t, err, &evaluationErr)
+	assert.Equal(t, "starlark_timeout", evaluationErr.Code)
 }

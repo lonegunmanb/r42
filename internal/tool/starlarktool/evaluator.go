@@ -56,6 +56,8 @@ type Error struct {
 	Code    string
 	Message string
 	Err     error
+	Stdout  string
+	Steps   uint64
 }
 
 func (e *Error) Error() string {
@@ -70,6 +72,9 @@ func (e *Error) Unwrap() error { return e.Err }
 // Evaluate runs code against one JSON data value without filesystem or module loading.
 func Evaluate(ctx context.Context, config Config, code, dataJSON string) (Result, error) {
 	config = normalizedConfig(config)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return Result{}, evaluationFailure("starlark_timeout", "evaluation exceeded timeout", ctx.Err(), "", 0)
+	}
 	if strings.TrimSpace(code) == "" {
 		return Result{}, failure("starlark_code_required", "code is required", nil)
 	}
@@ -119,25 +124,28 @@ func Evaluate(ctx context.Context, config Config, code, dataJSON string) (Result
 	})
 	steps := thread.ExecutionSteps()
 	if stdout.exceeded {
-		return Result{}, failure("starlark_output_limit", "stdout exceeds max_stdout_bytes", nil)
+		return Result{}, evaluationFailure("starlark_output_limit", "stdout exceeds max_stdout_bytes", nil, stdout.String(), steps)
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return Result{}, evaluationFailure("starlark_timeout", "evaluation exceeded timeout", ctx.Err(), stdout.String(), steps)
 	}
 	if err != nil {
-		return Result{}, classifyEvaluationError(err, stdout.String(), steps)
+		return Result{}, withEvaluationContext(classifyEvaluationError(err, stdout.String(), steps), stdout.String(), steps)
 	}
 	value, ok := globals["result"]
 	if !ok {
-		return Result{}, failure("starlark_result_missing", "top-level result is required", nil)
+		return Result{}, evaluationFailure("starlark_result_missing", "top-level result is required", nil, stdout.String(), steps)
 	}
 	jsonValue, err := resultJSONValue(value, make(map[starlark.Value]struct{}), 0)
 	if err != nil {
-		return Result{}, err
+		return Result{}, withEvaluationContext(err, stdout.String(), steps)
 	}
 	encoded, err := json.Marshal(jsonValue)
 	if err != nil {
-		return Result{}, failure("starlark_result_type", "result is not JSON-compatible", err)
+		return Result{}, evaluationFailure("starlark_result_type", "result is not JSON-compatible", err, stdout.String(), steps)
 	}
 	if len(encoded) > config.MaxResultBytes {
-		return Result{}, failure("starlark_output_limit", "result exceeds max_result_bytes", nil)
+		return Result{}, evaluationFailure("starlark_output_limit", "result exceeds max_result_bytes", nil, stdout.String(), steps)
 	}
 	return Result{ResultJSON: string(encoded), Stdout: stdout.String(), Steps: steps}, nil
 }
@@ -421,6 +429,9 @@ func classifyEvaluationError(err error, stdout string, steps uint64) error {
 	if strings.Contains(message, "too many steps") {
 		return failure("starlark_step_limit", "evaluation exceeded max_steps", err)
 	}
+	if strings.Contains(message, context.DeadlineExceeded.Error()) {
+		return failure("starlark_timeout", "evaluation exceeded timeout", err)
+	}
 	if strings.Contains(message, "undefined:") {
 		return failure("starlark_name_error", "program referenced an unavailable name", err)
 	}
@@ -447,6 +458,19 @@ func isFiniteBuiltin(_ *starlark.Thread, _ *starlark.Builtin, args starlark.Tupl
 
 func failure(code, message string, err error) *Error {
 	return &Error{Code: code, Message: message, Err: err}
+}
+
+func evaluationFailure(code, message string, err error, stdout string, steps uint64) *Error {
+	return &Error{Code: code, Message: message, Err: err, Stdout: stdout, Steps: steps}
+}
+
+func withEvaluationContext(err error, stdout string, steps uint64) error {
+	var evaluationErr *Error
+	if errors.As(err, &evaluationErr) {
+		evaluationErr.Stdout = stdout
+		evaluationErr.Steps = steps
+	}
+	return err
 }
 
 func isFinite(value float64) bool { return !math.IsInf(value, 0) && !math.IsNaN(value) }
