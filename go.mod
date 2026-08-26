@@ -18,6 +18,7 @@ require (
 	github.com/spf13/cobra v1.10.1
 	github.com/stretchr/testify v1.11.1
 	github.com/zclconf/go-cty v1.18.1
+	go.starlark.net v0.0.0-20260708150628-5395d018f003
 	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.45.0
