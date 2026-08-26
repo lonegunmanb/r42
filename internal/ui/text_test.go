@@ -27,6 +27,34 @@ func TestTextRendererShowsWorkflowPhaseTransition(t *testing.T) {
 	assert.Contains(t, output.String(), "[collection] PHASE round=2 decision=needs_more")
 }
 
+func TestTextRendererShowsOnlyCreatedSinglePhaseSessions(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{
+		{Address: "research.static.builder", Kind: "research"},
+		{Address: "research.static.juror", Kind: "research"},
+	}, nil, nil, nil)
+	require.NoError(t, err)
+	var output bytes.Buffer
+	renderer := ui.NewTextRenderer(&output, ui.NewProjector(planned))
+
+	for _, event := range []debuglog.Event{
+		{Kind: debuglog.EventLifecycle, Action: "session.open", Status: debuglog.StatusStarted, BlockAddress: "research.static.builder", Session: debuglog.SessionCollection},
+		{Kind: debuglog.EventMessage, Action: "assistant.message", BlockAddress: "research.static.builder", Session: debuglog.SessionCollection, Content: "DCF complete"},
+		{Kind: debuglog.EventLifecycle, Action: "session.open", Status: debuglog.StatusStarted, BlockAddress: "research.static.juror", Session: debuglog.SessionResearch},
+		{Kind: debuglog.EventMessage, Action: "assistant.message", BlockAddress: "research.static.juror", Session: debuglog.SessionResearch, Content: "review complete"},
+	} {
+		renderer.Observe(event)
+	}
+
+	text := output.String()
+	assert.Contains(t, text, "[collection] REPLYING DCF complete")
+	assert.Contains(t, text, "[research] REPLYING review complete")
+	assert.NotContains(t, text, "[collection_qc]")
+	assert.NotContains(t, text, "[final_qc]")
+	assert.NotContains(t, text, "[revision]")
+}
+
 func TestTextRendererShowsRunDAGAndMeaningfulTransitions(t *testing.T) {
 	t.Parallel()
 	runDirectory := testRunDirectory(t, "run-42")

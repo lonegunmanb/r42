@@ -53,6 +53,40 @@ func TestTUIModelShowsRunDAGCurrentActivityAndTokenTotal(t *testing.T) {
 	assert.Contains(t, view, "checking source dates")
 }
 
+func TestTUIModelShowsOnlyCreatedSinglePhaseSessions(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{
+		{Address: "research.static.builder", Kind: "research"},
+		{Address: "research.static.juror", Kind: "research"},
+	}, nil, nil, nil)
+	require.NoError(t, err)
+	projector := ui.NewProjector(planned)
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventMessage, Action: "assistant.message", Sequence: 1,
+		BlockAddress: "research.static.builder", Session: debuglog.SessionCollection, Content: "DCF complete",
+	})
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventMessage, Action: "assistant.message", Sequence: 2,
+		BlockAddress: "research.static.juror", Session: debuglog.SessionResearch, Content: "review complete",
+	})
+	model := resizeTUI(t, ui.NewTUIModel(projector, nil), 140, 32)
+
+	builderView := model.View()
+	model = updateTUI(t, model, tea.KeyMsg{Type: tea.KeyDown})
+	jurorView := model.View()
+
+	assert.Contains(t, builderView, "Phase: collection")
+	assert.Contains(t, builderView, "[collection] REPLYING DCF complete")
+	assert.Contains(t, jurorView, "Phase: research")
+	assert.Contains(t, jurorView, "[research] REPLYING review complete")
+	for _, view := range []string{builderView, jurorView} {
+		assert.NotContains(t, view, "collection_qc")
+		assert.NotContains(t, view, "final_qc")
+		assert.NotContains(t, view, "revision")
+	}
+}
+
 func TestTUIModelAdjustsResearchTotalForMaterializedDynamicTasks(t *testing.T) {
 	t.Parallel()
 	runDirectory := testRunDirectory(t, "run-42")

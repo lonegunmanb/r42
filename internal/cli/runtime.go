@@ -59,7 +59,8 @@ type SessionOpener interface {
 }
 
 type RuntimeOptions struct {
-	Sessions SessionOpener
+	Sessions       SessionOpener
+	StarlarkRunner starlarkRunner
 }
 
 type Engine struct {
@@ -212,6 +213,7 @@ func (e *Engine) apply(
 		contextValues: planned.Context(), localExpressions: planned.LocalExpressions(),
 		sessionStallTimeout: effectiveSessionStallTimeout(options.SessionStallTimeout),
 		artifactRegistry:    artifactpkg.NewRegistry(),
+		starlarkRunner:      e.options.StarlarkRunner,
 	}
 	runner := executor.New(factory, nil)
 	outputs, applyErr := runner.Apply(ctx, planned, options.Parallelism)
