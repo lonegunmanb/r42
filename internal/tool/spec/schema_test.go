@@ -4,6 +4,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/ext/typeexpr"
@@ -46,6 +47,7 @@ external_tool "search_catalog" {
   })
 }
 `)
+
 	require.NoError(t, config.RunPlan())
 
 	blocks := golden.Blocks[*toolspec.ExternalToolBlock](config)
@@ -64,6 +66,61 @@ external_tool "search_catalog" {
 	}))
 	require.NoError(t, err)
 	assert.True(t, cty.NumberIntVal(20).RawEquals(actual.GetAttr("limit")))
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestStarlarkToolBlockDecodesDefaultsAndUsageContract(t *testing.T) {
+	configValue := parseToolConfig(t, `
+starlark_tool "calculator" {
+  description = "Execute isolated numerical Starlark programs."
+}
+`)
+
+	require.NoError(t, configValue.RunPlan())
+	blocks := golden.Blocks[*toolspec.StarlarkToolBlock](configValue)
+	require.Len(t, blocks, 1)
+	block := blocks[0]
+	assert.Equal(t, 1_000_000, block.MaxSteps)
+	assert.Equal(t, 5*time.Second, block.Timeout)
+	assert.Equal(t, 65_536, block.MaxSourceBytes)
+	assert.Equal(t, 1_048_576, block.MaxDataBytes)
+	assert.Equal(t, 1_048_576, block.MaxResultBytes)
+	assert.Equal(t, 16_384, block.MaxStdoutBytes)
+	assert.Equal(t, 134_217_728, block.MemoryLimit)
+	assert.Contains(t, block.ModelDescription(), "https://github.com/google/starlark-go/blob/master/doc/spec.md")
+	assert.Contains(t, block.ModelDescription(), "https://github.com/google/starlark-go")
+	assert.Contains(t, block.ModelDescription(), "https://pkg.go.dev/go.starlark.net/starlark")
+	assert.Contains(t, block.ModelDescription(), "https://bazel.build/rules/language")
+
+	address, ok := config.AddressFromValue(block.Value())
+	require.True(t, ok)
+	assert.Equal(t, config.AddressKindStarlark, address.Kind)
+	assert.Equal(t, "starlark_tool.calculator", address.Value)
+	assert.Regexp(t, `^tool_starlark_tool_[a-z]+_[0-9a-f-]{36}$`, block.Id())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestStarlarkToolBlockRejectsResourceLimits(t *testing.T) {
+	tests := []struct {
+		name          string
+		attribute     string
+		expectedError string
+	}{
+		{name: "steps", attribute: "max_steps = 10000001", expectedError: "starlark tool max_steps must not exceed 10000000"},
+		{name: "timeout", attribute: `timeout = "31s"`, expectedError: "starlark tool timeout must not exceed 30s"},
+		{name: "source", attribute: "max_source_bytes = 262145", expectedError: "starlark tool max_source_bytes must not exceed 262144"},
+		{name: "data", attribute: "max_data_bytes = 8388609", expectedError: "starlark tool max_data_bytes must not exceed 8388608"},
+		{name: "result", attribute: "max_result_bytes = 8388609", expectedError: "starlark tool max_result_bytes must not exceed 8388608"},
+		{name: "stdout", attribute: "max_stdout_bytes = 65537", expectedError: "starlark tool max_stdout_bytes must not exceed 65536"},
+		{name: "memory", attribute: "memory_limit = 268435457", expectedError: "starlark tool memory_limit must not exceed 268435456"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configValue := parseToolConfig(t, "starlark_tool \"calculator\" {\n  description = \"Calculator\"\n  "+tt.attribute+"\n}")
+			assert.ErrorContains(t, configValue.RunPlan(), tt.expectedError)
+		})
+	}
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -419,6 +476,10 @@ external_tool "lookup" {
   input_type = object({ query = string })
   output_type = string
 }
+
+starlark_tool "calculator" {
+  description = "Calculate values."
+}
 `)
 	require.NoError(t, configValue.RunPlan())
 
@@ -440,6 +501,12 @@ external_tool "lookup" {
 			expectedKind: config.AddressKindExternal,
 			expected:     "external_tool.lookup",
 		},
+		{
+			name:         "starlark tool",
+			value:        golden.Blocks[*toolspec.StarlarkToolBlock](configValue)[0].Value(),
+			expectedKind: config.AddressKindStarlark,
+			expected:     "starlark_tool.calculator",
+		},
 	}
 
 	for _, tt := range tests {
@@ -458,6 +525,9 @@ external_tool "lookup" {
 	externalAddress, ok := config.AddressFromValue(evaluationContext.Variables["external_tool"].GetAttr("lookup"))
 	require.True(t, ok)
 	assert.Equal(t, "external_tool.lookup", externalAddress.Value)
+	starlarkAddress, ok := config.AddressFromValue(evaluationContext.Variables["starlark_tool"].GetAttr("calculator"))
+	require.True(t, ok)
+	assert.Equal(t, "starlark_tool.calculator", starlarkAddress.Value)
 
 	goValue := evaluationContext.Variables["go_tool"].GetAttr("finish")
 	require.True(t, goValue.Type().HasAttribute("description"))
@@ -480,6 +550,7 @@ external_tool "lookup" {
 	}{
 		{name: "go tool traversal", expression: "tool_name(go_tool.finish)", expectedPrefix: "tool_go_tool_finish_"},
 		{name: "external tool traversal", expression: "tool_name(external_tool.lookup)", expectedPrefix: "tool_external_tool_lookup_"},
+		{name: "starlark tool traversal", expression: "tool_name(starlark_tool.calculator)", expectedPrefix: "tool_starlark_tool_calculat_"},
 	}
 	for _, tt := range referenceTests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -567,6 +638,7 @@ func parseToolConfigWithPrefix(t *testing.T, canonicalPrefix, source string) *to
 	registerToolBlocks.Do(func() {
 		golden.RegisterBlock(new(toolspec.GoToolBlock))
 		golden.RegisterBlock(new(toolspec.ExternalToolBlock))
+		golden.RegisterBlock(new(toolspec.StarlarkToolBlock))
 	})
 
 	syntaxFile, diagnostics := hclsyntax.ParseConfig([]byte(source), "tool.r42", hcl.InitialPos)

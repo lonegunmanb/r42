@@ -358,6 +358,7 @@ func registerResearchBlocks() {
 		golden.RegisterBlock(new(provider.ModelProviderBlock))
 		golden.RegisterBlock(new(toolspec.GoToolBlock))
 		golden.RegisterBlock(new(toolspec.ExternalToolBlock))
+		golden.RegisterBlock(new(toolspec.StarlarkToolBlock))
 		golden.RegisterBlock(new(researchspec.ResearchBlock))
 		golden.RegisterBlock(new(researchspec.DynamicResearchBlock))
 		golden.RegisterBlock(new(modulespec.ModuleBlock))

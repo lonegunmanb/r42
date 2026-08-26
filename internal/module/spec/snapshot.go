@@ -525,6 +525,18 @@ func BuildToolRegistry(
 		}
 		registry[definition.ID] = definition
 	}
+	for _, block := range golden.Blocks[*toolspec.StarlarkToolBlock](planning) {
+		definition := internalplan.ToolSpec{
+			ID: block.Id(), Address: block.CanonicalAddress(), Kind: string(config.AddressKindStarlark),
+			Description: block.ModelDescription(), Origin: BlockOrigin(block.HclBlock()),
+			Starlark: &internalplan.StarlarkToolSpec{
+				MaxSteps: block.MaxSteps, TimeoutNanos: int64(block.Timeout), MaxSourceBytes: block.MaxSourceBytes,
+				MaxDataBytes: block.MaxDataBytes, MaxResultBytes: block.MaxResultBytes,
+				MaxStdoutBytes: block.MaxStdoutBytes, MemoryLimit: block.MemoryLimit,
+			},
+		}
+		registry[definition.ID] = definition
+	}
 	for _, module := range modules {
 		childRegistry := module.Saved.Tools()
 		for _, output := range module.Outputs {
@@ -631,6 +643,9 @@ func validateToolUseOwnership(
 				return fmt.Errorf("tool_use %q input field %q is not declared by the typed tool", toolUse.Name, field)
 			}
 			unmarked, _ := value.UnmarkDeep()
+			if definition.Kind == string(config.AddressKindStarlark) && !unmarked.Type().Equals(cty.String) {
+				return fmt.Errorf("tool_use %q input field %q does not match typed tool input", toolUse.Name, field)
+			}
 			if _, err = convert.Convert(unmarked, inputType.AttributeType(field)); err != nil {
 				return fmt.Errorf("tool_use %q input field %q does not match typed tool input: %w", toolUse.Name, field, err)
 			}
@@ -664,6 +679,8 @@ func plannedToolInputType(definition internalplan.ToolSpec) (cty.Type, error) {
 			return cty.NilType, diagnostics
 		}
 		return inputType, nil
+	case string(config.AddressKindStarlark):
+		return cty.Object(map[string]cty.Type{"code": cty.String, "data_json": cty.String}), nil
 	default:
 		return cty.NilType, fmt.Errorf("typed tool kind %q is not supported", definition.Kind)
 	}

@@ -643,6 +643,52 @@ research "static" "consumer" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
+func TestStarlarkToolSurvivesModuleExportAndPlanRoundTrip(t *testing.T) {
+	registerSchemas()
+	root := t.TempDir()
+	child := filepath.Join(root, "child")
+	require.NoError(t, os.Mkdir(child, 0o755))
+	writeR42(t, child, "main.r42.hcl", `
+starlark_tool "calculator" {
+  description      = "Calculate values."
+  max_steps        = 42
+  timeout          = "6s"
+  max_source_bytes = 99
+}
+
+output "calculator_id" { value = starlark_tool.calculator.id }
+`)
+	writeR42(t, root, "main.r42.hcl", `
+module "child" { source = "./child" }
+
+research "static" "consumer" {
+  model         = "test-model"
+  system_prompt = "Use the calculator."
+  tool_ids      = [module.child.calculator_id]
+}
+`)
+
+	planned, err := planSource(root, executor.ResearchConfigOptions{})
+	require.NoError(t, err)
+	encoded, err := internalplan.Marshal(planned.Saved)
+	require.NoError(t, err)
+	roundTripped, err := internalplan.Unmarshal(encoded)
+	require.NoError(t, err)
+
+	tools := roundTripped.Tools()
+	require.Len(t, tools, 1)
+	for _, definition := range tools {
+		assert.Equal(t, "starlark", definition.Kind)
+		assert.Equal(t, "module.child.starlark_tool.calculator", definition.Address)
+		require.NotNil(t, definition.Starlark)
+		assert.Equal(t, 42, definition.Starlark.MaxSteps)
+		assert.Equal(t, int64(6*time.Second), definition.Starlark.TimeoutNanos)
+		assert.Equal(t, 99, definition.Starlark.MaxSourceBytes)
+		assert.Contains(t, definition.Description, "https://pkg.go.dev/go.starlark.net/starlark")
+	}
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
 func TestResearchConfigRejectsUnknownTypedToolIDsDuringPlan(t *testing.T) {
 	registerSchemas()
 	golden.RegisterBlock(new(researchspec.ResearchBlock))
@@ -916,6 +962,55 @@ research "static" "source" {
 	_, err := planSource(directory, executor.ResearchConfigOptions{})
 
 	require.NoError(t, err)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestStarlarkToolUseRequiresFixedStringInputs(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		expectedError string
+	}{
+		{
+			name:  "valid fixed inputs",
+			input: `input = { code = "result = 1", data_json = "null" }`,
+		},
+		{
+			name:          "unknown input",
+			input:         `input = { code = "result = 1", data_json = "null", extra = "no" }`,
+			expectedError: `input field "extra" is not declared`,
+		},
+		{
+			name:          "wrong input type",
+			input:         `input = { code = 1, data_json = "null" }`,
+			expectedError: `input field "code" does not match typed tool input`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			directory := t.TempDir()
+			writeR42(t, directory, "main.r42.hcl", `
+starlark_tool "calculator" { description = "Calculate values." }
+
+research "static" "source" {
+  model         = "test-model"
+  system_prompt = "Calculate."
+  tool_use "calculate" {
+    tool_id = starlark_tool.calculator.id
+    `+tt.input+`
+  }
+}
+`)
+
+			_, err := planSource(directory, executor.ResearchConfigOptions{})
+			if tt.expectedError == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tt.expectedError)
+		})
+	}
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

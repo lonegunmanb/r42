@@ -20,6 +20,7 @@ const (
 	AddressKindUnknown  AddressKind = ""
 	AddressKindGo       AddressKind = "go"
 	AddressKindExternal AddressKind = "external"
+	AddressKindStarlark AddressKind = "starlark"
 	AddressKindBuiltin  AddressKind = "builtin"
 )
 
@@ -190,6 +191,8 @@ func validAddress(address Address) bool {
 		return hasNamedPrefix(address.Value, "go_tool.")
 	case AddressKindExternal:
 		return hasNamedPrefix(address.Value, "external_tool.")
+	case AddressKindStarlark:
+		return hasNamedPrefix(address.Value, "starlark_tool.")
 	case AddressKindBuiltin:
 		return address.Value != ""
 	default:

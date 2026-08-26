@@ -56,7 +56,19 @@ type ToolSpec struct {
 	InputTypeExpression  string               `json:"input_type_expression,omitempty"`
 	OutputTypeExpression string               `json:"output_type_expression,omitempty"`
 	Postconditions       []corespec.Condition `json:"postconditions,omitempty"`
+	Starlark             *StarlarkToolSpec    `json:"starlark,omitempty"`
 	Origin               Origin               `json:"origin,omitzero"`
+}
+
+// StarlarkToolSpec is the immutable resource configuration for a calculator.
+type StarlarkToolSpec struct {
+	MaxSteps       int   `json:"max_steps"`
+	TimeoutNanos   int64 `json:"timeout_nanoseconds"`
+	MaxSourceBytes int   `json:"max_source_bytes"`
+	MaxDataBytes   int   `json:"max_data_bytes"`
+	MaxResultBytes int   `json:"max_result_bytes"`
+	MaxStdoutBytes int   `json:"max_stdout_bytes"`
+	MemoryLimit    int   `json:"memory_limit"`
 }
 
 type Plan struct {
@@ -262,6 +274,10 @@ func cloneTools(source map[string]ToolSpec) map[string]ToolSpec {
 	for id, tool := range source {
 		tool.Program = slices.Clone(tool.Program)
 		tool.Postconditions = slices.Clone(tool.Postconditions)
+		if tool.Starlark != nil {
+			settings := *tool.Starlark
+			tool.Starlark = &settings
+		}
 		result[id] = tool
 	}
 	return result
