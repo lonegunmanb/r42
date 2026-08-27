@@ -2144,6 +2144,9 @@ func (s *directToolInternalSession) Resume(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	// Probe, not a wait: by this point handlerDone is already closed, so the
+	// default branch is only reachable if the wait above returned via ctx.Done
+	// (which already returned). Kept so the line-1497 assertion stays meaningful.
 	select {
 	case <-s.handlerDone:
 	default:
