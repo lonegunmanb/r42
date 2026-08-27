@@ -390,6 +390,7 @@ func negotiateJSONL(ctx context.Context, input io.Reader, output io.Writer, json
 	if !jsonlMode {
 		return ctx, nil
 	}
+	ignoreBrokenPipeSignal()
 	closableInput, ok := input.(io.ReadCloser)
 	if !ok {
 		return ctx, fmt.Errorf("jsonl mode requires closable stdin")
