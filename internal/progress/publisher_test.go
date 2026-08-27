@@ -39,7 +39,7 @@ func decodeLine(line string) (map[string]any, error) {
 // frames() can still inspect the encoded output.
 type publisherHarness struct {
 	publisher  *progress.Publisher
-	buffer     *bytes.Buffer
+	buffer     *syncBuffer
 	projector  *progress.Projector
 	warnings   []string
 	warningsMu sync.Mutex
@@ -47,7 +47,7 @@ type publisherHarness struct {
 
 func newPublisherHarness(t *testing.T, encoderWriter ioWriter, options ...progress.PublisherOption) *publisherHarness {
 	t.Helper()
-	buffer := new(bytes.Buffer)
+	buffer := new(syncBuffer)
 	var writer ioWriter = buffer
 	if encoderWriter != nil {
 		writer = &mirrorWriter{primary: encoderWriter, mirror: buffer}
@@ -65,10 +65,30 @@ func newPublisherHarness(t *testing.T, encoderWriter ioWriter, options ...progre
 	return harness
 }
 
+// syncBuffer is a bytes.Buffer protected by a mutex so that concurrent test
+// goroutines can safely call Write (from the publisher worker) and String (from
+// the test assertions) without a data race.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (sb *syncBuffer) Write(p []byte) (int, error) {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.Write(p)
+}
+
+func (sb *syncBuffer) String() string {
+	sb.mu.Lock()
+	defer sb.mu.Unlock()
+	return sb.buf.String()
+}
+
 // mirrorWriter forwards writes to primary and mirrors them into mirror.
 type mirrorWriter struct {
 	primary ioWriter
-	mirror  *bytes.Buffer
+	mirror  *syncBuffer
 }
 
 func (w *mirrorWriter) Write(payload []byte) (int, error) {
