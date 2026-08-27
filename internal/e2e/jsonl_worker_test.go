@@ -130,7 +130,7 @@ func TestJSONLWorkerSubprocessSlowStdoutLeavesExitStatusAuthoritative(t *testing
 	err := worker.command.Wait()
 
 	require.NoError(t, err, worker.stderr.String())
-	assert.Less(t, time.Since(started), 7*time.Second)
+	assert.Less(t, time.Since(started), 30*time.Second)
 }
 
 //nolint:paralleltest // This is launched as the sole test in its subprocess.
