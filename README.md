@@ -207,7 +207,7 @@ termination barrier exceeds the bounded cleanup window, r42 fails the research
 block instead of starting overlapping work. Session Close is bounded separately
 so a stuck SDK disconnect cannot prevent the CLI from exiting.
 
-Apply selects its progress UI with `--ui=auto|tui|repl` (default `auto`). An
+Apply selects its progress UI with `--ui=auto|tui|repl|jsonl` (default `auto`). An
 interactive terminal at least 50 columns by 12 rows uses the Bubble Tea TUI;
 redirected output, CI, and unsupported terminals use the line-oriented REPL
 renderer. The TUI header shows the run directory, expanded research-task
@@ -235,6 +235,28 @@ inspection. Both progress renderers write to stderr. For a single JSON document
 that is safe to pipe, use `r42 output`; for example,
 `r42 output | jq -r '.report_path'`. Use `--ui=repl` to force stable
 line-oriented progress or `--ui=tui` to require an interactive terminal.
+
+### JSONL worker mode
+
+`r42 apply --ui=jsonl` is a bidirectional local-process protocol for a
+supervising worker. Its stdout contains JSONL protocol frames only; it never
+contains the pretty Plan or Apply outputs. stderr remains the diagnostic stream.
+
+The worker reads the initial `hello` frame, writes exactly one selection on
+stdin, then waits for `ready` before treating subsequent stdout lines as
+progress records:
+
+```json
+{"type":"select","handshake_version":1,"schema_version":1}
+```
+
+After `ready`, r42 emits an initial `run_snapshot`, complete `node_upsert`
+records, dynamic-node announcements, and best-effort `timeline_append` records.
+It may coalesce, reorder, or drop progress records under consumer backpressure.
+`run_completed`, `run_failed`, and `run_canceled` are also best effort; the
+worker must use the r42 process exit code as the final outcome and mark progress
+incomplete if no terminal record arrives. The worker should retain its own
+durable history and cap a browser timeline at 200 entries per block.
 
 ## Variables, locals, and outputs
 
