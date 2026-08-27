@@ -85,6 +85,12 @@ variable "nullable_value" {
   nullable = true
 }
 
+variable "non_nullable_value" {
+  type     = string
+  default  = "fallback"
+  nullable = false
+}
+
 variable "secret_value" {
   type      = string
   default   = "never-print-this-secret"
@@ -108,23 +114,24 @@ variable "secret_value" {
 	}
 	require.NoError(t, json.Unmarshal(first, &decoded))
 	assert.Equal(t, 1, decoded.SchemaVersion)
-	require.Len(t, decoded.Variables, 10)
+	require.Len(t, decoded.Variables, 11)
 	assert.Equal(t, []string{
-		"bool_value", "list_value", "map_value", "nullable_value", "number_value",
+		"bool_value", "list_value", "map_value", "non_nullable_value", "nullable_value", "number_value",
 		"object_value", "secret_value", "set_value", "tuple_value", "z_required",
 	}, variableNames(decoded.Variables))
 
 	expectedTypes := map[string]string{
-		"bool_value":     "bool",
-		"list_value":     "list(string)",
-		"map_value":      "map(number)",
-		"nullable_value": "number",
-		"number_value":   "number",
-		"object_value":   "object({a_optional=optional(string),nested=optional(object({enabled=optional(bool)})),z_required=string})",
-		"secret_value":   "string",
-		"set_value":      "set(string)",
-		"tuple_value":    "tuple([string,number,bool])",
-		"z_required":     "string",
+		"bool_value":         "bool",
+		"list_value":         "list(string)",
+		"map_value":          "map(number)",
+		"non_nullable_value": "string",
+		"nullable_value":     "number",
+		"number_value":       "number",
+		"object_value":       "object({a_optional=optional(string),nested=optional(object({enabled=optional(bool)})),z_required=string})",
+		"secret_value":       "string",
+		"set_value":          "set(string)",
+		"tuple_value":        "tuple([string,number,bool])",
+		"z_required":         "string",
 	}
 	for _, variable := range decoded.Variables {
 		assert.Equal(t, expectedTypes[variable.Name], variable.Type)
@@ -144,7 +151,7 @@ variable "secret_value" {
 	}
 	assert.JSONEq(t, `{
   "name":"z_required","description":"Required input","type":"string",
-  "required":true,"nullable":false,"sensitive":false,"has_default":false,
+  "required":true,"nullable":true,"sensitive":false,"has_default":false,
   "default":null,"default_redacted":false
 }`, string(byName["z_required"]))
 	assert.JSONEq(t, `{
@@ -153,8 +160,13 @@ variable "secret_value" {
   "default":null,"default_redacted":false
 }`, string(byName["nullable_value"]))
 	assert.JSONEq(t, `{
+  "name":"non_nullable_value","description":null,"type":"string",
+  "required":false,"nullable":false,"sensitive":false,"has_default":true,
+  "default":"fallback","default_redacted":false
+}`, string(byName["non_nullable_value"]))
+	assert.JSONEq(t, `{
   "name":"secret_value","description":null,"type":"string",
-  "required":false,"nullable":false,"sensitive":true,"has_default":true,
+  "required":false,"nullable":true,"sensitive":true,"has_default":true,
   "default":null,"default_redacted":true
 }`, string(byName["secret_value"]))
 	assert.JSONEq(t, `{"a":1,"b":2}`, string(defaultFor(t, decoded.Variables, "map_value")))

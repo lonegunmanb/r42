@@ -96,11 +96,11 @@ func inspectVariable(block *golden.HclBlock) (Variable, error) {
 	if err != nil {
 		return Variable{}, err
 	}
-	nullable, err := optionalBoolAttribute(name, "nullable", attributes)
+	nullable, err := optionalBoolAttribute(name, "nullable", true, attributes)
 	if err != nil {
 		return Variable{}, err
 	}
-	sensitive, err := optionalBoolAttribute(name, "sensitive", attributes)
+	sensitive, err := optionalBoolAttribute(name, "sensitive", false, attributes)
 	if err != nil {
 		return Variable{}, err
 	}
@@ -161,11 +161,12 @@ func optionalStringAttribute(
 func optionalBoolAttribute(
 	variableName string,
 	attributeName string,
+	defaultValue bool,
 	attributes map[string]*golden.HclAttribute,
 ) (bool, error) {
 	attribute, exists := attributes[attributeName]
 	if !exists {
-		return false, nil
+		return defaultValue, nil
 	}
 	value, diagnostics := attribute.Expr.Value(nil)
 	if diagnostics.HasErrors() || value.IsNull() || !value.IsWhollyKnown() || !value.Type().Equals(cty.Bool) {

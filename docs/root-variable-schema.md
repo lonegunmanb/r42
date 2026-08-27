@@ -79,7 +79,7 @@ The complete version 1 variable record is:
   "description": "Output language.",
   "type": "string",
   "required": false,
-  "nullable": false,
+  "nullable": true,
   "sensitive": false,
   "has_default": true,
   "default": "zh-CN",
@@ -111,6 +111,7 @@ required = !has_default
 
 `nullable` is distinct from `required` and preserves r42's input semantics:
 
+- An omitted `nullable` declaration defaults to `true`, matching Terraform.
 - `required: true` requires a caller-provided non-null value.
 - For a non-required variable, `nullable: true` allows a caller to explicitly
   set the variable to `null`.
@@ -190,7 +191,7 @@ the default's evaluated value or source text.
       "description": null,
       "type": "string",
       "required": false,
-      "nullable": false,
+      "nullable": true,
       "sensitive": false,
       "has_default": true,
       "default": "zh-CN",
@@ -201,7 +202,7 @@ the default's evaluated value or source text.
       "description": "Model provider configuration.",
       "type": "object({ api_key_ref = optional(string), endpoint = string })",
       "required": true,
-      "nullable": false,
+      "nullable": true,
       "sensitive": true,
       "has_default": false,
       "default": null,
@@ -212,7 +213,7 @@ the default's evaluated value or source text.
       "description": "The topic to research.",
       "type": "string",
       "required": true,
-      "nullable": false,
+      "nullable": true,
       "sensitive": false,
       "has_default": false,
       "default": null,

@@ -208,12 +208,12 @@ variable "language" {
   "variables": [
     {
       "name":"language","description":null,"type":"string","required":false,
-      "nullable":false,"sensitive":false,"has_default":true,"default":"zh-CN",
+      "nullable":true,"sensitive":false,"has_default":true,"default":"zh-CN",
       "default_redacted":false
     },
     {
       "name":"topic","description":null,"type":"string","required":true,
-      "nullable":false,"sensitive":false,"has_default":false,"default":null,
+      "nullable":true,"sensitive":false,"has_default":false,"default":null,
       "default_redacted":false
     }
   ]
