@@ -104,6 +104,14 @@ func inspectVariable(block *golden.HclBlock) (Variable, error) {
 	if err != nil {
 		return Variable{}, err
 	}
+	typeDefaults := defaults
+	if sensitive {
+		typeDefaults = nil
+	}
+	formattedType, err := formatType(variableType, typeDefaults)
+	if err != nil {
+		return Variable{}, fmt.Errorf("variable %q type: %w", name, err)
+	}
 
 	defaultJSON := json.RawMessage("null")
 	defaultAttribute, hasDefault := attributes["default"]
@@ -122,7 +130,7 @@ func inspectVariable(block *golden.HclBlock) (Variable, error) {
 		converted, convertErr := convert.Convert(value, variableType)
 		if convertErr != nil {
 			return Variable{}, fmt.Errorf(
-				"variable %q default is incompatible with %s", name, formatType(variableType),
+				"variable %q default is incompatible with %s", name, formattedType,
 			)
 		}
 		if !sensitive {
@@ -135,7 +143,7 @@ func inspectVariable(block *golden.HclBlock) (Variable, error) {
 	}
 
 	return Variable{
-		Name: name, Description: description, Type: formatType(variableType),
+		Name: name, Description: description, Type: formattedType,
 		Required: !hasDefault, Nullable: nullable, Sensitive: sensitive,
 		HasDefault: hasDefault, Default: defaultJSON, DefaultRedacted: defaultRedacted,
 	}, nil
@@ -175,31 +183,38 @@ func optionalBoolAttribute(
 	return value.True(), nil
 }
 
-func formatType(valueType cty.Type) string {
+func formatType(valueType cty.Type, defaults *typeexpr.Defaults) (string, error) {
 	switch valueType {
 	case cty.String:
-		return "string"
+		return "string", nil
 	case cty.Number:
-		return "number"
+		return "number", nil
 	case cty.Bool:
-		return "bool"
+		return "bool", nil
 	}
 	if valueType.IsListType() {
-		return "list(" + formatType(valueType.ElementType()) + ")"
+		element, err := formatType(valueType.ElementType(), childDefaults(defaults, ""))
+		return "list(" + element + ")", err
 	}
 	if valueType.IsSetType() {
-		return "set(" + formatType(valueType.ElementType()) + ")"
+		element, err := formatType(valueType.ElementType(), childDefaults(defaults, ""))
+		return "set(" + element + ")", err
 	}
 	if valueType.IsMapType() {
-		return "map(" + formatType(valueType.ElementType()) + ")"
+		element, err := formatType(valueType.ElementType(), childDefaults(defaults, ""))
+		return "map(" + element + ")", err
 	}
 	if valueType.IsTupleType() {
 		elements := valueType.TupleElementTypes()
 		formatted := make([]string, len(elements))
 		for index, element := range elements {
-			formatted[index] = formatType(element)
+			var err error
+			formatted[index], err = formatType(element, childDefaults(defaults, fmt.Sprint(index)))
+			if err != nil {
+				return "", err
+			}
 		}
-		return "tuple([" + strings.Join(formatted, ",") + "])"
+		return "tuple([" + strings.Join(formatted, ",") + "])", nil
 	}
 
 	attributeTypes := valueType.AttributeTypes()
@@ -211,11 +226,38 @@ func formatType(valueType cty.Type) string {
 	optional := valueType.OptionalAttributes()
 	formatted := make([]string, 0, len(attributeNames))
 	for _, name := range attributeNames {
-		attributeType := formatType(attributeTypes[name])
+		attributeType, err := formatType(attributeTypes[name], childDefaults(defaults, name))
+		if err != nil {
+			return "", err
+		}
 		if _, isOptional := optional[name]; isOptional {
-			attributeType = "optional(" + attributeType + ")"
+			if defaultValue, exists := lookupDefaultValue(defaults, name); exists {
+				encoded, err := ctyjson.Marshal(defaultValue, defaultValue.Type())
+				if err != nil {
+					// note: untested because defaults are known values conforming to validated cty types.
+					return "", fmt.Errorf("encode optional attribute %q default: %w", name, err)
+				}
+				attributeType = "optional(" + attributeType + "," + string(encoded) + ")"
+			} else {
+				attributeType = "optional(" + attributeType + ")"
+			}
 		}
 		formatted = append(formatted, name+"="+attributeType)
 	}
-	return "object({" + strings.Join(formatted, ",") + "})"
+	return "object({" + strings.Join(formatted, ",") + "})", nil
+}
+
+func childDefaults(defaults *typeexpr.Defaults, name string) *typeexpr.Defaults {
+	if defaults == nil {
+		return nil
+	}
+	return defaults.Children[name]
+}
+
+func lookupDefaultValue(defaults *typeexpr.Defaults, name string) (cty.Value, bool) {
+	if defaults == nil {
+		return cty.NilVal, false
+	}
+	value, exists := defaults.DefaultValues[name]
+	return value, exists
 }

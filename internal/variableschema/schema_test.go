@@ -70,6 +70,7 @@ variable "object_value" {
   type = object({
     z_required = string
     a_optional = optional(string)
+    label = optional(string, "fallback")
     nested = optional(object({
       enabled = optional(bool, true)
     }), {})
@@ -127,7 +128,7 @@ variable "secret_value" {
 		"non_nullable_value": "string",
 		"nullable_value":     "number",
 		"number_value":       "number",
-		"object_value":       "object({a_optional=optional(string),nested=optional(object({enabled=optional(bool)})),z_required=string})",
+		"object_value":       "object({a_optional=optional(string),label=optional(string,\"fallback\"),nested=optional(object({enabled=optional(bool,true)}),{\"enabled\":null}),z_required=string})",
 		"secret_value":       "string",
 		"set_value":          "set(string)",
 		"tuple_value":        "tuple([string,number,bool])",
@@ -172,8 +173,95 @@ variable "secret_value" {
 	assert.JSONEq(t, `{"a":1,"b":2}`, string(defaultFor(t, decoded.Variables, "map_value")))
 	assert.JSONEq(t, `["one","two"]`, string(defaultFor(t, decoded.Variables, "set_value")))
 	assert.JSONEq(t, `{
-	  "a_optional":null,"nested":{"enabled":true},"z_required":"present"
+	  "a_optional":null,"label":"fallback","nested":{"enabled":true},"z_required":"present"
 }`, string(defaultFor(t, decoded.Variables, "object_value")))
+}
+
+func TestInspectRedactsSensitiveOptionalAttributeDefaults(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	writeConfig(t, directory, "variables.r42.hcl", `
+variable "credentials" {
+  type = object({
+    token = optional(string, "never-print-this-secret")
+  })
+  sensitive = true
+}
+`)
+
+	document, err := variableschema.Inspect(t.Context(), directory)
+	require.NoError(t, err)
+	encoded, err := variableschema.Marshal(document)
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(encoded), "never-print-this-secret")
+	require.Len(t, document.Variables, 1)
+	assert.Equal(t, "object({token=optional(string)})", document.Variables[0].Type)
+}
+
+func TestInspectSensitiveOptionalAttributeDefaultDiagnosticsDoNotLeakValues(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	writeConfig(t, directory, "variables.r42.hcl", `
+variable "credentials" {
+  type = object({
+    token = optional(number, "never-print-this-secret")
+  })
+  sensitive = true
+}
+`)
+
+	_, err := variableschema.Inspect(t.Context(), directory)
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "never-print-this-secret")
+}
+
+func TestInspectPreservesOptionalAttributeDefaultsThroughContainerTypes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		typeExpr string
+		expected string
+	}{
+		{
+			name:     "list",
+			typeExpr: `list(object({ enabled = optional(bool, true) }))`,
+			expected: `list(object({enabled=optional(bool,true)}))`,
+		},
+		{
+			name:     "set",
+			typeExpr: `set(object({ enabled = optional(bool, true) }))`,
+			expected: `set(object({enabled=optional(bool,true)}))`,
+		},
+		{
+			name:     "map",
+			typeExpr: `map(object({ enabled = optional(bool, true) }))`,
+			expected: `map(object({enabled=optional(bool,true)}))`,
+		},
+		{
+			name:     "tuple",
+			typeExpr: `tuple([string, object({ enabled = optional(bool, true) })])`,
+			expected: `tuple([string,object({enabled=optional(bool,true)})])`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			directory := t.TempDir()
+			writeConfig(t, directory, "variables.r42.hcl", `variable "input" { type = `+test.typeExpr+` }`)
+
+			document, err := variableschema.Inspect(t.Context(), directory)
+			require.NoError(t, err)
+			require.Len(t, document.Variables, 1)
+			assert.Equal(t, test.expected, document.Variables[0].Type)
+		})
+	}
 }
 
 func TestInspectRejectsInvalidVariableDeclarations(t *testing.T) {

@@ -155,7 +155,8 @@ Version 1 supports normalized expressions for these cty forms:
 - `map(<element type>)`
 - `tuple([<element type>, ...])`
 - `object({ <attribute> = <attribute type>, ... })`
-- `optional(<attribute type>)` for an object attribute
+- `optional(<attribute type>)` for an object attribute without a declared default
+- `optional(<attribute type>, <default>)` for an object attribute with a declared default
 
 The normalized formatter is semantic rather than source-preserving. Whitespace,
 line breaks, and original attribute order from the source must not affect the
@@ -163,6 +164,11 @@ output. Object attribute names are emitted in lexical order. Strings and
 attribute identifiers are rendered in a form accepted by HCL type expressions.
 HCL `typeexpr` requires object keys to be valid attribute identifiers, so
 declarations using other key forms are rejected during type validation.
+
+Optional attribute defaults are normalized as HCL-compatible constant
+expressions and retained in `type`. For example, `optional(string, "fallback")`
+remains `optional(string,"fallback")`; it is not reduced to
+`optional(string)`.
 
 ## 7. Defaults and Sensitive Values
 
@@ -178,7 +184,9 @@ the response sets `default: null` and `default_redacted: true`.
 
 Sensitive default material must also never appear in diagnostics. Error paths
 must report the variable name and the validation category without interpolating
-the default's evaluated value or source text.
+the default's evaluated value or source text. This applies to optional object
+attribute defaults inside `type` as well: for a sensitive variable, the type
+retains the optional attribute marker but omits its default argument.
 
 ## 8. Example
 
