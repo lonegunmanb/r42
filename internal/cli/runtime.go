@@ -1822,10 +1822,32 @@ func (s *recordingSession) sendWithStallWatchdog(
 		stopObserving := s.subscribeToAttempt(progress, handleEvent)
 		sendCtx, cancelSend := context.WithCancel(ctx)
 		completed := make(chan sessionSendResult, 1)
+		started := make(chan struct{})
 		go func(message sdk.MessageOptions) {
+			close(started)
 			event, err := s.Session.SendAndWait(sendCtx, message)
 			completed <- sessionSendResult{event: event, err: err}
 		}(prompt)
+		select {
+		case result := <-completed:
+			cancelSend()
+			if err := ctx.Err(); err != nil {
+				settled := make(chan sessionSendResult, 1)
+				settled <- result
+				cancelErr := s.stopCanceledAttempt(
+					ctx, cancelSend, settled, recovery, progress, stopObserving,
+				)
+				return nil, errors.Join(err, result.err, cancelErr)
+			}
+			stopObserving()
+			return result.event, result.err
+		case <-started:
+		case <-ctx.Done():
+			cancelErr := s.stopCanceledAttempt(
+				ctx, cancelSend, completed, recovery, progress, stopObserving,
+			)
+			return nil, errors.Join(ctx.Err(), cancelErr)
+		}
 		resetTimer(timer, s.effectiveStallTimeout(), s.lastActivity(progress))
 
 		attemptComplete := false
