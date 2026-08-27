@@ -2137,21 +2137,15 @@ func (s *directToolInternalSession) Abort(context.Context) error {
 func (s *directToolInternalSession) Resume(ctx context.Context) error {
 	// A fresh send replays the tracked typed tool, so production must not resume
 	// while the previous handler is still running. Wait for it to finish so the
-	// resumedBeforeToolFinished probe below observes the real ordering instead of
-	// a scheduling-dependent snapshot.
+	// resumedBeforeToolFinished flag records the real ordering instead of a
+	// scheduling-dependent snapshot.
 	select {
 	case <-s.handlerDone:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	// Probe, not a wait: by this point handlerDone is already closed, so the
-	// default branch is only reachable if the wait above returned via ctx.Done
-	// (which already returned). Kept so the line-1497 assertion stays meaningful.
-	select {
-	case <-s.handlerDone:
-	default:
-		s.resumedBeforeToolFinished.Store(true)
-	}
+	// handlerDone is closed here, so the resume happened after the tool finished.
+	s.resumedBeforeToolFinished.Store(false)
 	s.mu.Lock()
 	s.resumeCalls++
 	s.mu.Unlock()
