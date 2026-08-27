@@ -2134,7 +2134,16 @@ func (s *directToolInternalSession) Abort(context.Context) error {
 	return nil
 }
 
-func (s *directToolInternalSession) Resume(context.Context) error {
+func (s *directToolInternalSession) Resume(ctx context.Context) error {
+	// A fresh send replays the tracked typed tool, so production must not resume
+	// while the previous handler is still running. Wait for it to finish so the
+	// resumedBeforeToolFinished probe below observes the real ordering instead of
+	// a scheduling-dependent snapshot.
+	select {
+	case <-s.handlerDone:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	select {
 	case <-s.handlerDone:
 	default:
