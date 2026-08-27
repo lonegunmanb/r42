@@ -17,6 +17,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/lonegunmanb/r42/internal/plan"
+	"github.com/lonegunmanb/r42/internal/progress"
 	runui "github.com/lonegunmanb/r42/internal/ui"
 	"github.com/spf13/cobra"
 	"github.com/zclconf/go-cty/cty"
@@ -217,7 +218,15 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 				ctx = withDebugRun(ctx, debugState)
 				writeWarning(command.ErrOrStderr(), "debug output contains sensitive configuration, prompts, transcripts, and tool data")
 			}
+			jsonlMode := runui.Mode(uiMode) == runui.ModeJSONL
+			if !runui.Valid(runui.Mode(uiMode)) {
+				return &usageError{err: fmt.Errorf("invalid ui mode %q: want auto, tui, repl, or jsonl", uiMode)}
+			}
 			directory, modulesDirectory, err := openWorkingProject(runtime)
+			if err != nil {
+				return errors.Join(err, closeCommandDebug(command, debugState))
+			}
+			ctx, err = negotiateJSONL(ctx, command.InOrStdin(), command.OutOrStdout(), jsonlMode)
 			if err != nil {
 				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
@@ -245,7 +254,10 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 			if err != nil {
 				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
-			if err = writePlan(ctx, command.OutOrStdout(), planned.SavedPlan(), displayPath); err != nil {
+			if jsonlMode {
+				// stdout is reserved for the protocol; suppress the pretty
+				// Plan document.
+			} else if err = writePlan(ctx, command.OutOrStdout(), planned.SavedPlan(), displayPath); err != nil {
 				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
 			selectedMode, err := runui.ResolveMode(
@@ -255,13 +267,37 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 				return errors.Join(err, closeCommandDebug(command, debugState))
 			}
 			projector := runui.NewProjector(planned.SavedPlan())
-			if selectedMode == runui.ModeTUI {
+			switch selectedMode {
+			case runui.ModeJSONL:
+				encoder := progress.EncoderFromContext(ctx)
+				if encoder == nil {
+					return errors.Join(fmt.Errorf("jsonl progress encoder is required"), closeCommandDebug(command, debugState))
+				}
+				activeRun := config.Run()
+				if activeRun == nil {
+					return errors.Join(fmt.Errorf("jsonl progress run is required"), closeCommandDebug(command, debugState))
+				}
+				publisher := progress.NewPublisher(
+					encoder,
+					progress.NewProjector(planned.SavedPlan()),
+					activeRun.ID(),
+					progress.WithWarning(func(message string) {
+						writeWarning(command.ErrOrStderr(), message)
+					}),
+				)
+				publisher.Start()
+				unsubscribe := eventBus.Subscribe(publisher.Observe)
+				err = planned.Apply()
+				unsubscribe()
+				publisher.Finish(err)
+				publisher.Close()
+			case runui.ModeTUI:
 				unsubscribe := eventBus.Subscribe(projector.Observe)
 				err = runui.RunTUI(
 					ctx, command.InOrStdin(), command.ErrOrStderr(), projector, cancelRun, planned.Apply,
 				)
 				unsubscribe()
-			} else {
+			default:
 				renderer := runui.NewTextRenderer(command.ErrOrStderr(), projector)
 				if err = renderer.Start(); err != nil {
 					return errors.Join(fmt.Errorf("start repl renderer: %w", err), closeCommandDebug(command, debugState))
@@ -292,6 +328,9 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 			); stateErr != nil {
 				return fmt.Errorf("save apply outputs: %w", stateErr)
 			}
+			if jsonlMode {
+				return nil
+			}
 			return writeOutputs(command.OutOrStdout(), outputs)
 		},
 	}
@@ -306,7 +345,7 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 	command.Flags().BoolVar(&debug, "debug", false, "persist sensitive debug events")
 	command.Flags().StringArrayVar(&variables, "var", nil, "set a Golden input variable (name=value)")
 	command.Flags().StringArrayVar(&variableFiles, "var-file", nil, "load Golden input variables from a file")
-	command.Flags().StringVar(&uiMode, "ui", uiMode, "run progress UI: auto, tui, or repl")
+	command.Flags().StringVar(&uiMode, "ui", uiMode, "run progress UI: auto, tui, repl, or jsonl")
 	return command
 }
 
@@ -342,6 +381,24 @@ func terminalCapabilities(input io.Reader, output io.Writer) runui.Terminal {
 		terminal.Width, terminal.Height, _ = charmterm.GetSize(outputFD)
 	}
 	return terminal
+}
+
+// negotiateJSONL performs the stdin/stdout handshake when jsonlMode is set and
+// returns a context carrying the negotiated encoder. In other UI modes it is a
+// no-op. Negotiation failure aborts the command before Plan or Apply starts.
+func negotiateJSONL(ctx context.Context, input io.Reader, output io.Writer, jsonlMode bool) (context.Context, error) {
+	if !jsonlMode {
+		return ctx, nil
+	}
+	closableInput, ok := input.(io.ReadCloser)
+	if !ok {
+		return ctx, fmt.Errorf("jsonl mode requires closable stdin")
+	}
+	encoder, err := progress.Negotiate(closableInput, output)
+	if err != nil {
+		return ctx, fmt.Errorf("negotiate progress protocol: %w", err)
+	}
+	return progress.WithEncoder(ctx, encoder), nil
 }
 
 func fileDescriptor(value any) (uintptr, bool) {

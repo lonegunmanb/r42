@@ -1,11 +1,14 @@
 # r42 Research DAG DSL Design
 
-Status: current contract plus approved `phase_mode`/`starlark_tool` target
+Status: current contract plus approved `phase_mode`/`starlark_tool` and
+`--ui=jsonl` targets
 
 This document is the normative r42 execution contract. The `phase_mode`,
 `starlark_tool`, and revised SecJury sections describe the approved target that
 is not implemented yet; their delivery sequence is tracked in
 [phase-modes-starlark-development-plan.md](phase-modes-starlark-development-plan.md).
+The `--ui=jsonl` machine-progress target is tracked in
+[jsonl-progress-implementation.md](jsonl-progress-implementation.md).
 When this document and an example disagree, the explicit rules here win.
 
 ## 1. Purpose
@@ -1303,16 +1306,17 @@ only writes a saved Plan file when `--out` is present.
 `apply` without an argument plans the active configuration snapshot in memory;
 with one argument it loads that saved Plan. Configuration directories are not
 valid Apply arguments. Both forms require a successfully initialized current
-working directory. Apply prints the immutable Plan JSON to stdout before
-execution starts. After a successful Apply, it atomically publishes the output
-values and run metadata to `<cwd>/.r42/state.json`, then prints the output values
-as a pretty second JSON document. Apply failure does not replace outputs from
-the previous successful Apply. A subsequent successful Init clears them.
-Progress is always written to stderr. `--ui=auto` selects the Bubble Tea TUI
-when stdin and stderr are interactive terminals of at least 50x12 and falls
-back to the line-oriented REPL renderer for redirected output, CI, `TERM=dumb`,
-or smaller terminals. `--ui=tui` requires those capabilities; `--ui=repl`
-forces stable text events.
+working directory. In `auto`, `tui`, and `repl` UI modes, Apply prints the
+immutable Plan JSON to stdout before execution starts. After a successful Apply,
+it atomically publishes the output values and run metadata to
+`<cwd>/.r42/state.json`, then prints the output values as a pretty second JSON
+document. Apply failure does not replace outputs from the previous successful
+Apply. A subsequent successful Init clears them. Progress for these three modes
+is written to stderr. `--ui=auto` selects the Bubble Tea TUI when stdin and
+stderr are interactive terminals of at least 50x12 and falls back to the
+line-oriented REPL renderer for redirected output, CI, `TERM=dumb`, or smaller
+terminals. `--ui=tui` requires those capabilities; `--ui=repl` forces stable
+text events. The JSONL mode has the different I/O contract in section 15.1.
 
 `output` accepts no arguments or formatting flags. It reads the values saved by
 the latest successful Apply and writes one pretty JSON object to stdout. It
@@ -1344,13 +1348,141 @@ events use their canonical addresses. Both renderers strip terminal control
 sequences from display copies of model, tool, path, and error text; debug JSONL
 keeps the raw SDK event for diagnosis.
 
+### 15.1 JSONL machine progress UI
+
+`r42 apply --ui=jsonl` is a fourth, mutually exclusive UI mode. It is intended
+for a local worker process that supervises r42 and forwards progress to a web
+backend. In this mode stdout is an NDJSON protocol: every complete line is one
+JSON frame, and r42 does not print the pretty Plan or outputs JSON documents to
+stdout. stderr remains the human-readable diagnostic stream. `--debug` may be
+used at the same time, but it only controls the existing sensitive debug file;
+it never makes the stdout protocol less restrictive.
+
+The worker reads stdout and stderr through separate pipes. It decodes stdout
+line by line, records node state and timeline events, and may relay those records
+to browsers using its own transport. stderr is diagnostic data and must not be
+parsed as part of the progress protocol. Report identification and S3 upload are
+not part of this protocol; a separate root block will own that workflow.
+
+#### Negotiation
+
+stdin is reserved for negotiation in JSONL mode. Before planning or applying,
+r42 writes and flushes `hello`, the worker selects the highest schema major it
+supports from r42's advertised set, and r42 replies with `ready`:
+
+```json
+{"type":"hello","handshake_version":1,"protocol":"r42.progress","supported_schema_versions":[1,2],"r42_version":"0.8.0"}
+{"type":"select","handshake_version":1,"schema_version":2}
+{"type":"ready","handshake_version":1,"schema_version":2}
+```
+
+The middle line is written by the worker to r42's stdin; the other two lines are
+written by r42 to stdout. Negotiation must finish within 5 seconds. Malformed
+input, an unsupported handshake or schema version, EOF, timeout, or failure to
+flush `hello` or `ready` fails the command before Plan or Apply starts. After
+`ready`, stdin carries no progress commands and is otherwise ignored.
+Cancellation continues to use process signaling through the supervising worker;
+pause, resume, and checkpoint recovery are not supported.
+
+Handshake version 1 is stable independently of event schema majors. r42
+advertises every event schema major it can encode, and accepts only a selected
+value from that exact list. For event schemas, additive optional fields do not
+require a major bump. Consumers must ignore unknown fields and unknown events
+whose `critical` field is false or absent. An unknown critical event makes the
+consumer's progress view incomplete. When a breaking event-schema change is
+introduced, r42 must retain the immediately preceding major alongside the new
+major, with a separate encoder and contract fixtures for each advertised major.
+
+#### Event envelope and records
+
+After `ready`, every event frame includes `type`, `critical`, `protocol`,
+`schema_version`, `run_id`, `sequence`, and `timestamp`, except where a record
+definition says a field is not applicable. `protocol` is `r42.progress`;
+`run_id` is opaque and identifies one Apply invocation; `sequence` increases at
+the producer and may have gaps at the consumer; and `timestamp` is UTC RFC 3339.
+Consumers must not require contiguous delivery or cross-node event ordering.
+They may use sequence as a last-write-wins guard when their own ingestion is
+concurrent.
+
+The schema defines these records:
+
+| Type | Critical | Required payload | Meaning |
+| --- | --- | --- | --- |
+| `run_snapshot` | yes | `nodes` | Initial sanitized projection of the expanded DAG. It is not the saved Plan. |
+| `dynamic_tasks_materialized` | yes | `parent_address`, `nodes` | Announces nodes that become known during dynamic materialization. |
+| `node_upsert` | yes | `node` | Replaces the current projection for one canonical block address. It is self-contained, not a delta. |
+| `timeline_append` | no | `block_address`, `activity`, `summary` | Adds a best-effort, human-readable progress item for one block. |
+| `run_completed` | yes | `status`, aggregate counts | Reports successful completion. It does not contain output values or report paths. |
+| `run_failed` | yes | `status`, sanitized `summary` | Reports command failure after successful negotiation. |
+| `run_canceled` | yes | `status`, sanitized `summary` | Reports cancellation observed by r42. |
+
+`hello` and `ready` are handshake frames, not versioned event records. `select`
+is the only worker-to-r42 frame.
+
+A node projection contains the fields that are applicable from
+`block_address`, `block_kind`, `parent_address`, `dependencies`, `phase`,
+`status`, `activity`, `tool_name`, and aggregate token `usage`. Status values are
+`waiting`, `running`, `succeeded`, `failed`, and `canceled`. The projection must
+let a consumer reproduce the TUI's expanded DAG, select a block or dynamic task,
+show its current phase and activity, and maintain a per-block timeline. Dynamic
+members use their canonical block addresses.
+
+`summary` is a short display string, not a debug payload. It is produced without
+an additional model call. Deterministic templates are preferred. Any permitted
+assistant-derived text is normalized, stripped of terminal control characters,
+and truncated; this sanitization does not claim to detect semantic secrets.
+Every summary is valid UTF-8 and at most 4096 bytes. Tool arguments are excluded
+unless a future schema explicitly allowlists an individual field as safe.
+
+#### Projection and privacy boundary
+
+The JSONL stream is a stable progress projection over the internal event bus;
+it is not serialization of `debuglog.Event`. It may expose only:
+
+- DAG metadata: canonical address, kind, parent, dependencies, and status.
+- Current workflow phase and deterministic activity.
+- Tool name without arguments or results.
+- Aggregate token usage.
+- Sanitized, bounded summaries allowed by the selected schema major.
+
+It must not expose system or user prompts, HCL variable values, the complete
+Plan, raw tool arguments or results, raw stdout or stderr, raw SDK payloads, or
+the sensitive debug record. The JSONL projection remains subject to these rules
+when `--debug` is enabled.
+
+#### State, delivery, and termination
+
+The JSONL projector retains only the latest projection for each known node, so
+its state is `O(number of blocks)`. It does not retain timeline history. The web
+backend owns any durable or process-lifetime timeline; a browser keeps only the
+most recent 200 timeline entries per block. Reconnection replay and Apply resume
+are out of scope.
+
+Internal event-bus observers are synchronous, so stdout encoding must run behind
+a bounded asynchronous publisher. Research execution must never wait
+indefinitely for the JSONL consumer. Under pressure, the publisher preserves the
+latest `node_upsert` for each `block_address` by coalescing older pending values,
+drops older `timeline_append` records first, and gives structural and terminal
+records priority over timeline records. These priorities improve the view but do
+not turn delivery into a success condition: all post-negotiation progress frames,
+including terminal frames, remain best effort.
+
+After successful negotiation, a closed or unwritable stdout disables further
+progress publication and produces at most one warning on stderr. It must not
+cancel, block indefinitely, or change the result of research. Shutdown may make
+one bounded attempt to flush a terminal record and then abandon it. Consequently
+the supervising worker treats process exit as authoritative: exit zero means the
+Apply succeeded, a nonzero exit means it failed unless the worker itself requested
+cancellation, and a missing terminal frame marks `progress_incomplete` rather
+than changing that outcome.
+
 The CLI also exposes:
 
 - `--parallelism`, default 10.
 - Overall `--timeout`, default `1h`.
 - Per-session inactivity `--session-stall-timeout`, default `15m`.
 - `--debug`, disabled by default.
-- `--ui`, default `auto`; accepted values are `auto`, `tui`, and `repl`.
+- `--ui`, default `auto`; accepted values are `auto`, `tui`, `repl`, and `jsonl`.
 - Golden's existing root-variable input mechanisms without an r42-specific
   duplicate implementation.
 

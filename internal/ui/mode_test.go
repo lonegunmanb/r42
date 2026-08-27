@@ -60,6 +60,12 @@ func TestResolveMode(t *testing.T) {
 			terminal:  ui.Terminal{Input: true, Output: true, Width: 120, Height: 30},
 			wantErr:   "invalid ui mode",
 		},
+		{
+			name:      "jsonl mode is accepted regardless of terminal",
+			requested: ui.ModeJSONL,
+			terminal:  ui.Terminal{},
+			want:      ui.ModeJSONL,
+		},
 	}
 
 	for _, test := range tests {

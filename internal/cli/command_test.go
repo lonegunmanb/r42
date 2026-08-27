@@ -687,7 +687,7 @@ func TestCommandApplyHelpDescribesAutomaticUISelection(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, stdout, "r42 apply [PLAN]")
 	assert.Contains(t, stdout, "--ui string")
-	assert.Contains(t, stdout, "auto, tui, or repl")
+	assert.Contains(t, stdout, "auto, tui, repl, or jsonl")
 	assert.Contains(t, stdout, `(default "auto")`)
 }
 
