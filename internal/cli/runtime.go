@@ -1848,6 +1848,24 @@ func (s *recordingSession) sendWithStallWatchdog(
 			case <-s.typedToolActivity.signal():
 				resetTimer(timer, s.effectiveStallTimeout(), s.lastActivity(progress))
 			case <-timer.C:
+				// Prioritize a completed result over a stall: if timer.C and completed fire
+				// simultaneously, Go's select is non-deterministic. A quick non-blocking check
+				// here prevents a false "session stalled again after recovery" error.
+				select {
+				case result := <-completed:
+					cancelSend()
+					if err := ctx.Err(); err != nil {
+						settled := make(chan sessionSendResult, 1)
+						settled <- result
+						cancelErr := s.stopCanceledAttempt(
+							ctx, cancelSend, settled, recovery, progress, stopObserving,
+						)
+						return nil, errors.Join(err, result.err, cancelErr)
+					}
+					stopObserving()
+					return result.event, result.err
+				default:
+				}
 				remaining := s.effectiveStallTimeout() - time.Since(s.lastActivity(progress))
 				if remaining > 0 {
 					resetTimer(timer, remaining, time.Now())
