@@ -183,6 +183,10 @@ Initialize referenced modules, inspect and save the plan, then apply it:
 
 ```powershell
 r42 init .
+
+# Inspect the initialized template's root input contract without planning
+r42 schema --json
+
 r42 plan --out research.r42plan
 r42 apply research.r42plan
 
@@ -192,6 +196,12 @@ r42 apply
 # Read the outputs saved by the latest successful Apply
 r42 output
 ```
+
+`r42 schema --json` emits one versioned JSON document describing only the root
+variables exposed by the initialized snapshot. It succeeds without values for
+required variables, redacts sensitive defaults, and does not enter Plan, Apply,
+model-session, or typed-tool execution paths. The protocol is specified in
+[Root Variable Schema Command](docs/root-variable-schema.md).
 
 `r42 apply` is the convenience form that plans `<cwd>/.r42/config`, prints the
 plan as JSON, and immediately applies it. Source changes do not affect the

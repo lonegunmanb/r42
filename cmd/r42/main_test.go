@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -122,6 +124,30 @@ func TestRunDisplaysEveryHCLDiagnostic(t *testing.T) {
 	assert.Contains(t, stderr.String(), "first invalid expression")
 	assert.Contains(t, stderr.String(), "second invalid expression")
 	assert.NotContains(t, stderr.String(), "other diagnostic(s)")
+}
+
+//nolint:paralleltest // t.Chdir isolates the initialized schema fixture.
+func TestRunSchemaDoesNotLeakSensitiveDefaultInDiagnostics(t *testing.T) {
+	workingDirectory := t.TempDir()
+	t.Chdir(workingDirectory)
+	configDirectory := filepath.Join(workingDirectory, ".r42", "config")
+	require.NoError(t, os.MkdirAll(configDirectory, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(configDirectory, "variables.r42.hcl"), []byte(`
+variable "token" {
+  type      = number
+  sensitive = true
+  default   = "never-print-this-secret"
+}
+`), 0o600))
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := run(t.Context(), []string{"schema", "--json"}, nil, &stdout, &stderr, stubRuntime{})
+
+	assert.Equal(t, cli.ExitFailure, code)
+	assert.Empty(t, stdout.String())
+	assert.Contains(t, stderr.String(), `variable "token" default is incompatible with number`)
+	assert.NotContains(t, stderr.String(), "never-print-this-secret")
 }
 
 func TestRunAcceptsTerraformStyleVariableFlags(t *testing.T) {

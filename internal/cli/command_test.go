@@ -178,6 +178,121 @@ func TestCommandOutputReportsMissingSavedOutputs(t *testing.T) {
 	assert.ErrorContains(t, err, "run r42 apply")
 }
 
+//nolint:paralleltest // t.Chdir verifies the schema state path contract.
+func TestCommandSchemaPrintsStableRootVariablesWithoutPlanning(t *testing.T) {
+	workingDirectory := t.TempDir()
+	t.Chdir(workingDirectory)
+	runtime := new(fakeRuntime)
+	configDirectory := filepath.Join(workingDirectory, ".r42", "config")
+	require.NoError(t, os.MkdirAll(configDirectory, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(configDirectory, "variables.r42.hcl"), []byte(`
+variable "topic" {
+  type = string
+}
+
+variable "language" {
+  type    = string
+  default = "zh-CN"
+}
+`), 0o600))
+
+	first, stderr, err := execute(t, runtime, "schema", "--json")
+	require.NoError(t, err)
+	second, _, err := execute(t, runtime, "schema", "--json")
+	require.NoError(t, err)
+
+	assert.Empty(t, stderr)
+	assert.Equal(t, first, second)
+	assert.JSONEq(t, `{
+  "schema_version": 1,
+  "variables": [
+    {
+      "name":"language","description":null,"type":"string","required":false,
+      "nullable":false,"sensitive":false,"has_default":true,"default":"zh-CN",
+      "default_redacted":false
+    },
+    {
+      "name":"topic","description":null,"type":"string","required":true,
+      "nullable":false,"sensitive":false,"has_default":false,"default":null,
+      "default_redacted":false
+    }
+  ]
+}`, first)
+	assert.Empty(t, runtime.plannedDirectory)
+	assert.Zero(t, runtime.saveOutputsCalls)
+}
+
+func TestCommandSchemaRequiresJSONFlagAndRejectsArguments(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		arguments []string
+	}{
+		{name: "missing json flag", arguments: []string{"schema"}},
+		{name: "positional argument", arguments: []string{"schema", "template", "--json"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, _, err := execute(t, new(fakeRuntime), test.arguments...)
+
+			require.Error(t, err)
+			assert.Equal(t, cli.ExitUsage, cli.ExitCode(err))
+		})
+	}
+}
+
+//nolint:paralleltest // t.Chdir isolates the schema configuration fixture.
+func TestCommandSchemaReportsOutputWriteFailure(t *testing.T) {
+	workingDirectory := t.TempDir()
+	t.Chdir(workingDirectory)
+	configDirectory := filepath.Join(workingDirectory, ".r42", "config")
+	require.NoError(t, os.MkdirAll(configDirectory, 0o700))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(configDirectory, "variables.r42.hcl"),
+		[]byte(`variable "input" { type = string }`),
+		0o600,
+	))
+	command := cli.NewCommand(new(fakeRuntime))
+	command.SetOut(failingWriter{})
+	command.SetErr(new(bytes.Buffer))
+	command.SetArgs([]string{"schema", "--json"})
+
+	err := command.ExecuteContext(t.Context())
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "write root variable schema")
+}
+
+//nolint:paralleltest // t.Chdir verifies initialized root-versus-module behavior.
+func TestCommandSchemaExcludesChildModuleVariables(t *testing.T) {
+	workingDirectory := t.TempDir()
+	t.Chdir(workingDirectory)
+	templateDirectory := t.TempDir()
+	childDirectory := filepath.Join(templateDirectory, "child")
+	require.NoError(t, os.Mkdir(childDirectory, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(templateDirectory, "main.r42.hcl"), []byte(`
+variable "root_input" { type = string }
+module "child" { source = "./child" }
+`), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(childDirectory, "main.r42.hcl"), []byte(`
+variable "child_input" { type = string }
+`), 0o600))
+	runtime := cli.NewRuntime()
+	_, _, err := execute(t, runtime, "init", templateDirectory)
+	require.NoError(t, err)
+
+	stdout, stderr, err := execute(t, runtime, "schema", "--json")
+
+	require.NoError(t, err)
+	assert.Empty(t, stderr)
+	assert.Contains(t, stdout, `"name": "root_input"`)
+	assert.NotContains(t, stdout, "child_input")
+	assert.NoDirExists(t, filepath.Join(workingDirectory, ".r42", "runs"))
+}
+
 //nolint:paralleltest // t.Chdir verifies module installation relative to the CLI working directory.
 func TestCommandInitMakesModulesAvailableToDirectoryApply(t *testing.T) {
 	workingDirectory := t.TempDir()
