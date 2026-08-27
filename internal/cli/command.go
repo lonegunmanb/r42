@@ -19,6 +19,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/progress"
 	runui "github.com/lonegunmanb/r42/internal/ui"
+	"github.com/lonegunmanb/r42/internal/variableschema"
 	"github.com/spf13/cobra"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -74,8 +75,49 @@ func NewCommand(runtime Runtime) *cobra.Command {
 	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
 		return &usageError{err: err}
 	})
-	root.AddCommand(newInitCommand(runtime), newPlanCommand(runtime), newApplyCommand(runtime), newOutputCommand(runtime))
+	root.AddCommand(
+		newInitCommand(runtime),
+		newSchemaCommand(runtime),
+		newPlanCommand(runtime),
+		newApplyCommand(runtime),
+		newOutputCommand(runtime),
+	)
 	return root
+}
+
+func newSchemaCommand(runtime Runtime) *cobra.Command {
+	var jsonOutput bool
+	command := &cobra.Command{
+		Use:   "schema",
+		Short: "Print the initialized root variable schema",
+		Args:  usageArgs(cobra.NoArgs),
+		PreRunE: func(_ *cobra.Command, _ []string) error {
+			if !jsonOutput {
+				return &usageError{err: fmt.Errorf("--json is required")}
+			}
+			return nil
+		},
+		RunE: func(command *cobra.Command, _ []string) error {
+			directory, _, err := openWorkingProject(runtime)
+			if err != nil {
+				return err
+			}
+			document, err := variableschema.Inspect(command.Context(), directory)
+			if err != nil {
+				return fmt.Errorf("inspect root variable schema: %w", err)
+			}
+			encoded, err := variableschema.Marshal(document)
+			if err != nil {
+				return err
+			}
+			if _, err = command.OutOrStdout().Write(encoded); err != nil {
+				return fmt.Errorf("write root variable schema: %w", err)
+			}
+			return nil
+		},
+	}
+	command.Flags().BoolVar(&jsonOutput, "json", false, "write the versioned JSON schema protocol")
+	return command
 }
 
 func newInitCommand(runtime Runtime) *cobra.Command {
