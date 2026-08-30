@@ -198,6 +198,8 @@ type VerdictRecorder struct {
 	verdicts          []Verdict
 	failure           error
 	completionVersion uint64
+	finalIssues       map[string]corespec.Issue
+	finalReviewed     bool
 }
 
 func NewVerdictRecorder() *VerdictRecorder {
@@ -212,6 +214,57 @@ func (r *VerdictRecorder) Record(verdict Verdict) error {
 	verdict.Issues = cloneIssues(verdict.Issues)
 	r.verdicts = append(r.verdicts, verdict)
 	r.completionVersion++
+	r.mu.Unlock()
+	return nil
+}
+
+// RecordFinal validates and records one Final QC verdict. Final QC establishes
+// an issue-ID baseline on its first revision and may only carry IDs from the
+// previous baseline on later revisions.
+func (r *VerdictRecorder) RecordFinal(verdict Verdict) error {
+	if err := verdict.Validate(); err != nil {
+		return fmt.Errorf("record qc verdict: %w", err)
+	}
+	if verdict.Decision == DecisionReviseResearch {
+		seen := make(map[string]corespec.Issue, len(verdict.Issues))
+		for index := range verdict.Issues {
+			issue := &verdict.Issues[index]
+			id := strings.TrimSpace(issue.ID)
+			if id == "" {
+				return fmt.Errorf("record qc verdict: issue %d: issue id is required", index)
+			}
+			if _, duplicate := seen[id]; duplicate {
+				return fmt.Errorf("record qc verdict: issue %d: issue id %q appears more than once", index, id)
+			}
+			issue.ID = id
+			seen[id] = cloneIssues([]corespec.Issue{*issue})[0]
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for id, issue := range seen {
+			if r.finalReviewed {
+				previous, allowed := r.finalIssues[id]
+				if !allowed {
+					return fmt.Errorf("record qc verdict: new final qc issue id %q is not allowed; only previous issue IDs may be reused", id)
+				}
+				if !sameIssueIdentity(previous, issue) {
+					return fmt.Errorf("record qc verdict: final qc issue id %q changes final qc issue identity", id)
+				}
+			}
+		}
+		r.finalIssues = seen
+		r.finalReviewed = true
+		verdict.Issues = cloneIssues(verdict.Issues)
+		r.verdicts = append(r.verdicts, verdict)
+		r.completionVersion++
+		return nil
+	}
+
+	r.mu.Lock()
+	verdict.Issues = cloneIssues(verdict.Issues)
+	r.verdicts = append(r.verdicts, verdict)
+	r.completionVersion++
+	r.finalReviewed = true
 	r.mu.Unlock()
 	return nil
 }
@@ -319,7 +372,7 @@ func revisionPrompt(issues []corespec.Issue) string {
 		if index > 0 {
 			result.WriteByte('\n')
 		}
-		fmt.Fprintf(&result, "- [%s] %s", issue.Code, issue.Message)
+		fmt.Fprintf(&result, "- [%s] [%s] %s", issue.ID, issue.Code, issue.Message)
 		if issue.Path != nil {
 			fmt.Fprintf(&result, " (path: %s)", *issue.Path)
 		}
@@ -346,4 +399,14 @@ func cloneString(value *string) *string {
 	}
 	result := *value
 	return &result
+}
+
+func sameIssueIdentity(previous, current corespec.Issue) bool {
+	if previous.Code != current.Code {
+		return false
+	}
+	if previous.Path == nil || current.Path == nil {
+		return previous.Path == nil && current.Path == nil
+	}
+	return *previous.Path == *current.Path
 }

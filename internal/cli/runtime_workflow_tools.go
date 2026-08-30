@@ -20,6 +20,8 @@ import (
 	"github.com/lonegunmanb/r42/internal/collection"
 	"github.com/lonegunmanb/r42/internal/collectionqc"
 	"github.com/lonegunmanb/r42/internal/evidence"
+	"github.com/lonegunmanb/r42/internal/mcp"
+	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	researchruntime "github.com/lonegunmanb/r42/internal/research/runtime"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
@@ -30,7 +32,7 @@ import (
 var readOnlyFileBuiltIns = []string{"view", "grep", "head", "tail"}
 
 func collectionDisallowedTools(configured, allowed []string) []string {
-	result := slices.Clone(configured)
+	result := removeAllowedBuiltinTools(configured, allowed)
 	for _, name := range researchspec.CollectionBlockedBuiltinTools() {
 		if slices.Contains(allowed, name) {
 			continue
@@ -42,15 +44,60 @@ func collectionDisallowedTools(configured, allowed []string) []string {
 	return result
 }
 
-func collectionAllowedTools(configured, mandatory []string) []string {
+func collectionAllowedTools(
+	configured, mandatory, selectedMCPToolIDs []string,
+	mcpTools mcp.ToolRegistry,
+) []string {
 	if configured == nil {
 		return nil
 	}
-	return phaseAllowedTools(configured, append(slices.Clone(readOnlyFileBuiltIns), mandatory...))
+	allowed := collectionMCPToolFilters(configured, selectedMCPToolIDs, mcpTools)
+	return phaseAllowedTools(allowed, mandatory)
+}
+
+func withoutMCPToolIDs(filters []string) []string {
+	return slices.DeleteFunc(slices.Clone(filters), internalplan.IsMCPToolID)
+}
+
+func collectionMCPToolFilters(
+	configured, selectedMCPToolIDs []string,
+	mcpTools mcp.ToolRegistry,
+) []string {
+	result := make([]string, 0, len(configured))
+	for _, name := range configured {
+		if strings.HasPrefix(name, "mcp:") {
+			continue
+		}
+		if !internalplan.IsMCPToolID(name) {
+			result = append(result, name)
+			continue
+		}
+		if !slices.Contains(selectedMCPToolIDs, name) {
+			continue
+		}
+		tool, exists := mcpTools[name]
+		if exists {
+			result = append(result, tool.SDKName())
+		}
+	}
+	return result
+}
+
+func collectionMCPResources(ids []string, registry mcp.ResourceRegistry) []mcp.Resource {
+	result := make([]mcp.Resource, 0, len(ids))
+	for _, id := range ids {
+		resource, exists := registry[id]
+		if !exists {
+			continue
+		}
+		resource.Server = resource.Server.Clone()
+		result = append(result, resource)
+	}
+	return result
 }
 
 func closedWorldDisallowedTools(configured, allowed []string) []string {
-	result := slices.Clone(configured)
+	result := removeAllowedBuiltinTools(configured, allowed)
 	for _, name := range researchspec.ClosedWorldBuiltinTools() {
 		if slices.Contains(allowed, name) {
 			continue
@@ -60,6 +107,12 @@ func closedWorldDisallowedTools(configured, allowed []string) []string {
 		}
 	}
 	return result
+}
+
+func removeAllowedBuiltinTools(configured, allowed []string) []string {
+	return slices.DeleteFunc(slices.Clone(configured), func(name string) bool {
+		return slices.Contains(allowed, name)
+	})
 }
 
 func finalQCDisallowedTools(effective researchspec.EffectiveQC, explicitlyConfigured bool, allowed []string) []string {
@@ -228,6 +281,7 @@ func collectionProtocolTools(context *collection.Context, checkpoints *collectio
 				return responseToolResult(informationNeeds.Set(args))
 			},
 		},
+		readInformationNeedsTool(context),
 		{
 			Name: "r42_register_artifact", Description: "Register an existing workspace evidence artifact path or retained source tool call result. " +
 				"Optional source may be a URL or any other source identifier; when supplied, it is added as a compatible Source header only if the artifact has no non-empty Source or legacy URL header. " +
@@ -271,6 +325,23 @@ func collectionProtocolTools(context *collection.Context, checkpoints *collectio
 			},
 		},
 		collectionSaveArtifactTool(context),
+	}
+}
+
+func readInformationNeedsTool(context *collection.Context) sdk.Tool {
+	type output struct {
+		ActiveInformationNeedStates []collection.ActiveInformationNeedState `json:"active_information_need_states"`
+	}
+	return sdk.Tool{
+		Name: collection.ReadInformationNeedsToolName,
+		Description: "Read the current active frozen information needs and their canonical IDs. " +
+			"Call this after context compaction or whenever a checkpoint or Collection QC verdict rejects an information_need_id.",
+		Parameters: objectSchema(map[string]any{}, nil),
+		Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
+			return acceptedToolResult(output{
+				ActiveInformationNeedStates: context.ActiveInformationNeedStates(),
+			})
+		},
 	}
 }
 
@@ -419,6 +490,7 @@ type saveArtifactArgs struct {
 type saveArtifactOutput struct {
 	Path       string `json:"path"`
 	ArtifactID string `json:"artifact_id"`
+	NextAction string `json:"next_action,omitempty"`
 }
 
 func collectionSaveArtifactTool(context *collection.Context) sdk.Tool {
@@ -427,7 +499,8 @@ func collectionSaveArtifactTool(context *collection.Context) sdk.Tool {
 		Description: "Save and register complete source material as Markdown at a declared evidence artifact file target or below a declared evidence artifact directory target, " +
 			"then return path and artifact_id. source is required and may be a URL or any other source identifier; it is written to the artifact header. " +
 			"Provide description when possible to summarize the artifact's semantic contents for downstream research planning. " +
-			"After a successful call, use the returned artifact_id directly. Do not call r42_register_artifact for the returned path.",
+			"After a successful call, use the returned artifact_id directly. Do not call r42_register_artifact for the returned path. " +
+			"When the Collection batch gate is reached, next_action will be r42_collection_checkpoint; call it before acquiring more sources.",
 		Parameters: objectSchema(map[string]any{
 			"artifact_path": map[string]any{"type": "string", "description": "Absolute or workspace-relative .md path at a declared evidence artifact file target or below a declared evidence artifact directory target"},
 			"content":       map[string]any{"type": "string", "description": "Complete source material in Markdown"},
@@ -492,6 +565,9 @@ func saveCollectionArtifact(context *collection.Context, args saveArtifactArgs) 
 	output := saveArtifactOutput{
 		Path:       registration.Output.Path,
 		ArtifactID: registration.Output.ID,
+	}
+	if context.State.CheckpointPending() {
+		output.NextAction = "r42_collection_checkpoint"
 	}
 	return acceptedToolResult(output)
 }
@@ -1181,7 +1257,7 @@ func evidenceToolsWithAccess(
 			if recordErr != nil {
 				return rejectedToolResult("artifact_write_failed", recordErr.Error())
 			}
-			if record.Purpose != artifactpkg.PurposeOutput || record.Type != researchspec.ArtifactTypeFile {
+			if !artifactsRegistry.HasPurpose(args.ArtifactID, artifactpkg.PurposeOutput) || record.Type != researchspec.ArtifactTypeFile {
 				return rejectedToolResult("invalid_artifact_type", "markdown writer requires a file artifact")
 			}
 			path, writeErr := writer.Write(record.Path, args.Content)
@@ -1613,7 +1689,7 @@ func materializeArtifactPaths(arguments map[string]any, registry *artifactpkg.Re
 		if record.Type != researchspec.ArtifactTypeFile {
 			return fmt.Errorf("%s %q must name a file artifact", idField, id)
 		}
-		if pathField == "_r42_artifact_path" && record.Purpose != artifactpkg.PurposeOutput {
+		if pathField == "_r42_artifact_path" && !registry.HasPurpose(id, artifactpkg.PurposeOutput) {
 			return fmt.Errorf("artifact_id %q must name a declared file output artifact", id)
 		}
 		arguments[pathField] = record.Path

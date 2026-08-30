@@ -60,6 +60,16 @@ func TestConfigPhaseModeValidation(t *testing.T) {
 			expectedError: "collection_only forbids research skills",
 		},
 		{
+			name: "collection only accepts collection skills and builtin execution",
+			mutate: func(config *researchspec.Config) {
+				configureCollectionOnly(config)
+				config.CollectionSkillDirectories = []string{"skills/collection"}
+				config.CollectionSkills = []string{"yahoo-finance"}
+				config.CollectionAllowedBuiltinTools = []string{"powershell", "shell"}
+			},
+			expectedMode: researchspec.PhaseModeCollectionOnly,
+		},
+		{
 			name: "collection only rejects research tool ids",
 			mutate: func(config *researchspec.Config) {
 				configureCollectionOnly(config)
@@ -124,6 +134,24 @@ func TestConfigPhaseModeValidation(t *testing.T) {
 			},
 			expectedMode:  researchspec.PhaseModeResearchOnly,
 			expectedError: "research_only forbids collection_tool_ids",
+		},
+		{
+			name: "research only rejects collection mcp tools",
+			mutate: func(config *researchspec.Config) {
+				config.PhaseMode = researchspec.PhaseModeResearchOnly
+				config.CollectionMCPToolIDs = []string{"mcp_tool_jin10__quote_12345678-1234-8234-9234-123456789abc"}
+			},
+			expectedMode:  researchspec.PhaseModeResearchOnly,
+			expectedError: "research_only forbids collection_mcp_tool_ids",
+		},
+		{
+			name: "research only rejects collection mcp resources",
+			mutate: func(config *researchspec.Config) {
+				config.PhaseMode = researchspec.PhaseModeResearchOnly
+				config.CollectionMCPResourceIDs = []string{"mcp_resource_jin10__quote_codes_12345678-1234-8234-9234-123456789abc"}
+			},
+			expectedMode:  researchspec.PhaseModeResearchOnly,
+			expectedError: "research_only forbids collection_mcp_resource_ids",
 		},
 		{
 			name: "research only rejects collection provider",

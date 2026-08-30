@@ -44,7 +44,9 @@ research "static" "source" {
 	assert.Equal(t, "gpt-5.4", opener.configs[0].Profile)
 	assert.Equal(t, "gpt-5.4", opener.configs[3].Profile)
 	assert.Contains(t, toolNamesFromConfig(opener.configs[0]), "r42_collection_checkpoint")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[0]), "r42_read_information_needs")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[1]), "r42_collection_qc_verdict")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[1]), "r42_read_information_needs")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_verdict")
 	assert.NotContains(t, opener.configs[0].ExcludedTools, "powershell")
 	assert.Contains(t, opener.configs[0].ExcludedTools, "shell")
@@ -87,6 +89,7 @@ research "static" "source" {
 	assert.Contains(t, opener.configs[0].SystemPrompt, "Collection QC evidence-quality criteria")
 	assert.Contains(t, opener.configs[0].SystemPrompt, "primary_sources")
 	assert.Contains(t, opener.configs[0].SystemPrompt, "Use primary sources for every stop condition.")
+	assert.Contains(t, opener.configs[0].SystemPrompt, "After every MCP query or information read, save the result as evidence or a snapshot")
 }
 
 func TestProductionRuntimeKeepsFinalQCIssueTrackingOutOfResearchTools(t *testing.T) {
@@ -96,6 +99,7 @@ func TestProductionRuntimeKeepsFinalQCIssueTrackingOutOfResearchTools(t *testing
 research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
+  final_qc_strictness = "brief"
   qc { criteria = { accuracy = "Must be accurate" } }
 }
 `), 0o600))
@@ -109,6 +113,13 @@ research "static" "source" {
 	require.NoError(t, err)
 	require.Len(t, opener.configs, 4)
 	assert.NotContains(t, toolNamesFromConfig(opener.configs[2]), "r42_report_qc_issue_resolutions")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "focused audit of material semantic issues")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "analysis and mixed claims")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "Do not demand a formal reasoning chain")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "final_qc_strictness is authoritative")
+	assert.Contains(t, opener.configs[3].SystemPrompt, `Strictness="brief"`)
+	assert.Contains(t, opener.configs[3].SystemPrompt, "Final QC is a convergent, narrow audit")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "must not reject a plausible analysis")
 	assert.Contains(t, opener.configs[2].SystemPrompt, "Final QC may return this block to Research multiple times")
 	assert.Contains(t, opener.configs[2].SystemPrompt, "accepted terminal call completes only the current Research pass")
 }
@@ -206,7 +217,8 @@ research "static" "source" {
 	assert.Equal(t, 13, opener.configs[1].Retry.LifecycleRetries)
 	assert.Equal(t, 11, opener.configs[2].Retry.LifecycleRetries)
 	assert.Equal(t, 14, opener.configs[3].Retry.LifecycleRetries)
-	assert.Contains(t, opener.configs[3].SystemPrompt, "exhaustive audit")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "focused audit of material semantic issues")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "do not manufacture issues about optional detail")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "every configured criterion")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "all independent issues")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "do not stop after the first issue")
@@ -314,7 +326,7 @@ research "static" "source" {
 	assert.Equal(t, 1, opener.qc.closeCalls)
 }
 
-func TestProductionRuntimeAllowsFinalQCToReportNewIssueAfterRevision(t *testing.T) {
+func TestProductionRuntimeRejectsNewFinalQCIssueAfterRevision(t *testing.T) {
 	t.Parallel()
 
 	directory := t.TempDir()
@@ -333,10 +345,10 @@ research "static" "source" {
 	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
-	assert.Equal(t, 3, opener.research.sendCalls)
-	require.Len(t, opener.research.prompts, 3)
+	assert.Equal(t, 2, opener.research.sendCalls)
+	require.Len(t, opener.research.prompts, 2)
 	assert.Contains(t, opener.research.prompts[1], "add a citation")
-	assert.Contains(t, opener.research.prompts[2], "correct the changed total")
+	assert.NotContains(t, opener.research.prompts[1], "correct the changed total")
 	assert.Equal(t, 3, opener.qc.sendCalls)
 }
 
@@ -533,7 +545,7 @@ func (s *revisionQCSession) SendAndWait(_ context.Context, options sdk.MessageOp
 	if call == 1 {
 		arguments = map[string]any{
 			"decision": "revise_research",
-			"issues":   []any{map[string]any{"code": "missing_source", "message": "add a citation"}},
+			"issues":   []any{map[string]any{"id": "issue-source", "code": "missing_source", "message": "add a citation"}},
 		}
 	}
 	for _, tool := range s.config.Tools {
@@ -555,12 +567,12 @@ func (s *changingIssueQCSession) SendAndWait(context.Context, sdk.MessageOptions
 	case 1:
 		arguments = map[string]any{
 			"decision": "revise_research",
-			"issues":   []any{map[string]any{"code": "citation", "message": "add a citation"}},
+			"issues":   []any{map[string]any{"id": "issue-citation", "code": "citation", "message": "add a citation"}},
 		}
 	case 2:
 		arguments = map[string]any{
 			"decision": "revise_research",
-			"issues":   []any{map[string]any{"code": "accuracy", "message": "correct the changed total"}},
+			"issues":   []any{map[string]any{"id": "issue-new", "code": "accuracy", "message": "correct the changed total"}},
 		}
 	}
 	for _, tool := range s.config.Tools {

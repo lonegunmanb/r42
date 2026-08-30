@@ -75,3 +75,20 @@ persona roster into concurrent `research_only` review tasks before a final
 built-in web tools and PPLX finance/pro/fetch tools with `use_pplx`; no QC
 sessions are created. See [`secjury/README.md`](secjury/README.md) for the
 exact parity boundary and run commands.
+
+## Morning financial briefing
+
+The `morning` example turns overnight markets, macro/policy releases, and
+industry news into a Chinese-language breakfast briefing for ordinary readers.
+Three Collection tracks feed a mechanically validated frozen packet; macro,
+sentiment, and strategy reviewers then inspect the same packet before a typed
+tool renders the final Markdown with mandatory diversification, leverage, and
+cost warnings. See [`morning/README.md`](morning/README.md).
+
+## S3-compatible upload
+
+[`s3-folder`](s3-folder/README.md) shows a configuration-only `s3_provider`
+and a DAG-managed `s3_folder` that uploads a research workspace to AWS S3 or
+Alibaba Cloud OSS. It documents environment credential references, run-root
+source confinement, version-aware rollback, and exclusion of sensitive debug
+events.

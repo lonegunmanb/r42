@@ -4,12 +4,15 @@ import (
 	"context"
 	cryptorand "crypto/rand"
 	"fmt"
+	"maps"
 	"math/rand/v2"
 	"slices"
 	"sync"
 	"time"
 
 	sdk "github.com/github/copilot-sdk/go"
+	"github.com/github/copilot-sdk/go/rpc"
+	"github.com/lonegunmanb/r42/internal/mcp"
 	"github.com/lonegunmanb/r42/internal/provider"
 )
 
@@ -30,6 +33,8 @@ type SessionConfig struct {
 	Skills           []string
 	DisabledSkills   []string
 	Hooks            *sdk.SessionHooks
+	MCPServers       []mcp.Config
+	MCPResources     []mcp.Resource
 }
 
 type Factory struct {
@@ -53,7 +58,7 @@ func newFactory(
 }
 
 func (f *Factory) Open(ctx context.Context, config SessionConfig) (*Session, error) {
-	sdkConfig, err := f.sessionConfig(config)
+	sdkConfig, resourceHolder, err := f.sessionConfig(config)
 	if err != nil {
 		return nil, err
 	}
@@ -62,6 +67,7 @@ func (f *Factory) Open(ctx context.Context, config SessionConfig) (*Session, err
 	for attempt := 0; ; attempt++ {
 		session, err = f.client.CreateSession(ctx, sdkConfig)
 		if err == nil {
+			bindMCPResourceReader(resourceHolder, session)
 			return &Session{
 				sdk:          session,
 				factory:      f,
@@ -70,6 +76,7 @@ func (f *Factory) Open(ctx context.Context, config SessionConfig) (*Session, err
 				retry:        config.Retry,
 				delay:        f.delay,
 				random:       f.random,
+				mcpResources: resourceHolder,
 			}, nil
 		}
 		if attempt >= config.Retry.LifecycleRetries || !config.Retry.IsTransient(err) {
@@ -101,14 +108,32 @@ func (f *Factory) resume(
 	}
 }
 
-func (f *Factory) sessionConfig(config SessionConfig) (*sdk.SessionConfig, error) {
+func (f *Factory) sessionConfig(config SessionConfig) (*sdk.SessionConfig, *mcpResourceReaderHolder, error) {
 	profile := config.Profile
 	if profile == "" {
 		profile = config.Model
 	}
 	providerConfig, err := f.providerConfig(config.Provider, profile, config.Model)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	mcpServers, err := f.mcpServers(config.MCPServers)
+	if err != nil {
+		return nil, nil, err
+	}
+	var resourceHolder *mcpResourceReaderHolder
+	tools := slices.Clone(config.Tools)
+	availableTools := slices.Clone(config.AvailableTools)
+	excludedTools := slices.Clone(config.ExcludedTools)
+	if len(config.MCPResources) > 0 {
+		resourceHolder = newMCPResourceReaderHolder(config.MCPResources)
+		tools = append(tools, resourceHolder.tool())
+		if availableTools != nil && !slices.Contains(availableTools, MCPResourceReadToolName) {
+			availableTools = append(availableTools, MCPResourceReadToolName)
+		}
+		excludedTools = slices.DeleteFunc(excludedTools, func(name string) bool {
+			return name == MCPResourceReadToolName || name == "custom:"+MCPResourceReadToolName
+		})
 	}
 
 	result := &sdk.SessionConfig{
@@ -119,16 +144,18 @@ func (f *Factory) sessionConfig(config SessionConfig) (*sdk.SessionConfig, error
 		WorkingDirectory:       config.WorkingDirectory,
 		Streaming:              sdk.Bool(true),
 		Provider:               providerConfig,
-		Tools:                  slices.Clone(config.Tools),
-		AvailableTools:         slices.Clone(config.AvailableTools),
-		ExcludedTools:          slices.Clone(config.ExcludedTools),
+		Tools:                  tools,
+		AvailableTools:         availableTools,
+		ExcludedTools:          excludedTools,
 		OnPermissionRequest:    sdk.PermissionHandler.ApproveAll,
 		EnableSkills:           sdk.Bool(true),
 		SkillDirectories:       slices.Clone(config.SkillDirectories),
 		DisabledSkills:         slices.Clone(config.DisabledSkills),
 		EnableSessionStore:     sdk.Bool(false),
 		SkipEmbeddingRetrieval: sdk.Bool(true),
+		LargeOutput:            &sdk.LargeToolOutputConfig{Enabled: sdk.Bool(false)},
 		Hooks:                  config.Hooks,
+		MCPServers:             mcpServers,
 	}
 	if len(config.Skills) > 0 {
 		result.CustomAgents = []sdk.CustomAgentConfig{{
@@ -140,7 +167,7 @@ func (f *Factory) sessionConfig(config SessionConfig) (*sdk.SessionConfig, error
 		}}
 		result.Agent = researchAgentName
 	}
-	return result, nil
+	return result, resourceHolder, nil
 }
 
 func resumeSessionConfig(config *sdk.SessionConfig) *sdk.ResumeSessionConfig {
@@ -154,6 +181,7 @@ func resumeSessionConfig(config *sdk.SessionConfig) *sdk.ResumeSessionConfig {
 		ReasoningEffort:        config.ReasoningEffort,
 		OnPermissionRequest:    config.OnPermissionRequest,
 		Hooks:                  config.Hooks,
+		MCPServers:             cloneMCPServers(config.MCPServers),
 		WorkingDirectory:       config.WorkingDirectory,
 		EnableSkills:           config.EnableSkills,
 		Streaming:              config.Streaming,
@@ -164,6 +192,7 @@ func resumeSessionConfig(config *sdk.SessionConfig) *sdk.ResumeSessionConfig {
 		ContinuePendingWork:    sdk.Bool(false),
 		EnableSessionStore:     sdk.Bool(false),
 		SkipEmbeddingRetrieval: sdk.Bool(true),
+		LargeOutput:            &sdk.LargeToolOutputConfig{Enabled: sdk.Bool(false)},
 	}
 }
 
@@ -175,7 +204,71 @@ func cloneResumeSessionConfig(config *sdk.ResumeSessionConfig) *sdk.ResumeSessio
 	clone.CustomAgents = slices.Clone(config.CustomAgents)
 	clone.SkillDirectories = slices.Clone(config.SkillDirectories)
 	clone.DisabledSkills = slices.Clone(config.DisabledSkills)
+	clone.MCPServers = cloneMCPServers(config.MCPServers)
 	return &clone
+}
+
+func (f *Factory) mcpServers(configs []mcp.Config) (map[string]sdk.MCPServerConfig, error) {
+	if len(configs) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]sdk.MCPServerConfig, len(configs))
+	for _, config := range configs {
+		if err := config.ValidateSelection(); err != nil {
+			return nil, fmt.Errorf("validate mcp server: %w", err)
+		}
+		materialized, err := config.Materialize(mcp.EnvLookup(f.lookup))
+		if err != nil {
+			return nil, fmt.Errorf("materialize mcp server: %w", err)
+		}
+		runtimeName := materialized.RuntimeServerName()
+		if _, exists := result[runtimeName]; exists {
+			return nil, fmt.Errorf("mcp server %q is configured more than once", runtimeName)
+		}
+		timeoutMilliseconds := int(materialized.Timeout / time.Millisecond)
+		if len(materialized.Tools) == 0 && len(materialized.Resources) > 0 {
+			materialized.Tools = []string{}
+		}
+		switch materialized.Transport {
+		case mcp.TransportHTTP:
+			result[runtimeName] = sdk.MCPHTTPServerConfig{
+				URL: materialized.HTTP.URL, Headers: maps.Clone(materialized.HTTP.Headers),
+				Tools: slices.Clone(materialized.Tools), Timeout: timeoutMilliseconds,
+			}
+		case mcp.TransportStdio:
+			result[runtimeName] = sdk.MCPStdioServerConfig{
+				Command: materialized.Stdio.Command, Args: slices.Clone(materialized.Stdio.Args),
+				Env: maps.Clone(materialized.Stdio.Env), WorkingDirectory: materialized.Stdio.WorkingDirectory,
+				Tools: slices.Clone(materialized.Tools), Timeout: timeoutMilliseconds,
+			}
+		default:
+			return nil, fmt.Errorf("mcp server %q has unsupported transport %q", materialized.Name, materialized.Transport)
+		}
+	}
+	return result, nil
+}
+
+func cloneMCPServers(source map[string]sdk.MCPServerConfig) map[string]sdk.MCPServerConfig {
+	if source == nil {
+		return nil
+	}
+	result := make(map[string]sdk.MCPServerConfig, len(source))
+	for name, server := range source {
+		switch config := server.(type) {
+		case sdk.MCPHTTPServerConfig:
+			config.Tools = slices.Clone(config.Tools)
+			config.Headers = maps.Clone(config.Headers)
+			result[name] = config
+		case sdk.MCPStdioServerConfig:
+			config.Tools = slices.Clone(config.Tools)
+			config.Args = slices.Clone(config.Args)
+			config.Env = maps.Clone(config.Env)
+			result[name] = config
+		default:
+			result[name] = server
+		}
+	}
+	return result
 }
 
 func (f *Factory) providerConfig(config *provider.Config, profile, model string) (*sdk.ProviderConfig, error) {
@@ -217,6 +310,7 @@ type Session struct {
 	retry        provider.RetryPolicy
 	delay        func(context.Context, time.Duration) error
 	random       func() float64
+	mcpResources *mcpResourceReaderHolder
 }
 
 func (s *Session) SendAndWait(ctx context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
@@ -308,6 +402,7 @@ func (s *Session) resumeWithinContext(ctx context.Context) error {
 			return resumed.err
 		}
 		s.replace(resumed.session)
+		bindMCPResourceReader(s.mcpResources, resumed.session)
 		if err := ctx.Err(); err != nil {
 			s.clear(resumed.session)
 			if resumed.session != nil {
@@ -369,6 +464,14 @@ func (s *Session) replace(session sdkSession) {
 	s.mu.Unlock()
 }
 
+func bindMCPResourceReader(holder *mcpResourceReaderHolder, session sdkSession) {
+	if holder == nil {
+		return
+	}
+	reader, _ := session.(mcpResourceReader)
+	holder.setReader(reader)
+}
+
 type CleanupWarning struct {
 	Attempts int
 	Err      error
@@ -427,11 +530,50 @@ type eventSession interface {
 }
 
 type officialSession struct {
-	sdk eventSession
+	sdk            eventSession
+	resourceReader mcpResourceReader
 }
 
 func newOfficialSession(session eventSession) *officialSession {
-	return &officialSession{sdk: session}
+	result := &officialSession{sdk: session}
+	if concrete, ok := session.(*sdk.Session); ok {
+		result.resourceReader = officialMCPResourceReader{session: concrete}
+	}
+	return result
+}
+
+func (s *officialSession) ReadMCPResource(
+	ctx context.Context,
+	request mcp.ResourceReadRequest,
+) ([]mcp.ResourceContent, error) {
+	if s.resourceReader == nil {
+		return nil, fmt.Errorf("SDK session does not support MCP resource reads")
+	}
+	return s.resourceReader.ReadMCPResource(ctx, request)
+}
+
+type officialMCPResourceReader struct {
+	session *sdk.Session
+}
+
+func (r officialMCPResourceReader) ReadMCPResource(
+	ctx context.Context,
+	request mcp.ResourceReadRequest,
+) ([]mcp.ResourceContent, error) {
+	result, err := r.session.RPC.MCP.Resources().Read(ctx, &rpc.MCPResourcesReadRequest{
+		ServerName: request.ServerName,
+		URI:        request.URI,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read MCP resource %q from server %q: %w", request.URI, request.ServerName, err)
+	}
+	contents := make([]mcp.ResourceContent, len(result.Contents))
+	for index, content := range result.Contents {
+		contents[index] = mcp.ResourceContent{
+			URI: content.URI, MIMEType: content.MIMEType, Text: content.Text, Blob: content.Blob, Meta: maps.Clone(content.Meta),
+		}
+	}
+	return contents, nil
 }
 
 func (s *officialSession) SendAndWait(

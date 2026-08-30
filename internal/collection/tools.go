@@ -17,6 +17,12 @@ import (
 	"github.com/lonegunmanb/r42/internal/workflow"
 )
 
+// ReadInformationNeedsToolName identifies the typed tool that recalls active frozen needs.
+const ReadInformationNeedsToolName = "r42_read_information_needs"
+
+const readInformationNeedsInstruction = "call " + ReadInformationNeedsToolName +
+	" to read active_information_need_states and use the returned canonical information-need IDs"
+
 // Context wires the workflow state machine and Artifact Registry for one
 // Collection phase. Checkpoint and review state are deliberately transient.
 type Context struct {
@@ -483,7 +489,11 @@ func activeInformationNeeds(states []informationNeedState) []InformationNeed {
 
 func validateAssessments(states []informationNeedState, assessments []QCAssessment, hasNewArtifacts bool) []corespec.Issue {
 	if len(assessments) != len(states) {
-		return []corespec.Issue{{Code: "assessments", Message: "assessments must contain every active information need exactly once"}}
+		return []corespec.Issue{{
+			Code: "assessments",
+			Message: "assessments must contain every active information need exactly once; " +
+				readInformationNeedsInstruction,
+		}}
 	}
 	stateByID := make(map[string]informationNeedState, len(states))
 	for _, state := range states {
@@ -494,7 +504,15 @@ func validateAssessments(states []informationNeedState, assessments []QCAssessme
 	for index, assessment := range assessments {
 		state, found := stateByID[assessment.InformationNeedID]
 		if !found {
-			issues = append(issues, corespec.Issue{Code: "assessments", Message: fmt.Sprintf("assessments[%d] names unknown or closed information need %q", index, assessment.InformationNeedID)})
+			issues = append(issues, corespec.Issue{
+				Code: "assessments",
+				Message: fmt.Sprintf(
+					"assessments[%d].information_need_id %q is not an active frozen canonical information-need ID; %s",
+					index,
+					assessment.InformationNeedID,
+					readInformationNeedsInstruction,
+				),
+			})
 			continue
 		}
 		if _, duplicate := seen[assessment.InformationNeedID]; duplicate {
@@ -540,7 +558,11 @@ func validateAssessments(states []informationNeedState, assessments []QCAssessme
 	}
 	for _, state := range states {
 		if _, found := seen[state.need.ID]; !found {
-			return []corespec.Issue{{Code: "assessments", Message: "assessments must contain every active information need exactly once"}}
+			return []corespec.Issue{{
+				Code: "assessments",
+				Message: "assessments must contain every active information need exactly once; " +
+					readInformationNeedsInstruction,
+			}}
 		}
 	}
 	return nil
@@ -868,7 +890,11 @@ func (c *Context) LastRoundHadArtifacts() bool {
 
 func validateNeedDispositions(needs []InformationNeed, dispositions []NeedDisposition) []corespec.Issue {
 	if len(dispositions) != len(needs) {
-		return []corespec.Issue{{Code: "need_dispositions", Message: "need_dispositions must contain every active information need exactly once"}}
+		return []corespec.Issue{{
+			Code: "need_dispositions",
+			Message: "need_dispositions must contain every active information need exactly once; " +
+				readInformationNeedsInstruction,
+		}}
 	}
 	expected := make(map[string]struct{}, len(needs))
 	for _, need := range needs {
@@ -878,7 +904,15 @@ func validateNeedDispositions(needs []InformationNeed, dispositions []NeedDispos
 	issues := make([]corespec.Issue, 0)
 	for index, disposition := range dispositions {
 		if _, found := expected[disposition.InformationNeedID]; !found {
-			issues = append(issues, corespec.Issue{Code: "need_dispositions", Message: fmt.Sprintf("need_dispositions[%d] names unknown or closed information need %q", index, disposition.InformationNeedID)})
+			issues = append(issues, corespec.Issue{
+				Code: "need_dispositions",
+				Message: fmt.Sprintf(
+					"need_dispositions[%d].information_need_id %q is not an active frozen canonical information-need ID; %s",
+					index,
+					disposition.InformationNeedID,
+					readInformationNeedsInstruction,
+				),
+			})
 			continue
 		}
 		if _, duplicate := seen[disposition.InformationNeedID]; duplicate {
@@ -894,7 +928,11 @@ func validateNeedDispositions(needs []InformationNeed, dispositions []NeedDispos
 	}
 	for _, need := range needs {
 		if _, found := seen[need.ID]; !found {
-			return []corespec.Issue{{Code: "need_dispositions", Message: "need_dispositions must contain every active information need exactly once"}}
+			return []corespec.Issue{{
+				Code: "need_dispositions",
+				Message: "need_dispositions must contain every active information need exactly once; " +
+					readInformationNeedsInstruction,
+			}}
 		}
 	}
 	return nil

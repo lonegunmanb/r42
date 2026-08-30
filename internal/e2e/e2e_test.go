@@ -460,7 +460,7 @@ func (s *qcScenarioSession) SendAndWait(context.Context, sdk.MessageOptions) (*s
 	if s.sends == 1 {
 		arguments = map[string]any{
 			"decision": "revise_research",
-			"issues":   []any{map[string]any{"code": "missing_source", "message": "add a citation"}},
+			"issues":   []any{map[string]any{"id": "issue-source", "code": "missing_source", "message": "add a citation"}},
 		}
 	}
 	_, err := findTool(s.config.Tools, "r42_qc_verdict").Handler(sdk.ToolInvocation{Arguments: arguments})

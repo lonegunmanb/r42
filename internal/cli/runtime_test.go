@@ -168,9 +168,25 @@ func TestProductionRuntimeRunsOneResearchSessionAndPublishesArtifacts(t *testing
 	t.Parallel()
 	directory := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+mcp_server "market_data" {
+  tools = ["get_quote", "get_kline"]
+  resources = ["quote://codes"]
+  http {
+    url              = "https://mcp.example.test/mcp"
+    bearer_token_ref = "MARKET_DATA_API_KEY"
+  }
+}
+
 research "static" "source" {
   model = "test-model"
   system_prompt = "Collect evidence."
+	collection_mcp_tool_ids = [
+	  mcp_server.market_data.tool_ids["get_quote"],
+	  mcp_server.market_data.tool_ids["get_kline"],
+	]
+	collection_mcp_resource_ids = [mcp_server.market_data.resource_ids["quote://codes"]]
+	allowed_tools = ["web_search", mcp_server.market_data.tool_ids["get_quote"]]
+	disallowed_tools = [mcp_server.market_data.tool_ids["get_quote"]]
 	retry {
 	  lifecycle_retries = 3
 	}
@@ -199,6 +215,22 @@ output "report_id" { value = research.static.source.artifact.report.id }
 
 	require.NoError(t, err)
 	require.Len(t, opener.configs, 3)
+	require.Len(t, opener.configs[0].MCPServers, 1)
+	assert.Equal(t, "market_data", opener.configs[0].MCPServers[0].Name)
+	require.Len(t, opener.configs[0].MCPResources, 1)
+	assert.Equal(t, "quote://codes", opener.configs[0].MCPResources[0].URI)
+	assert.Contains(t, opener.configs[0].AvailableTools, "mcp:mcp_server.market_data-get_quote")
+	assert.Contains(t, opener.configs[0].AvailableTools, "r42_read_information_needs")
+	assert.NotContains(t, opener.configs[0].AvailableTools, "mcp:mcp_server.market_data-get_kline")
+	assert.NotContains(t, opener.configs[0].AvailableTools, opener.configs[0].MCPServers[0].Tools[0])
+	assert.Contains(t, opener.configs[0].ExcludedTools, "mcp:mcp_server.market_data-get_quote")
+	assert.Contains(t, opener.configs[0].SystemPrompt, "An accepted r42_collection_checkpoint is the only completion condition for this session")
+	assert.Contains(t, opener.configs[0].SystemPrompt, "The host will open a separate closed Research session")
+	assert.NotContains(t, opener.configs[0].SystemPrompt, "submit_morning_evidence")
+	assert.Empty(t, opener.configs[1].MCPServers)
+	assert.Empty(t, opener.configs[2].MCPServers)
+	assert.NotContains(t, opener.configs[2].AvailableTools, "mcp:mcp_server.market_data-get_quote")
+	assert.NotContains(t, opener.configs[2].ExcludedTools, "mcp:mcp_server.market_data-get_quote")
 	assert.Equal(t, "test-model", opener.configs[2].Model)
 	assert.Contains(t, opener.configs[2].SystemPrompt, "Collect evidence.")
 	assert.True(t, strings.HasPrefix(opener.configs[2].SystemPrompt, "You are the closed Research synthesis phase"))
@@ -210,6 +242,41 @@ output "report_id" { value = research.static.source.artifact.report.id }
 	assert.Equal(t, "report.md", filepath.Base(path))
 	assert.Equal(t, "3", retries)
 	assert.Regexp(t, `^artifact-[0-9a-f-]{36}$`, result.Outputs["report_id"].AsString())
+}
+
+func TestProductionRuntimePreservesExplicitEmptyMCPAllowlist(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+mcp_server "market_data" {
+  tools = ["get_quote"]
+  http { url = "https://mcp.example.test/mcp" }
+}
+
+research "static" "source" {
+  model                   = "test-model"
+  system_prompt           = "Collect evidence."
+  collection_mcp_tool_ids = [mcp_server.market_data.tool_ids["get_quote"]]
+  allowed_tools           = []
+}
+`), 0o600))
+	opener := &fakeSessionOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+	encoded, err := plan.Marshal(planned)
+	require.NoError(t, err)
+	planned, err = plan.Unmarshal(encoded)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+
+	require.NoError(t, err)
+	require.Len(t, opener.configs, 3)
+	assert.NotNil(t, opener.configs[0].AvailableTools)
+	assert.Contains(t, opener.configs[0].AvailableTools, "r42_read_information_needs")
+	assert.NotContains(t, opener.configs[0].AvailableTools, "mcp:mcp_server.market_data-get_quote")
 }
 
 func TestProductionRuntimeExecutesTerminalGoTool(t *testing.T) {

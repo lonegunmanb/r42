@@ -25,11 +25,10 @@ func NewArtifactEvidenceAccess(registry *artifactpkg.Registry, ids []string) (*A
 	}
 	allowed := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
-		record, err := registry.Record(id)
-		if err != nil {
+		if _, err := registry.Record(id); err != nil {
 			return nil, err
 		}
-		if record.Purpose == artifactpkg.PurposeEvidence {
+		if registry.HasPurpose(id, artifactpkg.PurposeEvidence) {
 			allowed[id] = struct{}{}
 		}
 	}

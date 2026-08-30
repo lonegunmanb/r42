@@ -11,6 +11,8 @@ import (
 
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/executor"
+	"github.com/lonegunmanb/r42/internal/mcp"
+	mcpspec "github.com/lonegunmanb/r42/internal/mcp/spec"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"
@@ -754,6 +756,36 @@ research "static" "source" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigRejectsNonStringTerminateOutputDuringPlan(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(toolspec.GoToolBlock))
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+go_tool "finish" {
+  description = "Finish research"
+  source = <<-GO
+    import "context"
+    type Input struct{}
+    type Output struct { Saved string `+"`json:\"saved\"`"+` }
+    func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+      return ToolResponse[Output]{Accepted: true}, nil
+    }
+  GO
+}
+research "static" "source" {
+  model             = "test-model"
+  system_prompt     = "Synthesize evidence."
+  terminate_tool_id = go_tool.finish.id
+}
+`)
+
+	_, err := planSource(directory, executor.ResearchConfigOptions{})
+
+	require.ErrorContains(t, err, "terminate tool go_tool.finish output type must be string-compatible")
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
 func TestResearchConfigRejectsQuotaForToolOutsideSession(t *testing.T) {
 	registerSchemas()
 	golden.RegisterBlock(new(toolspec.GoToolBlock))
@@ -1147,6 +1179,347 @@ research "static" "market" {
 	assert.Equal(t, "high", *reconstructed.Config.CollectionQC.ReasoningEffort)
 	require.Equal(t, researchspec.PermissionApproveAll, *reconstructed.Config.CollectionQC.Permission)
 	assert.Equal(t, "Cover the task.", reconstructed.Config.CollectionQC.Criteria.Index(cty.StringVal("coverage")).AsString())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestSavedResearchConfigResolvesCollectionMCPTools(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(mcpspec.ServerBlock))
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	golden.RegisterBlock(new(researchspec.DynamicResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+mcp_server "jin10" {
+  tools = ["get_quote", "get_kline"]
+  resources = ["quote://codes"]
+  http {
+    url              = "https://mcp.jin10.com/mcp"
+    bearer_token_ref = "J10_API_KEY"
+  }
+}
+
+research "static" "quote" {
+  model         = "test-model"
+  system_prompt = "Collect one quote."
+  collection_mcp_tool_ids = [mcp_server.jin10.tool_ids["get_quote"]]
+  collection_mcp_resource_ids = [mcp_server.jin10.resource_ids["quote://codes"]]
+}
+
+research "dynamic" "history" {
+  tasks = [{
+    model         = "test-model"
+    system_prompt = "Collect price history."
+    collection_mcp_tool_ids = [mcp_server.jin10.tool_ids["get_kline"]]
+    collection_mcp_resource_ids = [mcp_server.jin10.resource_ids["quote://codes"]]
+  }]
+}
+`)
+
+	planned, err := planSource(directory, executor.ResearchConfigOptions{})
+	require.NoError(t, err)
+	nodes := map[string]internalplan.NodeSpec{}
+	for _, node := range planned.Saved.Nodes() {
+		nodes[node.Address] = node
+	}
+
+	staticPlan, err := modulespec.DecodeResearchPlan(nodes["research.static.quote"].Config)
+	require.NoError(t, err)
+	require.Len(t, staticPlan.MCPServers, 1)
+	assertMCPServerTools(t, staticPlan.MCPServers[0], []string{"get_quote"})
+	require.Len(t, staticPlan.Config.CollectionMCPResourceIDs, 1)
+	assert.True(t, internalplan.IsMCPResourceID(staticPlan.Config.CollectionMCPResourceIDs[0]))
+
+	dynamicPlan, err := modulespec.DecodeDynamicResearchPlan(nodes["research.dynamic.history"].Config)
+	require.NoError(t, err)
+	tasks, _, err := researchspec.DecodeDynamicTasks(dynamicPlan.Tasks)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	resolved, err := dynamicPlan.Resolve(tasks[0])
+	require.NoError(t, err)
+	require.Len(t, resolved.MCPServers, 1)
+	assertMCPServerTools(t, resolved.MCPServers[0], []string{"get_kline"})
+	require.Len(t, resolved.Config.CollectionMCPResourceIDs, 1)
+	assert.True(t, internalplan.IsMCPResourceID(resolved.Config.CollectionMCPResourceIDs[0]))
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestSavedResearchConfigPreservesExplicitEmptyAllowlists(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+research "static" "strict" {
+  model         = "test-model"
+  system_prompt = "Research."
+  allowed_tools = []
+
+  qc {
+    criteria      = { accuracy = "accurate" }
+    allowed_tools = []
+  }
+}
+`)
+
+	planned, err := planSource(directory, executor.ResearchConfigOptions{})
+	require.NoError(t, err)
+	reconstructed, err := modulespec.DecodeResearchPlan(planned.Saved.Nodes()[0].Config)
+
+	require.NoError(t, err)
+	assert.NotNil(t, reconstructed.Config.Policy.AllowedTools)
+	assert.Empty(t, reconstructed.Config.Policy.AllowedTools)
+	require.NotNil(t, reconstructed.Config.QC)
+	assert.NotNil(t, reconstructed.Config.QC.AllowedTools)
+	assert.Empty(t, reconstructed.Config.QC.AllowedTools)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigRejectsTypedToolAsMCPTool(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+external_tool "collect" {
+  description = "Collect"
+  program     = ["collect"]
+  input_type  = object({})
+  output_type = string
+}
+
+research "static" "invalid" {
+  model         = "test-model"
+  system_prompt = "Collect."
+  collection_mcp_tool_ids = [external_tool.collect.id]
+}
+`)
+
+	_, err := planSource(directory, executor.ResearchConfigOptions{})
+	require.Error(t, err)
+	require.ErrorContains(t, err, "research collection_mcp_tool_ids")
+	require.ErrorContains(t, err, "is not an mcp tool id")
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigRejectsToolAsMCPResource(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(mcpspec.ServerBlock))
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+mcp_server "jin10" {
+  tools = ["get_quote"]
+  resources = ["quote://codes"]
+  http { url = "https://mcp.jin10.com/mcp" }
+}
+
+research "static" "invalid" {
+  model         = "test-model"
+  system_prompt = "Collect."
+  collection_mcp_resource_ids = [mcp_server.jin10.tool_ids["get_quote"]]
+}
+`)
+
+	_, err := planSource(directory, executor.ResearchConfigOptions{})
+
+	require.ErrorContains(t, err, "research collection_mcp_resource_ids")
+	require.ErrorContains(t, err, "is not an mcp resource id")
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestSavedResearchConfigSupportsResourceOnlyMCPSelection(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(mcpspec.ServerBlock))
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+mcp_server "jin10" {
+  tools = ["get_quote"]
+  resources = ["quote://codes"]
+  http { url = "https://mcp.jin10.com/mcp" }
+}
+
+research "static" "codes" {
+  model         = "test-model"
+  system_prompt = "Read codes."
+  collection_mcp_resource_ids = [mcp_server.jin10.resource_ids["quote://codes"]]
+}
+`)
+
+	planned, err := planSource(directory, executor.ResearchConfigOptions{})
+	require.NoError(t, err)
+	reconstructed, err := modulespec.DecodeResearchPlan(planned.Saved.Nodes()[0].Config)
+	require.NoError(t, err)
+
+	require.Len(t, reconstructed.MCPServers, 1)
+	assert.NotNil(t, reconstructed.MCPServers[0].Tools)
+	assert.Empty(t, reconstructed.MCPServers[0].Tools)
+	assert.Equal(t, []string{"quote://codes"}, reconstructed.MCPServers[0].Resources)
+	require.Len(t, reconstructed.Config.CollectionMCPResourceIDs, 1)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigRejectsUnknownMCPToolInFilters(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	tests := []struct {
+		name          string
+		allowedTool   string
+		expectedError string
+	}{
+		{
+			name:          "unknown generated id",
+			allowedTool:   "mcp_tool_missing__query_12345678-1234-8234-9234-123456789abc",
+			expectedError: "was not planned",
+		},
+		{
+			name:          "sdk filter name",
+			allowedTool:   "mcp:missing-query",
+			expectedError: "must use generated mcp tool ids",
+		},
+		{
+			name:          "resource id",
+			allowedTool:   "mcp_resource_jin10__quote_codes_12345678-1234-8234-9234-123456789abc",
+			expectedError: "does not accept mcp resource ids",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			directory := t.TempDir()
+			writeR42(t, directory, "main.r42.hcl", fmt.Sprintf(`
+research "static" "invalid" {
+  model         = "test-model"
+  system_prompt = "Collect."
+  allowed_tools = [%q]
+}
+`, tt.allowedTool))
+
+			_, err := planSource(directory, executor.ResearchConfigOptions{})
+
+			require.Error(t, err)
+			require.ErrorContains(t, err, "research allowed_tools")
+			require.ErrorContains(t, err, tt.expectedError)
+		})
+	}
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigRejectsMCPToolsInQCFilters(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(mcpspec.ServerBlock))
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	tests := []struct {
+		name      string
+		attribute string
+		filter    string
+	}{
+		{name: "generated id in allowed tools", attribute: "allowed_tools", filter: `mcp_server.market.tool_ids["quote"]`},
+		{name: "generated id in disallowed tools", attribute: "disallowed_tools", filter: `mcp_server.market.tool_ids["quote"]`},
+		{name: "sdk name in allowed tools", attribute: "allowed_tools", filter: `"mcp:market-quote"`},
+		{name: "sdk name in disallowed tools", attribute: "disallowed_tools", filter: `"mcp:market-quote"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			directory := t.TempDir()
+			writeR42(t, directory, "main.r42.hcl", fmt.Sprintf(`
+mcp_server "market" {
+  tools = ["quote"]
+  http { url = "https://mcp.example.test/mcp" }
+}
+
+research "static" "invalid" {
+  model         = "test-model"
+  system_prompt = "Collect."
+  qc {
+    criteria = { accuracy = "accurate" }
+    %s = [%s]
+  }
+}
+`, tt.attribute, tt.filter))
+
+			_, err := planSource(directory, executor.ResearchConfigOptions{})
+
+			require.Error(t, err)
+			require.ErrorContains(t, err, "qc "+tt.attribute)
+			require.ErrorContains(t, err, "MCP tools are collection-only")
+		})
+	}
+}
+
+func TestSavedResearchValidationRejectsMCPToolQuota(t *testing.T) {
+	t.Parallel()
+
+	id := "mcp_tool_market__quote_12345678-1234-8234-9234-123456789abc"
+	err := modulespec.ValidateResearchToolIDs(researchspec.Config{
+		Policy: researchspec.SessionPolicy{ToolCallQuota: map[string]int{id: 1}},
+	}, nil)
+
+	require.EqualError(t, err, "research tool_call_quota does not support mcp tool id \""+id+"\"")
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigRejectsCollidingMCPRuntimeNames(t *testing.T) {
+	registerSchemas()
+	golden.RegisterBlock(new(mcpspec.ServerBlock))
+	golden.RegisterBlock(new(researchspec.ResearchBlock))
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+mcp_server "market" {
+  tools = ["data-quote"]
+  http { url = "https://market.example.test/mcp" }
+}
+
+mcp_server "market-data" {
+  tools = ["quote"]
+  http { url = "https://market-data.example.test/mcp" }
+}
+
+research "static" "invalid" {
+  model         = "test-model"
+  system_prompt = "Collect."
+  collection_mcp_tool_ids = [
+    mcp_server.market.tool_ids["data-quote"],
+    mcp_server.market-data.tool_ids["quote"],
+  ]
+}
+`)
+
+	_, err := planSource(directory, executor.ResearchConfigOptions{})
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, `MCP tools map to duplicate SDK name "mcp:mcp_server.market-data-quote"`)
+}
+
+func assertMCPServerTools(t *testing.T, server mcp.Config, expected []string) {
+	t.Helper()
+	assert.Equal(t, "jin10", server.Name)
+	assert.Equal(t, expected, server.Tools)
+	require.NotNil(t, server.HTTP)
+	assert.Equal(t, "https://mcp.jin10.com/mcp", server.HTTP.URL)
+}
+
+func TestDeferredStaticResearchPlanResolvePropagatesMCPServers(t *testing.T) {
+	t.Parallel()
+
+	id := "mcp_tool_jin10__get_quote_12345678-1234-8234-9234-123456789abc"
+	server := mcp.Config{
+		Name: "jin10", Transport: mcp.TransportHTTP, Tools: []string{"get_quote"}, Timeout: 30 * time.Second,
+		HTTP: &mcp.HTTPConfig{URL: "https://mcp.jin10.com/mcp"},
+	}
+	planned := modulespec.ResearchPlan{
+		Expression: "local.deferred",
+		MCPTools: mcp.ToolRegistry{
+			id: {ID: id, Name: "get_quote", Server: server},
+		},
+	}
+
+	resolved, err := planned.Resolve(researchspec.Config{
+		Model: "test-model", SystemPrompt: "Collect a quote.", CollectionMCPToolIDs: []string{id},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, resolved.MCPServers, 1)
+	assertMCPServerTools(t, resolved.MCPServers[0], []string{"get_quote"})
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

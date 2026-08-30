@@ -32,6 +32,7 @@ import (
 	researchruntime "github.com/lonegunmanb/r42/internal/research/runtime"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	"github.com/lonegunmanb/r42/internal/run"
+	internals3 "github.com/lonegunmanb/r42/internal/s3"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	externaltool "github.com/lonegunmanb/r42/internal/tool/external"
 	"github.com/lonegunmanb/r42/internal/tool/gotool"
@@ -59,8 +60,10 @@ type SessionOpener interface {
 }
 
 type RuntimeOptions struct {
-	Sessions       SessionOpener
-	StarlarkRunner starlarkRunner
+	Sessions         SessionOpener
+	StarlarkRunner   starlarkRunner
+	S3ServiceFactory internals3.ServiceFactory
+	S3EnvLookup      internals3.EnvLookup
 }
 
 type Engine struct {
@@ -214,6 +217,8 @@ func (e *Engine) apply(
 		sessionStallTimeout: effectiveSessionStallTimeout(options.SessionStallTimeout),
 		artifactRegistry:    artifactpkg.NewRegistry(),
 		starlarkRunner:      e.options.StarlarkRunner,
+		s3ServiceFactory:    e.options.S3ServiceFactory,
+		s3EnvLookup:         e.options.S3EnvLookup,
 	}
 	runner := executor.New(factory, nil)
 	outputs, applyErr := runner.Apply(ctx, planned, options.Parallelism)
@@ -296,6 +301,8 @@ type runtimeFactory struct {
 	sessionStallTimeout time.Duration
 	artifactRegistry    *artifactpkg.Registry
 	starlarkRunner      starlarkRunner
+	s3ServiceFactory    internals3.ServiceFactory
+	s3EnvLookup         internals3.EnvLookup
 }
 
 type starlarkRunner interface {
@@ -340,6 +347,9 @@ func (f *runtimeFactory) New(
 ) (golden.ApplyBlock, error) {
 	if node.Kind == "module" {
 		return f.newModuleBlock(ctx, node, scope)
+	}
+	if node.Kind == "s3_folder" {
+		return f.newS3FolderBlock(ctx, node)
 	}
 	if node.Kind != "research" {
 		return nil, fmt.Errorf("unsupported apply node kind %q", node.Kind)
@@ -432,6 +442,8 @@ func (f *runtimeFactory) newModuleBlock(
 		localExpressions:    node.Module.Plan.LocalExpressions(),
 		sessionStallTimeout: f.sessionStallTimeout,
 		starlarkRunner:      f.starlarkRunner,
+		s3ServiceFactory:    f.s3ServiceFactory,
+		s3EnvLookup:         f.s3EnvLookup,
 	}
 	return &moduleApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address,
@@ -1318,7 +1330,7 @@ func (f *runtimeFactory) publish(address string, value cty.Value) {
 func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.VerdictRecorder) sdk.Tool {
 	return sdk.Tool{
 		Name:        "r42_qc_verdict",
-		Description: "Submit pass with no issues, or revise_research with every issue found in this review. Final QC cannot reopen Collection.",
+		Description: "Submit pass with no issues, or revise_research with unresolved issues from the current Final QC baseline. Each issue must reuse its stable id; after the first review, do not introduce new ids or change issue identity. Final QC cannot reopen Collection.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -1331,12 +1343,13 @@ func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.Ver
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
+							"id":          map[string]any{"type": "string"},
 							"code":        map[string]any{"type": "string"},
 							"message":     map[string]any{"type": "string"},
 							"path":        map[string]any{"type": "string"},
 							"repair_hint": map[string]any{"type": "string"},
 						},
-						"required":             []string{"code", "message"},
+						"required":             []string{"id", "code", "message"},
 						"additionalProperties": false,
 					},
 				},
@@ -1361,7 +1374,7 @@ func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.Ver
 				//nolint:nilerr // Invalid verdicts are repairable tool results, not handler failures.
 				return sdk.ToolResult{TextResultForLLM: string(rejected), ResultType: "success"}, nil
 			}
-			if recordErr := verdicts.Record(verdict); recordErr != nil {
+			if recordErr := verdicts.RecordFinal(verdict); recordErr != nil {
 				return rejectedToolResult("invalid_qc_issue_transition", recordErr.Error())
 			}
 			result, _ := json.Marshal(map[string]any{"accepted": true})

@@ -27,6 +27,20 @@ func TestConfigValidateCollectionFields(t *testing.T) {
 			expectedError: "research collection_tool_ids must not contain empty values",
 		},
 		{
+			name: "empty collection mcp tool id",
+			mutate: func(config *researchspec.Config) {
+				config.CollectionMCPToolIDs = []string{""}
+			},
+			expectedError: "research collection_mcp_tool_ids must not contain empty values",
+		},
+		{
+			name: "empty collection mcp resource id",
+			mutate: func(config *researchspec.Config) {
+				config.CollectionMCPResourceIDs = []string{""}
+			},
+			expectedError: "research collection_mcp_resource_ids must not contain empty values",
+		},
+		{
 			name: "collection tool quota may reference collection tool ids",
 			mutate: func(config *researchspec.Config) {
 				config.CollectionToolIDs = []string{"tool_go_tool_example_12345678-1234-8234-9234-123456789abc"}

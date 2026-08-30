@@ -129,8 +129,8 @@ func TestRunnerCarriesIssuesIntoFollowUpQCContext(t *testing.T) {
 	session := &fakeSession{onSend: func(call int, _ string) error {
 		if call == 1 {
 			return verdicts.Record(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{
-				{Code: "source", Message: "add primary source"},
-				{Code: "entailment", Message: "narrow the claim"},
+				{ID: "issue-source", Code: "source", Message: "add primary source"},
+				{ID: "issue-entailment", Code: "entailment", Message: "narrow the claim"},
 			}})
 		}
 		return verdicts.Record(qc.Verdict{Decision: qc.DecisionPass})
@@ -146,9 +146,51 @@ func TestRunnerCarriesIssuesIntoFollowUpQCContext(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal([]byte(session.prompts[1]), &document))
 	assert.Equal(t, []corespec.Issue{
-		{Code: "source", Message: "add primary source"},
-		{Code: "entailment", Message: "narrow the claim"},
+		{ID: "issue-source", Code: "source", Message: "add primary source"},
+		{ID: "issue-entailment", Code: "entailment", Message: "narrow the claim"},
 	}, document.OpenIssues)
+}
+
+func TestVerdictRecorderRequiresIssueIDsForFinalQC(t *testing.T) {
+	t.Parallel()
+
+	recorder := qc.NewVerdictRecorder()
+
+	err := recorder.RecordFinal(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{{
+		Code: "accuracy", Message: "wrong total",
+	}}})
+
+	require.ErrorContains(t, err, "issue id is required")
+}
+
+func TestVerdictRecorderRejectsNewFinalQCIssueAfterFirstReview(t *testing.T) {
+	t.Parallel()
+
+	recorder := qc.NewVerdictRecorder()
+	require.NoError(t, recorder.RecordFinal(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{{
+		ID: "issue-accuracy", Code: "accuracy", Message: "wrong total",
+	}}}))
+
+	err := recorder.RecordFinal(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{{
+		ID: "issue-new", Code: "coverage", Message: "new issue",
+	}}})
+
+	require.ErrorContains(t, err, "new final qc issue id")
+}
+
+func TestVerdictRecorderRejectsChangedFinalQCIssueIdentity(t *testing.T) {
+	t.Parallel()
+
+	recorder := qc.NewVerdictRecorder()
+	require.NoError(t, recorder.RecordFinal(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{{
+		ID: "issue-accuracy", Code: "accuracy", Message: "wrong total",
+	}}}))
+
+	err := recorder.RecordFinal(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{{
+		ID: "issue-accuracy", Code: "coverage", Message: "missing source",
+	}}})
+
+	require.ErrorContains(t, err, "changes final qc issue identity")
 }
 
 func TestRunnerResetsVerdictProtocolBudgetForEachRevision(t *testing.T) {
@@ -407,8 +449,8 @@ func TestRunnerIncludesCompleteIssueDetailsInRevision(t *testing.T) {
 	session := &fakeSession{onSend: func(call int, _ string) error {
 		if call == 1 {
 			return verdicts.Record(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{
-				{Code: "source", Message: "missing source", Path: &path, RepairHint: &hint},
-				{Code: "accuracy", Message: "wrong total"},
+				{ID: "issue-source", Code: "source", Message: "missing source", Path: &path, RepairHint: &hint},
+				{ID: "issue-accuracy", Code: "accuracy", Message: "wrong total"},
 			}})
 		}
 		return verdicts.Record(qc.Verdict{Decision: qc.DecisionPass})
@@ -419,7 +461,7 @@ func TestRunnerIncludesCompleteIssueDetailsInRevision(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Len(t, research.configs, 2)
-	assert.Contains(t, research.configs[1].InitialPrompt, "(path: report.md) Repair: add a citation\n- [accuracy]")
+	assert.Contains(t, research.configs[1].InitialPrompt, "(path: report.md) Repair: add a citation\n- [issue-accuracy] [accuracy]")
 }
 
 func TestVerdictRecorderCompletionVersionOnlyAdvancesForNewOutcomes(t *testing.T) {

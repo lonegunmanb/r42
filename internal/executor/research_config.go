@@ -23,6 +23,7 @@ import (
 	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	"github.com/lonegunmanb/r42/internal/run"
+	s3spec "github.com/lonegunmanb/r42/internal/s3/spec"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -373,6 +374,9 @@ func (c *ResearchConfig) savedPlan(planned modulespec.Plan) (*internalplan.Plan,
 	for _, block := range golden.Blocks[*modulespec.ModuleBlock](c) {
 		executable[block.Address()] = struct{}{}
 	}
+	for _, block := range golden.Blocks[*s3spec.FolderBlock](c) {
+		executable[block.Address()] = struct{}{}
+	}
 	dependencies := make(map[string][]string, len(executable))
 	for address := range executable {
 		children, err := c.GetChildren(address)
@@ -415,6 +419,20 @@ func (c *ResearchConfig) savedPlan(planned modulespec.Plan) (*internalplan.Plan,
 			Module: &internalplan.ModuleSpec{Plan: module.Saved, Parallelism: module.Parallelism, Timeout: module.Timeout},
 		})
 	}
+	for _, block := range golden.Blocks[*s3spec.FolderBlock](c) {
+		providerConfig, err := s3ProviderForReference(c, block.FolderConfig().Provider)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot %s: %w", block.Address(), err)
+		}
+		snapshot, err := s3spec.EncodeFolderPlan(providerConfig, block.FolderConfig())
+		if err != nil {
+			return nil, fmt.Errorf("snapshot %s: %w", block.Address(), err)
+		}
+		nodes = append(nodes, internalplan.NodeSpec{
+			Address: block.Address(), Kind: "s3_folder", Dependencies: dependencies[block.Address()], Config: snapshot,
+			Origin: modulespec.BlockOrigin(block.HclBlock()),
+		})
+	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].Address < nodes[j].Address })
 	for index := range nodes {
 		sort.Strings(nodes[index].Dependencies)
@@ -440,6 +458,21 @@ func (c *ResearchConfig) savedPlan(planned modulespec.Plan) (*internalplan.Plan,
 		return nil, fmt.Errorf("build saved plan: %w", err)
 	}
 	return result, nil
+}
+
+func s3ProviderForReference(planning golden.Config, value cty.Value) (s3spec.ProviderConfig, error) {
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.IsKnown() || !unmarked.Type().IsObjectType() || !unmarked.Type().HasAttribute("address") || !unmarked.Type().HasAttribute("kind") ||
+		unmarked.GetAttr("kind").AsString() != "s3_provider" {
+		return s3spec.ProviderConfig{}, fmt.Errorf("s3 folder provider must be an s3_provider reference")
+	}
+	address := unmarked.GetAttr("address").AsString()
+	for _, block := range golden.Blocks[*s3spec.ProviderBlock](planning) {
+		if block.Address() == address {
+			return block.ProviderConfig(), nil
+		}
+	}
+	return s3spec.ProviderConfig{}, fmt.Errorf("s3 provider %q was not planned", address)
 }
 
 func savedExpressionSource(attribute *golden.HclAttribute) string {

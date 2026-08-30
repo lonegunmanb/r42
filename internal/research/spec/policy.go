@@ -53,11 +53,8 @@ func (c Config) ValidateResolved(tools ResolvedTools) error {
 				configuredID,
 			)
 		}
-		if err := corespec.ValidateType(tools.Terminate.OutputType); err != nil {
-			return fmt.Errorf("terminate tool %s output type: %w", tools.Terminate.Address, err)
-		}
-		if !tools.Terminate.OutputType.Equals(cty.String) && convert.GetConversion(tools.Terminate.OutputType, cty.String) == nil {
-			return fmt.Errorf("terminate tool %s output type must be string-compatible", tools.Terminate.Address)
+		if err := ValidateTerminateOutputType(tools.Terminate.Address, tools.Terminate.OutputType); err != nil {
+			return err
 		}
 		if err := validateMandatoryTool(c.Policy.AllowedTools, c.Policy.DisallowedTools, tools.TerminateSDKName); err != nil {
 			return err
@@ -74,6 +71,18 @@ func (c Config) ValidateResolved(tools ResolvedTools) error {
 		if err := validateMandatoryTool(c.QC.AllowedTools, disallowed, tools.QCVerdictSDKName); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// ValidateTerminateOutputType enforces the string result contract shared by
+// plan-time tool validation and the apply-time terminal recorder.
+func ValidateTerminateOutputType(address string, outputType cty.Type) error {
+	if err := corespec.ValidateType(outputType); err != nil {
+		return fmt.Errorf("terminate tool %s output type: %w", address, err)
+	}
+	if !outputType.Equals(cty.String) && convert.GetConversion(outputType, cty.String) == nil {
+		return fmt.Errorf("terminate tool %s output type must be string-compatible", address)
 	}
 	return nil
 }

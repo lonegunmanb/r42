@@ -257,7 +257,7 @@ func issuePrompt(header string, issues []corespec.Issue) string {
 	var result strings.Builder
 	result.WriteString(header)
 	for _, issue := range issues {
-		fmt.Fprintf(&result, "\n- [%s] %s", issue.Code, issue.Message)
+		fmt.Fprintf(&result, "\n- [%s] [%s] %s", issue.ID, issue.Code, issue.Message)
 	}
 	return result.String()
 }

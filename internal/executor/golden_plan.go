@@ -18,11 +18,13 @@ import (
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
 	"github.com/lonegunmanb/r42/internal/config"
 	"github.com/lonegunmanb/r42/internal/debuglog"
+	mcpspec "github.com/lonegunmanb/r42/internal/mcp/spec"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	"github.com/lonegunmanb/r42/internal/run"
+	s3spec "github.com/lonegunmanb/r42/internal/s3/spec"
 	toolspec "github.com/lonegunmanb/r42/internal/tool/spec"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -356,11 +358,14 @@ func registerResearchBlocks() {
 		// go-defaults v1.4.0 lazily initializes its shared filler without synchronization.
 		defaults.SetDefaults(&struct{}{})
 		golden.RegisterBlock(new(provider.ModelProviderBlock))
+		golden.RegisterBlock(new(mcpspec.ServerBlock))
 		golden.RegisterBlock(new(toolspec.GoToolBlock))
 		golden.RegisterBlock(new(toolspec.ExternalToolBlock))
 		golden.RegisterBlock(new(toolspec.StarlarkToolBlock))
 		golden.RegisterBlock(new(researchspec.ResearchBlock))
 		golden.RegisterBlock(new(researchspec.DynamicResearchBlock))
+		golden.RegisterBlock(new(s3spec.ProviderBlock))
+		golden.RegisterBlock(new(s3spec.FolderBlock))
 		golden.RegisterBlock(new(modulespec.ModuleBlock))
 		golden.RegisterBlock(new(modulespec.OutputBlock))
 	})
@@ -464,6 +469,12 @@ func nativePlanHCLBlocks(nodes []plan.NodeSpec) ([]*golden.HclBlock, error) {
 				block.Body().SetAttributeValue("system_prompt", cty.StringVal("saved-plan"))
 			}
 		case "module":
+			block.Body().SetAttributeValue("source", cty.StringVal("."))
+		case "s3_folder":
+			block.Body().SetAttributeValue("provider", cty.ObjectVal(map[string]cty.Value{
+				"address": cty.StringVal("s3_provider.saved"), "kind": cty.StringVal("s3_provider"),
+			}))
+			block.Body().SetAttributeValue("bucket", cty.StringVal("saved-plan"))
 			block.Body().SetAttributeValue("source", cty.StringVal("."))
 		default:
 			return nil, fmt.Errorf(

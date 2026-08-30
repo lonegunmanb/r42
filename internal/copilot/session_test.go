@@ -8,6 +8,7 @@ import (
 	"time"
 
 	sdk "github.com/github/copilot-sdk/go"
+	"github.com/lonegunmanb/r42/internal/mcp"
 	"github.com/lonegunmanb/r42/internal/provider"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -62,6 +63,9 @@ func TestFactoryOpenMaterializesProviderAndAssemblesSession(t *testing.T) {
 	assert.False(t, *config.EnableSessionStore)
 	require.NotNil(t, config.SkipEmbeddingRetrieval)
 	assert.True(t, *config.SkipEmbeddingRetrieval)
+	require.NotNil(t, config.LargeOutput)
+	require.NotNil(t, config.LargeOutput.Enabled)
+	assert.False(t, *config.LargeOutput.Enabled)
 	assert.Equal(t, "D:/run/research.market", config.WorkingDirectory)
 	require.NotNil(t, config.SystemMessage)
 	assert.Equal(t, "append", config.SystemMessage.Mode)
@@ -123,6 +127,255 @@ func TestFactoryOpenForwardsSessionHooks(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, client.configs, 1)
 	assert.Same(t, hooks, client.configs[0].Hooks)
+}
+
+func TestFactoryOpenMountsAuthorizedMCPResourceReader(t *testing.T) {
+	t.Parallel()
+
+	resourceID := "mcp_resource_jin10__quote_codes_12345678-1234-8234-9234-123456789abc"
+	underlying := &fakeMCPResourceSession{contents: []mcp.ResourceContent{{
+		URI: "quote://codes", MIMEType: sdk.String("application/json"), Text: sdk.String(`{"codes":["USDCNH"]}`),
+	}}}
+	client := &fakeClient{session: underlying}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+
+	_, err := factory.Open(t.Context(), SessionConfig{
+		Retry:          retryPolicy(t, 0, 0),
+		AvailableTools: []string{"web_search"}, ExcludedTools: []string{MCPResourceReadToolName, "ask_user"},
+		MCPResources: []mcp.Resource{{
+			ID: resourceID, URI: "quote://codes",
+			Server: mcp.Config{Name: "jin10", RuntimeName: "module.market.mcp_server.jin10"},
+		}},
+	})
+	require.NoError(t, err)
+	require.Len(t, client.configs, 1)
+	assert.Contains(t, client.configs[0].AvailableTools, MCPResourceReadToolName)
+	assert.NotContains(t, client.configs[0].ExcludedTools, MCPResourceReadToolName)
+	assert.Contains(t, client.configs[0].ExcludedTools, "ask_user")
+	reader := sdkToolByName(t, client.configs[0].Tools, MCPResourceReadToolName)
+
+	result, err := reader.Handler(sdk.ToolInvocation{Arguments: map[string]any{"resource_id": resourceID}})
+
+	require.NoError(t, err)
+	assert.Equal(t, "success", result.ResultType)
+	assert.JSONEq(t, `{"resource_id":"`+resourceID+`","contents":[{"uri":"quote://codes","mimeType":"application/json","text":"{\"codes\":[\"USDCNH\"]}"}]}`, result.TextResultForLLM)
+	assert.Equal(t, []mcp.ResourceReadRequest{{ServerName: "module.market.mcp_server.jin10", URI: "quote://codes"}}, underlying.reads)
+}
+
+func TestMCPResourceReaderRejectsResourceOutsideSessionAuthorization(t *testing.T) {
+	t.Parallel()
+
+	underlying := &fakeMCPResourceSession{}
+	client := &fakeClient{session: underlying}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+	_, err := factory.Open(t.Context(), SessionConfig{
+		Retry: retryPolicy(t, 0, 0),
+		MCPResources: []mcp.Resource{{
+			ID:  "mcp_resource_jin10__quote_codes_12345678-1234-8234-9234-123456789abc",
+			URI: "quote://codes", Server: mcp.Config{Name: "jin10"},
+		}},
+	})
+	require.NoError(t, err)
+	reader := sdkToolByName(t, client.configs[0].Tools, MCPResourceReadToolName)
+
+	result, err := reader.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"resource_id": "mcp_resource_other__secret_12345678-1234-8234-9234-123456789abc",
+	}})
+
+	require.NoError(t, err)
+	assert.Equal(t, "success", result.ResultType)
+	assert.Contains(t, result.TextResultForLLM, "resource_not_authorized")
+	assert.Empty(t, underlying.reads)
+}
+
+func TestFactoryOpenDoesNotMountMCPResourceReaderWithoutResources(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+
+	_, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 0, 0), AvailableTools: []string{"web_search"}})
+
+	require.NoError(t, err)
+	assert.NotContains(t, client.configs[0].AvailableTools, MCPResourceReadToolName)
+	for _, tool := range client.configs[0].Tools {
+		assert.NotEqual(t, MCPResourceReadToolName, tool.Name)
+	}
+}
+
+func TestMCPResourceReaderSchemaEnumeratesAuthorizedResourceIDs(t *testing.T) {
+	t.Parallel()
+
+	resourceIDs := []string{"resource-a", "resource-b"}
+	tool := mcpResourceReadTool(newMCPResourceReaderHolder(nil), resourceIDs)
+
+	properties, ok := tool.Parameters["properties"].(map[string]any)
+	require.True(t, ok)
+	resourceID, ok := properties["resource_id"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, resourceIDs, resourceID["enum"])
+}
+
+func TestFactoryOpenSupportsResourceOnlyMCPServerSelection(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{session: &fakeMCPResourceSession{}}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+	resource := mcp.Resource{
+		ID:  "mcp_resource_jin10__quote_codes_12345678-1234-8234-9234-123456789abc",
+		URI: "quote://codes", Server: mcp.Config{Name: "jin10"},
+	}
+
+	_, err := factory.Open(t.Context(), SessionConfig{
+		Retry: retryPolicy(t, 0, 0), MCPResources: []mcp.Resource{resource},
+		MCPServers: []mcp.Config{{
+			Name: "jin10", Transport: mcp.TransportHTTP, Tools: []string{}, Resources: []string{"quote://codes"},
+			Timeout: 30 * time.Second, HTTP: &mcp.HTTPConfig{URL: "https://mcp.jin10.com/mcp"},
+		}},
+	})
+
+	require.NoError(t, err)
+	server, ok := client.configs[0].MCPServers["jin10"].(sdk.MCPHTTPServerConfig)
+	require.True(t, ok)
+	assert.NotNil(t, server.Tools)
+	assert.Empty(t, server.Tools)
+}
+
+func TestFactoryOpenNormalizesNilToolsForResourceOnlyMCPServer(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{session: &fakeMCPResourceSession{}}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+
+	_, err := factory.Open(t.Context(), SessionConfig{
+		Retry: retryPolicy(t, 0, 0),
+		MCPServers: []mcp.Config{{
+			Name: "jin10", Transport: mcp.TransportHTTP, Resources: []string{"quote://codes"},
+			Timeout: 30 * time.Second, HTTP: &mcp.HTTPConfig{URL: "https://mcp.jin10.com/mcp"},
+		}},
+	})
+
+	require.NoError(t, err)
+	server, ok := client.configs[0].MCPServers["jin10"].(sdk.MCPHTTPServerConfig)
+	require.True(t, ok)
+	assert.NotNil(t, server.Tools)
+	assert.Empty(t, server.Tools)
+}
+
+func TestFactoryOpenMapsNativeMCPServers(t *testing.T) {
+	t.Parallel()
+
+	httpTokenRef := "J10_API_KEY"
+	stdioTokenRef := "LOCAL_MCP_TOKEN"
+	client := &fakeClient{}
+	factory := newFactory(client, func(name string) (string, bool) {
+		return map[string]string{
+			"J10_API_KEY":     "j10-secret",
+			"LOCAL_MCP_TOKEN": "local-secret",
+		}[name], true
+	}, noDelay, fixedRandom)
+
+	_, err := factory.Open(t.Context(), SessionConfig{
+		Retry: retryPolicy(t, 0, 0),
+		MCPServers: []mcp.Config{
+			{
+				Name: "jin10", Transport: mcp.TransportHTTP, Tools: []string{"get_quote", "get_kline"}, Timeout: 30 * time.Second,
+				HTTP: &mcp.HTTPConfig{
+					URL: "https://mcp.jin10.com/mcp", Headers: map[string]string{"X-Tenant": "research"}, BearerTokenRef: &httpTokenRef,
+				},
+			},
+			{
+				Name: "local", Transport: mcp.TransportStdio, Tools: []string{"query"}, Timeout: 2 * time.Minute,
+				Stdio: &mcp.StdioConfig{
+					Command: "uvx", Args: []string{"example-mcp"}, Env: map[string]string{"LOG_LEVEL": "warning"},
+					EnvRefs: map[string]string{"TOKEN": stdioTokenRef}, WorkingDirectory: "D:/mcp",
+				},
+			},
+		},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, client.configs, 1)
+	httpConfig, ok := client.configs[0].MCPServers["jin10"].(sdk.MCPHTTPServerConfig)
+	require.True(t, ok)
+	assert.Equal(t, "https://mcp.jin10.com/mcp", httpConfig.URL)
+	assert.Equal(t, map[string]string{"X-Tenant": "research", "Authorization": "Bearer j10-secret"}, httpConfig.Headers)
+	assert.Equal(t, []string{"get_quote", "get_kline"}, httpConfig.Tools)
+	assert.Equal(t, 30_000, httpConfig.Timeout)
+	stdioConfig, ok := client.configs[0].MCPServers["local"].(sdk.MCPStdioServerConfig)
+	require.True(t, ok)
+	assert.Equal(t, "uvx", stdioConfig.Command)
+	assert.Equal(t, []string{"example-mcp"}, stdioConfig.Args)
+	assert.Equal(t, map[string]string{"LOG_LEVEL": "warning", "TOKEN": "local-secret"}, stdioConfig.Env)
+	assert.Equal(t, "D:/mcp", stdioConfig.WorkingDirectory)
+	assert.Equal(t, []string{"query"}, stdioConfig.Tools)
+	assert.Equal(t, 120_000, stdioConfig.Timeout)
+}
+
+func TestFactoryOpenRejectsMissingMCPEnvironmentValueBeforeSDKCall(t *testing.T) {
+	t.Parallel()
+
+	tokenRef := "MISSING_MCP_TOKEN"
+	client := &fakeClient{}
+	factory := newFactory(client, func(string) (string, bool) { return "", false }, noDelay, fixedRandom)
+
+	_, err := factory.Open(t.Context(), SessionConfig{
+		Retry: retryPolicy(t, 0, 0),
+		MCPServers: []mcp.Config{{
+			Name: "jin10", Transport: mcp.TransportHTTP, Tools: []string{"get_quote"}, Timeout: 30 * time.Second,
+			HTTP: &mcp.HTTPConfig{URL: "https://mcp.jin10.com/mcp", BearerTokenRef: &tokenRef},
+		}},
+	})
+
+	require.EqualError(t, err, `materialize mcp server: mcp server "jin10" bearer token environment variable "MISSING_MCP_TOKEN" is not set`)
+	assert.Empty(t, client.configs)
+}
+
+func TestFactoryOpenRejectsInvalidMCPConfigBeforeSDKCall(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+
+	_, err := factory.Open(t.Context(), SessionConfig{
+		Retry: retryPolicy(t, 0, 0),
+		MCPServers: []mcp.Config{{
+			Name: "invalid", Transport: mcp.TransportHTTP, Tools: []string{"query"}, Timeout: 30 * time.Second,
+		}},
+	})
+
+	require.EqualError(t, err, "validate mcp server: mcp server must have exactly one http or stdio block")
+	assert.Empty(t, client.configs)
+}
+
+func TestCloneResumeSessionConfigDeepCopiesMCPServers(t *testing.T) {
+	t.Parallel()
+
+	source := &sdk.ResumeSessionConfig{MCPServers: map[string]sdk.MCPServerConfig{
+		"http":  sdk.MCPHTTPServerConfig{Headers: map[string]string{"X-Test": "original"}, Tools: []string{"quote"}},
+		"stdio": sdk.MCPStdioServerConfig{Args: []string{"original"}, Env: map[string]string{"TOKEN": "original"}, Tools: []string{"query"}},
+	}}
+
+	cloned := cloneResumeSessionConfig(source)
+	httpConfig, ok := cloned.MCPServers["http"].(sdk.MCPHTTPServerConfig)
+	require.True(t, ok)
+	httpConfig.Headers["X-Test"] = "changed"
+	httpConfig.Tools[0] = "changed"
+	stdioConfig, ok := cloned.MCPServers["stdio"].(sdk.MCPStdioServerConfig)
+	require.True(t, ok)
+	stdioConfig.Args[0] = "changed"
+	stdioConfig.Env["TOKEN"] = "changed"
+	stdioConfig.Tools[0] = "changed"
+
+	sourceHTTP, ok := source.MCPServers["http"].(sdk.MCPHTTPServerConfig)
+	require.True(t, ok)
+	assert.Equal(t, map[string]string{"X-Test": "original"}, sourceHTTP.Headers)
+	assert.Equal(t, []string{"quote"}, sourceHTTP.Tools)
+	sourceStdio, ok := source.MCPServers["stdio"].(sdk.MCPStdioServerConfig)
+	require.True(t, ok)
+	assert.Equal(t, []string{"original"}, sourceStdio.Args)
+	assert.Equal(t, map[string]string{"TOKEN": "original"}, sourceStdio.Env)
+	assert.Equal(t, []string{"query"}, sourceStdio.Tools)
 }
 
 func TestFactoryOpenRejectsMissingProviderEnvironmentValueBeforeSDKCall(t *testing.T) {
@@ -258,9 +511,15 @@ func TestSessionResumeDisconnectsAndRestoresSameConversation(t *testing.T) {
 	original := &fakeSession{}
 	resumed := &fakeSession{event: &sdk.SessionEvent{ID: "resumed-result"}}
 	client := &fakeClient{session: original, resumedSession: resumed}
-	factory := newFactory(client, nil, noDelay, fixedRandom)
+	factory := newFactory(client, func(name string) (string, bool) {
+		if name == "J10_API_KEY" {
+			return "j10-secret", true
+		}
+		return "", false
+	}, noDelay, fixedRandom)
 	hooks := &sdk.SessionHooks{}
 	bearerToken := "provider-secret"
+	mcpBearerTokenRef := "J10_API_KEY"
 	session, err := factory.Open(t.Context(), SessionConfig{
 		Provider: &provider.Config{
 			Type: provider.TypeAnthropic, Endpoint: "https://models.example.test", BearerToken: &bearerToken,
@@ -277,6 +536,10 @@ func TestSessionResumeDisconnectsAndRestoresSameConversation(t *testing.T) {
 		Skills:           []string{"citation"},
 		DisabledSkills:   []string{"unused"},
 		Hooks:            hooks,
+		MCPServers: []mcp.Config{{
+			Name: "jin10", Transport: mcp.TransportHTTP, Tools: []string{"get_quote"}, Timeout: 30 * time.Second,
+			HTTP: &mcp.HTTPConfig{URL: "https://mcp.jin10.com/mcp", BearerTokenRef: &mcpBearerTokenRef},
+		}},
 	})
 	require.NoError(t, err)
 	require.Len(t, client.configs, 1)
@@ -309,6 +572,15 @@ func TestSessionResumeDisconnectsAndRestoresSameConversation(t *testing.T) {
 	require.Len(t, resume.CustomAgents, 1)
 	assert.Equal(t, []string{"citation"}, resume.CustomAgents[0].Skills)
 	assert.Same(t, hooks, resume.Hooks)
+	require.NotNil(t, resume.LargeOutput)
+	require.NotNil(t, resume.LargeOutput.Enabled)
+	assert.False(t, *resume.LargeOutput.Enabled)
+	require.Contains(t, resume.MCPServers, "jin10")
+	resumeMCP, ok := resume.MCPServers["jin10"].(sdk.MCPHTTPServerConfig)
+	require.True(t, ok)
+	assert.Equal(t, "Bearer j10-secret", resumeMCP.Headers["Authorization"])
+	assert.Equal(t, []string{"get_quote"}, resumeMCP.Tools)
+	assert.Equal(t, 30_000, resumeMCP.Timeout)
 	require.Len(t, resume.Tools, 1)
 	assert.Equal(t, "finish", resume.Tools[0].Name)
 
@@ -317,6 +589,31 @@ func TestSessionResumeDisconnectsAndRestoresSameConversation(t *testing.T) {
 	assert.Equal(t, "resumed-result", result.ID)
 	assert.Empty(t, original.messages)
 	assert.Len(t, resumed.messages, 1)
+}
+
+func TestSessionResumeRebindsMCPResourceReader(t *testing.T) {
+	t.Parallel()
+
+	resourceID := "mcp_resource_jin10__quote_codes_12345678-1234-8234-9234-123456789abc"
+	original := &fakeMCPResourceSession{contents: []mcp.ResourceContent{{URI: "quote://codes", Text: sdk.String("original")}}}
+	resumed := &fakeMCPResourceSession{contents: []mcp.ResourceContent{{URI: "quote://codes", Text: sdk.String("resumed")}}}
+	client := &fakeClient{session: original, resumedSession: resumed}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+	resource := mcp.Resource{ID: resourceID, URI: "quote://codes", Server: mcp.Config{Name: "jin10"}}
+	session, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 0, 0), MCPResources: []mcp.Resource{resource}})
+	require.NoError(t, err)
+	reader := sdkToolByName(t, client.configs[0].Tools, MCPResourceReadToolName)
+
+	first, err := reader.Handler(sdk.ToolInvocation{Arguments: map[string]any{"resource_id": resourceID}})
+	require.NoError(t, err)
+	require.NoError(t, session.Resume(t.Context()))
+	second, err := reader.Handler(sdk.ToolInvocation{Arguments: map[string]any{"resource_id": resourceID}})
+
+	require.NoError(t, err)
+	assert.Contains(t, first.TextResultForLLM, "original")
+	assert.Contains(t, second.TextResultForLLM, "resumed")
+	assert.Len(t, original.reads, 1)
+	assert.Len(t, resumed.reads, 1)
 }
 
 func TestSessionResumeFailsBeforeReplacementWhenDisconnectFails(t *testing.T) {
@@ -722,6 +1019,32 @@ type fakeClient struct {
 	resumeConfigs  []*sdk.ResumeSessionConfig
 	resumeErrors   []error
 	resumedSession sdkSession
+}
+
+type fakeMCPResourceSession struct {
+	fakeSession
+	contents []mcp.ResourceContent
+	reads    []mcp.ResourceReadRequest
+	err      error
+}
+
+func (s *fakeMCPResourceSession) ReadMCPResource(
+	_ context.Context,
+	request mcp.ResourceReadRequest,
+) ([]mcp.ResourceContent, error) {
+	s.reads = append(s.reads, request)
+	return s.contents, s.err
+}
+
+func sdkToolByName(t *testing.T, tools []sdk.Tool, name string) sdk.Tool {
+	t.Helper()
+	for _, tool := range tools {
+		if tool.Name == name {
+			return tool
+		}
+	}
+	require.FailNow(t, "SDK tool not found", name)
+	return sdk.Tool{}
 }
 
 type blockingResumeClient struct {

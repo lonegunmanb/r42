@@ -172,8 +172,8 @@ func (s *workflowScenarioSession) SendAndWait(_ context.Context, options sdk.Mes
 			arguments = map[string]any{
 				"decision": "revise_research",
 				"issues": []any{
-					map[string]any{"code": "coverage", "message": "coverage"},
-					map[string]any{"code": "accuracy", "message": "accuracy"},
+					map[string]any{"id": "issue-coverage", "code": "coverage", "message": "coverage"},
+					map[string]any{"id": "issue-accuracy", "code": "accuracy", "message": "accuracy"},
 				},
 			}
 		}
@@ -191,7 +191,7 @@ func (s *workflowScenarioSession) SendAndWait(_ context.Context, options sdk.Mes
 func (*workflowScenarioSession) Close(context.Context) error { return nil }
 
 func decisionArguments(decision, code string) map[string]any {
-	return map[string]any{"decision": decision, "issues": []any{map[string]any{"code": code, "message": code}}}
+	return map[string]any{"decision": decision, "issues": []any{map[string]any{"id": "issue-" + code, "code": code, "message": code}}}
 }
 
 type reopenRejectionOpener struct {

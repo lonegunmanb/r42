@@ -22,6 +22,15 @@ func TestProductionRuntimeCollectionOnlyUsesOneCollectionSession(t *testing.T) {
 
 	directory := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+mcp_server "market_data" {
+  tools = ["get_quote", "get_kline"]
+  resources = ["quote://codes"]
+  http {
+    url              = "https://mcp.example.test/mcp"
+    bearer_token_ref = "MARKET_DATA_API_KEY"
+  }
+}
+
 go_tool "submit" {
   description = "Submit the completed DCF."
   source = <<-GO
@@ -40,6 +49,12 @@ research "static" "builder" {
   phase_mode    = "collection_only"
   model         = "test-model"
   system_prompt = "Build a DCF."
+  collection_mcp_tool_ids = [
+    mcp_server.market_data.tool_ids["get_quote"],
+    mcp_server.market_data.tool_ids["get_kline"],
+  ]
+	collection_mcp_resource_ids = [mcp_server.market_data.resource_ids["quote://codes"]]
+	allowed_tools = ["web_search", mcp_server.market_data.tool_ids["get_quote"], go_tool.submit.id]
 
   artifact "sources" {
     type        = "directory"
@@ -63,6 +78,12 @@ research "static" "builder" {
 
 	require.NoError(t, err)
 	require.Len(t, opener.configs, 1)
+	require.Len(t, opener.configs[0].MCPServers, 1)
+	assert.Equal(t, "market_data", opener.configs[0].MCPServers[0].Name)
+	require.Len(t, opener.configs[0].MCPResources, 1)
+	assert.Equal(t, "quote://codes", opener.configs[0].MCPResources[0].URI)
+	assert.Contains(t, opener.configs[0].AvailableTools, "mcp:mcp_server.market_data-get_quote")
+	assert.NotContains(t, opener.configs[0].AvailableTools, "mcp:mcp_server.market_data-get_kline")
 	assert.Contains(t, opener.configs[0].SystemPrompt, "sole Collection session")
 	assert.NotContains(t, toolNamesFromConfig(opener.configs[0]), "r42_set_information_needs")
 	assert.NotContains(t, toolNamesFromConfig(opener.configs[0]), "r42_collection_checkpoint")

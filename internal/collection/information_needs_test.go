@@ -70,6 +70,52 @@ func TestCheckpointRequiresEachActiveNeedExactlyOnce(t *testing.T) {
 	assert.Len(t, response.Output.NeedDispositions, 2)
 }
 
+func TestCheckpointUnknownInformationNeedSuggestsReadingActiveNeeds(t *testing.T) {
+	t.Parallel()
+
+	context := NewContext(t.TempDir(), 10, nil)
+	plan := NewInformationNeedsHandler(context).Set(InformationNeedsArgs{InformationNeeds: []InformationNeedInput{{
+		Question:       "supplier",
+		StopConditions: []StopConditionInput{{Condition: "relationship"}},
+	}}})
+	require.True(t, plan.Accepted)
+
+	response := NewCheckpointHandler(context).Submit(CheckpointArgs{
+		EmptyReason: "no sources found",
+		NeedDispositions: []NeedDisposition{{
+			InformationNeedID: "supplier", SearchDisposition: SearchDispositionStalled,
+		}},
+	})
+
+	assert.False(t, response.Accepted)
+	require.NotEmpty(t, response.Issues)
+	assert.Contains(t, response.Issues[0].Message, "not an active frozen canonical information-need ID")
+	assert.Contains(t, response.Issues[0].Message, "r42_read_information_needs")
+	assert.Contains(t, response.Issues[0].Message, "active_information_need_states")
+}
+
+func TestQCAssessmentUnknownInformationNeedSuggestsReadingActiveNeeds(t *testing.T) {
+	t.Parallel()
+
+	context := NewContext(t.TempDir(), 10, nil)
+	plan := NewInformationNeedsHandler(context).Set(InformationNeedsArgs{InformationNeeds: []InformationNeedInput{{
+		Question:       "supplier",
+		StopConditions: []StopConditionInput{{Condition: "relationship"}},
+	}}})
+	require.True(t, plan.Accepted)
+
+	issues := context.ValidateQCAssessments([]QCAssessment{{
+		InformationNeedID: "supplier",
+		Status:            AssessmentSufficient,
+		EvidenceProgress:  EvidenceProgressMaterial,
+	}}, true)
+
+	require.NotEmpty(t, issues)
+	assert.Contains(t, issues[0].Message, "not an active frozen canonical information-need ID")
+	assert.Contains(t, issues[0].Message, "r42_read_information_needs")
+	assert.Contains(t, issues[0].Message, "active_information_need_states")
+}
+
 func TestAssessmentsCanOnlyShrinkUnsatisfiedConditionsAndCloseStalledNeed(t *testing.T) {
 	t.Parallel()
 

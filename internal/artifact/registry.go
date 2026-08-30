@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -46,6 +47,7 @@ type entry struct {
 	workspace     string
 	directoryRoot string
 	relativePath  string
+	purposes      map[Purpose]struct{}
 }
 
 // Registry owns opaque artifact IDs for one apply run.
@@ -54,6 +56,7 @@ type Registry struct {
 	entries          map[string]entry
 	order            []string
 	children         map[string]string
+	paths            map[string]string
 	retainedMu       sync.Mutex
 	retained         map[string]string
 	retainedEvidence map[string]string
@@ -63,6 +66,7 @@ func NewRegistry() *Registry {
 	return &Registry{
 		entries:          make(map[string]entry),
 		children:         make(map[string]string),
+		paths:            make(map[string]string),
 		retained:         make(map[string]string),
 		retainedEvidence: make(map[string]string),
 	}
@@ -85,8 +89,28 @@ func (r *Registry) Declare(workspace string, declared researchspec.Artifact) (Re
 		Description: strings.TrimSpace(declared.Description), Kind: KindArtifact, Type: declared.Type, Purpose: PurposeOutput,
 	}
 	r.mu.Lock()
-	r.entries[record.ID] = entry{Record: record, workspace: workspace}
+	key := artifactPathKey(workspace, path)
+	if existingID, exists := r.paths[key]; exists {
+		existing := r.entries[existingID]
+		if existing.Type != record.Type {
+			r.mu.Unlock()
+			return Record{}, fmt.Errorf("artifact path %q is already registered with type %q", declared.Path, existing.Type)
+		}
+		if existing.purposes == nil {
+			existing.purposes = make(map[Purpose]struct{})
+		}
+		existing.Name = record.Name
+		existing.Description = record.Description
+		existing.Kind = record.Kind
+		existing.Type = record.Type
+		existing.purposes[PurposeOutput] = struct{}{}
+		r.entries[existingID] = existing
+		r.mu.Unlock()
+		return existing.Record, nil
+	}
+	r.entries[record.ID] = entry{Record: record, workspace: workspace, purposes: map[Purpose]struct{}{PurposeOutput: {}}}
 	r.order = append(r.order, record.ID)
+	r.paths[key] = record.ID
 	r.mu.Unlock()
 	return record, nil
 }
@@ -115,6 +139,10 @@ func (r *Registry) RegisterEvidence(workspace, path, source, description string)
 	if r == nil {
 		return Record{}, false, errors.New("artifact registry is required")
 	}
+	logicalPath, err := absoluteArtifactPath(workspace, path)
+	if err != nil {
+		return Record{}, false, err
+	}
 	resolved, err := evidencePath(workspace, path)
 	if err != nil {
 		return Record{}, false, err
@@ -142,22 +170,42 @@ func (r *Registry) RegisterEvidence(workspace, path, source, description string)
 	source = sourceFromContent(string(prepared))
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, existing := range r.entries {
-		if existing.Path != resolved || existing.Purpose != PurposeEvidence {
-			continue
+	key := artifactPathKey(workspace, resolved)
+	existingID, exists := r.paths[key]
+	if !exists {
+		existingID, exists = r.paths[artifactLogicalPathKey(workspace, logicalPath)]
+		if exists {
+			r.paths[key] = existingID
+		}
+	}
+	if exists {
+		existing := r.entries[existingID]
+		if existing.Type != researchspec.ArtifactTypeFile {
+			return Record{}, false, fmt.Errorf("evidence path %q is not a file artifact", path)
+		}
+		if _, alreadyEvidence := existing.purposes[PurposeEvidence]; alreadyEvidence {
+			return existing.Record, false, nil
 		}
 		if existing.Description == "" {
 			existing.Description = strings.TrimSpace(description)
-			r.entries[existing.ID] = existing
 		}
-		return existing.Record, false, nil
+		existing.Path = resolved
+		existing.Source = source
+		existing.Purpose = PurposeEvidence
+		if existing.purposes == nil {
+			existing.purposes = make(map[Purpose]struct{})
+		}
+		existing.purposes[PurposeEvidence] = struct{}{}
+		r.entries[existing.ID] = existing
+		return existing.Record, true, nil
 	}
 	record := Record{
 		ID: "artifact-" + uuid.NewString(), Path: resolved, Description: strings.TrimSpace(description),
 		Kind: KindArtifact, Type: researchspec.ArtifactTypeFile, Purpose: PurposeEvidence, Source: source,
 	}
-	r.entries[record.ID] = entry{Record: record, workspace: workspace}
+	r.entries[record.ID] = entry{Record: record, workspace: workspace, purposes: map[Purpose]struct{}{PurposeEvidence: {}}}
 	r.order = append(r.order, record.ID)
+	r.paths[key] = record.ID
 	return record, true, nil
 }
 
@@ -246,19 +294,38 @@ func (r *Registry) ListDirectoryFiles(id string) ([]Record, error) {
 		key := id + "\x00" + filepath.Clean(relative)
 		childID, exists := r.children[key]
 		if !exists {
-			childID = "artifact-" + uuid.NewString()
-			record := Record{
-				ID: childID, Name: filepath.ToSlash(relative), Path: path,
-				Description: "File from directory artifact " + parent.Name + ": " + filepath.ToSlash(relative),
-				Kind:        KindArtifactFile, Type: researchspec.ArtifactTypeFile, Purpose: parent.Purpose,
+			pathKey := artifactPathKey(parent.workspace, path)
+			if existingID, pathExists := r.paths[pathKey]; pathExists {
+				childID = existingID
+				existing := r.entries[childID]
+				if existing.Name == "" {
+					existing.Name = filepath.ToSlash(relative)
+					existing.Kind = KindArtifactFile
+				}
+				existing.directoryRoot = parent.Path
+				existing.relativePath = filepath.Clean(relative)
+				if existing.purposes == nil {
+					existing.purposes = make(map[Purpose]struct{})
+				}
+				existing.purposes[parent.Purpose] = struct{}{}
+				r.entries[childID] = existing
+			} else {
+				childID = "artifact-" + uuid.NewString()
+				record := Record{
+					ID: childID, Name: filepath.ToSlash(relative), Path: path,
+					Description: "File from directory artifact " + parent.Name + ": " + filepath.ToSlash(relative),
+					Kind:        KindArtifactFile, Type: researchspec.ArtifactTypeFile, Purpose: parent.Purpose,
+				}
+				r.entries[childID] = entry{
+					Record:        record,
+					workspace:     parent.workspace,
+					directoryRoot: parent.Path,
+					relativePath:  filepath.Clean(relative),
+					purposes:      map[Purpose]struct{}{parent.Purpose: {}},
+				}
+				r.order = append(r.order, childID)
+				r.paths[pathKey] = childID
 			}
-			r.entries[childID] = entry{
-				Record:        record,
-				workspace:     parent.workspace,
-				directoryRoot: parent.Path,
-				relativePath:  filepath.Clean(relative),
-			}
-			r.order = append(r.order, childID)
 			r.children[key] = childID
 		}
 		result = append(result, r.entries[childID].Record)
@@ -305,11 +372,58 @@ func (r *Registry) RecordsByPurpose(purpose Purpose) []Record {
 	defer r.mu.RUnlock()
 	result := make([]Record, 0)
 	for _, id := range r.order {
-		if record, ok := r.entries[id]; ok && record.Purpose == purpose {
+		if record, ok := r.entries[id]; ok && record.hasPurpose(purpose) {
 			result = append(result, record.Record)
 		}
 	}
 	return result
+}
+
+// HasPurpose reports whether an artifact has the requested run-scoped capability.
+func (r *Registry) HasPurpose(id string, purpose Purpose) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	item, ok := r.entries[id]
+	return ok && item.hasPurpose(purpose)
+}
+
+func (e entry) hasPurpose(purpose Purpose) bool {
+	if len(e.purposes) > 0 {
+		_, ok := e.purposes[purpose]
+		return ok
+	}
+	return e.Purpose == purpose
+}
+
+func artifactPathKey(workspace, path string) string {
+	workspace = canonicalArtifactPath(workspace)
+	path = canonicalArtifactPath(path)
+	return scopedArtifactPathKey(workspace, path)
+}
+
+func artifactLogicalPathKey(workspace, path string) string {
+	workspace = canonicalArtifactPath(workspace)
+	path, _ = filepath.Abs(filepath.Clean(path))
+	return scopedArtifactPathKey(workspace, path)
+}
+
+func scopedArtifactPathKey(workspace, path string) string {
+	key := workspace + "\x00" + path
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(key)
+	}
+	return key
+}
+
+func canonicalArtifactPath(path string) string {
+	path, _ = filepath.Abs(filepath.Clean(path))
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return path
 }
 
 // Page is a bounded UTF-8 byte range from an artifact.

@@ -90,6 +90,18 @@ func TestConfigValidateRequiredFields(t *testing.T) {
 			expectedError: "research tool_call_quota must not contain an empty tool name",
 		},
 		{
+			name: "mcp tool quota is unsupported",
+			config: researchspec.Config{
+				Model:               "gpt-5.6-sol",
+				SystemPrompt:        "research carefully",
+				CollectionBatchSize: researchspec.DefaultCollectionBatchSize,
+				Policy: researchspec.SessionPolicy{
+					ToolCallQuota: map[string]int{"mcp_tool_market__quote_12345678-1234-8234-9234-123456789abc": 1},
+				},
+			},
+			expectedError: "research tool_call_quota does not support mcp tool id \"mcp_tool_market__quote_12345678-1234-8234-9234-123456789abc\"",
+		},
+		{
 			name: "reference must contain kind",
 			config: researchspec.Config{
 				Model:         "gpt-5.6-sol",
@@ -181,7 +193,7 @@ func TestConfigValidateAllowedBuiltinTools(t *testing.T) {
 		{
 			name: "allows phase fixed exclusions",
 			configure: func(config *researchspec.Config) {
-				config.CollectionAllowedBuiltinTools = []string{"powershell"}
+				config.CollectionAllowedBuiltinTools = []string{"powershell", "web_search", "web_fetch"}
 				config.CollectionQCAllowedBuiltinTools = []string{"web_fetch"}
 				config.ResearchAllowedBuiltinTools = []string{"shell"}
 				config.FinalQCAllowedBuiltinTools = []string{"edit"}
@@ -190,7 +202,7 @@ func TestConfigValidateAllowedBuiltinTools(t *testing.T) {
 		{
 			name: "rejects builtin not fixed blocked for collection",
 			configure: func(config *researchspec.Config) {
-				config.CollectionAllowedBuiltinTools = []string{"web_fetch"}
+				config.CollectionAllowedBuiltinTools = []string{"unknown_builtin"}
 			},
 			expectedError: "research collection_allowed_builtin_tools may only allow fixed blocked built-in tools",
 		},
@@ -297,6 +309,11 @@ func TestQCConfigRejectsInvalidToolCallQuota(t *testing.T) {
 			name:          "outside session",
 			quota:         map[string]int{"tool_go_tool_example_12345678-1234-8234-9234-123456789abc": 1},
 			expectedError: "qc tool_call_quota references tool id \"tool_go_tool_example_12345678-1234-8234-9234-123456789abc\" that is not configured for this session",
+		},
+		{
+			name:          "mcp tool",
+			quota:         map[string]int{"mcp_tool_market__quote_12345678-1234-8234-9234-123456789abc": 1},
+			expectedError: "qc tool_call_quota does not support mcp tool id \"mcp_tool_market__quote_12345678-1234-8234-9234-123456789abc\"",
 		},
 	}
 

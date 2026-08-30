@@ -35,6 +35,7 @@ type ResearchBlock struct {
 	Profile                         *string               `hcl:"profile,optional"`
 	ReasoningEffort                 *string               `hcl:"reasoning_effort,optional"`
 	SystemPrompt                    string                `hcl:"system_prompt"`
+	FinalQCStrictness               *string               `hcl:"final_qc_strictness,optional"`
 	Prompt                          *string               `hcl:"prompt,optional"`
 	ToolIDs                         []string              `hcl:"tool_ids,optional"`
 	ToolCallQuota                   map[string]int        `hcl:"tool_call_quota,optional"`
@@ -54,6 +55,8 @@ type ResearchBlock struct {
 	QCBlocks                        []QCBlock             `hcl:"qc,block"`
 	CollectionModelProvider         cty.Value             `hcl:"collection_model_provider,optional"`
 	CollectionToolIDs               []string              `hcl:"collection_tool_ids,optional"`
+	CollectionMCPToolIDs            []string              `hcl:"collection_mcp_tool_ids,optional"`
+	CollectionMCPResourceIDs        []string              `hcl:"collection_mcp_resource_ids,optional"`
 	CollectionAllowedBuiltinTools   []string              `hcl:"collection_allowed_builtin_tools,optional"`
 	CollectionQCAllowedBuiltinTools []string              `hcl:"collection_qc_allowed_builtin_tools,optional"`
 	ResearchAllowedBuiltinTools     []string              `hcl:"research_allowed_builtin_tools,optional"`
@@ -66,6 +69,7 @@ type ResearchBlock struct {
 	CollectionQCBlocks              []CollectionQCBlock   `hcl:"collection_qc,block"`
 
 	planned                Config
+	plannedPath            cty.Value
 	deferredTaskExpression string
 	plannedTaskValue       cty.Value
 }
@@ -174,6 +178,7 @@ func (b *ResearchBlock) ExecuteDuringPlan() error {
 			return err
 		}
 		b.planned = config
+		b.plannedPath = plannedBlockPath(b.BaseBlock)
 		return nil
 	})
 }
@@ -195,13 +200,13 @@ func (b *ResearchBlock) validateNativeStringFields() error {
 		return err
 	}
 	if err := validateStringAttributes(root, b.EvalContext(), "research", []string{
-		"model", "profile", "reasoning_effort", "system_prompt", "prompt", "terminate_tool_id", "permission", "timeout",
+		"model", "profile", "reasoning_effort", "system_prompt", "prompt", "final_qc_strictness", "terminate_tool_id", "permission", "timeout",
 	}); err != nil {
 		return err
 	}
 	if err := validateStringCollections(root, b.EvalContext(), "research", []string{
 		"tool_ids", "allowed_tools", "disallowed_tools", "skill_directories", "skills", "disabled_skills",
-		"collection_tool_ids", "collection_allowed_builtin_tools", "collection_qc_allowed_builtin_tools",
+		"collection_tool_ids", "collection_mcp_tool_ids", "collection_mcp_resource_ids", "collection_allowed_builtin_tools", "collection_qc_allowed_builtin_tools",
 		"research_allowed_builtin_tools", "final_qc_allowed_builtin_tools", "collection_skill_directories",
 		"collection_skills", "collection_disabled_skills",
 	}); err != nil {
@@ -378,12 +383,14 @@ func (b *ResearchBlock) Values() map[string]cty.Value {
 		return deferredStaticResearchValues(b.plannedTaskValue)
 	}
 	values := map[string]cty.Value{
+		"path":                                b.plannedPath,
 		"phase_mode":                          cty.StringVal(string(b.planned.EffectivePhaseMode())),
 		"model_provider":                      optionalObjectValue(b.ModelProvider),
 		"model":                               cty.StringVal(b.Model),
 		"profile":                             cty.StringVal(b.planned.ProfileName()),
 		"reasoning_effort":                    optionalStringValue(b.ReasoningEffort),
 		"system_prompt":                       cty.StringVal(b.SystemPrompt),
+		"final_qc_strictness":                 cty.StringVal(finalQCStrictnessValue(b.FinalQCStrictness)),
 		"prompt":                              optionalStringValue(b.Prompt),
 		"tool_ids":                            stringListValue(b.ToolIDs),
 		"tool_call_quota":                     intMapValue(b.ToolCallQuota),
@@ -402,6 +409,8 @@ func (b *ResearchBlock) Values() map[string]cty.Value {
 		"qc":                                  qcBlockValues(b.QCBlocks),
 		"collection_model_provider":           optionalObjectValue(b.CollectionModelProvider),
 		"collection_tool_ids":                 stringListValue(b.CollectionToolIDs),
+		"collection_mcp_tool_ids":             stringListValue(b.CollectionMCPToolIDs),
+		"collection_mcp_resource_ids":         stringListValue(b.CollectionMCPResourceIDs),
 		"collection_allowed_builtin_tools":    stringListValue(b.CollectionAllowedBuiltinTools),
 		"collection_qc_allowed_builtin_tools": stringListValue(b.CollectionQCAllowedBuiltinTools),
 		"research_allowed_builtin_tools":      stringListValue(b.ResearchAllowedBuiltinTools),
@@ -417,6 +426,25 @@ func (b *ResearchBlock) Values() map[string]cty.Value {
 		values["result"] = cty.UnknownVal(cty.String)
 	}
 	return values
+}
+
+func plannedBlockPath(block *golden.BaseBlock) cty.Value {
+	if block == nil {
+		return cty.UnknownVal(cty.String)
+	}
+	provider, ok := block.Config().(blockWorkingDirectoryProvider)
+	if !ok {
+		return cty.UnknownVal(cty.String)
+	}
+	directory, err := provider.BlockWorkingDirectory(block.Address())
+	if err != nil {
+		return cty.UnknownVal(cty.String)
+	}
+	absolute, err := filepath.Abs(filepath.Clean(filepath.FromSlash(directory)))
+	if err != nil {
+		return cty.UnknownVal(cty.String)
+	}
+	return cty.StringVal(filepath.ToSlash(filepath.Clean(absolute)))
 }
 
 type RetryBlock struct {
@@ -652,6 +680,10 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	strictness := finalQCStrictnessValue(b.FinalQCStrictness)
+	if b.FinalQCStrictness != nil && *b.FinalQCStrictness == "" {
+		return Config{}, errors.New("final_qc_strictness must not be empty")
+	}
 	config := Config{
 		PhaseMode:           b.PhaseMode,
 		ModelProvider:       b.ModelProvider,
@@ -659,6 +691,7 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 		Profile:             profile,
 		ReasoningEffort:     clonePointer(b.ReasoningEffort),
 		SystemPrompt:        b.SystemPrompt,
+		FinalQCStrictness:   strictness,
 		Prompt:              clonePointer(b.Prompt),
 		TerminateToolID:     cloneStringPointer(b.TerminateToolID),
 		TerminateToolIDSet:  b.TerminateToolID != nil,
@@ -675,6 +708,8 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 			Permission:       PermissionApproveAll,
 		},
 		CollectionToolIDs:               slices.Clone(b.CollectionToolIDs),
+		CollectionMCPToolIDs:            slices.Clone(b.CollectionMCPToolIDs),
+		CollectionMCPResourceIDs:        slices.Clone(b.CollectionMCPResourceIDs),
 		CollectionAllowedBuiltinTools:   slices.Clone(b.CollectionAllowedBuiltinTools),
 		CollectionQCAllowedBuiltinTools: slices.Clone(b.CollectionQCAllowedBuiltinTools),
 		ResearchAllowedBuiltinTools:     slices.Clone(b.ResearchAllowedBuiltinTools),
@@ -1010,6 +1045,8 @@ func cloneConfig(config Config) Config {
 	result.Policy.Skills = slices.Clone(config.Policy.Skills)
 	result.Policy.DisabledSkills = slices.Clone(config.Policy.DisabledSkills)
 	result.CollectionToolIDs = slices.Clone(config.CollectionToolIDs)
+	result.CollectionMCPToolIDs = slices.Clone(config.CollectionMCPToolIDs)
+	result.CollectionMCPResourceIDs = slices.Clone(config.CollectionMCPResourceIDs)
 	result.CollectionModelProvider = config.CollectionModelProvider
 	result.CollectionAllowedBuiltinTools = slices.Clone(config.CollectionAllowedBuiltinTools)
 	result.CollectionQCAllowedBuiltinTools = slices.Clone(config.CollectionQCAllowedBuiltinTools)

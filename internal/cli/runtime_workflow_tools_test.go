@@ -15,6 +15,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/collection"
 	"github.com/lonegunmanb/r42/internal/collectionqc"
 	"github.com/lonegunmanb/r42/internal/evidence"
+	"github.com/lonegunmanb/r42/internal/mcp"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/stretchr/testify/assert"
@@ -68,11 +69,11 @@ func TestCollectionDisallowedToolsBlocksDelegationAndShellFallbacks(t *testing.T
 		configured []string
 		expected   []string
 	}{
-		{name: "defaults", expected: []string{"bash", "powershell", "read_powershell", "list_powershell", "shell", "edit", "create", "glob", "task", "ask_user", "curl"}},
+		{name: "defaults", expected: []string{"web_search", "web_fetch", "bash", "powershell", "read_powershell", "list_powershell", "shell", "edit", "create", "glob", "task", "ask_user", "curl"}},
 		{
 			name:       "preserves custom exclusions without duplicating defaults",
 			configured: []string{"custom", "curl"},
-			expected:   []string{"custom", "curl", "bash", "powershell", "read_powershell", "list_powershell", "shell", "edit", "create", "glob", "task", "ask_user"},
+			expected:   []string{"custom", "curl", "web_search", "web_fetch", "bash", "powershell", "read_powershell", "list_powershell", "shell", "edit", "create", "glob", "task", "ask_user"},
 		},
 	}
 	for _, tt := range tests {
@@ -99,7 +100,7 @@ func TestCollectionDisallowedToolsAllowsExplicitShellTools(t *testing.T) {
 	assert.NotContains(t, tools, "powershell")
 	assert.NotContains(t, tools, "shell")
 	for _, name := range []string{
-		"bash", "read_powershell", "list_powershell", "edit", "create", "glob", "task", "ask_user", "curl",
+		"web_search", "web_fetch", "bash", "read_powershell", "list_powershell", "edit", "create", "glob", "task", "ask_user", "curl",
 	} {
 		assert.Contains(t, tools, name)
 	}
@@ -125,31 +126,89 @@ func TestExplicitDisallowedToolsOverrideBuiltinOptIn(t *testing.T) {
 
 	collection := collectionDisallowedTools([]string{"shell"}, []string{"powershell", "shell"})
 	assert.NotContains(t, collection, "powershell")
-	assert.Contains(t, collection, "shell")
+	assert.NotContains(t, collection, "shell")
 
 	closedWorld := closedWorldDisallowedTools([]string{"web_search"}, []string{"web_search", "shell"})
-	assert.Contains(t, closedWorld, "web_search")
+	assert.NotContains(t, closedWorld, "web_search")
 	assert.NotContains(t, closedWorld, "shell")
 }
 
-func TestFinalQCDisallowedToolsDistinguishesDefaultAndExplicitDenials(t *testing.T) {
+func TestAllowedBuiltinToolsAreRemovedFromConfiguredDenials(t *testing.T) {
+	t.Parallel()
+
+	for _, build := range []struct {
+		name string
+		fn   func([]string, []string) []string
+	}{
+		{name: "collection", fn: collectionDisallowedTools},
+		{name: "closed world", fn: closedWorldDisallowedTools},
+	} {
+		t.Run(build.name, func(t *testing.T) {
+			t.Parallel()
+			result := build.fn([]string{"bash", "powershell", "shell", "web_search", "custom"}, []string{"bash", "powershell", "shell", "web_search"})
+			assert.Contains(t, result, "custom")
+			for _, name := range []string{"bash", "powershell", "shell", "web_search"} {
+				assert.NotContains(t, result, name)
+			}
+		})
+	}
+}
+
+func TestFinalQCDisallowedToolsHonorsBuiltinAllowlist(t *testing.T) {
 	t.Parallel()
 
 	effective := researchspec.EffectiveQC{DisallowedTools: []string{"edit"}}
 	assert.NotContains(t, finalQCDisallowedTools(effective, false, []string{"edit"}), "edit")
-	assert.Contains(t, finalQCDisallowedTools(effective, true, []string{"edit"}), "edit")
+	assert.NotContains(t, finalQCDisallowedTools(effective, true, []string{"edit"}), "edit")
 }
 
-func TestCollectionAllowedToolsPreservesReadOnlyFileTools(t *testing.T) {
+func TestCollectionAllowedToolsAddsOnlyMandatoryProtocolTools(t *testing.T) {
 	t.Parallel()
 
-	assert.Nil(t, collectionAllowedTools(nil, []string{"r42_collection_checkpoint"}))
+	assert.Nil(t, collectionAllowedTools(nil, []string{"r42_collection_checkpoint"}, nil, nil))
 	assert.Equal(t,
-		[]string{"web_fetch", "view", "grep", "head", "tail", "r42_collection_checkpoint"},
+		[]string{"web_fetch", "r42_collection_checkpoint"},
 		collectionAllowedTools(
-			[]string{"web_fetch", "view"},
+			[]string{"web_fetch"},
 			[]string{"r42_collection_checkpoint"},
+			nil,
+			nil,
 		),
+	)
+}
+
+func TestCollectionAllowedToolsRequiresExplicitMCPAllowlistEntry(t *testing.T) {
+	t.Parallel()
+
+	quoteID := "mcp_tool_market__quote_12345678-1234-8234-9234-123456789abc"
+	klineID := "mcp_tool_market__kline_22345678-1234-8234-9234-123456789abc"
+	registry := mcp.ToolRegistry{
+		quoteID: {ID: quoteID, Name: "quote", Server: mcp.Config{Name: "market"}},
+		klineID: {ID: klineID, Name: "kline", Server: mcp.Config{Name: "market"}},
+	}
+	selected := []string{quoteID, klineID}
+
+	assert.Equal(t,
+		[]string{"web_search", "mcp:market-quote", "r42_collection_checkpoint"},
+		collectionAllowedTools(
+			[]string{"web_search", quoteID},
+			[]string{"r42_collection_checkpoint"},
+			selected,
+			registry,
+		),
+	)
+	assert.NotContains(t,
+		collectionAllowedTools([]string{"web_search"}, nil, selected, registry),
+		"mcp:market-quote",
+	)
+	assert.NotContains(t,
+		collectionAllowedTools([]string{"mcp:market-kline"}, nil, selected, registry),
+		"mcp:market-kline",
+	)
+	assert.Nil(t, collectionAllowedTools(nil, nil, selected, registry))
+	assert.Equal(t,
+		[]string{"mcp:market-quote"},
+		collectionMCPToolFilters([]string{quoteID}, selected, registry),
 	)
 }
 
@@ -421,6 +480,66 @@ func TestCollectionProtocolToolsRegisterRetainedResultAndCheckpoint(t *testing.T
 	assert.Contains(t, checkpoint.TextResultForLLM, "artifact-")
 }
 
+func TestReadInformationNeedsToolReturnsOnlyActiveStates(t *testing.T) {
+	t.Parallel()
+
+	context := collection.NewContext(t.TempDir(), 10, nil)
+	plan := collection.NewInformationNeedsHandler(context).Set(collection.InformationNeedsArgs{
+		InformationNeeds: []collection.InformationNeedInput{
+			{
+				Question:       "supplier",
+				StopConditions: []collection.StopConditionInput{{Condition: "relationship"}},
+			},
+			{
+				Question:       "materiality",
+				StopConditions: []collection.StopConditionInput{{Condition: "economic exposure"}},
+			},
+		},
+	})
+	require.True(t, plan.Accepted)
+	assessment := context.ApplyQCAssessments(
+		[]collection.NeedDisposition{
+			{InformationNeedID: "NEED-001", SearchDisposition: collection.SearchDispositionContinue},
+			{InformationNeedID: "NEED-002", SearchDisposition: collection.SearchDispositionContinue},
+		},
+		[]collection.QCAssessment{
+			{
+				InformationNeedID: "NEED-001",
+				Status:            collection.AssessmentSufficient,
+				EvidenceProgress:  collection.EvidenceProgressMaterial,
+			},
+			{
+				InformationNeedID:       "NEED-002",
+				Status:                  collection.AssessmentNeedsMore,
+				UnsatisfiedConditionIDs: []string{"NEED-002-SC-001"},
+				EvidenceProgress:        collection.EvidenceProgressMaterial,
+			},
+		},
+		false,
+		true,
+	)
+	require.True(t, assessment.Accepted)
+
+	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
+	readTool := toolByName(t, protocol, "r42_read_information_needs")
+	result, err := readTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+
+	require.NoError(t, err)
+	var response struct {
+		Accepted bool `json:"accepted"`
+		Output   struct {
+			ActiveInformationNeedStates []collection.ActiveInformationNeedState `json:"active_information_need_states"`
+		} `json:"output"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(result.TextResultForLLM), &response))
+	assert.True(t, response.Accepted)
+	require.Len(t, response.Output.ActiveInformationNeedStates, 1)
+	state := response.Output.ActiveInformationNeedStates[0]
+	assert.Equal(t, "NEED-002", state.InformationNeed.ID)
+	assert.Equal(t, []string{"NEED-002-SC-001"}, state.UnsatisfiedConditionIDs)
+	assert.Empty(t, readTool.Parameters["required"])
+}
+
 func TestCollectionProtocolToolsSaveArtifactWithRequiredSource(t *testing.T) {
 	t.Parallel()
 
@@ -429,7 +548,7 @@ func TestCollectionProtocolToolsSaveArtifactWithRequiredSource(t *testing.T) {
 	freezeTestInformationNeeds(t, context)
 	require.NoError(t, context.AddArtifactTarget(filepath.Join(workspace, "evidence"), true))
 	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
-	assert.Equal(t, []string{"r42_set_information_needs", "r42_register_artifact", "r42_collection_checkpoint", "r42_save_artifact"}, toolNames(protocol))
+	assert.Equal(t, []string{"r42_set_information_needs", "r42_read_information_needs", "r42_register_artifact", "r42_collection_checkpoint", "r42_save_artifact"}, toolNames(protocol))
 	assert.Contains(t, phaseAllowedTools([]string{"web_fetch"}, toolNames(protocol)), "r42_save_artifact")
 	registerTool := toolByName(t, protocol, "r42_register_artifact")
 	checkpointTool := toolByName(t, protocol, "r42_collection_checkpoint")
@@ -463,12 +582,14 @@ func TestCollectionProtocolToolsSaveArtifactWithRequiredSource(t *testing.T) {
 		Output   struct {
 			Path       string `json:"path"`
 			ArtifactID string `json:"artifact_id"`
+			NextAction string `json:"next_action"`
 		} `json:"output"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(result.TextResultForLLM), &response))
 	assert.True(t, response.Accepted)
 	assert.Equal(t, path, response.Output.Path)
 	assert.Regexp(t, `^artifact-[0-9a-f-]{36}$`, response.Output.ArtifactID)
+	assert.Empty(t, response.Output.NextAction)
 	content, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "- Source: local-record:42\n\n\n# Evidence\n\nCollected material.\n", string(content))
@@ -484,6 +605,35 @@ func TestCollectionProtocolToolsSaveArtifactWithRequiredSource(t *testing.T) {
 	record, err := context.Artifacts.Record(context.EvidenceArtifactIDs()[0])
 	require.NoError(t, err)
 	assert.Equal(t, "Database record used for the baseline", record.Description)
+}
+
+func TestCollectionProtocolToolsSaveArtifactSignalsCheckpointAtBatchGate(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	context := collection.NewContext(workspace, 1, nil)
+	freezeTestInformationNeeds(t, context)
+	path := filepath.Join(workspace, "evidence", "source.md")
+	require.NoError(t, context.AddArtifactTarget(filepath.Dir(path), true))
+	protocol := collectionProtocolTools(context, collection.NewCheckpointRecorder())
+	saveTool := toolByName(t, protocol, "r42_save_artifact")
+
+	result, err := saveTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"artifact_path": path,
+		"content":       "# Evidence",
+		"source":        "local-record:42",
+	}})
+
+	require.NoError(t, err)
+	var response struct {
+		Accepted bool `json:"accepted"`
+		Output   struct {
+			NextAction string `json:"next_action"`
+		} `json:"output"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(result.TextResultForLLM), &response))
+	assert.True(t, response.Accepted)
+	assert.Equal(t, "r42_collection_checkpoint", response.Output.NextAction)
 }
 
 func TestCollectionProtocolToolsRejectsUndeclaredArtifactPath(t *testing.T) {

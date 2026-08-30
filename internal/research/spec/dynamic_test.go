@@ -1,8 +1,10 @@
 package spec_test
 
 import (
+	"path/filepath"
 	"testing"
 
+	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/plan"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
@@ -10,6 +12,23 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
 )
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestDynamicResearchBlockPlannedValuesExposeParentWorkspacePath(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+research "dynamic" "path" {
+  tasks = []
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	block := golden.Blocks[*researchspec.DynamicResearchBlock](config)[0]
+	path := block.Values()["path"]
+	require.True(t, path.IsKnown())
+	assert.True(t, filepath.IsAbs(path.AsString()))
+	assert.Equal(t, filepath.ToSlash(filepath.Clean(path.AsString())), path.AsString())
+}
 
 func TestPlanDynamicTasksPreservesTaskShape(t *testing.T) {
 	t.Parallel()
@@ -122,6 +141,45 @@ func TestDecodeDynamicTaskDecodesDeclaredArtifactsFromSingularAttribute(t *testi
 		Name: "sources", Type: researchspec.ArtifactTypeDirectory,
 		Path: "artifacts/sources", Description: "Collected source material",
 	}, config.Artifacts[0])
+}
+
+func TestDecodeDynamicTaskResolvesDeclaredArtifactSources(t *testing.T) {
+	t.Parallel()
+
+	reference, err := researchspec.ArtifactReferenceFunction(nil).Call([]cty.Value{cty.StringVal("sources")})
+	require.NoError(t, err)
+	config, err := researchspec.DecodeDynamicTask(cty.ObjectVal(map[string]cty.Value{
+		"model":         cty.StringVal("test-model"),
+		"system_prompt": cty.StringVal("Collect and synthesize."),
+		"artifact": cty.MapVal(map[string]cty.Value{
+			"sources": cty.ObjectVal(map[string]cty.Value{
+				"type":        cty.StringVal("directory"),
+				"path":        cty.StringVal("artifacts/sources"),
+				"description": cty.StringVal("Collected source material"),
+				"required":    cty.True,
+				"non_empty":   cty.True,
+			}),
+		}),
+		"tool_use": cty.MapVal(map[string]cty.Value{
+			"submit": cty.ObjectVal(map[string]cty.Value{
+				"tool_id": cty.StringVal("tool_submit"),
+				"input_from_agent": cty.ObjectVal(map[string]cty.Value{
+					"claims": cty.ObjectVal(map[string]cty.Value{
+						"desc":    cty.StringVal("Atomic claims"),
+						"sources": cty.TupleVal([]cty.Value{reference}),
+					}),
+				}),
+			}),
+		}),
+		"retry": cty.NullVal(cty.DynamicPseudoType),
+		"qc":    cty.NullVal(cty.DynamicPseudoType),
+	}))
+
+	require.NoError(t, err)
+	source := config.ToolUses[0].InputFromAgent.GetAttr("claims").GetAttr("sources").Index(cty.NumberIntVal(0))
+	assert.Equal(t, "directory", source.GetAttr("type").AsString())
+	assert.True(t, source.GetAttr("required").True())
+	assert.True(t, source.GetAttr("non_empty").True())
 }
 
 func TestDecodeDynamicTaskDecodesMapImportsAndToolUses(t *testing.T) {
@@ -272,6 +330,50 @@ func TestArtifactReferenceFunctionProducesDeferredArtifactIDs(t *testing.T) {
 	assert.Equal(t, "backup", backupName)
 }
 
+func TestArtifactReferenceFunctionDefaultsValidationFlagsToFalse(t *testing.T) {
+	t.Parallel()
+
+	reference, err := researchspec.ArtifactReferenceFunction(nil).Call([]cty.Value{cty.StringVal("sources")})
+
+	require.NoError(t, err)
+	require.True(t, reference.IsWhollyKnown())
+	assert.False(t, reference.GetAttr("required").True())
+	assert.False(t, reference.GetAttr("non_empty").True())
+}
+
+func TestResolveArtifactReferencesUsesDeclaredValidationFlags(t *testing.T) {
+	t.Parallel()
+
+	function := researchspec.ArtifactReferenceFunction(nil)
+	optional, err := function.Call([]cty.Value{cty.StringVal("optional")})
+	require.NoError(t, err)
+	required, err := function.Call([]cty.Value{cty.StringVal("required")})
+	require.NoError(t, err)
+	config, err := researchspec.ResolveArtifactReferences(researchspec.Config{
+		Artifacts: []researchspec.Artifact{
+			{Name: "optional", Type: researchspec.ArtifactTypeDirectory, Path: "optional", Description: "Optional sources"},
+			{
+				Name: "required", Type: researchspec.ArtifactTypeDirectory, Path: "required",
+				Description: "Required sources", Required: true, NonEmpty: true,
+			},
+		},
+		ToolUses: []researchspec.ToolUse{{
+			Name: "submit",
+			InputFromAgent: cty.ObjectVal(map[string]cty.Value{
+				"sources": cty.TupleVal([]cty.Value{optional, required}),
+			}),
+		}},
+	})
+
+	require.NoError(t, err)
+	sources := config.ToolUses[0].InputFromAgent.GetAttr("sources").AsValueSlice()
+	require.Len(t, sources, 2)
+	assert.False(t, sources[0].GetAttr("required").True())
+	assert.False(t, sources[0].GetAttr("non_empty").True())
+	assert.True(t, sources[1].GetAttr("required").True())
+	assert.True(t, sources[1].GetAttr("non_empty").True())
+}
+
 func TestResolveArtifactReferencesRejectsUndeclaredArtifact(t *testing.T) {
 	t.Parallel()
 
@@ -406,6 +508,7 @@ func TestAppliedDynamicTaskWithoutTerminateToolDoesNotGainResult(t *testing.T) {
 	}))
 
 	assert.False(t, applied.Type().HasAttribute("result"))
+	assert.Equal(t, researchspec.FinalQCStrictnessStrict, applied.GetAttr("final_qc_strictness").AsString())
 }
 
 func TestAppliedDynamicTaskPublishesDeclaredArtifacts(t *testing.T) {

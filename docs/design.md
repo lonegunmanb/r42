@@ -93,6 +93,11 @@ from the DAG roots.
 The first version has these root-level declarations:
 
 - `model_provider`: model API transport and retry policy, but not a model name.
+- `s3_provider`: S3-compatible object storage endpoint, credentials, and upload
+  retry policy.
+- `s3_folder`: a fail-fast folder upload with best-effort rollback.
+- `mcp_server`: a native Copilot SDK MCP server with explicit tool and resource
+  declarations.
 - `go_tool`: a typed tool implemented by inline Go source.
 - `external_tool`: a typed tool implemented by a child process.
 - `starlark_tool`: an isolated, resource-bounded numerical scratchpad.
@@ -256,6 +261,36 @@ resolved `artifacts` and optional terminate-tool `result`. All members share the
 dynamic block's `block_wd()` and the HCL author is responsible for adding an
 index or key when task files need separate directories.
 
+Static and dynamic research blocks expose a plan-known `path` attribute. For a
+static block it is the block workspace returned by `block_wd()`. For a dynamic
+block it is the parent workspace shared by its materialized task directories.
+The path is available for downstream references such as `s3_folder.source` and
+creates the normal implicit DAG dependency when referenced.
+
+### S3-compatible artifact upload
+
+`s3_provider` is a configuration-only root block. `s3_folder` is an executable
+root block that uploads a local directory into one bucket and key prefix. A
+relative `source` is resolved below the active run root
+(`.r42/runs/<run-id>`); an absolute source is accepted only when its cleaned
+path remains below that same run root. A research `path` reference is absolute
+and is therefore the normal way to upload research output.
+
+The folder walk includes hidden files and supports `**` exclude matching,
+and skips symbolic links and special files. An empty directory after excludes
+is a successful no-op. Object keys always use `/` separators and are formed by
+joining the validated prefix with the relative file path.
+
+Uploads are streamed and may use multipart transfer. Files are uploaded in a
+deterministic order. The first failed PUT or multipart operation stops further
+uploads. When the target bucket has versioning `Enabled`, previously uploaded
+objects are deleted in reverse order by the exact version created by each PUT.
+For an unversioned or suspended bucket, automatic rollback is not attempted:
+deleting by key could destroy an older object that this block does not own.
+The block still fails and its error identifies the local source root and remote
+root (`s3://<bucket>/<prefix>`) so an administrator can clean up manually.
+Existing objects may be overwritten.
+
 ## 5. Model Providers
 
 `model_provider` contains endpoint and wire configuration only. The `model`
@@ -339,10 +374,20 @@ Research session fields include:
 - `reasoning_effort`: an arbitrary non-empty string passed through unchanged.
 - `system_prompt`: required.
 - `prompt`: optional.
+- `final_qc_strictness`: optional Final-QC semantic policy, one of `strict`,
+  `balanced`, or `brief`; omission defaults to `strict`. The configured policy
+  is authoritative if a later task prompt, candidate instruction, or custom
+  criterion conflicts with it.
 - `collection_model_provider`: optional Collection-only provider override;
   omission reuses `model_provider`.
 - `collection_tool_ids`: typed acquisition or snapshot-producing tool IDs used
   only by Collection.
+- `collection_mcp_tool_ids`: native MCP tool IDs from
+  `mcp_server.<name>.tool_ids`, attached only to Collection.
+- `collection_mcp_resource_ids`: declared MCP resource IDs from
+  `mcp_server.<name>.resource_ids`, attached only to Collection. A session with
+  one or more selected resources automatically receives the typed
+  `r42_read_mcp_resource` reader; it can read only those declared IDs.
 - `collection_allowed_builtin_tools`: built-in tool names to remove from
   Collection's fixed denylist only. It applies in `full` and
   `collection_only`.
@@ -358,7 +403,8 @@ Research session fields include:
   or Research typed tools, the terminate tool, or Copilot built-ins. Collection
   and Research maintain separate counters.
 - `terminate_tool_id`: optional typed tool ID.
-- `allowed_tools` and `disallowed_tools`: SDK tool-name strings.
+- `allowed_tools` and `disallowed_tools`: SDK tool-name strings for ordinary
+  tools and generated `mcp_tool_...` IDs for MCP tools.
 - `collection_skill_directories`, `collection_skills`, and
   `collection_disabled_skills`, used only by Collection.
 - `skill_directories`, `skills`, and `disabled_skills`, used only by Research.
@@ -376,7 +422,7 @@ The mode-specific configuration contract is:
 
 | Configuration | `full` | `collection_only` | `research_only` |
 | --- | --- | --- | --- |
-| `collection_tool_ids`, `collection_model_provider`, Collection skills | Collection | Sole session | Forbidden |
+| `collection_tool_ids`, `collection_mcp_tool_ids`, `collection_mcp_resource_ids`, `collection_model_provider`, Collection skills | Collection | Sole session | Forbidden |
 | `collection_allowed_builtin_tools` | Collection | Sole session | Forbidden |
 | `collection_qc_allowed_builtin_tools` | Collection QC | Forbidden | Forbidden |
 | `tool_ids`, `terminate_tool_id`, Research skills | Research | Forbidden | Research |
@@ -453,6 +499,36 @@ Registration, checkpoint, terminate, and verdict tools are protocol tools. r42
 registers only those applicable to the selected mode, and configuration cannot
 exclude them. `collection_only` has registration and save-artifact helpers but
 does not receive information-needs, checkpoint, or QC-verdict tools.
+
+An `mcp_server` requires a non-empty explicit `tools` list and exactly one
+transport. `resources` is an optional list of exact resource URIs. HTTP maps
+`url`, optional `headers`, `bearer_token_ref`, tools, and timeout to
+`sdk.MCPHTTPServerConfig`. Stdio maps `command`, `args`, literal `env`,
+environment-backed `env_refs`, `working_directory`, tools, and timeout to
+`sdk.MCPStdioServerConfig`. The SDK owns protocol negotiation; r42 uses its
+experimental host-side resource read RPC only through the generated typed reader.
+The configured label is display-only for runtime routing: every planned MCP
+server receives its canonical block address as its runtime name. Native MCP
+tool filters and typed resource reads use that same canonical name, so identical
+labels in different module paths remain separate SDK servers.
+
+MCP IDs use `mcp_tool_<server>__<tool>_<uuid>` and
+`mcp_resource_<server>__<uri>_<uuid>` and are separate from the typed tool
+registry. Tool IDs select tools through `collection_mcp_tool_ids` and may appear
+in the shared filters. Resource IDs select resources through
+`collection_mcp_resource_ids` and are forbidden in tool filters. Neither can be
+attached to Collection QC, Research, or Final QC or used by `tool_use`,
+`terminate_tool_id`, or typed-tool quotas.
+
+When `allowed_tools` is configured, MCP availability is the intersection of
+that allowlist and `collection_mcp_tool_ids`. r42 converts only those explicit
+MCP IDs to the SDK's `mcp:<server>-<tool>` filter names; it does not implicitly
+allow every connected MCP tool. Omitted `allowed_tools` leaves the SDK allowlist
+unset. Protocol-mandatory r42 tools are appended independently so a user filter
+cannot break checkpoint, artifact, terminal, or verdict protocols.
+When a Collection session selects resources, r42 likewise appends
+`r42_read_mcp_resource` to any non-nil SDK allowlist and removes it from the
+denylist. The typed reader accepts only the session's declared resource IDs.
 
 Each typed tool receives a deterministic, SDK-safe ID from its canonical block
 address. Workflow snapshots store only those IDs; the Plan stores the complete
@@ -963,8 +1039,17 @@ declared artifact metadata, and read-only artifact projections, but not the
 Research transcript. In `full`, it also does not receive information-need
 outcomes or stop conditions. Collection QC exclusively owns evidence
 sufficiency and primary-coverage decisions; Final QC reviews only the claims
-actually present in the candidate. Its mandatory `r42_qc_verdict` decision is
-one of:
+actually present in the candidate.
+
+The research-level `final_qc_strictness` setting controls the semantic threshold:
+`strict` requires source facts to materially match evidence and interpretations
+to be strictly derivable; `balanced` permits a reasonable one-step inference;
+`brief` accepts concise, plausible analysis while retaining checks for material
+contradictions, invented premises, misleading certainty, and unsupported
+precision. This setting defaults to `strict` and is authoritative over later
+task prompts, candidate instructions, and custom criteria.
+
+Its mandatory `r42_qc_verdict` decision is one of:
 
 - `pass`, with no issues, completes the workflow;
 - `revise_research`, with one or more issues, returns to closed Research.
@@ -1361,8 +1446,10 @@ it never makes the stdout protocol less restrictive.
 The worker reads stdout and stderr through separate pipes. It decodes stdout
 line by line, records node state and timeline events, and may relay those records
 to browsers using its own transport. stderr is diagnostic data and must not be
-parsed as part of the progress protocol. Report identification and S3 upload are
-not part of this protocol; a separate root block will own that workflow.
+parsed as part of the progress protocol. Report identification and S3 upload
+remain ordinary DAG behavior; an `s3_folder` block publishes its lifecycle
+through the same progress stream without putting credentials or object contents
+on stdout.
 
 #### Negotiation
 

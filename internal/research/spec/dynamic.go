@@ -24,6 +24,7 @@ type DynamicResearchBlock struct {
 	Tasks  cty.Value `hcl:"tasks"`
 
 	plannedTasks cty.Value
+	plannedPath  cty.Value
 }
 
 func (*DynamicResearchBlock) Type() string { return "dynamic" }
@@ -47,6 +48,7 @@ func (b *DynamicResearchBlock) ExecuteDuringPlan() error {
 			return err
 		}
 		b.plannedTasks = planned
+		b.plannedPath = plannedBlockPath(b.BaseBlock)
 		return nil
 	})
 }
@@ -64,7 +66,11 @@ func (b *DynamicResearchBlock) Values() map[string]cty.Value {
 	if value == cty.NilVal {
 		value = cty.DynamicVal
 	}
-	return map[string]cty.Value{"tasks": value}
+	path := b.plannedPath
+	if path == cty.NilVal {
+		path = cty.UnknownVal(cty.String)
+	}
+	return map[string]cty.Value{"path": path, "tasks": value}
 }
 
 func (b *DynamicResearchBlock) TasksExpression() string {
@@ -165,6 +171,13 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 	if block.SystemPrompt, err = dynamicRequiredString(unmarked, "system_prompt"); err != nil {
 		return Config{}, err
 	}
+	finalQCStrictness, err := dynamicOptionalString(unmarked, "final_qc_strictness")
+	if err != nil {
+		return Config{}, err
+	}
+	if finalQCStrictness != nil {
+		block.FinalQCStrictness = finalQCStrictness
+	}
 	if block.Prompt, err = dynamicOptionalString(unmarked, "prompt"); err != nil {
 		return Config{}, err
 	}
@@ -227,6 +240,12 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 	if block.CollectionToolIDs, err = dynamicStringList(unmarked, "collection_tool_ids"); err != nil {
 		return Config{}, err
 	}
+	if block.CollectionMCPToolIDs, err = dynamicStringList(unmarked, "collection_mcp_tool_ids"); err != nil {
+		return Config{}, err
+	}
+	if block.CollectionMCPResourceIDs, err = dynamicStringList(unmarked, "collection_mcp_resource_ids"); err != nil {
+		return Config{}, err
+	}
 	if block.CollectionAllowedBuiltinTools, err = dynamicStringList(unmarked, "collection_allowed_builtin_tools"); err != nil {
 		return Config{}, err
 	}
@@ -258,6 +277,10 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 		return Config{}, err
 	}
 	config, err := block.toConfig()
+	if err != nil {
+		return Config{}, err
+	}
+	config, err = ResolveArtifactReferences(config)
 	if err != nil {
 		return Config{}, err
 	}
@@ -669,6 +692,7 @@ func dynamicAttribute(object cty.Value, name string) (cty.Value, bool) {
 func plannedDynamicTaskValue(task cty.Value, config Config) cty.Value {
 	values, marks := dynamicTaskValuesWithProfile(task)
 	values["phase_mode"] = cty.StringVal(string(config.EffectivePhaseMode()))
+	values["final_qc_strictness"] = cty.StringVal(defaultFinalQCStrictness(config.FinalQCStrictness))
 	values["artifact"] = ArtifactsValue(config.Artifacts, nil)
 	if config.TerminateToolID != nil {
 		values["result"] = cty.UnknownVal(cty.String)
@@ -697,6 +721,10 @@ func dynamicTaskValuesWithProfile(task cty.Value) (map[string]cty.Value, cty.Val
 func AppliedDynamicTaskValue(task, result cty.Value) cty.Value {
 	unmarked, marks := task.UnmarkDeepWithPaths()
 	values := maps.Clone(unmarked.AsValueMap())
+	strictness, exists := values["final_qc_strictness"]
+	if !exists || strictness.IsNull() {
+		values["final_qc_strictness"] = cty.StringVal(FinalQCStrictnessStrict)
+	}
 	resultValues := result.AsValueMap()
 	if artifacts, ok := resultValues["artifact"]; ok {
 		values["artifact"] = artifacts
@@ -730,6 +758,7 @@ func dynamicTaskOutputType(taskType cty.Type, hasTerminatingToolUse bool) cty.Ty
 	}
 	attributes := taskType.AttributeTypes()
 	attributes["phase_mode"] = cty.String
+	attributes["final_qc_strictness"] = cty.String
 	attributes["profile"] = cty.String
 	attributes["artifact"] = cty.Map(artifactValueType)
 	if taskType.HasAttribute("terminate_tool_id") || hasTerminatingToolUse {

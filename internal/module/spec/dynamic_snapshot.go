@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/lonegunmanb/golden"
+	"github.com/lonegunmanb/r42/internal/mcp"
 	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
@@ -14,17 +15,21 @@ import (
 )
 
 type DynamicResearchPlan struct {
-	Expression string
-	Providers  map[string]*provider.Config
-	Serial     bool
-	Tasks      cty.Value
+	Expression   string
+	Providers    map[string]*provider.Config
+	Serial       bool
+	Tasks        cty.Value
+	MCPTools     mcp.ToolRegistry
+	MCPResources mcp.ResourceRegistry
 }
 
 type dynamicResearchSnapshot struct {
-	Expression string                       `json:"expression"`
-	Providers  map[string]*providerSnapshot `json:"providers,omitempty"`
-	Serial     bool                         `json:"serial,omitempty"`
-	Tasks      *dynamicTasksSnapshot        `json:"tasks,omitempty"`
+	Expression   string                       `json:"expression"`
+	Providers    map[string]*providerSnapshot `json:"providers,omitempty"`
+	Serial       bool                         `json:"serial,omitempty"`
+	Tasks        *dynamicTasksSnapshot        `json:"tasks,omitempty"`
+	MCPTools     mcp.ToolRegistry             `json:"mcp_tools,omitempty"`
+	MCPResources mcp.ResourceRegistry         `json:"mcp_resources,omitempty"`
 }
 
 type dynamicTasksSnapshot struct {
@@ -48,12 +53,13 @@ func EncodeDynamicResearchPlan(
 	if err != nil {
 		return cty.NilVal, err
 	}
+	mcpTools := BuildMCPToolRegistry(planning)
 	if block.Tasks.IsWhollyKnown() {
 		configs, _, decodeErr := researchspec.DecodeDynamicTasks(block.Tasks)
 		if decodeErr != nil {
 			return cty.NilVal, decodeErr
 		}
-		plan := DynamicResearchPlan{Providers: restoreProviders(providers)}
+		plan := DynamicResearchPlan{Providers: restoreProviders(providers), MCPTools: mcpTools.Clone(), MCPResources: BuildMCPResourceRegistry(planning)}
 		for index, config := range configs {
 			resolved, resolveErr := plan.Resolve(config)
 			if resolveErr != nil {
@@ -74,7 +80,7 @@ func EncodeDynamicResearchPlan(
 		}
 	}
 	encoded, err := json.Marshal(dynamicResearchSnapshot{
-		Expression: expression, Providers: providers, Serial: block.Serial, Tasks: taskSnapshot,
+		Expression: expression, Providers: providers, Serial: block.Serial, Tasks: taskSnapshot, MCPTools: mcpTools, MCPResources: BuildMCPResourceRegistry(planning),
 	})
 	if err != nil {
 		return cty.NilVal, fmt.Errorf("encode dynamic research plan: %w", err)
@@ -107,9 +113,11 @@ func DecodeDynamicResearchPlan(value cty.Value) (DynamicResearchPlan, error) {
 		return DynamicResearchPlan{}, fmt.Errorf("dynamic research plan expression is required")
 	}
 	result := DynamicResearchPlan{
-		Expression: snapshot.Expression,
-		Providers:  restoreProviders(snapshot.Providers),
-		Serial:     snapshot.Serial,
+		Expression:   snapshot.Expression,
+		Providers:    restoreProviders(snapshot.Providers),
+		Serial:       snapshot.Serial,
+		MCPTools:     snapshot.MCPTools.Clone(),
+		MCPResources: snapshot.MCPResources.Clone(),
 	}
 	if snapshot.Tasks != nil {
 		taskType, err := ctyjson.UnmarshalType(snapshot.Tasks.Type)
@@ -148,9 +156,29 @@ func (p DynamicResearchPlan) Resolve(config researchspec.Config) (ResearchPlan, 
 			return ResearchPlan{}, fmt.Errorf("collection qc model_provider: %w", err)
 		}
 	}
+	if err := validateMCPToolFilters(config.Policy.AllowedTools, p.MCPTools, "research allowed_tools"); err != nil {
+		return ResearchPlan{}, err
+	}
+	if err := validateMCPToolFilters(config.Policy.DisallowedTools, p.MCPTools, "research disallowed_tools"); err != nil {
+		return ResearchPlan{}, err
+	}
+	if config.QC != nil {
+		if err := validateNoMCPToolFilters(config.QC.AllowedTools, "qc allowed_tools"); err != nil {
+			return ResearchPlan{}, err
+		}
+		if err := validateNoMCPToolFilters(config.QC.DisallowedTools, "qc disallowed_tools"); err != nil {
+			return ResearchPlan{}, err
+		}
+	}
+	mcpServers, err := resolveMCPServers(config.CollectionMCPToolIDs, config.CollectionMCPResourceIDs, p.MCPTools, p.MCPResources)
+	if err != nil {
+		return ResearchPlan{}, err
+	}
 	return ResearchPlan{
 		Config: config, Provider: modelProvider, CollectionProvider: collectionProvider,
 		QCProvider: qcProvider, CollectionQCProvider: collectionQCProvider,
+		MCPServers: mcpServers, MCPTools: p.MCPTools.Clone(),
+		MCPResources: p.MCPResources.Clone(),
 	}, nil
 }
 

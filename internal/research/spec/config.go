@@ -23,7 +23,7 @@ const (
 )
 
 var collectionBlockedBuiltIns = []string{
-	"bash", "powershell", "read_powershell", "list_powershell", "shell",
+	"web_search", "web_fetch", "bash", "powershell", "read_powershell", "list_powershell", "shell",
 	"edit", "create", "glob", "task", "ask_user", "curl",
 }
 
@@ -75,6 +75,7 @@ type Config struct {
 	Profile                         string
 	ReasoningEffort                 *string
 	SystemPrompt                    string
+	FinalQCStrictness               string
 	Prompt                          *string
 	TerminateToolID                 *string
 	TerminateToolIDSet              bool
@@ -88,6 +89,8 @@ type Config struct {
 	QC                              *QCConfig
 	CollectionModelProvider         cty.Value
 	CollectionToolIDs               []string
+	CollectionMCPToolIDs            []string
+	CollectionMCPResourceIDs        []string
 	CollectionAllowedBuiltinTools   []string
 	CollectionQCAllowedBuiltinTools []string
 	ResearchAllowedBuiltinTools     []string
@@ -100,6 +103,38 @@ type Config struct {
 	MaxCollectionRounds             *int
 	MaxCollectionRoundsSet          bool
 	CollectionQC                    *CollectionQCConfig
+}
+
+const (
+	FinalQCStrictnessStrict   = "strict"
+	FinalQCStrictnessBalanced = "balanced"
+	FinalQCStrictnessBrief    = "brief"
+)
+
+func defaultFinalQCStrictness(value string) string {
+	if value == "" {
+		return FinalQCStrictnessStrict
+	}
+	return value
+}
+
+func finalQCStrictnessValue(value *string) string {
+	if value == nil {
+		return FinalQCStrictnessStrict
+	}
+	return *value
+}
+
+func validateFinalQCStrictness(value string) error {
+	if value == "" {
+		return errors.New("final_qc_strictness must not be empty")
+	}
+	switch value {
+	case FinalQCStrictnessStrict, FinalQCStrictnessBalanced, FinalQCStrictnessBrief:
+		return nil
+	default:
+		return fmt.Errorf("final_qc_strictness must be strict, balanced, or brief")
+	}
 }
 
 // ImportArtifact grants a block read access to artifacts declared by another block.
@@ -144,6 +179,9 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.SystemPrompt) == "" {
 		return errors.New("research system prompt is required")
 	}
+	if err := validateFinalQCStrictness(defaultFinalQCStrictness(c.FinalQCStrictness)); err != nil {
+		return fmt.Errorf("research: %w", err)
+	}
 	if err := validateOptionalProviderReference(c.ModelProvider, "research model_provider"); err != nil {
 		return err
 	}
@@ -151,6 +189,12 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := validateToolIDs(c.CollectionToolIDs, "research collection_tool_ids"); err != nil {
+		return err
+	}
+	if err := validateToolIDs(c.CollectionMCPToolIDs, "research collection_mcp_tool_ids"); err != nil {
+		return err
+	}
+	if err := validateToolIDs(c.CollectionMCPResourceIDs, "research collection_mcp_resource_ids"); err != nil {
 		return err
 	}
 	if err := validateAllowedBuiltinTools(c.CollectionAllowedBuiltinTools, "research collection_allowed_builtin_tools", CollectionBlockedBuiltinTools()); err != nil {
@@ -298,6 +342,12 @@ func (c Config) validateResearchOnly() error {
 	}
 	if len(c.CollectionToolIDs) > 0 {
 		return errors.New("research_only forbids collection_tool_ids")
+	}
+	if len(c.CollectionMCPToolIDs) > 0 {
+		return errors.New("research_only forbids collection_mcp_tool_ids")
+	}
+	if len(c.CollectionMCPResourceIDs) > 0 {
+		return errors.New("research_only forbids collection_mcp_resource_ids")
 	}
 	if len(c.CollectionAllowedBuiltinTools) > 0 {
 		return errors.New("research_only forbids collection_allowed_builtin_tools")
@@ -799,6 +849,9 @@ func validateToolCallQuota(quota map[string]int, sessionToolIDs []string, scope 
 		}
 		if limit < 0 {
 			return fmt.Errorf("%s tool_call_quota for %q must be non-negative", scope, toolName)
+		}
+		if internalplan.IsMCPToolID(toolName) {
+			return fmt.Errorf("%s tool_call_quota does not support mcp tool id %q", scope, toolName)
 		}
 		if internalplan.IsToolID(toolName) && !slices.Contains(sessionToolIDs, toolName) {
 			return fmt.Errorf("%s tool_call_quota references tool id %q that is not configured for this session", scope, toolName)

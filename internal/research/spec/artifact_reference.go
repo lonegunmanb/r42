@@ -50,8 +50,8 @@ func artifactReferenceValue(name string) cty.Value {
 		"type":        cty.StringVal(artifactReferenceToken(name, "type")),
 		"path":        cty.StringVal(artifactReferenceToken(name, "path")),
 		"description": cty.StringVal(artifactReferenceToken(name, "description")),
-		"required":    cty.UnknownVal(cty.Bool),
-		"non_empty":   cty.UnknownVal(cty.Bool),
+		"required":    cty.False,
+		"non_empty":   cty.False,
 	})
 }
 
@@ -154,6 +154,13 @@ func resolveArtifactReferenceValue(value cty.Value, artifacts map[string]Artifac
 		}
 		return cty.StringVal(resolved).WithMarks(marks), nil
 	case unmarked.Type().IsObjectType():
+		resolved, ok, err := resolveArtifactReferenceObject(unmarked, artifacts)
+		if err != nil {
+			return cty.NilVal, err
+		}
+		if ok {
+			return resolved.WithMarks(marks), nil
+		}
 		values := make(map[string]cty.Value, len(unmarked.AsValueMap()))
 		for name, item := range unmarked.AsValueMap() {
 			resolved, err := resolveArtifactReferenceValue(item, artifacts)
@@ -202,4 +209,35 @@ func resolveArtifactReferenceValue(value cty.Value, artifacts map[string]Artifac
 	default:
 		return value, nil
 	}
+}
+
+func resolveArtifactReferenceObject(
+	value cty.Value,
+	artifacts map[string]Artifact,
+) (cty.Value, bool, error) {
+	if !value.Type().Equals(artifactValueType) {
+		return cty.NilVal, false, nil
+	}
+	id := value.GetAttr("id")
+	if !id.IsKnown() || id.IsNull() || !id.Type().Equals(cty.String) {
+		return cty.NilVal, false, nil
+	}
+	name, ok := ArtifactReferenceIDName(id.AsString())
+	if !ok {
+		return cty.NilVal, false, nil
+	}
+	artifact, exists := artifacts[name]
+	if !exists {
+		return cty.NilVal, true, fmt.Errorf("artifact(%q) references an undeclared artifact", name)
+	}
+	return cty.ObjectVal(map[string]cty.Value{
+		"id":          id,
+		"name":        cty.StringVal(artifact.Name),
+		"kind":        cty.StringVal("artifact"),
+		"type":        cty.StringVal(string(artifact.Type)),
+		"path":        cty.StringVal(artifact.Path),
+		"description": cty.StringVal(artifact.Description),
+		"required":    cty.BoolVal(artifact.Required),
+		"non_empty":   cty.BoolVal(artifact.NonEmpty),
+	}), true, nil
 }

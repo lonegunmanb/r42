@@ -390,7 +390,8 @@ research "dynamic" "followups" {
 
 There are no block-level defaults for dynamic tasks: each object carries the
 same Collection, Collection QC, Research, tool, quota, artifact, retry, and
-Final-QC fields needed by that task, including all `collection_*` fields.
+Final-QC fields needed by that task, including `final_qc_strictness` and all
+`collection_*` fields.
 Within a task, `retry` and `qc` are an object or `null`, while `artifact` is a
 map of named objects. The `tasks` expression may be unknown in the saved Plan, but it
 must be wholly known when the block starts Apply. Empty tasks succeed
@@ -495,13 +496,16 @@ that depend on its successful completion are not run.
 | `reasoning_effort` | No | Non-empty provider-specific reasoning level. r42 passes it through without restricting the allowed names. |
 | `system_prompt` | Yes | Instructions appended to r42's fixed research protocol system prompt. |
 | `prompt` | No | Initial user task. When omitted, r42 sends a fixed start message. |
+| `final_qc_strictness` | No | Final-QC semantic strictness: `strict`, `balanced`, or `brief`; defaults to `strict`. This policy is authoritative over later task prompts, candidate instructions, and custom criteria. |
 | `collection_model_provider` | No | Collection provider override. When omitted, Collection reuses `model_provider`. |
 | `collection_tool_ids` | No | IDs of acquisition or snapshot-producing typed tools available only during Collection. This is where search and fetch tools belong. |
+| `collection_mcp_tool_ids` | No | IDs from `mcp_server.<name>.tool_ids`, attached only to Collection. MCP tools cannot be used by QC, Research, `tool_use`, `terminate_tool_id`, or `tool_call_quota`. |
+| `collection_mcp_resource_ids` | No | IDs from `mcp_server.<name>.resource_ids`, attached only to Collection. Selecting one automatically mounts the restricted `r42_read_mcp_resource` typed tool. |
 | `tool_ids` | No | IDs of typed tools available only to the closed Research synthesis session. |
 | `tool_call_quota` | No | `map(number)` of non-negative per-session call limits. It may name configured Collection or Research typed tools, the terminate tool, or Copilot built-ins. Collection and Research keep separate counters. |
 | `terminate_tool_id` | No | Typed tool that must return an accepted response before the stage can finish. Its output must be string-compatible and becomes `research.static.<name>.result`. Without it, a normal assistant completion ends the stage. |
-| `allowed_tools` | No | SDK tool-name allowlist shared by Collection and Research. Mandatory r42 protocol tools are added even when omitted. |
-| `disallowed_tools` | No | SDK tool-name denylist shared by Collection and Research. Research additionally blocks obvious network, shell, write/edit, glob, task, and user-input built-ins; read-only `view`, `grep`, `head`, and `tail` remain available. |
+| `allowed_tools` | No | Tool allowlist shared by Collection and Research. Use SDK names for ordinary tools and `mcp_server.<name>.tool_ids[...]` for MCP tools. Mandatory r42 protocol tools are always added. |
+| `disallowed_tools` | No | Tool denylist shared by Collection and Research. MCP IDs selected for Collection are translated to SDK MCP filter names. Research additionally blocks obvious network, shell, write/edit, glob, task, and user-input built-ins; read-only `view`, `grep`, `head`, and `tail` remain available. |
 | `collection_skill_directories` | No | Skill roots available only during Collection. |
 | `collection_skills` | No | Skills eagerly loaded only during Collection. |
 | `collection_disabled_skills` | No | Skills disabled only during Collection. |
@@ -514,10 +518,12 @@ that depend on its successful completion are not run.
 | `max_protocol_attempts` | No | Maximum repair budget for rejected terminal calls or completed turns that omit the required terminal call. Defaults to `10`; a new QC revision round resets the budget. |
 | `timeout` | No | Per-block deadline expressed as a Go duration such as `30m` or `2h`. It is bounded by the CLI and ancestor-module deadlines. |
 
-Tool filters use SDK names. A typed tool's read-only `.id` is also its SDK name,
-so the same ID can appear in `collection_tool_ids` or `tool_ids` and in the
-filters. The mandatory registration, checkpoint, terminal, and verdict tools
-cannot be disabled.
+Ordinary tool filters use SDK names. A typed tool's read-only `.id` is also its
+SDK name, so the same ID can appear in `collection_tool_ids` or `tool_ids` and
+in the filters. MCP is the exception: filters use its generated `mcp_tool_...`
+ID in HCL, and r42 translates selected IDs to the SDK's
+`mcp:<server>-<tool>` form. The mandatory registration, checkpoint, terminal,
+and verdict tools cannot be disabled.
 
 Every research block now starts in Collection, even when
 `collection_tool_ids` is empty. Before any collection or artifact-writing tool
@@ -791,6 +797,13 @@ snapshots. Omitting `qc` completes the block after Research succeeds.
 | `max_qc_rounds` | No | Maximum number of QC evaluations, including the first evaluation. Defaults to `10`; at most `max_qc_rounds - 1` QC-triggered research revisions can occur. |
 | `retry` | No | One retry block using the same fields as research. It is layered after the selected Final-QC provider policy and the research-level retry override. |
 
+`final_qc_strictness` defaults to `strict`: source facts must materially match
+their evidence and analysis must be strictly derivable. `balanced` permits a
+reasonable one-step inference, while `brief` is intended for concise reports
+and focuses on material contradictions, invented premises, misleading certainty,
+and unsupported precision. The configured strictness is authoritative over any
+later task prompt, candidate instruction, or custom criterion.
+
 Collection, Research, and Final QC quotas use independent counters, even when
 sessions use the same tool. Typed-tool calls consume quota only after their arguments pass schema
 validation and the tool returns an accepted response; execution errors and
@@ -986,6 +999,65 @@ initialized snapshot. Root `path.module` is therefore `<cwd>/.r42/config`;
 module blocks use their canonical installed directories. `cwd()` remains the
 directory where the CLI was started. Run `r42 init` again after changing the
 source configuration.
+
+## MCP servers
+
+`mcp_server` attaches native MCP tools through the official GitHub Copilot SDK.
+Every server requires an explicit non-empty tool allowlist and exactly one
+`http` or `stdio` transport:
+
+```hcl
+mcp_server "jin10" {
+  tools   = ["get_quote", "get_kline"]
+  resources = ["quote://codes"]
+  timeout = "30s"
+
+  http {
+    url              = "https://mcp.jin10.com/mcp"
+    bearer_token_ref = "J10_API_KEY"
+  }
+}
+
+research "static" "market" {
+  model         = "gpt-5.6-sol"
+  system_prompt = "Collect current market evidence."
+  collection_mcp_tool_ids = [mcp_server.jin10.tool_ids["get_quote"]]
+  collection_mcp_resource_ids = [mcp_server.jin10.resource_ids["quote://codes"]]
+  allowed_tools             = [mcp_server.jin10.tool_ids["get_quote"]]
+}
+```
+
+HTTP supports `url`, optional `headers`, and `bearer_token_ref`. Stdio supports
+`command`, optional `args`, literal `env`, environment-backed `env_refs`, and
+`working_directory`. Timeout defaults to `30s` and must be between `1s` and
+`5m`. `resources` contains exact MCP resource URIs and is optional. r42 leaves
+MCP protocol negotiation to the SDK; the selected resources are read through
+the SDK's experimental host RPC by the generated `r42_read_mcp_resource` tool.
+The display name (`jin10` above) is separate from the runtime identity: r42 uses
+the MCP block's canonical path (for example `mcp_server.jin10`, including its
+module path) as the SDK server name. This keeps same-named blocks from different
+modules distinct for both native MCP tools and resources, even when their
+endpoints happen to be identical.
+
+Each selected tool has a deterministic `mcp_tool_<server>__<tool>_<uuid>` ID.
+These IDs are deliberately distinct from `go_tool`, `external_tool`, and
+`starlark_tool` IDs. They select connected tools through
+`collection_mcp_tool_ids` and may also appear in tool filters.
+
+`collection_mcp_tool_ids` controls which MCP tools are connected to Collection.
+When `allowed_tools` is omitted, those selected tools remain available. When
+`allowed_tools` is configured, it is a strict allowlist: an MCP tool is callable
+only if its generated ID appears in both fields. r42 translates that explicit
+intersection to the SDK's `mcp:<server>-<tool>` filter name. Mandatory r42
+protocol tools are still added automatically; selected MCP tools are not.
+
+Each selected resource has a deterministic
+`mcp_resource_<server>__<uri>_<uuid>` ID. A resource ID is valid only in
+`collection_mcp_resource_ids`; it is never accepted in `allowed_tools`. When a
+session has selected resources, `r42_read_mcp_resource` is automatically added
+to its tool declarations and, when `allowed_tools` is non-nil, to that SDK
+allowlist as well. The tool accepts only the declared resource IDs and returns
+the MCP `contents` array, preserving text/blob and MIME metadata.
 
 ## Typed tools
 

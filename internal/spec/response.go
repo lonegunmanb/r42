@@ -6,6 +6,7 @@ import (
 )
 
 type Issue struct {
+	ID         string  `json:"id,omitempty"`
 	Code       string  `json:"code"`
 	Message    string  `json:"message"`
 	Path       *string `json:"path,omitempty"`

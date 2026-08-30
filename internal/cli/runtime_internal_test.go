@@ -63,12 +63,13 @@ func TestQCVerdictToolSchemaDescribesIssueFields(t *testing.T) {
 				"items": {
 					"type": "object",
 					"properties": {
+						"id": {"type": "string"},
 						"code": {"type": "string"},
 						"message": {"type": "string"},
 						"path": {"type": "string"},
 						"repair_hint": {"type": "string"}
 					},
-					"required": ["code", "message"],
+					"required": ["id", "code", "message"],
 					"additionalProperties": false
 				}
 			}
@@ -128,6 +129,34 @@ func TestQCVerdictToolRejectsReopenDecision(t *testing.T) {
 			"message": "unsupported final qc decision \"reopen_collection\""
 		}]
 	}`, result.TextResultForLLM)
+}
+
+func TestQCVerdictToolRejectsNewIssueIDAfterInitialRevision(t *testing.T) {
+	t.Parallel()
+
+	recorder, err := debuglog.NewRecorder(t.TempDir(), false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+	verdicts := qc.NewVerdictRecorder()
+	tool := qcVerdictTool("research.static.test", recorder, verdicts)
+
+	_, err = tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"decision": "revise_research",
+		"issues": []any{map[string]any{
+			"id": "issue-accuracy", "code": "accuracy", "message": "wrong total",
+		}},
+	}})
+	require.NoError(t, err)
+
+	result, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"decision": "revise_research",
+		"issues": []any{map[string]any{
+			"id": "issue-new", "code": "coverage", "message": "new issue",
+		}},
+	}})
+
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, "new final qc issue id")
 }
 
 type phaseCapturingResearch struct {

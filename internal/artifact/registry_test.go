@@ -113,6 +113,246 @@ func TestRegistryListsDirectoryFilesAsReadableChildArtifacts(t *testing.T) {
 	assert.Equal(t, files, again)
 }
 
+func TestRegistryReusesDirectoryFileIDWhenRegisteredAsEvidence(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	directory := filepath.Join(workspace, "sources")
+	path := filepath.Join(directory, "source.md")
+	require.NoError(t, os.MkdirAll(directory, 0o700))
+	require.NoError(t, os.WriteFile(path, []byte("evidence"), 0o600))
+	registry := artifactpkg.NewRegistry()
+	parent, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "sources", Type: researchspec.ArtifactTypeDirectory, Path: "sources", Description: "Sources",
+	})
+	require.NoError(t, err)
+
+	files, err := registry.ListDirectoryFiles(parent.ID)
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+
+	evidence, created, err := registry.RegisterEvidence(workspace, path, "https://example.test/source", "Source evidence")
+	require.NoError(t, err)
+	assert.True(t, created)
+	assert.Equal(t, files[0].ID, evidence.ID)
+	assert.Equal(t, artifactpkg.PurposeEvidence, evidence.Purpose)
+
+	listedAgain, err := registry.ListDirectoryFiles(parent.ID)
+	require.NoError(t, err)
+	require.Len(t, listedAgain, 1)
+	assert.Equal(t, evidence.ID, listedAgain[0].ID)
+}
+
+func TestRegistryReusesEvidenceIDWhenDirectoryIsListedLater(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	directory := filepath.Join(workspace, "sources")
+	path := filepath.Join(directory, "source.md")
+	require.NoError(t, os.MkdirAll(directory, 0o700))
+	require.NoError(t, os.WriteFile(path, []byte("evidence"), 0o600))
+	registry := artifactpkg.NewRegistry()
+
+	evidence, created, err := registry.RegisterEvidence(workspace, path, "https://example.test/source", "Source evidence")
+	require.NoError(t, err)
+	assert.True(t, created)
+	parent, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "sources", Type: researchspec.ArtifactTypeDirectory, Path: "sources", Description: "Sources",
+	})
+	require.NoError(t, err)
+
+	files, err := registry.ListDirectoryFiles(parent.ID)
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	assert.Equal(t, evidence.ID, files[0].ID)
+	assert.Equal(t, "source.md", files[0].Name)
+	assert.Equal(t, artifactpkg.KindArtifactFile, files[0].Kind)
+}
+
+func TestRegistryDeclareMergesMetadataIntoExistingEvidenceID(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "report.md")
+	require.NoError(t, os.WriteFile(path, []byte("evidence"), 0o600))
+	registry := artifactpkg.NewRegistry()
+	evidence, created, err := registry.RegisterEvidence(workspace, path, "https://example.test/report", "Collected evidence")
+	require.NoError(t, err)
+	assert.True(t, created)
+
+	declared, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "report", Type: researchspec.ArtifactTypeFile, Path: "report.md", Description: "Declared report",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, evidence.ID, declared.ID)
+	assert.Equal(t, "report", declared.Name)
+	assert.Equal(t, "Declared report", declared.Description)
+	assert.Equal(t, artifactpkg.KindArtifact, declared.Kind)
+	assert.True(t, registry.HasPurpose(declared.ID, artifactpkg.PurposeOutput))
+	assert.True(t, registry.HasPurpose(declared.ID, artifactpkg.PurposeEvidence))
+}
+
+func TestRegistryEvidenceRegistrationPreservesDeclaredMetadata(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "report.md")
+	require.NoError(t, os.WriteFile(path, []byte("evidence"), 0o600))
+	registry := artifactpkg.NewRegistry()
+	declared, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "report", Type: researchspec.ArtifactTypeFile, Path: "report.md", Description: "Declared report",
+	})
+	require.NoError(t, err)
+
+	evidence, created, err := registry.RegisterEvidence(workspace, path, "https://example.test/report", "Collected evidence")
+	require.NoError(t, err)
+	assert.True(t, created)
+	assert.Equal(t, declared.ID, evidence.ID)
+	assert.Equal(t, path, evidence.Path)
+	assert.Equal(t, "report", evidence.Name)
+	assert.Equal(t, "Declared report", evidence.Description)
+	assert.Equal(t, artifactpkg.KindArtifact, evidence.Kind)
+}
+
+func TestRegistryDeclareMergesMetadataIntoDirectoryChildID(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	directory := filepath.Join(workspace, "sources")
+	path := filepath.Join(directory, "source.md")
+	require.NoError(t, os.MkdirAll(directory, 0o700))
+	require.NoError(t, os.WriteFile(path, []byte("source"), 0o600))
+	registry := artifactpkg.NewRegistry()
+	parent, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "sources", Type: researchspec.ArtifactTypeDirectory, Path: "sources", Description: "Sources",
+	})
+	require.NoError(t, err)
+	files, err := registry.ListDirectoryFiles(parent.ID)
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+
+	declared, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "source", Type: researchspec.ArtifactTypeFile, Path: "sources/source.md", Description: "Declared source",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, files[0].ID, declared.ID)
+	assert.Equal(t, "source", declared.Name)
+	assert.Equal(t, "Declared source", declared.Description)
+	assert.Equal(t, artifactpkg.KindArtifact, declared.Kind)
+}
+
+func TestRegistryDirectoryListingPreservesDirectDeclarationMetadata(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	directory := filepath.Join(workspace, "sources")
+	path := filepath.Join(directory, "source.md")
+	require.NoError(t, os.MkdirAll(directory, 0o700))
+	require.NoError(t, os.WriteFile(path, []byte("source"), 0o600))
+	registry := artifactpkg.NewRegistry()
+	parent, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "sources", Type: researchspec.ArtifactTypeDirectory, Path: "sources", Description: "Sources",
+	})
+	require.NoError(t, err)
+	direct, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "source", Type: researchspec.ArtifactTypeFile, Path: "sources/source.md", Description: "Declared source",
+	})
+	require.NoError(t, err)
+
+	files, err := registry.ListDirectoryFiles(parent.ID)
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	assert.Equal(t, direct.ID, files[0].ID)
+	assert.Equal(t, "source", files[0].Name)
+	assert.Equal(t, "Declared source", files[0].Description)
+	assert.Equal(t, artifactpkg.KindArtifact, files[0].Kind)
+}
+
+func TestRegistryReusesIDForExistingSymlinkAlias(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	realPath := filepath.Join(workspace, "real.md")
+	aliasPath := filepath.Join(workspace, "alias.md")
+	require.NoError(t, os.WriteFile(realPath, []byte("evidence"), 0o600))
+	require.NoError(t, os.Symlink(realPath, aliasPath))
+	registry := artifactpkg.NewRegistry()
+	declared, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "source", Type: researchspec.ArtifactTypeFile, Path: "alias.md", Description: "Aliased source",
+	})
+	require.NoError(t, err)
+
+	evidence, created, err := registry.RegisterEvidence(workspace, aliasPath, "https://example.test/source", "Source evidence")
+	require.NoError(t, err)
+	assert.True(t, created)
+	assert.Equal(t, declared.ID, evidence.ID)
+	assert.Equal(t, realPath, evidence.Path)
+}
+
+func TestRegistryReusesDeclaredIDWhenPathLaterBecomesSymlink(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	realPath := filepath.Join(workspace, "real.md")
+	aliasPath := filepath.Join(workspace, "alias.md")
+	registry := artifactpkg.NewRegistry()
+	declared, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "source", Type: researchspec.ArtifactTypeFile, Path: "alias.md", Description: "Aliased source",
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(realPath, []byte("evidence"), 0o600))
+	require.NoError(t, os.Symlink(realPath, aliasPath))
+
+	evidence, created, err := registry.RegisterEvidence(workspace, aliasPath, "https://example.test/source", "Source evidence")
+	require.NoError(t, err)
+	assert.True(t, created)
+	assert.Equal(t, declared.ID, evidence.ID)
+	assert.Equal(t, realPath, evidence.Path)
+}
+
+func TestRegistryReusesDeclaredIDForMissingFileBelowSymlinkedDirectory(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	realDirectory := filepath.Join(workspace, "real")
+	aliasDirectory := filepath.Join(workspace, "alias")
+	require.NoError(t, os.MkdirAll(realDirectory, 0o700))
+	require.NoError(t, os.Symlink(realDirectory, aliasDirectory))
+	registry := artifactpkg.NewRegistry()
+	declared, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "report", Type: researchspec.ArtifactTypeFile, Path: "alias/report.md", Description: "Report",
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(realDirectory, "report.md"), []byte("evidence"), 0o600))
+
+	evidence, created, err := registry.RegisterEvidence(
+		workspace, filepath.Join(aliasDirectory, "report.md"), "https://example.test/report", "Report evidence",
+	)
+	require.NoError(t, err)
+	assert.True(t, created)
+	assert.Equal(t, declared.ID, evidence.ID)
+	assert.Equal(t, filepath.Join(realDirectory, "report.md"), evidence.Path)
+}
+
+func TestRegistryDoesNotReuseIDAcrossWorkspaces(t *testing.T) {
+	t.Parallel()
+
+	outerWorkspace := t.TempDir()
+	innerWorkspace := filepath.Join(outerWorkspace, "task")
+	path := filepath.Join(innerWorkspace, "source.md")
+	require.NoError(t, os.MkdirAll(innerWorkspace, 0o700))
+	require.NoError(t, os.WriteFile(path, []byte("evidence"), 0o600))
+	registry := artifactpkg.NewRegistry()
+
+	outer, outerCreated, err := registry.RegisterEvidence(outerWorkspace, path, "https://example.test/source", "Outer source")
+	require.NoError(t, err)
+	inner, innerCreated, err := registry.RegisterEvidence(innerWorkspace, path, "https://example.test/source", "Inner source")
+	require.NoError(t, err)
+	assert.True(t, outerCreated)
+	assert.True(t, innerCreated)
+	assert.NotEqual(t, outer.ID, inner.ID)
+}
+
 func TestRegistryRefusesDirectoryChildReplacedBySymlink(t *testing.T) {
 	t.Parallel()
 

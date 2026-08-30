@@ -15,6 +15,8 @@ import (
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/config"
+	"github.com/lonegunmanb/r42/internal/mcp"
+	mcpspec "github.com/lonegunmanb/r42/internal/mcp/spec"
 	internalplan "github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/provider"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
@@ -34,6 +36,9 @@ type ResearchPlan struct {
 	CollectionQCProvider *provider.Config
 	Expression           string
 	Providers            map[string]*provider.Config
+	MCPServers           []mcp.Config
+	MCPTools             mcp.ToolRegistry
+	MCPResources         mcp.ResourceRegistry
 }
 
 type researchSnapshot struct {
@@ -44,6 +49,7 @@ type researchSnapshot struct {
 	Profile                         string                       `json:"profile,omitempty"`
 	ReasoningEffort                 *string                      `json:"reasoning_effort,omitempty"`
 	SystemPrompt                    string                       `json:"system_prompt"`
+	FinalQCStrictness               string                       `json:"final_qc_strictness,omitempty"`
 	Prompt                          *string                      `json:"prompt,omitempty"`
 	MaxProtocolAttempts             int                          `json:"max_protocol_attempts"`
 	TimeoutNanoseconds              *int64                       `json:"timeout_nanoseconds,omitempty"`
@@ -59,6 +65,11 @@ type researchSnapshot struct {
 	TerminateToolIDSet              bool                         `json:"terminate_tool_id_set,omitempty"`
 	QCProvider                      *providerSnapshot            `json:"qc_provider,omitempty"`
 	CollectionToolIDs               []string                     `json:"collection_tool_ids,omitempty"`
+	CollectionMCPToolIDs            []string                     `json:"collection_mcp_tool_ids,omitempty"`
+	CollectionMCPResourceIDs        []string                     `json:"collection_mcp_resource_ids,omitempty"`
+	MCPServers                      []mcp.Config                 `json:"mcp_servers,omitempty"`
+	MCPTools                        mcp.ToolRegistry             `json:"mcp_tools,omitempty"`
+	MCPResources                    mcp.ResourceRegistry         `json:"mcp_resources,omitempty"`
 	CollectionAllowedBuiltinTools   []string                     `json:"collection_allowed_builtin_tools,omitempty"`
 	CollectionQCAllowedBuiltinTools []string                     `json:"collection_qc_allowed_builtin_tools,omitempty"`
 	ResearchAllowedBuiltinTools     []string                     `json:"research_allowed_builtin_tools,omitempty"`
@@ -106,6 +117,7 @@ type policySnapshot struct {
 	ToolIDs          []string                `json:"tool_ids,omitempty"`
 	ToolCallQuota    map[string]int          `json:"tool_call_quota,omitempty"`
 	AllowedTools     []string                `json:"allowed_tools,omitempty"`
+	AllowedToolsSet  bool                    `json:"allowed_tools_set,omitempty"`
 	DisallowedTools  []string                `json:"disallowed_tools,omitempty"`
 	SkillDirectories []string                `json:"skill_directories,omitempty"`
 	Skills           []string                `json:"skills,omitempty"`
@@ -121,6 +133,7 @@ type qcSnapshot struct {
 	ToolIDs            []string                 `json:"tool_ids,omitempty"`
 	ToolCallQuota      map[string]int           `json:"tool_call_quota,omitempty"`
 	AllowedTools       []string                 `json:"allowed_tools,omitempty"`
+	AllowedToolsSet    bool                     `json:"allowed_tools_set,omitempty"`
 	DisallowedTools    []string                 `json:"disallowed_tools,omitempty"`
 	DisallowedToolsSet bool                     `json:"disallowed_tools_set,omitempty"`
 	SkillDirectories   []string                 `json:"skill_directories,omitempty"`
@@ -157,7 +170,13 @@ func EncodeResearchPlan(
 		if err != nil {
 			return cty.NilVal, err
 		}
-		encoded, err := json.Marshal(researchSnapshot{Expression: expression, Providers: providers})
+		mcpTools := BuildMCPToolRegistry(planning)
+		mcpResources := BuildMCPResourceRegistry(planning)
+		sensitive = sensitive || mcpToolRegistrySensitive(mcpTools) || mcpResourceRegistrySensitive(mcpResources)
+		encoded, err := json.Marshal(researchSnapshot{
+			Expression: expression, Providers: providers, MCPTools: mcpTools,
+			MCPResources: mcpResources,
+		})
 		if err != nil {
 			return cty.NilVal, fmt.Errorf("encode deferred research plan: %w", err)
 		}
@@ -173,16 +192,30 @@ func EncodeResearchPlan(
 	if err := ValidateResearchToolIDs(config, registry); err != nil {
 		return cty.NilVal, err
 	}
+	mcpTools := BuildMCPToolRegistry(planning)
+	if err := validateMCPToolFilters(config.Policy.AllowedTools, mcpTools, "research allowed_tools"); err != nil {
+		return cty.NilVal, err
+	}
+	if err := validateMCPToolFilters(config.Policy.DisallowedTools, mcpTools, "research disallowed_tools"); err != nil {
+		return cty.NilVal, err
+	}
+	mcpResources := BuildMCPResourceRegistry(planning)
+	mcpServers, err := resolveMCPServers(config.CollectionMCPToolIDs, config.CollectionMCPResourceIDs, mcpTools, mcpResources)
+	if err != nil {
+		return cty.NilVal, err
+	}
 	providerConfig, sensitive, err := resolveProvider(config.ModelProvider, planning)
 	if err != nil {
 		return cty.NilVal, err
 	}
+	sensitive = sensitive || mcpServersSensitive(mcpServers)
 	snapshot := researchSnapshot{
 		PhaseMode:                       config.EffectivePhaseMode(),
 		Model:                           config.Model,
 		Profile:                         config.ProfileName(),
 		ReasoningEffort:                 clonePointer(config.ReasoningEffort),
 		SystemPrompt:                    config.SystemPrompt,
+		FinalQCStrictness:               config.FinalQCStrictness,
 		Prompt:                          clonePointer(config.Prompt),
 		MaxProtocolAttempts:             config.MaxProtocolAttempts,
 		TimeoutNanoseconds:              durationNanoseconds(config.Timeout),
@@ -193,6 +226,11 @@ func EncodeResearchPlan(
 		TerminateToolID:                 clonePointer(config.TerminateToolID),
 		TerminateToolIDSet:              config.TerminateToolIDSet,
 		CollectionToolIDs:               slices.Clone(config.CollectionToolIDs),
+		CollectionMCPToolIDs:            slices.Clone(config.CollectionMCPToolIDs),
+		CollectionMCPResourceIDs:        slices.Clone(config.CollectionMCPResourceIDs),
+		MCPServers:                      cloneMCPServers(mcpServers),
+		MCPTools:                        mcpTools.Clone(),
+		MCPResources:                    mcpResources.Clone(),
 		CollectionAllowedBuiltinTools:   slices.Clone(config.CollectionAllowedBuiltinTools),
 		CollectionQCAllowedBuiltinTools: slices.Clone(config.CollectionQCAllowedBuiltinTools),
 		ResearchAllowedBuiltinTools:     slices.Clone(config.ResearchAllowedBuiltinTools),
@@ -233,7 +271,8 @@ func EncodeResearchPlan(
 			ReasoningEffort: clonePointer(config.QC.ReasoningEffort), Retry: config.QC.Retry,
 			ToolIDs:       slices.Clone(config.QC.ToolIDs),
 			ToolCallQuota: maps.Clone(config.QC.ToolCallQuota),
-			AllowedTools:  slices.Clone(config.QC.AllowedTools), DisallowedTools: slices.Clone(config.QC.DisallowedTools),
+			AllowedTools:  slices.Clone(config.QC.AllowedTools), AllowedToolsSet: config.QC.AllowedTools != nil,
+			DisallowedTools:    slices.Clone(config.QC.DisallowedTools),
 			DisallowedToolsSet: config.QC.DisallowedToolsSet,
 			SkillDirectories:   slices.Clone(config.QC.SkillDirectories), Skills: slices.Clone(config.QC.Skills),
 			DisabledSkills: slices.Clone(config.QC.DisabledSkills), Permission: clonePointer(config.QC.Permission),
@@ -296,14 +335,16 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 	}
 	if snapshot.Expression != "" {
 		return ResearchPlan{
-			Expression: snapshot.Expression,
-			Providers:  restoreProviders(snapshot.Providers),
+			Expression:   snapshot.Expression,
+			Providers:    restoreProviders(snapshot.Providers),
+			MCPTools:     snapshot.MCPTools.Clone(),
+			MCPResources: snapshot.MCPResources.Clone(),
 		}, nil
 	}
 	configValue := researchspec.Config{
 		PhaseMode: snapshot.PhaseMode,
 		Model:     snapshot.Model, Profile: snapshot.Profile, ReasoningEffort: clonePointer(snapshot.ReasoningEffort),
-		SystemPrompt: snapshot.SystemPrompt, Prompt: clonePointer(snapshot.Prompt),
+		SystemPrompt: snapshot.SystemPrompt, FinalQCStrictness: snapshot.FinalQCStrictness, Prompt: clonePointer(snapshot.Prompt),
 		MaxProtocolAttempts: snapshot.MaxProtocolAttempts, Timeout: nanosecondsDuration(snapshot.TimeoutNanoseconds),
 		Retry: snapshot.Retry, Policy: restorePolicy(snapshot.Policy),
 		Artifacts:                       slices.Clone(snapshot.Artifacts),
@@ -314,6 +355,8 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 		MaxCollectionRounds:             restoreMaxCollectionRounds(snapshot.MaxCollectionRounds),
 		MaxCollectionRoundsSet:          snapshot.MaxCollectionRoundsSet,
 		CollectionToolIDs:               slices.Clone(snapshot.CollectionToolIDs),
+		CollectionMCPToolIDs:            slices.Clone(snapshot.CollectionMCPToolIDs),
+		CollectionMCPResourceIDs:        slices.Clone(snapshot.CollectionMCPResourceIDs),
 		CollectionAllowedBuiltinTools:   slices.Clone(snapshot.CollectionAllowedBuiltinTools),
 		CollectionQCAllowedBuiltinTools: slices.Clone(snapshot.CollectionQCAllowedBuiltinTools),
 		ResearchAllowedBuiltinTools:     slices.Clone(snapshot.ResearchAllowedBuiltinTools),
@@ -342,7 +385,8 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 		configValue.QC = &researchspec.QCConfig{
 			Criteria: cty.MapVal(stringValues(snapshot.QC.Criteria)), Model: clonePointer(snapshot.QC.Model),
 			ReasoningEffort: clonePointer(snapshot.QC.ReasoningEffort), Retry: snapshot.QC.Retry,
-			ToolIDs: slices.Clone(snapshot.QC.ToolIDs), AllowedTools: slices.Clone(snapshot.QC.AllowedTools),
+			ToolIDs:         slices.Clone(snapshot.QC.ToolIDs),
+			AllowedTools:    restoreOptionalStringSlice(snapshot.QC.AllowedTools, snapshot.QC.AllowedToolsSet),
 			ToolCallQuota:   maps.Clone(snapshot.QC.ToolCallQuota),
 			DisallowedTools: slices.Clone(snapshot.QC.DisallowedTools), SkillDirectories: slices.Clone(snapshot.QC.SkillDirectories),
 			DisallowedToolsSet: snapshot.QC.DisallowedToolsSet,
@@ -366,7 +410,148 @@ func DecodeResearchPlan(value cty.Value) (ResearchPlan, error) {
 		CollectionProvider:   restoreProvider(snapshot.CollectionProvider),
 		QCProvider:           restoreProvider(snapshot.QCProvider),
 		CollectionQCProvider: restoreProvider(snapshot.CollectionQCProvider),
+		MCPServers:           cloneMCPServers(snapshot.MCPServers),
+		MCPTools:             snapshot.MCPTools.Clone(),
+		MCPResources:         snapshot.MCPResources.Clone(),
 	}, nil
+}
+
+func BuildMCPToolRegistry(planning golden.Config) mcp.ToolRegistry {
+	registry := mcp.ToolRegistry{}
+	for _, block := range golden.Blocks[*mcpspec.ServerBlock](planning) {
+		server := block.ServerConfig()
+		for _, toolName := range server.Tools {
+			id := block.ToolID(toolName)
+			registry[id] = mcp.Tool{ID: id, Name: toolName, Server: server.Clone()}
+		}
+	}
+	return registry
+}
+
+func BuildMCPResourceRegistry(planning golden.Config) mcp.ResourceRegistry {
+	registry := mcp.ResourceRegistry{}
+	for _, block := range golden.Blocks[*mcpspec.ServerBlock](planning) {
+		server := block.ServerConfig()
+		for _, uri := range server.Resources {
+			id := block.ResourceID(uri)
+			registry[id] = mcp.Resource{ID: id, URI: uri, Server: server.Clone()}
+		}
+	}
+	return registry
+}
+
+func resolveMCPServers(toolIDs, resourceIDs []string, registry mcp.ToolRegistry, resources mcp.ResourceRegistry) ([]mcp.Config, error) {
+	servers := []mcp.Config{}
+	serverIndexes := map[string]int{}
+	sdkNames := map[string]string{}
+	for _, id := range toolIDs {
+		if !internalplan.IsMCPToolID(id) {
+			return nil, fmt.Errorf("research collection_mcp_tool_ids value %q is not an mcp tool id", id)
+		}
+		tool, exists := registry[id]
+		if !exists {
+			return nil, fmt.Errorf("research collection_mcp_tool_ids references unknown mcp tool id %q", id)
+		}
+		sdkName := tool.SDKName()
+		if existingID, exists := sdkNames[sdkName]; exists && existingID != id {
+			return nil, fmt.Errorf("research collection_mcp_tool_ids MCP tools map to duplicate SDK name %q", sdkName)
+		}
+		sdkNames[sdkName] = id
+		serverKey := tool.Server.RuntimeServerName()
+		index, exists := serverIndexes[serverKey]
+		if !exists {
+			server := tool.Server.Clone()
+			server.Tools = []string{}
+			server.Resources = []string{}
+			servers = append(servers, server)
+			index = len(servers) - 1
+			serverIndexes[serverKey] = index
+		}
+		if slices.Contains(servers[index].Tools, tool.Name) {
+			return nil, fmt.Errorf("research collection_mcp_tool_ids contains duplicate mcp tool id %q", id)
+		}
+		servers[index].Tools = append(servers[index].Tools, tool.Name)
+	}
+	selectedResources := make(map[string]struct{}, len(resourceIDs))
+	for _, id := range resourceIDs {
+		if !internalplan.IsMCPResourceID(id) {
+			return nil, fmt.Errorf("research collection_mcp_resource_ids value %q is not an mcp resource id", id)
+		}
+		resource, exists := resources[id]
+		if !exists {
+			return nil, fmt.Errorf("research collection_mcp_resource_ids references unknown mcp resource id %q", id)
+		}
+		if _, exists := selectedResources[id]; exists {
+			return nil, fmt.Errorf("research collection_mcp_resource_ids contains duplicate mcp resource id %q", id)
+		}
+		selectedResources[id] = struct{}{}
+		serverKey := resource.Server.RuntimeServerName()
+		index, exists := serverIndexes[serverKey]
+		if !exists {
+			server := resource.Server.Clone()
+			server.Tools = []string{}
+			server.Resources = []string{resource.URI}
+			servers = append(servers, server)
+			index = len(servers) - 1
+			serverIndexes[serverKey] = index
+		} else if !slices.Contains(servers[index].Resources, resource.URI) {
+			servers[index].Resources = append(servers[index].Resources, resource.URI)
+		}
+	}
+	return servers, nil
+}
+
+func validateMCPToolFilters(filters []string, registry mcp.ToolRegistry, attribute string) error {
+	for _, filter := range filters {
+		if internalplan.IsMCPResourceID(filter) {
+			return fmt.Errorf("%s does not accept mcp resource ids; use collection_mcp_resource_ids", attribute)
+		}
+		if strings.HasPrefix(filter, "mcp:") {
+			return fmt.Errorf("%s must use generated mcp tool ids instead of SDK mcp filter names", attribute)
+		}
+		if !internalplan.IsMCPToolID(filter) {
+			continue
+		}
+		if _, exists := registry[filter]; !exists {
+			return fmt.Errorf("%s references mcp tool id %q that was not planned", attribute, filter)
+		}
+	}
+	return nil
+}
+
+func cloneMCPServers(servers []mcp.Config) []mcp.Config {
+	result := make([]mcp.Config, len(servers))
+	for index, server := range servers {
+		result[index] = server.Clone()
+	}
+	return result
+}
+
+func mcpServersSensitive(servers []mcp.Config) bool {
+	for _, server := range servers {
+		if server.HTTP != nil && server.HTTP.BearerToken != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func mcpToolRegistrySensitive(registry mcp.ToolRegistry) bool {
+	for _, tool := range registry {
+		if mcpServersSensitive([]mcp.Config{tool.Server}) {
+			return true
+		}
+	}
+	return false
+}
+
+func mcpResourceRegistrySensitive(registry mcp.ResourceRegistry) bool {
+	for _, resource := range registry {
+		if mcpServersSensitive([]mcp.Config{resource.Server}) {
+			return true
+		}
+	}
+	return false
 }
 
 func snapshotToolUses(toolUses []researchspec.ToolUse) ([]toolUseSnapshot, bool, error) {
@@ -478,7 +663,7 @@ func (p ResearchPlan) Resolve(config researchspec.Config) (ResearchPlan, error) 
 	if p.Expression == "" {
 		return p, nil
 	}
-	resolved, err := (DynamicResearchPlan{Providers: p.Providers}).Resolve(config)
+	resolved, err := (DynamicResearchPlan{Providers: p.Providers, MCPTools: p.MCPTools, MCPResources: p.MCPResources}).Resolve(config)
 	if err != nil {
 		return ResearchPlan{}, err
 	}
@@ -486,6 +671,9 @@ func (p ResearchPlan) Resolve(config researchspec.Config) (ResearchPlan, error) 
 		Config: resolved.Config, Provider: resolved.Provider, CollectionProvider: resolved.CollectionProvider,
 		QCProvider:           resolved.QCProvider,
 		CollectionQCProvider: resolved.CollectionQCProvider,
+		MCPServers:           cloneMCPServers(resolved.MCPServers),
+		MCPTools:             resolved.MCPTools.Clone(),
+		MCPResources:         resolved.MCPResources.Clone(),
 	}, nil
 }
 
@@ -604,6 +792,14 @@ func ValidateResearchToolIDs(config researchspec.Config, registry map[string]int
 		if err := validateConfiguredToolIDs([]string{*config.TerminateToolID}, registry, "research terminate_tool_id"); err != nil {
 			return err
 		}
+		definition := registry[*config.TerminateToolID]
+		outputType, err := plannedToolOutputType(definition)
+		if err != nil {
+			return fmt.Errorf("research terminate_tool_id output type: %w", err)
+		}
+		if err := researchspec.ValidateTerminateOutputType(definition.Address, outputType); err != nil {
+			return err
+		}
 	}
 	if err := validateToolUseOwnership(config.ToolUses, registry); err != nil {
 		return err
@@ -629,10 +825,25 @@ func ValidateResearchToolIDs(config researchspec.Config, registry map[string]int
 	if err := validatePlannedToolCallQuota(config.QC.ToolCallQuota, registry, "qc"); err != nil {
 		return err
 	}
+	if err := validateNoMCPToolFilters(config.QC.AllowedTools, "qc allowed_tools"); err != nil {
+		return err
+	}
 	if err := validateToolFilters(config.QC.AllowedTools, registry, "qc allowed_tools"); err != nil {
 		return err
 	}
+	if err := validateNoMCPToolFilters(config.QC.DisallowedTools, "qc disallowed_tools"); err != nil {
+		return err
+	}
 	return validateToolFilters(config.QC.DisallowedTools, registry, "qc disallowed_tools")
+}
+
+func validateNoMCPToolFilters(filters []string, attribute string) error {
+	for _, filter := range filters {
+		if strings.HasPrefix(filter, "mcp:") || internalplan.IsMCPToolID(filter) || internalplan.IsMCPResourceID(filter) {
+			return fmt.Errorf("%s must not contain MCP tools because MCP tools are collection-only", attribute)
+		}
+	}
+	return nil
 }
 
 func validateToolUseOwnership(
@@ -701,6 +912,33 @@ func plannedToolInputType(definition internalplan.ToolSpec) (cty.Type, error) {
 	}
 }
 
+func plannedToolOutputType(definition internalplan.ToolSpec) (cty.Type, error) {
+	switch definition.Kind {
+	case string(config.AddressKindGo):
+		analysis, err := gotool.Analyze(definition.Source)
+		if err != nil {
+			return cty.NilType, err
+		}
+		return analysis.OutputType, nil
+	case string(config.AddressKindExternal):
+		expression, diagnostics := hclsyntax.ParseExpression(
+			[]byte(definition.OutputTypeExpression), "saved-tool-output-type", hcl.InitialPos,
+		)
+		if diagnostics.HasErrors() {
+			return cty.NilType, diagnostics
+		}
+		outputType, _, diagnostics := typeexpr.TypeConstraintWithDefaults(expression)
+		if diagnostics.HasErrors() {
+			return cty.NilType, diagnostics
+		}
+		return outputType, nil
+	case string(config.AddressKindStarlark):
+		return cty.String, nil
+	default:
+		return cty.NilType, fmt.Errorf("typed tool kind %q is not supported", definition.Kind)
+	}
+}
+
 func toolUseValueMap(value cty.Value) map[string]cty.Value {
 	if value == cty.NilVal || value.Type().Equals(cty.NilType) || value.IsNull() {
 		return nil
@@ -715,6 +953,9 @@ func validatePlannedToolCallQuota(
 	scope string,
 ) error {
 	for toolID := range quota {
+		if internalplan.IsMCPToolID(toolID) {
+			return fmt.Errorf("%s tool_call_quota does not support mcp tool id %q", scope, toolID)
+		}
 		if !internalplan.IsToolID(toolID) {
 			continue
 		}
@@ -769,7 +1010,8 @@ func snapshotPolicy(policy researchspec.SessionPolicy) policySnapshot {
 	return policySnapshot{
 		ToolIDs:       slices.Clone(policy.ToolIDs),
 		ToolCallQuota: maps.Clone(policy.ToolCallQuota),
-		AllowedTools:  slices.Clone(policy.AllowedTools), DisallowedTools: slices.Clone(policy.DisallowedTools),
+		AllowedTools:  slices.Clone(policy.AllowedTools), AllowedToolsSet: policy.AllowedTools != nil,
+		DisallowedTools:  slices.Clone(policy.DisallowedTools),
 		SkillDirectories: slices.Clone(policy.SkillDirectories), Skills: slices.Clone(policy.Skills),
 		DisabledSkills: slices.Clone(policy.DisabledSkills), Permission: policy.Permission,
 	}
@@ -777,11 +1019,22 @@ func snapshotPolicy(policy researchspec.SessionPolicy) policySnapshot {
 
 func restorePolicy(policy policySnapshot) researchspec.SessionPolicy {
 	return researchspec.SessionPolicy{
-		ToolIDs: slices.Clone(policy.ToolIDs), AllowedTools: slices.Clone(policy.AllowedTools),
+		ToolIDs:         slices.Clone(policy.ToolIDs),
+		AllowedTools:    restoreOptionalStringSlice(policy.AllowedTools, policy.AllowedToolsSet),
 		ToolCallQuota:   maps.Clone(policy.ToolCallQuota),
 		DisallowedTools: slices.Clone(policy.DisallowedTools), SkillDirectories: slices.Clone(policy.SkillDirectories),
 		Skills: slices.Clone(policy.Skills), DisabledSkills: slices.Clone(policy.DisabledSkills), Permission: policy.Permission,
 	}
+}
+
+func restoreOptionalStringSlice(values []string, explicitlySet bool) []string {
+	if !explicitlySet && values == nil {
+		return nil
+	}
+	if len(values) == 0 {
+		return []string{}
+	}
+	return slices.Clone(values)
 }
 
 func restoreProvider(snapshot *providerSnapshot) *provider.Config {

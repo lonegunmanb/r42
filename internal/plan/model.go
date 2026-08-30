@@ -12,7 +12,11 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
-var toolIDPattern = regexp.MustCompile(`^tool_.+_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+var (
+	toolIDPattern        = regexp.MustCompile(`^tool_.+_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	mcpToolIDPattern     = regexp.MustCompile(`^mcp_tool_.+_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+	mcpResourceIDPattern = regexp.MustCompile(`^mcp_resource_.+_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+)
 
 type NodeSpec struct {
 	Address      string
@@ -175,6 +179,14 @@ func (p *Plan) Tools() map[string]ToolSpec {
 
 func IsToolID(value string) bool {
 	return toolIDPattern.MatchString(value)
+}
+
+func IsMCPToolID(value string) bool {
+	return mcpToolIDPattern.MatchString(value)
+}
+
+func IsMCPResourceID(value string) bool {
+	return mcpResourceIDPattern.MatchString(value)
 }
 
 func validateTools(tools map[string]ToolSpec) error {

@@ -2,6 +2,7 @@ package spec_test
 
 import (
 	"math"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -62,6 +63,7 @@ func assertReference(t *testing.T, value cty.Value, address, kind string) {
 func registerResearchSchemaBlocks() {
 	registerResearchBlock.Do(func() {
 		golden.RegisterBlock(new(researchspec.ResearchBlock))
+		golden.RegisterBlock(new(researchspec.DynamicResearchBlock))
 		golden.RegisterBlock(new(provider.ModelProviderBlock))
 		golden.RegisterBlock(new(fixtureToolBlock))
 	})
@@ -102,8 +104,11 @@ research "static" "fact" {
 		assert.Equal(t, key, instance.GetAttr("system_prompt").AsString())
 		artifacts := instance.GetAttr("artifact")
 		require.Equal(t, 1, artifacts.LengthInt())
-		assert.Equal(t, "answer", artifacts.Index(cty.StringVal("answer")).GetAttr("name").AsString())
-		assert.False(t, artifacts.Index(cty.StringVal("answer")).GetAttr("path").IsKnown())
+		answer := artifacts.Index(cty.StringVal("answer"))
+		assert.Equal(t, "answer", answer.GetAttr("name").AsString())
+		assert.False(t, answer.GetAttr("path").IsKnown())
+		assert.False(t, answer.GetAttr("required").True())
+		assert.False(t, answer.GetAttr("non_empty").True())
 	}
 
 	plannedPaths := make(map[string]string, len(blocks))
@@ -212,6 +217,7 @@ research "static" "market" {
     }
   }
 }
+
 `)
 
 	require.NoError(t, config.RunPlan())
@@ -223,6 +229,32 @@ research "static" "market" {
 	require.NotNil(t, planned.QC)
 	assert.Equal(t, []string{"tool_fixture_read_only"}, planned.QC.ToolIDs)
 	assert.Equal(t, map[string]int{"tool_fixture_read_only": 3}, planned.QC.ToolCallQuota)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockDefaultsAndValidatesFinalQCStrictness(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+research "static" "default" {
+  model = "model"
+  system_prompt = "prompt"
+}
+research "static" "balanced" {
+  model = "model"
+  system_prompt = "prompt"
+  final_qc_strictness = "balanced"
+}
+`)
+	require.NoError(t, config.RunPlan())
+	blocks := golden.Blocks[*researchspec.ResearchBlock](config)
+	for _, block := range blocks {
+		switch block.Name() {
+		case "default":
+			assert.Equal(t, researchspec.FinalQCStrictnessStrict, block.ResearchConfig().FinalQCStrictness)
+		case "balanced":
+			assert.Equal(t, researchspec.FinalQCStrictnessBalanced, block.ResearchConfig().FinalQCStrictness)
+		}
+	}
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -785,6 +817,7 @@ research "static" "minimal" {
     }
   }
 }
+
 `)
 
 	require.NoError(t, config.RunPlan())
@@ -804,6 +837,24 @@ research "static" "minimal" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockPlannedValuesExposeAbsoluteWorkspacePath(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+research "static" "path" {
+  model = "model"
+  system_prompt = "prompt"
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	block := golden.Blocks[*researchspec.ResearchBlock](config)[0]
+	path := block.Values()["path"]
+	require.True(t, path.IsKnown())
+	assert.True(t, filepath.IsAbs(path.AsString()))
+	assert.Equal(t, filepath.ToSlash(filepath.Clean(path.AsString())), path.AsString())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
 func TestResearchBlockRejectsStringReferencePlaceholders(t *testing.T) {
 	registerResearchSchemaBlocks()
 	tests := []struct {
@@ -815,6 +866,8 @@ func TestResearchBlockRejectsStringReferencePlaceholders(t *testing.T) {
 		{name: "collection model provider", attribute: `collection_model_provider = "fixture_provider.collection"`, expectedError: "research collection_model_provider must be a provider reference"},
 		{name: "tool ids", attribute: `tool_ids = [""]`, expectedError: "research tool_ids must not contain empty values"},
 		{name: "terminate tool id", attribute: `terminate_tool_id = ""`, expectedError: "research terminate_tool_id must not be empty"},
+		{name: "final qc strictness", attribute: `final_qc_strictness = "loose"`, expectedError: "final_qc_strictness must be strict, balanced, or brief"},
+		{name: "empty final qc strictness", attribute: `final_qc_strictness = ""`, expectedError: "final_qc_strictness must not be empty"},
 		{name: "qc model provider", attribute: "qc {\ncriteria = { accuracy = \"accurate\" }\nmodel_provider = \"fixture_provider.quality\"\n}", expectedError: "qc model_provider must be a provider reference"},
 		{name: "qc tool ids", attribute: "qc {\ncriteria = { accuracy = \"accurate\" }\ntool_ids = [\"\"]\n}", expectedError: "qc tool_ids must not contain empty values"},
 	}

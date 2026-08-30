@@ -17,6 +17,52 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
+func TestMCPToolIDClassification(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		id       string
+		expected bool
+	}{
+		{name: "mcp tool", id: "mcp_tool_jin10__get_quote_12345678-1234-8234-9234-123456789abc", expected: true},
+		{name: "go tool", id: "tool_go_tool_quote_12345678-1234-8234-9234-123456789abc"},
+		{name: "missing identity", id: "mcp_tool_jin10__get_quote"},
+		{name: "wrong prefix", id: "tool_mcp_jin10__get_quote_12345678-1234-8234-9234-123456789abc"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, plan.IsMCPToolID(tt.id))
+			if tt.expected {
+				assert.False(t, plan.IsToolID(tt.id))
+			}
+		})
+	}
+}
+
+func TestMCPResourceIDClassification(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		id       string
+		expected bool
+	}{
+		{name: "mcp resource", id: "mcp_resource_jin10__quote_codes_12345678-1234-8234-9234-123456789abc", expected: true},
+		{name: "mcp tool", id: "mcp_tool_jin10__get_quote_12345678-1234-8234-9234-123456789abc"},
+		{name: "missing identity", id: "mcp_resource_jin10__quote_codes"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, plan.IsMCPResourceID(tt.id))
+		})
+	}
+}
+
 func TestPlanNestedRoundTripPreservesDAGValuesAndSensitivity(t *testing.T) {
 	t.Parallel()
 

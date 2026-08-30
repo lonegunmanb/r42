@@ -18,8 +18,10 @@ func TestDecodeDynamicTaskDecodesCollectionFields(t *testing.T) {
 	task := cty.ObjectVal(map[string]cty.Value{
 		"model":                               cty.StringVal("wire-model"),
 		"system_prompt":                       cty.StringVal("Collect and synthesize."),
+		"final_qc_strictness":                 cty.StringVal("balanced"),
 		"collection_model_provider":           collectionProviderRef,
 		"collection_tool_ids":                 cty.TupleVal([]cty.Value{cty.StringVal("tool_fixture_source")}),
+		"collection_mcp_resource_ids":         cty.TupleVal([]cty.Value{cty.StringVal("mcp_resource_jin10__quote_codes_12345678-1234-8234-9234-123456789abc")}),
 		"collection_allowed_builtin_tools":    cty.TupleVal([]cty.Value{cty.StringVal("powershell")}),
 		"collection_qc_allowed_builtin_tools": cty.TupleVal([]cty.Value{cty.StringVal("web_fetch")}),
 		"research_allowed_builtin_tools":      cty.TupleVal([]cty.Value{cty.StringVal("shell")}),
@@ -49,6 +51,8 @@ func TestDecodeDynamicTaskDecodesCollectionFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, collectionProviderRef.RawEquals(config.CollectionModelProvider))
 	assert.Equal(t, []string{"tool_fixture_source"}, config.CollectionToolIDs)
+	assert.Equal(t, researchspec.FinalQCStrictnessBalanced, config.FinalQCStrictness)
+	assert.Equal(t, []string{"mcp_resource_jin10__quote_codes_12345678-1234-8234-9234-123456789abc"}, config.CollectionMCPResourceIDs)
 	assert.Equal(t, []string{"powershell"}, config.CollectionAllowedBuiltinTools)
 	assert.Equal(t, []string{"web_fetch"}, config.CollectionQCAllowedBuiltinTools)
 	assert.Equal(t, []string{"shell"}, config.ResearchAllowedBuiltinTools)
@@ -109,6 +113,7 @@ func TestDecodeDynamicTaskCollectionDefaults(t *testing.T) {
 	assert.Equal(t, researchspec.DefaultMaxCollectionRounds, *config.MaxCollectionRounds)
 	assert.Nil(t, config.CollectionQC)
 	assert.Equal(t, researchspec.PhaseModeFull, config.EffectivePhaseMode())
+	assert.Equal(t, researchspec.FinalQCStrictnessStrict, config.FinalQCStrictness)
 }
 
 func TestDecodeDynamicTaskDecodesPhaseModes(t *testing.T) {

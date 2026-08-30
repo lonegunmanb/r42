@@ -17,11 +17,11 @@ import (
 
 var researchAttributeNames = map[string]struct{}{
 	"phase_mode":     {},
-	"model_provider": {}, "model": {}, "profile": {}, "reasoning_effort": {}, "system_prompt": {}, "prompt": {},
+	"model_provider": {}, "model": {}, "profile": {}, "reasoning_effort": {}, "system_prompt": {}, "prompt": {}, "final_qc_strictness": {},
 	"tool_ids": {}, "tool_call_quota": {}, "terminate_tool_id": {}, "allowed_tools": {},
 	"disallowed_tools": {}, "skill_directories": {}, "skills": {}, "disabled_skills": {},
 	"permission": {}, "max_protocol_attempts": {}, "timeout": {},
-	"collection_model_provider": {}, "collection_tool_ids": {}, "collection_skill_directories": {}, "collection_skills": {},
+	"collection_model_provider": {}, "collection_tool_ids": {}, "collection_mcp_tool_ids": {}, "collection_mcp_resource_ids": {}, "collection_skill_directories": {}, "collection_skills": {},
 	"collection_disabled_skills": {}, "collection_allowed_builtin_tools": {}, "collection_qc_allowed_builtin_tools": {},
 	"research_allowed_builtin_tools": {}, "final_qc_allowed_builtin_tools": {}, "collection_batch_size": {}, "max_collection_rounds": {},
 }
@@ -405,8 +405,9 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 	values := map[string]cty.Value{
 		"phase_mode":     cty.StringVal(string(PhaseModeFull)),
 		"model_provider": cty.NullVal(cty.EmptyObject), "profile": cty.UnknownVal(cty.String),
-		"reasoning_effort": cty.NullVal(cty.String),
-		"prompt":           cty.NullVal(cty.String), "tool_ids": cty.EmptyTupleVal,
+		"reasoning_effort":    cty.NullVal(cty.String),
+		"final_qc_strictness": cty.StringVal(FinalQCStrictnessStrict),
+		"prompt":              cty.NullVal(cty.String), "tool_ids": cty.EmptyTupleVal,
 		"tool_call_quota": cty.EmptyObjectVal, "terminate_tool_id": cty.NullVal(cty.String),
 		"allowed_tools": cty.EmptyTupleVal, "disallowed_tools": cty.EmptyTupleVal,
 		"skill_directories": cty.EmptyTupleVal, "skills": cty.EmptyTupleVal,
@@ -415,6 +416,8 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 		"retry": cty.EmptyTupleVal, "artifact": cty.EmptyObjectVal, "tool_use": cty.EmptyTupleVal, "qc": cty.EmptyTupleVal,
 		"collection_model_provider":           cty.NullVal(cty.EmptyObject),
 		"collection_tool_ids":                 cty.EmptyTupleVal,
+		"collection_mcp_tool_ids":             cty.EmptyTupleVal,
+		"collection_mcp_resource_ids":         cty.EmptyTupleVal,
 		"collection_allowed_builtin_tools":    cty.EmptyTupleVal,
 		"collection_qc_allowed_builtin_tools": cty.EmptyTupleVal,
 		"research_allowed_builtin_tools":      cty.EmptyTupleVal,

@@ -653,7 +653,7 @@ func (s *dynamicQCIssueSession) SendAndWait(_ context.Context, options sdk.Messa
 		if round == 1 {
 			arguments = map[string]any{
 				"decision": "revise_research",
-				"issues":   []any{map[string]any{"code": "accuracy", "message": "correct the task result"}},
+				"issues":   []any{map[string]any{"id": "issue-accuracy", "code": "accuracy", "message": "correct the task result"}},
 			}
 		}
 		return &sdk.SessionEvent{}, callDynamicQCWorkflowTool(s.config, "r42_qc_verdict", arguments)
