@@ -46,10 +46,14 @@ research "dynamic" "scan" {
         target, inspect has_more and next_cursor; request another page only when
         has_more is true and next_cursor is non-empty. Stop at the target or when
         the service reports no next page; do not blindly paginate to pad a short result.
+        For the live-date `list_news` open-discovery task, call `list_news({})`
+        exactly once and retain that single returned page as the complete latest-
+        news snapshot; do not follow its cursor or make a second list_news call.
         Quote tasks use the bounded Yahoo-first fallback and must begin with
         yahoo-finance, even though their configured Jin10 tool is the fallback.
         Do not call the configured Jin10 tool before the Yahoo step.
         ${action.scan_type == "get_quote" ? local.quote_scan_guidance : "For non-quote scans, no fallback search or retry is allowed."}
+        ${action.scan_type == "list_news" ? "This is the bounded open-discovery latest-news page: include the returned page in the packet candidate pool, filter it to the edition date scope, and do not paginate even when has_more is true." : ""}
         ${local.date_scope_guidance}
 
         Save the complete structured result from every retained page and any useful source context with
@@ -201,6 +205,21 @@ research "static" "freeze_packet" {
     frozen packet for the Publisher. The packet tool also maintains a root
     `source_urls` index from the host-supplied scan paths, which the Publisher
     can use as a complete source list.
+
+    The `open-discovery` scans are the only source for open-ended incremental
+    news. On a live edition date, one additional `list_news` task supplies a
+    single latest-news page; treat that page as part of the same open-discovery
+    candidate pool and keep only in-window, material, non-duplicate events.
+    When it contains a genuinely material event that is not already covered by
+    the watchlist or another focus topic, give that event an `open-` prefix in
+    its event ID. Within the overall news limit, preserve up to
+    ${var.uncovered_news_limit} such open-discovery events before filling the
+    remaining slots with the strongest covered events. This is a preference,
+    not a quota: if no open-discovery event is supported by the scans, keep zero
+    and record no_material_news rather than repeating a known story or inventing
+    one. Keep the new watchlist market readings in the imported evidence and
+    coverage rows even when the typed market_snapshot contract only publishes
+    its canonical market keys.
 
     Call ${go_tool.submit_breakfast_packet.id}; r42 binds the packet artifact.
     Create evidence_catalog entries only for claims supported by the imported
@@ -491,8 +510,12 @@ research "static" "news_digest" {
 
     Choose at most ${var.morning_news_limit} packet events that are genuinely
     useful for today's newspaper. Prefer material events with clear impact and
-    source URLs; do not fill the limit when fewer events are useful. For every
-    selected event, copy its event_id, headline, and all packet source_urls.
+    source URLs; do not fill the limit when fewer events are useful. Prefer
+    packet events whose IDs start with `open-` when they represent a genuinely
+    new story outside the watchlist and existing focus topics; include up to
+    ${var.uncovered_news_limit} of them, but do not force the count when the
+    packet has no supported open-discovery event. For every selected event,
+    copy its event_id, headline, and all packet source_urls.
     If it has URLs, call web_fetch once per URL, save each complete response
     under "${artifact("fetched").path}", and put the returned artifact IDs in
     fetch_artifact_ids. Set status to fetched when the source was read, or
@@ -606,9 +629,13 @@ research "static" "publish" {
     checklist. You may choose the exact headings, but normally include a short
     lead, overnight market numbers with their observation date, the most useful
     news, and a final section of conditional signals to watch before and after
-    the open. Select and combine duplicate news; choose at most ${var.morning_news_limit}
-    news items for the reader-facing article. If the packet contains fewer useful
-    candidates, use fewer rather than adding filler. Do not list scan tasks.
+    the open. The major-stories section should normally contain 5-7 distinct,
+    material stories. Select and combine duplicate news; choose at most
+    ${var.morning_news_limit} news items for the reader-facing article. If the
+    packet contains fewer than five useful candidates, use fewer rather than
+    adding filler. Prefer one or two `open-` events when they are genuinely
+    material and not duplicates of the configured watchlist/focus topics;
+    otherwise use zero. Do not list scan tasks.
     Every factual or analytical sentence must end with one provenance marker:
     <!-- r42:claim=<id> evidence=<id> -->. Use IDs that exist in the frozen
     packet or validated reviews. A sentence may cite multiple IDs by repeating

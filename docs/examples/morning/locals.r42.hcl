@@ -1,7 +1,7 @@
 locals {
   edition_date = var.edition_date == null ? formatdate(
     "YYYY-MM-DD",
-    timeadd(timestamp(), "8h"),
+    local_timestamp(),
   ) : var.edition_date
 
   previous_date = formatdate(
@@ -27,15 +27,20 @@ locals {
     {
       id        = "overnight-market"
       use_jin10 = true
-      question = "隔夜海外市场如何变化，它们对中国投资者今天的开盘环境意味着什么？"
+      question = "隔夜海外市场、外汇、商品和航运如何变化，它们对中国投资者今天的开盘环境意味着什么？"
       instructions = <<-PROMPT
         按下面的 focus_topics 逐项检查隔夜市场方向，并记录数值、涨跌、数据时间、
         交易日及原始来源：
         ${local.focus_topic_guidance["overnight-market"]}
-        另外逐项检查观察清单中的 A 股指数、港股指数和港股中国互联网公司：分别
-        查询行情与${var.enforce_cutoff_time ? "前一天至 edition_date 当日截止时间内" : "前一天和 edition_date 当天任意时间"}的新闻。没有值得写的要闻时记录 no_material_news
-        和已检查范围；查询失败时记录 check_failed，不能伪装成没有新闻。发现符合
-        标准的新闻必须进入候选池；最终由 freeze_packet 按配置的新闻上限选择。
+        另外逐项检查观察清单中的 A 股指数、港股指数、港股中国互联网公司、
+        美元/日元、道琼斯工业平均指数、日经225、德国 DAX、法国 CAC 40、
+        英国富时100、欧洲斯托克50和波罗的海干散货指数：分别查询行情与
+        ${var.enforce_cutoff_time ? "前一天至 edition_date 当日截止时间内" : "前一天和 edition_date 当天任意时间"}
+        的新闻。商品和航运方向要同时关注价格、运价和供需/扰动消息；没有值得写的
+        要闻时记录 no_material_news 和已检查范围；查询失败时记录 check_failed，不能
+        伪装成没有新闻。发现符合标准的新闻必须进入候选池；最终由 freeze_packet 按
+        配置的新闻上限选择。新增海外指数、外汇和 BDI 的行情即使不入选头条，也要在
+        对应 coverage 与扫描 artifact 中如实保留，供事实包判断是否可用。
         行情扫描必须先使用 yahoo-finance；只有 Yahoo 无结果、报错或价格为空时，
         才按 quote_scan_guidance 回退到 Jin10。不要用新闻标题代替行情数据。
         Yahoo 结果必须保留观察时间、交易日和市场状态；A50 期指必须使用直接行情源，
@@ -54,6 +59,12 @@ locals {
         已经发生、已经宣布和市场预期；记录公布时间、前值/预期/实际值（可得时）
         以及政策原文或统计机构来源。
         用金十财经日历建立事件候选，但重要数据仍优先回到统计机构或央行原文。
+        `open-discovery` 是一次有限的增量搜索：只保留既不属于观察清单、也不属于
+        其他 focus_topics 的重大财经事件。它用于让每期早餐有 0-2 条真正的新线索，
+        不得把已有主题换个关键词重复提交，也不得为了凑数编造或重复头条；没有合格
+        增量时提交 no_material_news，并写清已检查范围。edition_date 是运行主机本地今天
+        时，系统还会提供一次 `list_news({})` 最新资讯页；把这一页当作开放发现的
+        补充候选，按日期和重要性筛选后交给 freeze_packet，不要继续翻页。
       PROMPT
     },
     {
@@ -110,6 +121,7 @@ locals {
   jin10_scan_tool_ids = {
     get_quote    = mcp_server.jin10.tool_ids["get_quote"]
     search_flash = mcp_server.jin10.tool_ids["search_flash"]
+    list_news    = mcp_server.jin10.tool_ids["list_news"]
     search_news  = mcp_server.jin10.tool_ids["search_news"]
   }
 
@@ -136,6 +148,27 @@ locals {
           }
         ] if topic.track == track.id
       ]),
+      # On the live local-system date, take one latest-news page as a bounded
+      # open-discovery supplement. Historical reruns remain deterministic and
+      # use only their date-scoped keyword scans.
+      track.id == "macro-policy" && local.edition_date == formatdate(
+        "YYYY-MM-DD",
+        local_timestamp(),
+      ) && length([for topic in var.focus_topics : topic.id if topic.id == "open-discovery"]) > 0 ? [{
+        id            = "${track.id}.open-discovery.latest-news"
+        track_id      = track.id
+        target_id     = "open-discovery"
+        target_name   = "开放式增量要闻（最新资讯页）"
+        scan_type     = "list_news"
+        tool_id       = local.jin10_scan_tool_ids.list_news
+        query         = "Jin10 latest news page"
+        query_terms   = []
+        arguments_json = jsonencode({})
+        use_jin10     = true
+        use_pplx      = false
+        quote_symbol  = ""
+        question      = track.question
+      }] : [],
       track.id == "overnight-market" ? flatten([
         for item in var.watchlist : concat(
           [{

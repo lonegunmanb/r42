@@ -127,10 +127,10 @@ func TestMorningConfigurationPlansWithNativeMCP(t *testing.T) {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestMorningDefaultEditionDateUsesShanghaiCurrentDate(t *testing.T) {
-	shanghai := time.FixedZone("Asia/Shanghai", 8*60*60)
+func TestMorningDefaultEditionDateUsesSystemLocalCurrentDate(t *testing.T) {
+	systemLocal := time.Local
 	expectedDates := map[string]struct{}{
-		time.Now().In(shanghai).Format(time.DateOnly): {},
+		time.Now().In(systemLocal).Format(time.DateOnly): {},
 	}
 
 	runtime := cli.NewRuntime()
@@ -142,14 +142,14 @@ func TestMorningDefaultEditionDateUsesShanghaiCurrentDate(t *testing.T) {
 		},
 	})
 	require.NoError(t, err)
-	expectedDates[time.Now().In(shanghai).Format(time.DateOnly)] = struct{}{}
+	expectedDates[time.Now().In(systemLocal).Format(time.DateOnly)] = struct{}{}
 
 	localValue, ok := config.EvalContext().Variables["local"]
 	require.True(t, ok)
 	require.True(t, localValue.Type().HasAttribute("edition_date"))
 	actual := localValue.GetAttr("edition_date").AsString()
 	_, matched := expectedDates[actual]
-	assert.True(t, matched, "edition_date %q is not the current Asia/Shanghai date", actual)
+	assert.True(t, matched, "edition_date %q is not the current system-local date", actual)
 }
 
 func TestMorningExampleDocumentsAudienceAndRiskBoundary(t *testing.T) {
@@ -200,6 +200,7 @@ func TestMorningWorkflowScopesFinancialDataToolsToCollectionRoles(t *testing.T) 
 		"has_more and next_cursor",
 		"do not blindly paginate",
 		"select at most ${var.morning_news_limit}",
+		"major-stories section should normally contain 5-7",
 		"source_urls",
 		"copy every source URL",
 		"submit_morning_news_digest",

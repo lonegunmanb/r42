@@ -1,6 +1,6 @@
 variable "edition_date" {
   type        = string
-  description = "财经早餐对应的 YYYY-MM-DD 日期；新闻和行情默认覆盖该日期前一天及当天。"
+  description = "财经早餐对应的 YYYY-MM-DD 日期；为空时使用运行主机系统时区的当前日期，新闻和行情默认覆盖该日期前一天及当天。"
   default     = null
 
   validation {
@@ -48,6 +48,12 @@ variable "morning_news_limit" {
     condition     = var.morning_news_limit >= 1 && floor(var.morning_news_limit) == var.morning_news_limit
     error_message = "morning_news_limit must be a positive integer."
   }
+}
+
+variable "uncovered_news_limit" {
+  type        = number
+  description = "每期从开放式增量要闻方向最多选入的、未被观察清单和既有焦点覆盖的新闻条数，默认 3 条。"
+  default     = 3
 }
 
 variable "jin10_mcp_token_ref" {
@@ -152,6 +158,62 @@ variable "watchlist" {
       quote_symbols = ["9999.HK"]
       search_terms = ["网易"]
     },
+    {
+      id = "usdjpy"
+      name = "美元/日元"
+      kind = "fx"
+      quote_symbols = ["JPY=X"]
+      search_terms = ["美元/日元", "USD/JPY", "日元"]
+    },
+    {
+      id = "dow-jones"
+      name = "道琼斯工业平均指数"
+      kind = "overseas_index"
+      quote_symbols = ["^DJI"]
+      search_terms = ["道琼斯", "道琼斯工业指数", "Dow Jones"]
+    },
+    {
+      id = "nikkei"
+      name = "日经225"
+      kind = "overseas_index"
+      quote_symbols = ["^N225"]
+      search_terms = ["日经225", "日经指数", "日本股市"]
+    },
+    {
+      id = "dax"
+      name = "德国DAX"
+      kind = "europe_index"
+      quote_symbols = ["^GDAXI"]
+      search_terms = ["德国DAX", "德国股市"]
+    },
+    {
+      id = "cac40"
+      name = "法国CAC 40"
+      kind = "europe_index"
+      quote_symbols = ["^FCHI"]
+      search_terms = ["法国CAC 40", "法国股市"]
+    },
+    {
+      id = "ftse100"
+      name = "英国富时100"
+      kind = "europe_index"
+      quote_symbols = ["^FTSE"]
+      search_terms = ["英国富时100", "英国股市"]
+    },
+    {
+      id = "euro-stoxx50"
+      name = "欧洲斯托克50"
+      kind = "europe_index"
+      quote_symbols = ["^STOXX50E"]
+      search_terms = ["欧洲斯托克50", "Euro Stoxx 50", "欧洲股市"]
+    },
+    {
+      id = "baltic-dry"
+      name = "波罗的海干散货指数"
+      kind = "shipping_index"
+      quote_symbols = ["^BDI"]
+      search_terms = ["波罗的海干散货指数", "BDI", "干散货运价"]
+    },
   ]
 }
 
@@ -207,6 +269,18 @@ variable "focus_topics" {
       search_terms = ["WTI 原油", "布伦特原油"]
     },
     {
+      id = "global-commodities"
+      name = "全球大宗商品"
+      track = "overnight-market"
+      search_terms = ["黄金", "白银", "原油", "铜", "天然气", "铁矿石", "铝"]
+    },
+    {
+      id = "shipping-freight"
+      name = "航运与运价"
+      track = "overnight-market"
+      search_terms = ["航运", "集装箱运价", "波罗的海干散货指数", "BDI", "红海航运"]
+    },
+    {
       id = "fed-decision"
       name = "美联储议息会议与表态"
       track = "macro-policy"
@@ -247,6 +321,12 @@ variable "focus_topics" {
       name = "金融学者与市场大咖公开言论"
       track = "macro-policy"
       search_terms = ["金融学者", "市场大咖", "专家观点"]
+    },
+    {
+      id = "open-discovery"
+      name = "开放式增量要闻"
+      track = "macro-policy"
+      search_terms = ["全球财经要闻", "突发财经", "市场焦点"]
     },
     {
       id = "market-liquidity"

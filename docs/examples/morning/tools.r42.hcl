@@ -1,5 +1,5 @@
 go_tool "submit_morning_scan" {
-  description = "Finish one fixed morning coverage-matrix scan. The collector must make one initial call to its assigned acquisition tool, with only the bounded cursor pagination allowed by that tool's schema for news results; an unsupported get_quote code may additionally be recovered by one quote://codes resource read and exactly one retry. Save the complete returned material from every page as an artifact, then submit status and artifact references here. Valid statuses are completed, no_material_news, check_failed, and unavailable. This tool performs mechanical checks only and never requests another search."
+  description = "Finish one fixed morning coverage-matrix scan. The collector must make one initial call to its assigned acquisition tool, with only the bounded cursor pagination allowed by that tool's schema for news results; list_news open-discovery tasks intentionally retain one page without following the cursor; an unsupported get_quote code may additionally be recovered by one quote://codes resource read and exactly one retry. Save the complete returned material from every page as an artifact, then submit status and artifact references here. Valid statuses are completed, no_material_news, check_failed, and unavailable. This tool performs mechanical checks only and never requests another search."
 
   source = <<-GO
     import (
@@ -42,9 +42,9 @@ go_tool "submit_morning_scan" {
       if _, ok := validStatuses[input.Status]; !ok {
         issues = append(issues, morningIssue("status", "status", "must be completed, no_material_news, check_failed, or unavailable"))
       }
-      validScanTypes := map[string]struct{}{"get_quote": {}, "search_flash": {}, "search_news": {}, "web_search": {}, "pplx_search": {}}
+      validScanTypes := map[string]struct{}{"get_quote": {}, "search_flash": {}, "search_news": {}, "list_news": {}, "web_search": {}, "pplx_search": {}}
       if _, ok := validScanTypes[input.ScanType]; !ok {
-        issues = append(issues, morningIssue("scan_type", "scan_type", "must be get_quote, search_flash, search_news, web_search, or pplx_search"))
+        issues = append(issues, morningIssue("scan_type", "scan_type", "must be get_quote, search_flash, search_news, list_news, web_search, or pplx_search"))
       }
       if !validArtifactID(input.ArtifactID) {
         issues = append(issues, morningIssue("artifact_id", "artifact_id", "must be an r42 artifact ID"))
@@ -1956,8 +1956,8 @@ go_tool "submit_morning_report" {
         }
       }
 
-      if len(input.Stories) < 3 || len(input.Stories) > 5 {
-        issues = append(issues, reportIssue("stories", "stories", "must contain three through five major stories"))
+      if len(input.Stories) < 5 || len(input.Stories) > 7 {
+        issues = append(issues, reportIssue("stories", "stories", "must contain five through seven major stories"))
       }
       for index, story := range input.Stories {
         path := fmt.Sprintf("stories[%d]", index)

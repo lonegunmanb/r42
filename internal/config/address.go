@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/hcl/v2/ext/typeexpr"
 	"github.com/zclconf/go-cty/cty"
@@ -66,9 +67,20 @@ func Functions() map[string]function.Function {
 	return map[string]function.Function{
 		"cwd":                cwdFunction(),
 		"one":                oneFunction(),
+		"local_timestamp":    localTimestampFunction(),
 		"tool_name":          toolNameFunction(),
 		"jsondecodewithtype": jsonDecodeWithTypeFunction(),
 	}
+}
+
+func localTimestampFunction() function.Function {
+	return function.New(&function.Spec{
+		Params: []function.Parameter{},
+		Type:   function.StaticReturnType(cty.String),
+		Impl: func([]cty.Value, cty.Type) (cty.Value, error) {
+			return cty.StringVal(time.Now().Format(time.RFC3339Nano)), nil
+		},
+	})
 }
 
 func jsonDecodeWithTypeFunction() function.Function {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/ext/typeexpr"
@@ -504,6 +505,28 @@ func TestNewBaseConfigIncludesGoldenEnvAndR42Functions(t *testing.T) {
 	assert.NotContains(t, workingDirectory.AsString(), `\`)
 	assert.Equal(t, "r42", base.DslFullName())
 	assert.Equal(t, "r42", base.DslAbbreviation())
+}
+
+func TestLocalTimestampUsesSystemTimezone(t *testing.T) {
+	t.Parallel()
+
+	base := config.NewBaseConfig(golden.NewBaseConfigArgs{
+		Basedir: t.TempDir(),
+		Ctx:     context.Background(),
+	})
+
+	localTimestamp, exists := base.EmptyEvalContext().Functions["local_timestamp"]
+	require.True(t, exists)
+	value, err := localTimestamp.Call(nil)
+	require.NoError(t, err)
+
+	parsed, err := time.Parse(time.RFC3339, value.AsString())
+	require.NoError(t, err)
+	expected := time.Now()
+	assert.Equal(t, expected.Format(time.DateOnly), parsed.Format(time.DateOnly))
+	_, expectedOffset := expected.Zone()
+	_, actualOffset := parsed.Zone()
+	assert.Equal(t, expectedOffset, actualOffset)
 }
 
 func TestJSONDecodeWithType(t *testing.T) {

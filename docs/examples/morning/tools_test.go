@@ -604,11 +604,23 @@ func TestSubmitMorningReportRequiresEvidence(t *testing.T) {
 		"snapshot": []any{map[string]any{
 			"metric_key": "sp500", "plain_language": "美股大盘变化。",
 		}},
-		"stories": []any{map[string]any{
-			"headline": "利率决议", "what_happened": "决议已发布。",
-			"why_it_matters": "可能影响融资成本。", "what_to_watch": "观察后续数据。",
-			"evidence_ids": []string{"missing-event"},
-		}},
+		"stories": []any{
+			map[string]any{
+				"headline": "利率决议", "what_happened": "决议已发布。",
+				"why_it_matters": "可能影响融资成本。", "what_to_watch": "观察后续数据。",
+				"evidence_ids": []string{"missing-event"},
+			},
+			map[string]any{
+				"headline": "就业数据", "what_happened": "数据已发布。",
+				"why_it_matters": "可能影响利率预期。", "what_to_watch": "观察市场定价。",
+				"evidence_ids": []string{"missing-event"},
+			},
+			map[string]any{
+				"headline": "商品市场", "what_happened": "价格出现变化。",
+				"why_it_matters": "可能影响通胀预期。", "what_to_watch": "观察后续走势。",
+				"evidence_ids": []string{"missing-event"},
+			},
+		},
 		"themes":             []any{},
 		"setups":             []any{},
 		"institutional_scan": []any{},
@@ -621,6 +633,7 @@ func TestSubmitMorningReportRequiresEvidence(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.False(t, response.Accepted)
+	assert.Contains(t, issueCodes(response), "stories")
 	assert.Contains(t, issueCodes(response), "evidence_reference")
 	assert.NoFileExists(t, reportMarkdownPath)
 }
@@ -795,8 +808,8 @@ func TestSubmitMorningReportRendersReaderFriendlyMarkdown(t *testing.T) {
 			"metric_key": key, "plain_language": "这个指标帮助理解隔夜风险偏好。",
 		})
 	}
-	stories := make([]any, 0, 3)
-	for index := 1; index <= 3; index++ {
+	stories := make([]any, 0, 5)
+	for index := 1; index <= 5; index++ {
 		stories = append(stories, map[string]any{
 			"headline": "今晨大事", "what_happened": "已确认的事件发生了。",
 			"why_it_matters": "它可能影响融资成本和风险偏好。", "what_to_watch": "继续观察后续数据。",
