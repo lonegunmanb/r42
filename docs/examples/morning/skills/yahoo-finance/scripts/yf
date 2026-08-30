@@ -1,0 +1,148 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "yfinance>=0.2.36",
+# ]
+# ///
+"""Small Yahoo Finance CLI for the r42 morning overnight-market researcher."""
+
+import json
+import math
+import sys
+from datetime import datetime, timezone
+
+import yfinance as yf
+
+
+MACRO_SYMBOLS = {
+    "sp500": ("^GSPC", "S&P 500"),
+    "nasdaq": ("^IXIC", "Nasdaq Composite"),
+    "china_adr": ("^HXC", "Nasdaq Golden Dragon China Index"),
+    "hang_seng": ("^HSI", "Hang Seng Index"),
+    "usdcnh": ("CNH=X", "USD/CNH"),
+    "vix": ("^VIX", "CBOE VIX"),
+    "dxy": ("DX-Y.NYB", "US Dollar Index"),
+    "us_13_week_bill": ("^IRX", "US 13-week Treasury bill yield"),
+    "us_10_year": ("^TNX", "US 10-year Treasury yield"),
+    "gold": ("GC=F", "Gold futures"),
+    "wti": ("CL=F", "WTI crude futures"),
+}
+
+
+def json_safe(value):
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    if hasattr(value, "item"):
+        try:
+            value = value.item()
+        except (TypeError, ValueError):
+            pass
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, (datetime,)):
+        return value.isoformat()
+    return value
+
+
+def emit(payload):
+    print(json.dumps(json_safe(payload), ensure_ascii=False, allow_nan=False, default=str))
+
+
+def require_json(args):
+    if "--json" not in args:
+        raise ValueError("--json is required for evidence collection")
+    return [arg for arg in args if arg != "--json"]
+
+
+def daily_rows(symbol, period="5d"):
+    frame = yf.Ticker(symbol).history(period=period, interval="1d", auto_adjust=False)
+    rows = []
+    for observed_at, row in frame.iterrows():
+        rows.append(
+            {
+                "observed_at": observed_at.isoformat(),
+                "trading_date": observed_at.date().isoformat(),
+                "open": row.get("Open"),
+                "high": row.get("High"),
+                "low": row.get("Low"),
+                "close": row.get("Close"),
+                "volume": row.get("Volume"),
+            }
+        )
+    return rows
+
+
+def quote_metadata(symbol):
+    ticker = yf.Ticker(symbol)
+    info = ticker.info or {}
+    timestamp = info.get("regularMarketTime")
+    observed_at = None
+    if timestamp is not None:
+        observed_at = datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+    return {
+        "symbol": symbol,
+        "name": info.get("shortName") or info.get("longName"),
+        "currency": info.get("currency"),
+        "exchange": info.get("exchange"),
+        "exchange_timezone": info.get("exchangeTimezoneName"),
+        "market_state": info.get("marketState"),
+        "observed_at": observed_at,
+        "regular_market_price": info.get("regularMarketPrice"),
+        "previous_close": info.get("regularMarketPreviousClose") or info.get("previousClose"),
+    }
+
+
+def price(symbol):
+    rows = daily_rows(symbol)
+    latest = rows[-1] if rows else None
+    previous = rows[-2] if len(rows) > 1 else None
+    change = None
+    change_percent = None
+    if latest and previous and previous["close"] not in (None, 0):
+        change = latest["close"] - previous["close"]
+        change_percent = change / previous["close"] * 100
+    metadata = quote_metadata(symbol)
+    return {
+        **metadata,
+        "latest_daily_observation": latest,
+        "change_from_previous_close": change,
+        "change_percent": change_percent,
+        "retrieved_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def main():
+    args = require_json(sys.argv[1:])
+    if not args:
+        raise ValueError("command is required: price, quote, history, or macro")
+    command = args[0].lower()
+    rest = args[1:]
+    if command == "price" and len(rest) == 1:
+        emit(price(rest[0].upper()))
+    elif command == "quote" and len(rest) == 1:
+        emit({**quote_metadata(rest[0].upper()), "retrieved_at": datetime.now(timezone.utc).isoformat()})
+    elif command == "history" and len(rest) in (1, 2):
+        symbol = rest[0].upper()
+        period = rest[1] if len(rest) == 2 else "5d"
+        emit({"symbol": symbol, "period": period, "rows": daily_rows(symbol, period), "retrieved_at": datetime.now(timezone.utc).isoformat()})
+    elif command == "macro" and not rest:
+        values = []
+        for key, (symbol, label) in MACRO_SYMBOLS.items():
+            try:
+                values.append({"key": key, "label": label, **price(symbol)})
+            except Exception as error:
+                values.append({"key": key, "label": label, "symbol": symbol, "error": str(error)})
+        emit({"values": values, "a50_futures": None, "a50_note": "Use a direct source; no Yahoo ETF proxy is presented as A50 futures."})
+    else:
+        raise ValueError("invalid command or arguments")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        print(json.dumps({"error": str(error)}, ensure_ascii=False), file=sys.stderr)
+        sys.exit(1)
