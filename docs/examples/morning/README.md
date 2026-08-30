@@ -69,6 +69,8 @@ Publisher 直接写一份自然中文 Markdown，并在每句末尾暂时附上
 扫描结果中的 HTTP(S) 来源 URL 会由 `submit_breakfast_packet` 自动汇总到事实包根部的
 `source_urls`，并在有明确对应条目时保留在条目的同名字段；`packet_editor` 不会丢弃这些
 URL，因此 Publisher 始终能看到原始链接。
+扫描任务未生成的可选 `sources` 目录会被 packet 工具跳过；coverage 只需提交
+`object_id` 和检查结果，`name`、`kind` 始终由 `required_coverage` 的 canonical 值自动补齐。
 专业术语应在第一次出现时解释，避免只有交易员才看得懂的数据堆砌。写作原则是：
 **正文讲因果，表格放数字，盘前线索写条件**。盘前观察给交易员提供开盘前需要验证的
 假设，但不输出无条件买卖指令。

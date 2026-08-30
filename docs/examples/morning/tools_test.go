@@ -384,6 +384,29 @@ func TestSubmitBreakfastPacketPreservesSourceURLs(t *testing.T) {
 	assert.NotContains(t, string(payload), "source_paths")
 }
 
+func TestSubmitBreakfastPacketExtractsURLsFromMarkdownSources(t *testing.T) {
+	t.Parallel()
+
+	program := compileTool(t, "submit_breakfast_packet")
+	workspace := blockDirectory(t, "markdown-source-urls")
+	artifactPath := filepath.Join(workspace, "breakfast-packet.json")
+	sourcePath := filepath.Join(workspace, "sources", "news.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sourcePath), 0o700))
+	require.NoError(t, os.WriteFile(sourcePath, []byte("- Source: https://example.com/news/123\n\nA saved source."), 0o600))
+	input := validPacketInput(artifactPath)
+	input["source_paths"] = []string{sourcePath}
+
+	response, err := program.Invoke(t.Context(), marshalInput(t, input), workspace)
+
+	require.NoError(t, err)
+	require.True(t, response.Accepted, "issues: %#v", response.Issues)
+	payload, err := os.ReadFile(artifactPath)
+	require.NoError(t, err)
+	var packet map[string]any
+	require.NoError(t, json.Unmarshal(payload, &packet))
+	assert.Equal(t, []any{"https://example.com/news/123"}, packet["source_urls"])
+}
+
 func TestSubmitBreakfastPacketInjectsDroppedSourceURLs(t *testing.T) {
 	t.Parallel()
 
@@ -405,6 +428,56 @@ func TestSubmitBreakfastPacketInjectsDroppedSourceURLs(t *testing.T) {
 	var packet map[string]any
 	require.NoError(t, json.Unmarshal(payload, &packet))
 	assert.Equal(t, []any{"https://xnews.jin10.com/details/228637"}, packet["source_urls"])
+}
+
+func TestSubmitBreakfastPacketSkipsMissingOptionalSourcePaths(t *testing.T) {
+	t.Parallel()
+
+	program := compileTool(t, "submit_breakfast_packet")
+	workspace := blockDirectory(t, "missing-source-path")
+	artifactPath := filepath.Join(workspace, "breakfast-packet.json")
+	input := validPacketInput(artifactPath)
+	input["source_paths"] = []string{filepath.Join(workspace, "sources")}
+
+	response, err := program.Invoke(t.Context(), marshalInput(t, input), workspace)
+
+	require.NoError(t, err)
+	require.True(t, response.Accepted, "issues: %#v", response.Issues)
+	assert.FileExists(t, artifactPath)
+}
+
+func TestSubmitBreakfastPacketFillsCoverageIdentityFromRequirements(t *testing.T) {
+	t.Parallel()
+
+	program := compileTool(t, "submit_breakfast_packet")
+	workspace := blockDirectory(t, "coverage-identity")
+	artifactPath := filepath.Join(workspace, "breakfast-packet.json")
+	input := validPacketInput(artifactPath)
+	input["required_coverage"] = []any{map[string]any{
+		"id": "csi300", "name": "沪深300", "kind": "a_share_index",
+		"quote_symbols": []string{"000300.SH"}, "search_terms": []string{"沪深300"},
+	}}
+	input["coverage"] = []any{map[string]any{
+		"object_id": "csi300", "name": "错误名称", "kind": "index",
+		"quote_status": "observed", "news_status": "no_material_news",
+		"checked_until": "2026-08-28 07:30 Asia/Shanghai", "summary": "已检查行情和新闻，没有重大消息。",
+	}}
+
+	response, err := program.Invoke(t.Context(), marshalInput(t, input), workspace)
+
+	require.NoError(t, err)
+	require.True(t, response.Accepted, "issues: %#v", response.Issues)
+	payload, err := os.ReadFile(artifactPath)
+	require.NoError(t, err)
+	var packet map[string]any
+	require.NoError(t, json.Unmarshal(payload, &packet))
+	coverage, ok := packet["coverage"].([]any)
+	require.True(t, ok)
+	require.Len(t, coverage, 1)
+	row, ok := coverage[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "沪深300", row["name"])
+	assert.Equal(t, "a_share_index", row["kind"])
 }
 
 func TestSubmitBreakfastPacketTreatsOmittedCategoryAsSourceFact(t *testing.T) {

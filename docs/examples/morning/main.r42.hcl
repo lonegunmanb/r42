@@ -243,7 +243,7 @@ research "static" "freeze_packet" {
         sources = flatten([for item in research.dynamic.scan.tasks : values(item.artifact)])
       }
       coverage = {
-        desc    = "One preserved coverage row for every configured watchlist object; no_material_news is a valid checked result. Preserve every source URL in source_urls when present."
+        desc    = "One preserved coverage row for every configured watchlist object; submit object_id, statuses, checked_until, summary, event_ids, and source_urls only. The typed tool fills name and kind from required_coverage; do not guess or override them. no_material_news is a valid checked result. Preserve every source URL in source_urls when present."
         sources = flatten([for item in research.dynamic.scan.tasks : values(item.artifact)])
       }
       events = {
@@ -329,7 +329,10 @@ research "static" "packet_editor" {
       cutoff_time        = local.cutoff_label
       reviewed_artifacts = []
       required_coverage  = var.watchlist
-      source_paths       = [research.static.freeze_packet.artifact.packet.path]
+      source_paths       = concat(
+        [research.static.freeze_packet.artifact.packet.path],
+        flatten([for item in research.dynamic.scan.tasks : [for source in values(item.artifact) : source.path]])
+      )
     }
     input_from_agent = {
       market_snapshot = {
@@ -337,7 +340,7 @@ research "static" "packet_editor" {
         sources = flatten([for item in research.dynamic.scan.tasks : values(item.artifact)])
       }
       coverage = {
-        desc    = "每个观察清单对象一条 coverage 记录。"
+        desc    = "每个观察清单对象一条 coverage 记录；只提交 object_id、状态、检查时间、摘要、event_ids 和 source_urls。name/kind 由 typed tool 根据 required_coverage 自动补齐，不要自行推断或修改。"
         sources = flatten([for item in research.dynamic.scan.tasks : values(item.artifact)])
       }
       events = {

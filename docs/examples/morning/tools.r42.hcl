@@ -407,7 +407,7 @@ go_tool "submit_morning_evidence" {
 }
 
 go_tool "submit_breakfast_packet" {
-  description = "Validate and write the breakfast packet. This tool performs basic mechanical checks only. `market_snapshot.direction`: `up`, `down`, `flat`, `unavailable`; an unavailable market must use `as_of = unavailable`, while an observed market must use its actual YYYY-MM-DD quote date. `events.category`: `macro`, `policy`, `industry`, `company`; `evidence_catalog.category`: `source_fact` (default when omitted), `analysis`, or `mixed`; `events.status`: `occurred`, `announced`, `expected`. Required market keys: `sp500`, `nasdaq`, `china_adr`, `a50`, `usdcnh`, `gold`, `crude`. Every configured watchlist object must have a coverage record; `no_material_news` is a valid outcome and does not require an event. Every HTTP(S) URL found in the host-supplied source paths is automatically retained in the packet root `source_urls` index and should also be copied to the corresponding packet item when applicable."
+  description = "Validate and write the breakfast packet. This tool performs basic mechanical checks only. `market_snapshot.direction`: `up`, `down`, `flat`, `unavailable`; an unavailable market must use `as_of = unavailable`, while an observed market must use its actual YYYY-MM-DD quote date. `events.category`: `macro`, `policy`, `industry`, `company`; `evidence_catalog.category`: `source_fact` (default when omitted), `analysis`, or `mixed`; `events.status`: `occurred`, `announced`, `expected`. Required market keys: `sp500`, `nasdaq`, `china_adr`, `a50`, `usdcnh`, `gold`, `crude`. Every configured watchlist object must have a coverage record; submit its `object_id` and coverage result while the typed tool fills `name` and `kind` from `required_coverage`. `no_material_news` is a valid outcome and does not require an event. Missing optional source paths are skipped. Every HTTP(S) URL found in existing host-supplied source paths is automatically retained in the packet root `source_urls` index and should also be copied to the corresponding packet item when applicable."
 
   source = <<-GO
     import (
@@ -416,6 +416,7 @@ go_tool "submit_breakfast_packet" {
       "fmt"
       "os"
       "path/filepath"
+      "regexp"
       "sort"
       "strings"
       "time"
@@ -442,8 +443,8 @@ go_tool "submit_breakfast_packet" {
 
     type CoverageRecord struct {
       ObjectID     string   `json:"object_id"`
-      Name         string   `json:"name"`
-      Kind         string   `json:"kind"`
+      Name         string   `json:"name,omitempty"`
+      Kind         string   `json:"kind,omitempty"`
       QuoteStatus  string   `json:"quote_status"`
       NewsStatus   string   `json:"news_status"`
       CheckedUntil string   `json:"checked_until"`
@@ -525,7 +526,10 @@ go_tool "submit_breakfast_packet" {
 
     type Output string
 
+    var httpURLPattern = regexp.MustCompile(`https?://[^\s"'<>]+`)
+
     func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
+      normalizePacketCoverage(&input)
       issues := validatePacket(input)
       requiredURLs, readErr := sourceURLsFromPaths(input.SourcePaths)
       if readErr != "" {
@@ -577,6 +581,9 @@ go_tool "submit_breakfast_packet" {
         clean := filepath.Clean(strings.TrimSpace(path))
         info, err := os.Stat(clean)
         if err != nil {
+          if os.IsNotExist(err) {
+            continue
+          }
           return nil, fmt.Sprintf("cannot read source path %q: %v", clean, err)
         }
         visit := func(filePath string) error {
@@ -585,10 +592,10 @@ go_tool "submit_breakfast_packet" {
             return readErr
           }
           var value any
-          if json.Unmarshal(payload, &value) != nil {
-            return nil
+          if json.Unmarshal(payload, &value) == nil {
+            collectSourceURLs(value, found)
           }
-          collectSourceURLs(value, found)
+          collectTextURLs(string(payload), found)
           return nil
         }
         if info.IsDir() {
@@ -613,6 +620,26 @@ go_tool "submit_breakfast_packet" {
       }
       sort.Strings(urls)
       return urls, ""
+    }
+
+    func normalizePacketCoverage(input *Input) {
+      required := make(map[string]CoverageRequirement, len(input.RequiredCoverage))
+      for _, requirement := range input.RequiredCoverage {
+        id := strings.TrimSpace(requirement.ID)
+        if id == "" {
+          continue
+        }
+        required[id] = requirement
+      }
+      for index := range input.Coverage {
+        id := strings.TrimSpace(input.Coverage[index].ObjectID)
+        requirement, ok := required[id]
+        if !ok {
+          continue
+        }
+        input.Coverage[index].Name = requirement.Name
+        input.Coverage[index].Kind = requirement.Kind
+      }
     }
 
     func collectSourceURLs(value any, found map[string]struct{}) {
@@ -643,6 +670,15 @@ go_tool "submit_breakfast_packet" {
       case []any:
         for _, child := range item {
           collectURLValues(child, found)
+        }
+      }
+    }
+
+    func collectTextURLs(text string, found map[string]struct{}) {
+      for _, match := range httpURLPattern.FindAllString(text, -1) {
+        match = strings.TrimRight(match, ".,;:!?)]}")
+        if match != "" {
+          found[match] = struct{}{}
         }
       }
     }

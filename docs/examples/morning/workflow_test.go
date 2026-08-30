@@ -69,6 +69,7 @@ func TestMorningWorkflowHasEvidenceGatesAndReadableOutput(t *testing.T) {
 		"Do not call the configured Jin10 tool before the Yahoo step",
 		"unsupported",
 		"retry get_quote once",
+		"The typed tool fills name and kind from required_coverage",
 		"r42:claim=",
 		"morning-draft.annotated.md",
 		"morning-provenance.json",
