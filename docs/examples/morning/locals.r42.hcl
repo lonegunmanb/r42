@@ -122,6 +122,7 @@ locals {
     get_quote    = mcp_server.jin10.tool_ids["get_quote"]
     search_flash = mcp_server.jin10.tool_ids["search_flash"]
     list_news    = mcp_server.jin10.tool_ids["list_news"]
+    list_calendar = mcp_server.jin10.tool_ids["list_calendar"]
     search_news  = mcp_server.jin10.tool_ids["search_news"]
   }
 
@@ -162,6 +163,21 @@ locals {
         scan_type     = "list_news"
         tool_id       = local.jin10_scan_tool_ids.list_news
         query         = "Jin10 latest news page"
+        query_terms   = []
+        arguments_json = jsonencode({})
+        use_jin10     = true
+        use_pplx      = false
+        quote_symbol  = ""
+        question      = track.question
+      }] : [],
+      track.id == "macro-policy" ? [{
+        id            = "${track.id}.calendar.current-week"
+        track_id      = track.id
+        target_id     = "calendar"
+        target_name   = "本周财经日历"
+        scan_type     = "list_calendar"
+        tool_id       = local.jin10_scan_tool_ids.list_calendar
+        query         = "Jin10 current-week economic calendar"
         query_terms   = []
         arguments_json = jsonencode({})
         use_jin10     = true

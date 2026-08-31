@@ -49,11 +49,15 @@ research "dynamic" "scan" {
         For the live-date `list_news` open-discovery task, call `list_news({})`
         exactly once and retain that single returned page as the complete latest-
         news snapshot; do not follow its cursor or make a second list_news call.
+        For the calendar task, call `list_calendar({})` exactly once. It returns
+        the current calendar week; save the complete returned array, then retain
+        only entries inside the assigned edition-date window for the packet.
         Quote tasks use the bounded Yahoo-first fallback and must begin with
         yahoo-finance, even though their configured Jin10 tool is the fallback.
         Do not call the configured Jin10 tool before the Yahoo step.
         ${action.scan_type == "get_quote" ? local.quote_scan_guidance : "For non-quote scans, no fallback search or retry is allowed."}
         ${action.scan_type == "list_news" ? "This is the bounded open-discovery latest-news page: include the returned page in the packet candidate pool, filter it to the edition date scope, and do not paginate even when has_more is true." : ""}
+        ${action.scan_type == "list_calendar" ? "This is the standalone current-week calendar scan: use list_calendar({}) once, save its complete data array, and filter packet candidates to the edition date window without inventing missing values." : ""}
         ${local.date_scope_guidance}
 
         Save the complete structured result from every retained page and any useful source context with
@@ -192,11 +196,15 @@ research "static" "freeze_packet" {
     count. Also retain
     an institutional_scan across market_liquidity, bonds_rates, commodities,
     company_announcements, and sell_side when evidence exists, plus
-    calendar_events with previous / consensus / actual values left empty when
-    unavailable rather than guessed. In each event summary, preserve a
+    calendar_events from the dedicated list_calendar scan, with previous /
+    consensus / actual values left empty when unavailable rather than guessed.
+    Keep this calendar data separate from news events and retain only important
+    entries relevant to the edition-date window. In each event summary, preserve a
     source-supported impact dimension (revenue, costs, demand, supply, or
     valuation/sentiment) when relevant; omit it when the evidence does not
-    establish one.
+    establish one. If the window has no important scheduled event, create one
+    evidence-backed `calendar-none` entry stating that plainly instead of
+    submitting an empty calendar_events array.
 
     Whenever an imported scan result or evidence entry contains one or more
     source URLs, copy every source URL verbatim into that packet item's
@@ -206,7 +214,9 @@ research "static" "freeze_packet" {
     `source_urls` index from the host-supplied scan paths, which the Publisher
     can use as a complete source list.
 
-    The `open-discovery` scans are the only source for open-ended incremental
+    The dedicated `list_calendar` scan is the only source for the standalone
+    calendar section; do not turn calendar rows into news events unless a
+    separate news scan supports the event. The `open-discovery` scans are the only source for open-ended incremental
     news. On a live edition date, one additional `list_news` task supplies a
     single latest-news page; treat that page as part of the same open-discovery
     candidate pool and keep only in-window, material, non-duplicate events.
@@ -584,6 +594,9 @@ research "static" "publish" {
     user or professional trader. Use short paragraphs and familiar words.
     Explain unavoidable terms at first use. Lead with the useful conclusion,
     then answer: what happened, why it matters, and what to watch.
+    The article must include a standalone “财经日历” section sourced from
+    `calendar_events`; keep scheduled data separate from news stories.
+    必须单独设置“财经日历”栏目；它只使用 packet 的 `calendar_events`，不与新闻混写。
 
     Use only the frozen packet and validated reviews. Do not add model-memory
     facts. Do not predict certainty, recommend a security, or imply guaranteed
@@ -628,14 +641,16 @@ research "static" "publish" {
     Write a complete 5-8 minute natural Chinese morning newspaper, not a form or a
     checklist. You may choose the exact headings, but normally include a short
     lead, overnight market numbers with their observation date, the most useful
-    news, and a final section of conditional signals to watch before and after
-    the open. The major-stories section should normally contain 5-7 distinct,
-    material stories. Select and combine duplicate news; choose at most
-    ${var.morning_news_limit} news items for the reader-facing article. If the
-    packet contains fewer than five useful candidates, use fewer rather than
-    adding filler. Prefer one or two `open-` events when they are genuinely
-    material and not duplicates of the configured watchlist/focus topics;
-    otherwise use zero. Do not list scan tasks.
+    news, a standalone “财经日历” section, and a final section of conditional
+    signals to watch before and after the open. The “财经日历” section must use
+    `calendar_events` from the packet, remain separate from news, and say plainly
+    when there are no relevant scheduled events. The major-stories section should normally contain 5-7 distinct,
+    material stories. Select and combine duplicate
+    news; choose at most ${var.morning_news_limit} news items for the reader-facing
+    article. If the packet contains fewer than five useful candidates, use fewer
+    rather than adding filler. Prefer one or two `open-` events when they are
+    genuinely material and not duplicates of the configured watchlist/focus
+    topics; otherwise use zero. Do not list scan tasks.
     Every factual or analytical sentence must end with one provenance marker:
     <!-- r42:claim=<id> evidence=<id> -->. Use IDs that exist in the frozen
     packet or validated reviews. A sentence may cite multiple IDs by repeating
@@ -733,9 +748,11 @@ research "static" "publisher_editor" {
     the author's natural newspaper style. Correct or delete only material
     numeric, date, unit, percentage, sign, market-direction, or provenance
     errors that are clear from the supplied sources. Never add a new fact or
-     turn a plausible conditional analysis into a certainty. Preserve valid
-     provenance markers on every factual or analytical sentence. Submit the
-     corrected annotated Markdown; do not return an issue list.
+    turn a plausible conditional analysis into a certainty. Preserve valid
+    provenance markers on every factual or analytical sentence. Submit the
+    corrected annotated Markdown; do not return an issue list.
+    Preserve the standalone “财经日历” section and keep its scheduled events
+    separate from the article's news stories.
 
     Remove or directly rewrite disclaimer-style sentences in the draft. Do not
     preserve formulations such as “不能替代……”, “不代表已经……”,
@@ -762,6 +779,9 @@ research "static" "publisher_editor" {
     必须直接改写为事实/状态/影响，或在无法保留原意时删除。禁止保留
     “不能替代……”“不代表已经……”“尚未确认/尚未证实……”“更准确的说法是……”
     “只能提供……线索”等措辞及其同义表达。
+
+    保留独立的“财经日历”栏目，内容只能来自 packet 的 `calendar_events`；
+    不要把日历事件改写成新闻，也不要在没有事件时虚构内容。
 
     The packet is the Publisher's source of record. Publisher receives
     `source_urls` from the packet; keep every URL available for provenance when

@@ -52,8 +52,13 @@ variable "morning_news_limit" {
 
 variable "uncovered_news_limit" {
   type        = number
-  description = "每期从开放式增量要闻方向最多选入的、未被观察清单和既有焦点覆盖的新闻条数，默认 3 条。"
-  default     = 3
+  description = "每期从开放式增量要闻方向最多选入的、未被观察清单和既有焦点覆盖的新闻条数，默认 2 条。"
+  default     = 2
+
+  validation {
+    condition     = var.uncovered_news_limit >= 0 && floor(var.uncovered_news_limit) == var.uncovered_news_limit
+    error_message = "uncovered_news_limit must be a non-negative integer."
+  }
 }
 
 variable "jin10_mcp_token_ref" {

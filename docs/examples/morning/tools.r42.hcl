@@ -42,9 +42,9 @@ go_tool "submit_morning_scan" {
       if _, ok := validStatuses[input.Status]; !ok {
         issues = append(issues, morningIssue("status", "status", "must be completed, no_material_news, check_failed, or unavailable"))
       }
-      validScanTypes := map[string]struct{}{"get_quote": {}, "search_flash": {}, "search_news": {}, "list_news": {}, "web_search": {}, "pplx_search": {}}
+      validScanTypes := map[string]struct{}{"get_quote": {}, "search_flash": {}, "search_news": {}, "list_news": {}, "list_calendar": {}, "web_search": {}, "pplx_search": {}}
       if _, ok := validScanTypes[input.ScanType]; !ok {
-        issues = append(issues, morningIssue("scan_type", "scan_type", "must be get_quote, search_flash, search_news, list_news, web_search, or pplx_search"))
+        issues = append(issues, morningIssue("scan_type", "scan_type", "must be get_quote, search_flash, search_news, list_news, list_calendar, web_search, or pplx_search"))
       }
       if !validArtifactID(input.ArtifactID) {
         issues = append(issues, morningIssue("artifact_id", "artifact_id", "must be an r42 artifact ID"))
@@ -2139,7 +2139,7 @@ go_tool "submit_morning_report" {
       for _, item := range input.InstitutionalScan {
         fmt.Fprintf(&output, "- **%s｜%s：** %s\n", institutionalSectionLabel(item.Section), markdownText(item.Headline), markdownText(item.Summary))
       }
-      output.WriteString("\n## 今日事件表\n\n| 时间 | 事件 | 普通读者该看什么 |\n|---|---|---|\n")
+      output.WriteString("\n## 财经日历\n\n| 时间 | 事件 | 普通读者该看什么 |\n|---|---|---|\n")
       for _, item := range input.CalendarEvents {
         fmt.Fprintf(&output, "| %s | %s | %s |\n", markdownText(item.Time), markdownText(item.Event), markdownText(item.WhatToWatch))
       }

@@ -14,6 +14,29 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
+func TestSubmitMorningScanAcceptsListCalendar(t *testing.T) {
+	t.Parallel()
+
+	program := compileTool(t, "submit_morning_scan")
+	workspace := blockDirectory(t, "calendar-scan")
+	artifactPath := filepath.Join(workspace, "scan.json")
+	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"artifact_id":         "artifact-0123456789abcdef0123456789abcdef",
+		"_r42_artifact_path":  artifactPath,
+		"action_id":           "macro-policy.calendar.current-week",
+		"track_id":            "macro-policy",
+		"target_id":           "calendar",
+		"scan_type":           "list_calendar",
+		"status":              "completed",
+		"summary":             "The current-week calendar was captured.",
+		"source_artifact_ids": []string{"artifact-abcdef0123456789abcdef0123456789"},
+	}), workspace)
+
+	require.NoError(t, err)
+	assert.True(t, response.Accepted, "issues: %#v", response.Issues)
+	assert.FileExists(t, artifactPath)
+}
+
 func TestSubmitBreakfastPacketRejectsMechanicalEvidenceProblems(t *testing.T) {
 	t.Parallel()
 
@@ -871,7 +894,7 @@ func TestSubmitMorningReportRendersReaderFriendlyMarkdown(t *testing.T) {
 		"## 今日主线与市场影响",
 		"## 盘前观察清单",
 		"## 机构信息扫描",
-		"## 今日事件表",
+		"## 财经日历",
 		"## 上一交易时段的市场信号",
 		"## 本期局限",
 	} {
