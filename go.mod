@@ -3,8 +3,8 @@ module github.com/lonegunmanb/r42
 go 1.25.0
 
 require (
-	github.com/aws/aws-sdk-go v1.55.5
-	github.com/bmatcuk/doublestar v1.1.5
+	github.com/aws/aws-sdk-go v1.55.8
+	github.com/bmatcuk/doublestar v1.3.4
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.8
