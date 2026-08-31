@@ -21,9 +21,15 @@ const (
 )
 
 type ArtifactSearchMatch struct {
+	QuoteRef    string `json:"quote_ref,omitempty"`
 	Line        int    `json:"line"`
+	EndLine     int    `json:"end_line"`
 	MatchedText string `json:"matched_text"`
 	Excerpt     string `json:"excerpt"`
+
+	artifactDigest  string
+	normalizedStart int
+	normalizedEnd   int
 }
 
 type ArtifactSearchResult struct {

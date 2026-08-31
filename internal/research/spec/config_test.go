@@ -11,6 +11,12 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
+func TestDefaultMaxQCRoundsIsFive(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, 5, researchspec.DefaultMaxQCRounds)
+}
+
 func TestConfigValidateRequiredFields(t *testing.T) {
 	t.Parallel()
 

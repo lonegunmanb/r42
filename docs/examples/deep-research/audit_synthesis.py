@@ -2,7 +2,6 @@ import html
 import json
 import re
 import sys
-import unicodedata
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -13,6 +12,7 @@ QUOTE_ID_RE = re.compile(
 ARTIFACT_ID_RE = re.compile(
     r"^artifact-(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
 )
+QUOTE_REF_RE = re.compile(r"^quote-ref-[0-9a-f]{32}$")
 URL_RE = re.compile(r"https?://[^\s|<>]+")
 MATCH_MODES = (
     "typed_tool_validated",
@@ -23,47 +23,6 @@ MATCH_MODES = (
     "not_found",
 )
 MAX_RETURNED_ISSUES = 25
-
-
-def normalize_line_endings(value):
-    return value.replace("\r\n", "\n").replace("\r", "\n")
-
-
-def normalize_whitespace(value):
-    value = normalize_line_endings(value)
-    paragraphs = re.split(r"\n[^\S\n]*\n+", value)
-    normalized = []
-    for paragraph in paragraphs:
-        lines = []
-        for line in paragraph.split("\n"):
-            collapsed = " ".join(line.split())
-            if collapsed:
-                lines.append(collapsed)
-        normalized.append(" ".join(lines))
-    return "\n\n".join(normalized).strip()
-
-
-def match_quote(quote, artifact):
-    if not quote:
-        return "not_found"
-    if quote in artifact:
-        return "exact"
-
-    quote_lines = normalize_line_endings(quote)
-    artifact_lines = normalize_line_endings(artifact)
-    if quote_lines in artifact_lines:
-        return "line_ending_equivalent"
-
-    quote_whitespace = normalize_whitespace(quote_lines)
-    artifact_whitespace = normalize_whitespace(artifact_lines)
-    if quote_whitespace and quote_whitespace in artifact_whitespace:
-        return "whitespace_equivalent"
-
-    quote_unicode = unicodedata.normalize("NFC", quote_whitespace)
-    artifact_unicode = unicodedata.normalize("NFC", artifact_whitespace)
-    if quote_unicode and quote_unicode in artifact_unicode:
-        return "unicode_equivalent"
-    return "not_found"
 
 
 def new_issue(code, message, path, repair_hint):
@@ -244,6 +203,16 @@ def load_knowledge(paths, root, issues):
                     )
                 )
                 continue
+            quote_ref = str(quote.get("quote_ref", "")).strip()
+            if not QUOTE_REF_RE.fullmatch(quote_ref):
+                issues.append(
+                    new_issue(
+                        "invalid_quote_ref",
+                        f"quote {quote_id} does not contain a trusted quote reference",
+                        quote_path,
+                        "Regenerate knowledge.json with quote_ref returned by the upstream Research typed tool.",
+                    )
+                )
             if quote_id in quotes:
                 issues.append(
                     new_issue(

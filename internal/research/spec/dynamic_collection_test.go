@@ -113,7 +113,7 @@ func TestDecodeDynamicTaskCollectionDefaults(t *testing.T) {
 	assert.Equal(t, researchspec.DefaultMaxCollectionRounds, *config.MaxCollectionRounds)
 	assert.Nil(t, config.CollectionQC)
 	assert.Equal(t, researchspec.PhaseModeFull, config.EffectivePhaseMode())
-	assert.Equal(t, researchspec.FinalQCStrictnessStrict, config.FinalQCStrictness)
+	assert.Equal(t, researchspec.FinalQCStrictnessBalanced, config.FinalQCStrictness)
 }
 
 func TestDecodeDynamicTaskDecodesPhaseModes(t *testing.T) {

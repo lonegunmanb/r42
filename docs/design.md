@@ -375,7 +375,7 @@ Research session fields include:
 - `system_prompt`: required.
 - `prompt`: optional.
 - `final_qc_strictness`: optional Final-QC semantic policy, one of `strict`,
-  `balanced`, or `brief`; omission defaults to `strict`. The configured policy
+  `balanced`, or `brief`; omission defaults to `balanced`. The configured policy
   is authoritative if a later task prompt, candidate instruction, or custom
   criterion conflicts with it.
 - `collection_model_provider`: optional Collection-only provider override;
@@ -1046,7 +1046,7 @@ The research-level `final_qc_strictness` setting controls the semantic threshold
 to be strictly derivable; `balanced` permits a reasonable one-step inference;
 `brief` accepts concise, plausible analysis while retaining checks for material
 contradictions, invented premises, misleading certainty, and unsupported
-precision. This setting defaults to `strict` and is authoritative over later
+precision. This setting defaults to `balanced` and is authoritative over later
 task prompts, candidate instructions, and custom criteria.
 
 Its mandatory `r42_qc_verdict` decision is one of:
@@ -1058,7 +1058,7 @@ Final QC can never reopen Collection and must not reject a candidate for
 missing coverage. It may return the candidate only when a claim actually
 present exceeds or misrepresents its cited evidence; Research must then delete
 or narrow that claim rather than collect or add evidence. `max_qc_rounds`
-defaults to 10; a non-pass
+defaults to 5; a non-pass
 decision on the last review fails without starting work that cannot be reviewed.
 
 Final QC inherits only effective provider/model/reasoning/retry/permission

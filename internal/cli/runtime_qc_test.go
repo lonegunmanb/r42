@@ -56,6 +56,7 @@ research "static" "source" {
 	assert.Contains(t, opener.configs[2].ExcludedTools, "edit")
 	assert.NotContains(t, opener.configs[3].ExcludedTools, "edit")
 	assert.Contains(t, opener.configs[3].ExcludedTools, "shell")
+	assert.Contains(t, opener.configs[3].SystemPrompt, `Strictness="balanced"`)
 	assert.Equal(t, 1, opener.research.sendCalls)
 	assert.Equal(t, 1, opener.qc.sendCalls)
 	assert.Equal(t, 1, opener.collection.closeCalls)

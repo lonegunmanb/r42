@@ -213,9 +213,45 @@ func TestRunnerEmitsPhaseDecisionsWithoutSnapshotContent(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Contains(t, events, coordinator.Event{Phase: workflow.PhaseCollection, Action: coordinator.ActionStarted, CollectionRounds: 1})
-	assert.Contains(t, events, coordinator.Event{Phase: workflow.PhaseCollectionQC, Action: coordinator.ActionDecision, Decision: "sufficient", CollectionRounds: 1})
-	assert.Contains(t, events, coordinator.Event{Phase: workflow.PhaseFinalQC, Action: coordinator.ActionDecision, Decision: "pass", CollectionRounds: 1})
+	assert.Contains(t, events, coordinator.Event{Phase: workflow.PhaseCollection, Action: coordinator.ActionStarted, CollectionRounds: 1, Round: 1})
+	assert.Contains(t, events, coordinator.Event{Phase: workflow.PhaseCollectionQC, Action: coordinator.ActionDecision, Decision: "sufficient", CollectionRounds: 1, Round: 1})
+	assert.Contains(t, events, coordinator.Event{Phase: workflow.PhaseFinalQC, Action: coordinator.ActionDecision, Decision: "pass", CollectionRounds: 1, Round: 1})
+}
+
+func TestRunnerEmitsPhaseRoundsAndResearchRevision(t *testing.T) {
+	t.Parallel()
+
+	state := workflow.New(workflow.Config{})
+	collector := &fakeCollector{}
+	collectionReviewer := &fakeCollectionReviewer{state: state, rounds: []collectionQCRound{
+		{assessments: sufficientAssessment()},
+	}}
+	researcher := &fakeResearcher{}
+	finalReviewer := &fakeFinalReviewer{verdicts: []qc.Verdict{
+		{Decision: qc.DecisionReviseResearch, Issues: issues("accuracy")},
+		{Decision: qc.DecisionPass},
+	}}
+	runner := coordinator.NewRunner(state, collector, collectionReviewer, researcher, finalReviewer)
+	events := make([]coordinator.Event, 0)
+
+	_, err := runner.Run(t.Context(), coordinator.Config{
+		FinalQCEnabled:   true,
+		MaxFinalQCRounds: 2,
+		Observe:          func(event coordinator.Event) { events = append(events, event) },
+	})
+
+	require.NoError(t, err)
+	require.Len(t, events, 10)
+	assert.Equal(t, coordinator.Event{Phase: workflow.PhaseCollection, Action: coordinator.ActionStarted, CollectionRounds: 1, Round: 1}, events[0])
+	assert.Equal(t, coordinator.Event{Phase: workflow.PhaseCollectionQC, Action: coordinator.ActionStarted, CollectionRounds: 1, Round: 1}, events[1])
+	assert.Equal(t, coordinator.Event{Phase: workflow.PhaseCollectionQC, Action: coordinator.ActionDecision, Decision: "sufficient", CollectionRounds: 1, Round: 1}, events[2])
+	assert.Equal(t, coordinator.Event{Phase: workflow.PhaseResearch, Action: coordinator.ActionStarted, CollectionRounds: 1}, events[3])
+	assert.Equal(t, coordinator.Event{Phase: workflow.PhaseFinalQC, Action: coordinator.ActionStarted, CollectionRounds: 1, Round: 1}, events[4])
+	assert.Equal(t, coordinator.Event{Phase: workflow.PhaseFinalQC, Action: coordinator.ActionDecision, Decision: "revise_research", CollectionRounds: 1, Round: 1}, events[5])
+	assert.Equal(t, coordinator.Event{Phase: workflow.PhaseResearch, Action: coordinator.ActionStarted, CollectionRounds: 1, IsRevision: true, Round: 1}, events[6])
+	assert.Equal(t, coordinator.Event{Phase: workflow.PhaseFinalQC, Action: coordinator.ActionStarted, CollectionRounds: 1, Round: 2}, events[7])
+	assert.Equal(t, coordinator.Event{Phase: workflow.PhaseFinalQC, Action: coordinator.ActionDecision, Decision: "pass", CollectionRounds: 1, Round: 2}, events[8])
+	assert.Equal(t, coordinator.Event{Phase: workflow.PhaseComplete, Action: coordinator.ActionStarted, CollectionRounds: 1}, events[9])
 }
 
 func TestRunnerPassesDispositionsToCollectionQC(t *testing.T) {

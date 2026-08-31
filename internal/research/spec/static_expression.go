@@ -406,7 +406,7 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 		"phase_mode":     cty.StringVal(string(PhaseModeFull)),
 		"model_provider": cty.NullVal(cty.EmptyObject), "profile": cty.UnknownVal(cty.String),
 		"reasoning_effort":    cty.NullVal(cty.String),
-		"final_qc_strictness": cty.StringVal(FinalQCStrictnessStrict),
+		"final_qc_strictness": cty.StringVal(DefaultFinalQCStrictness),
 		"prompt":              cty.NullVal(cty.String), "tool_ids": cty.EmptyTupleVal,
 		"tool_call_quota": cty.EmptyObjectVal, "terminate_tool_id": cty.NullVal(cty.String),
 		"allowed_tools": cty.EmptyTupleVal, "disallowed_tools": cty.EmptyTupleVal,

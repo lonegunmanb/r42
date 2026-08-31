@@ -23,6 +23,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/config"
 	"github.com/lonegunmanb/r42/internal/copilot"
 	"github.com/lonegunmanb/r42/internal/debuglog"
+	"github.com/lonegunmanb/r42/internal/evidence"
 	"github.com/lonegunmanb/r42/internal/executor"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/plan"
@@ -216,6 +217,7 @@ func (e *Engine) apply(
 		contextValues: planned.Context(), localExpressions: planned.LocalExpressions(),
 		sessionStallTimeout: effectiveSessionStallTimeout(options.SessionStallTimeout),
 		artifactRegistry:    artifactpkg.NewRegistry(),
+		quoteRegistry:       evidence.NewQuoteRegistry(),
 		starlarkRunner:      e.options.StarlarkRunner,
 		s3ServiceFactory:    e.options.S3ServiceFactory,
 		s3EnvLookup:         e.options.S3EnvLookup,
@@ -300,6 +302,7 @@ type runtimeFactory struct {
 	localExpressions    map[string]string
 	sessionStallTimeout time.Duration
 	artifactRegistry    *artifactpkg.Registry
+	quoteRegistry       *evidence.QuoteRegistry
 	starlarkRunner      starlarkRunner
 	s3ServiceFactory    internals3.ServiceFactory
 	s3EnvLookup         internals3.EnvLookup
@@ -323,6 +326,15 @@ func (f *runtimeFactory) ensureArtifactRegistry() *artifactpkg.Registry {
 		f.artifactRegistry = artifactpkg.NewRegistry()
 	}
 	return f.artifactRegistry
+}
+
+func (f *runtimeFactory) ensureQuoteRegistry() *evidence.QuoteRegistry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.quoteRegistry == nil {
+		f.quoteRegistry = evidence.NewQuoteRegistry()
+	}
+	return f.quoteRegistry
 }
 
 func (s *runtimeState) addWarning(err error) {

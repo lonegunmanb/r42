@@ -46,6 +46,7 @@ type Node struct {
 	Status       Status
 	Phase        debuglog.SessionKind
 	Activity     Activity
+	Round        int
 	Content      string
 	ToolName     string
 	Usage        debuglog.Usage
@@ -63,6 +64,7 @@ type TimelineEntry struct {
 	ToolName   string
 	Action     string
 	Error      string
+	Round      int
 	MessageID  string
 	ToolCallID string
 }
@@ -172,6 +174,9 @@ func (p *Projector) Observe(event debuglog.Event) {
 		node.Activity = ActivityIdle
 	}
 	node.Phase = event.Session
+	if event.Action == "workflow.phase" {
+		node.Round = event.Round
+	}
 	switch event.Action {
 	case "assistant.reasoning", "assistant.reasoning_delta":
 		node.Activity = ActivityThinking
@@ -299,7 +304,7 @@ func (p *Projector) updateTimeline(
 	}
 	p.timeline = append(p.timeline, TimelineEntry{
 		Address: event.BlockAddress, Session: event.Session, Activity: activity,
-		Content: content, ToolName: toolName, Action: event.Action, Error: errorText,
+		Content: content, ToolName: toolName, Action: event.Action, Error: errorText, Round: event.Round,
 		MessageID: event.MessageID, ToolCallID: event.ToolCallID,
 	})
 }

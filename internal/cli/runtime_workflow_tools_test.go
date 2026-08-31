@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -16,6 +17,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/collectionqc"
 	"github.com/lonegunmanb/r42/internal/evidence"
 	"github.com/lonegunmanb/r42/internal/mcp"
+	researchruntime "github.com/lonegunmanb/r42/internal/research/runtime"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
 	"github.com/stretchr/testify/assert"
@@ -714,7 +716,10 @@ func TestEvidenceToolsExposeArtifactPagingAndSearch(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("- Source: local-record:42\n\none\ntarget phrase\nthree\n"), 0o600))
 	registration, _, err := registry.RegisterEvidence(workspace, path, "fixture", "Fixture evidence")
 	require.NoError(t, err)
-	tools, err := evidenceToolsWithArtifactRegistry(workspace, nil, false, registry, []string{registration.ID}, nil)
+	quotes := evidence.NewQuoteRegistry()
+	tools, err := evidenceToolsWithArtifactRegistry(
+		workspace, nil, false, registry, []string{registration.ID}, nil, quotes,
+	)
 	require.NoError(t, err)
 
 	read := toolByName(t, tools, "r42_read_artifact")
@@ -739,6 +744,137 @@ func TestEvidenceToolsExposeArtifactPagingAndSearch(t *testing.T) {
 	}})
 	require.NoError(t, err)
 	assert.Contains(t, result.TextResultForLLM, `"matched_text":"target phrase"`)
+	var searchResponse struct {
+		Accepted bool `json:"accepted"`
+		Output   struct {
+			Matches []struct {
+				QuoteRef string `json:"quote_ref"`
+			} `json:"matches"`
+		} `json:"output"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(result.TextResultForLLM), &searchResponse))
+	require.True(t, searchResponse.Accepted)
+	require.Len(t, searchResponse.Output.Matches, 1)
+	assert.Regexp(t, `^quote-ref-`, searchResponse.Output.Matches[0].QuoteRef)
+
+	capture := toolByName(t, tools, "r42_capture_quote")
+	result, err = capture.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"quote_ref": searchResponse.Output.Matches[0].QuoteRef, "before_lines": 1, "after_lines": 1,
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"exact_quote":"one target phrase three"`)
+	assert.Contains(t, result.TextResultForLLM, `"locator":"lines 3-5"`)
+}
+
+func TestBindResearchToolUsesResolvesTrustedQuoteWithoutRecheckingArtifactText(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	path := filepath.Join(workspace, "source.md")
+	require.NoError(t, os.WriteFile(path, []byte("- Source: https://example.test/source\n\ntrusted evidence\n"), 0o600))
+	registered, _, err := registry.RegisterEvidence(workspace, path, "", "Primary source")
+	require.NoError(t, err)
+	quotes := evidence.NewQuoteRegistry()
+	searchResult, err := evidence.SearchArtifact(registry, registered.ID, "trusted evidence", true, 1, 0)
+	require.NoError(t, err)
+	require.Len(t, searchResult.Matches, 1)
+	captured, err := quotes.CaptureMatch(registry, registered.ID, searchResult.Matches[0])
+	require.NoError(t, err)
+
+	parameters := objectSchema(map[string]any{
+		"quotes": map[string]any{"type": "array", "items": objectSchema(map[string]any{
+			"id":           map[string]any{"type": "string"},
+			"quote_ref":    map[string]any{"type": "string"},
+			"source_title": map[string]any{"type": "string"},
+			"url":          map[string]any{"type": "string"},
+			"artifact_id":  map[string]any{"type": "string"},
+			"locator":      map[string]any{"type": "string"},
+			"exact_quote":  map[string]any{"type": "string"},
+		}, []string{"id", "quote_ref", "source_title", "url", "artifact_id", "locator", "exact_quote"})},
+	}, []string{"quotes"})
+	tool := sdk.Tool{
+		Name: "submit", Parameters: parameters,
+		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			arguments, ok := invocation.Arguments.(map[string]any)
+			require.True(t, ok)
+			items, ok := arguments["quotes"].([]any)
+			require.True(t, ok)
+			require.Len(t, items, 1)
+			quote, ok := items[0].(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, captured.Ref, quote["quote_ref"])
+			assert.Equal(t, registered.ID, quote["artifact_id"])
+			assert.Equal(t, "trusted evidence", quote["exact_quote"])
+			assert.Equal(t, "https://example.test/source", quote["url"])
+			return acceptedToolResult(struct{}{})
+		},
+	}
+	terminal := researchruntime.NewTerminalRecorder()
+	bound, err := bindResearchToolUses(
+		[]sdk.Tool{tool}, nil,
+		func() (*evidence.ArtifactEvidenceAccess, error) {
+			// A downstream task can receive the quote_ref through an authorized
+			// knowledge artifact without receiving the original source artifact ID.
+			return evidence.NewArtifactEvidenceAccess(registry, nil)
+		},
+		registry, workspace, "submit", terminal, quotes,
+	)
+	require.NoError(t, err)
+	require.Len(t, bound, 1)
+	properties, ok := bound[0].Parameters["properties"].(map[string]any)
+	require.True(t, ok)
+	quotesSchema, ok := properties["quotes"].(map[string]any)
+	require.True(t, ok)
+	quoteSchema, ok := quotesSchema["items"].(map[string]any)
+	require.True(t, ok)
+	quoteProperties, ok := quoteSchema["properties"].(map[string]any)
+	require.True(t, ok)
+	assert.ElementsMatch(t, []string{"id", "quote_ref"}, slices.Sorted(maps.Keys(quoteProperties)))
+
+	// A captured quote is an immutable ledger record. Submission does not reopen
+	// the mutable artifact and compare model-authored text.
+	require.NoError(t, os.WriteFile(path, []byte("changed after capture\n"), 0o600))
+	result, err := bound[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"quotes": []any{map[string]any{"id": "quote-1", "quote_ref": captured.Ref}},
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"accepted":true`)
+}
+
+func TestBindResearchToolUsesRejectsUnknownQuoteReference(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	terminal := researchruntime.NewTerminalRecorder()
+	tool := sdk.Tool{
+		Name: "submit",
+		Parameters: objectSchema(map[string]any{
+			"quote": objectSchema(map[string]any{
+				"quote_ref": map[string]any{"type": "string"},
+			}, []string{"quote_ref"}),
+		}, []string{"quote"}),
+		Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
+			require.FailNow(t, "handler must not run for an unknown quote reference")
+			return sdk.ToolResult{}, nil
+		},
+	}
+	bound, err := bindResearchToolUses(
+		[]sdk.Tool{tool}, nil,
+		func() (*evidence.ArtifactEvidenceAccess, error) {
+			return evidence.NewArtifactEvidenceAccess(registry, nil)
+		},
+		registry, workspace, "submit", terminal, evidence.NewQuoteRegistry(),
+	)
+	require.NoError(t, err)
+
+	result, err := bound[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"quote": map[string]any{"quote_ref": "quote-ref-unknown"},
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"accepted":false`)
+	assert.Contains(t, result.TextResultForLLM, `"code":"unknown_quote_ref"`)
 }
 
 func TestEvidenceToolsSearchAllAuthorizedArtifacts(t *testing.T) {
@@ -1538,7 +1674,7 @@ func TestEvidenceToolsExposeIDsAndDeclaredArtifactNamesOnly(t *testing.T) {
 
 	assert.Equal(t, []string{
 		"r42_list_artifacts", "r42_list_artifact_files", "r42_read_artifact", "r42_search_artifact",
-		"r42_search_artifacts",
+		"r42_search_artifacts", "r42_capture_quote",
 		"r42_read_artifact_json_schema", "r42_query_artifact_json",
 		"r42_write_markdown",
 	}, toolNames(tools))

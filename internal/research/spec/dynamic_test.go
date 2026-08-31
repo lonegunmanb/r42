@@ -508,7 +508,7 @@ func TestAppliedDynamicTaskWithoutTerminateToolDoesNotGainResult(t *testing.T) {
 	}))
 
 	assert.False(t, applied.Type().HasAttribute("result"))
-	assert.Equal(t, researchspec.FinalQCStrictnessStrict, applied.GetAttr("final_qc_strictness").AsString())
+	assert.Equal(t, researchspec.FinalQCStrictnessBalanced, applied.GetAttr("final_qc_strictness").AsString())
 }
 
 func TestAppliedDynamicTaskPublishesDeclaredArtifacts(t *testing.T) {

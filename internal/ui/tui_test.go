@@ -298,6 +298,28 @@ func TestTUIModelSanitizesPlanKindInDetail(t *testing.T) {
 	assert.Contains(t, view, "Kind: researchforged")
 }
 
+func TestTUIModelShowsWorkflowRound(t *testing.T) {
+	t.Parallel()
+
+	projector := newTUIProjector(t)
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "workflow.phase", Status: debuglog.StatusStarted,
+		BlockAddress: "research.static.collect", Session: debuglog.SessionCollectionQC, Round: 2,
+	})
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "workflow.phase", Status: debuglog.StatusStarted,
+		BlockAddress: "research.static.collect", Session: debuglog.SessionCollectionQC, Round: 2,
+		Content: "needs_more",
+	})
+	model := resizeTUI(t, ui.NewTUIModel(projector, nil), 100, 20)
+	model = updateTUI(t, model, tea.KeyMsg{Type: tea.KeyRight})
+
+	view := model.View()
+	assert.Contains(t, view, "Phase: collection_qc (round=2)")
+	assert.Contains(t, view, "round=2")
+	assert.Contains(t, view, "needs_more")
+}
+
 func TestTUIModelRequestsFullRedrawForEveryWindowResize(t *testing.T) {
 	t.Parallel()
 

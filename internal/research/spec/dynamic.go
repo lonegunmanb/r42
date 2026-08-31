@@ -723,7 +723,7 @@ func AppliedDynamicTaskValue(task, result cty.Value) cty.Value {
 	values := maps.Clone(unmarked.AsValueMap())
 	strictness, exists := values["final_qc_strictness"]
 	if !exists || strictness.IsNull() {
-		values["final_qc_strictness"] = cty.StringVal(FinalQCStrictnessStrict)
+		values["final_qc_strictness"] = cty.StringVal(DefaultFinalQCStrictness)
 	}
 	resultValues := result.AsValueMap()
 	if artifacts, ok := resultValues["artifact"]; ok {

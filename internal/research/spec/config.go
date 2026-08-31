@@ -16,7 +16,7 @@ import (
 
 const (
 	DefaultMaxProtocolAttempts   = 10
-	DefaultMaxQCRounds           = 10
+	DefaultMaxQCRounds           = 5
 	DefaultCollectionBatchSize   = 10
 	DefaultMaxCollectionRounds   = 10
 	DefaultCollectionQCCriterion = "The registered evidence artifacts must provide sufficient evidence to answer the research task."
@@ -109,18 +109,19 @@ const (
 	FinalQCStrictnessStrict   = "strict"
 	FinalQCStrictnessBalanced = "balanced"
 	FinalQCStrictnessBrief    = "brief"
+	DefaultFinalQCStrictness  = FinalQCStrictnessBalanced
 )
 
 func defaultFinalQCStrictness(value string) string {
 	if value == "" {
-		return FinalQCStrictnessStrict
+		return DefaultFinalQCStrictness
 	}
 	return value
 }
 
 func finalQCStrictnessValue(value *string) string {
 	if value == nil {
-		return FinalQCStrictnessStrict
+		return DefaultFinalQCStrictness
 	}
 	return *value
 }

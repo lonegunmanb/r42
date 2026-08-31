@@ -108,26 +108,53 @@ go_tool "submit_research_plan" {
 }
 
 go_tool "submit_knowledge" {
-  description = "Submit one subquestion's knowledge records and exact source quotes linked by registered artifact IDs, validate their links, and write the declared knowledge artifact identified by artifact_id. `knowledge.confidence` allowed values: `high`, `medium`, `low`."
+  description = "Submit one subquestion's knowledge claims using trusted quote_ref values returned by r42_search_artifact or r42_capture_quote, then write the declared knowledge artifact. `knowledge.confidence` allowed values: `high`, `medium`, `low`."
 
   source = <<-GO
     import (
       "context"
+      "crypto/sha256"
       "encoding/json"
       "fmt"
-      "net/url"
       "os"
       "path/filepath"
       "strings"
     )
 
+    type Citation struct {
+      QuoteRef       string `json:"quote_ref"`
+      SourceTitle    string `json:"source_title"`
+      URL            string `json:"url"`
+      ArtifactID     string `json:"artifact_id"`
+      ArtifactDigest string `json:"artifact_digest"`
+      Locator        string `json:"locator"`
+      ExactQuote     string `json:"exact_quote"`
+    }
+
+    type KnowledgeInput struct {
+      ID         string     `json:"id"`
+      Claim      string     `json:"claim"`
+      Confidence string     `json:"confidence"`
+      Citations  []Citation `json:"citations"`
+    }
+
+    type Input struct {
+      ArtifactID    string           `json:"artifact_id"`
+      ArtifactPath  string           `json:"_r42_artifact_path"`
+      QuoteIDPrefix string           `json:"quote_id_prefix"`
+      Subquestion   string           `json:"subquestion"`
+      Knowledge     []KnowledgeInput `json:"knowledge"`
+    }
+
     type Quote struct {
-      ID           string `json:"id"`
-      SourceTitle  string `json:"source_title"`
-      URL          string `json:"url"`
-      ArtifactID   string `json:"artifact_id"`
-      Locator      string `json:"locator"`
-      ExactQuote   string `json:"exact_quote"`
+      ID             string `json:"id"`
+      QuoteRef       string `json:"quote_ref"`
+      SourceTitle    string `json:"source_title"`
+      URL            string `json:"url"`
+      ArtifactID     string `json:"artifact_id"`
+      ArtifactDigest string `json:"artifact_digest"`
+      Locator        string `json:"locator"`
+      ExactQuote     string `json:"exact_quote"`
     }
 
     type KnowledgeItem struct {
@@ -137,12 +164,11 @@ go_tool "submit_knowledge" {
       QuoteIDs   []string `json:"quote_ids"`
     }
 
-    type Input struct {
-      ArtifactID   string          `json:"artifact_id"`
-      ArtifactPath string          `json:"_r42_artifact_path"`
-      Subquestion  string          `json:"subquestion"`
-      Knowledge    []KnowledgeItem `json:"knowledge"`
-      Quotes       []Quote         `json:"quotes"`
+    type KnowledgeArtifact struct {
+      ArtifactID  string          `json:"artifact_id"`
+      Subquestion string          `json:"subquestion"`
+      Knowledge   []KnowledgeItem `json:"knowledge"`
+      Quotes      []Quote         `json:"quotes"`
     }
 
     type Output string
@@ -153,14 +179,13 @@ go_tool "submit_knowledge" {
         return ToolResponse[Output]{Accepted: false, Issues: issues}, nil
       }
 
-      artifactPath := input.ArtifactPath
-      input.ArtifactPath = ""
-      payload, err := json.MarshalIndent(input, "", "  ")
+      artifact := buildKnowledgeArtifact(input)
+      payload, err := json.MarshalIndent(artifact, "", "  ")
       if err != nil {
         return ToolResponse[Output]{}, fmt.Errorf("encode knowledge artifact: %w", err)
       }
       payload = append(payload, '\n')
-      artifactPath = filepath.Clean(artifactPath)
+      artifactPath := filepath.Clean(input.ArtifactPath)
       if err := os.MkdirAll(filepath.Dir(artifactPath), 0700); err != nil {
         return ToolResponse[Output]{}, fmt.Errorf("create knowledge artifact directory: %w", err)
       }
@@ -171,6 +196,40 @@ go_tool "submit_knowledge" {
       return ToolResponse[Output]{Accepted: true, Output: &output}, nil
     }
 
+    func buildKnowledgeArtifact(input Input) KnowledgeArtifact {
+      artifact := KnowledgeArtifact{
+        ArtifactID: input.ArtifactID,
+        Subquestion: input.Subquestion,
+        Knowledge: make([]KnowledgeItem, 0, len(input.Knowledge)),
+        Quotes: make([]Quote, 0),
+      }
+      quoteIDs := make(map[string]string)
+      for _, item := range input.Knowledge {
+        outputItem := KnowledgeItem{ID: item.ID, Claim: item.Claim, Confidence: item.Confidence, QuoteIDs: make([]string, 0, len(item.Citations))}
+        seen := make(map[string]struct{}, len(item.Citations))
+        for _, citation := range item.Citations {
+          quoteID, exists := quoteIDs[citation.QuoteRef]
+          if !exists {
+            digest := sha256.Sum256([]byte(citation.QuoteRef))
+            quoteID = fmt.Sprintf("%s%x", input.QuoteIDPrefix, digest[:16])
+            quoteIDs[citation.QuoteRef] = quoteID
+            artifact.Quotes = append(artifact.Quotes, Quote{
+              ID: quoteID, QuoteRef: citation.QuoteRef,
+              SourceTitle: citation.SourceTitle, URL: citation.URL,
+              ArtifactID: citation.ArtifactID, ArtifactDigest: citation.ArtifactDigest,
+              Locator: citation.Locator, ExactQuote: citation.ExactQuote,
+            })
+          }
+          if _, duplicate := seen[quoteID]; !duplicate {
+            outputItem.QuoteIDs = append(outputItem.QuoteIDs, quoteID)
+            seen[quoteID] = struct{}{}
+          }
+        }
+        artifact.Knowledge = append(artifact.Knowledge, outputItem)
+      }
+      return artifact
+    }
+
     func validateKnowledge(input Input) []Issue {
       issues := make([]Issue, 0)
       if !validBlockArtifactPath(input.ArtifactPath, "knowledge.json") {
@@ -179,40 +238,11 @@ go_tool "submit_knowledge" {
       if strings.TrimSpace(input.Subquestion) == "" {
         issues = append(issues, newIssue("subquestion", "subquestion", "must not be empty"))
       }
+      if strings.TrimSpace(input.QuoteIDPrefix) == "" {
+        issues = append(issues, newIssue("quote_id_prefix", "quote_id_prefix", "must not be empty"))
+      }
       if len(input.Knowledge) == 0 {
         issues = append(issues, newIssue("knowledge", "knowledge", "submit at least one knowledge item"))
-      }
-      if len(input.Quotes) == 0 {
-        issues = append(issues, newIssue("quotes", "quotes", "submit at least one exact quote"))
-      }
-
-      quoteIDs := make(map[string]struct{}, len(input.Quotes))
-      usedQuoteIDs := make(map[string]struct{}, len(input.Quotes))
-      for index, quote := range input.Quotes {
-        path := fmt.Sprintf("quotes[%d]", index)
-        id := strings.TrimSpace(quote.ID)
-        if id == "" {
-          issues = append(issues, newIssue("quote_id", path+".id", "must not be empty"))
-        } else if _, exists := quoteIDs[id]; exists {
-          issues = append(issues, newIssue("quote_id", path+".id", "must be unique"))
-        } else {
-          quoteIDs[id] = struct{}{}
-        }
-        if strings.TrimSpace(quote.SourceTitle) == "" {
-          issues = append(issues, newIssue("source_title", path+".source_title", "must not be empty"))
-        }
-        if strings.TrimSpace(quote.Locator) == "" {
-          issues = append(issues, newIssue("locator", path+".locator", "identify a page, section, paragraph, timestamp, or table"))
-        }
-        if strings.TrimSpace(quote.ExactQuote) == "" {
-          issues = append(issues, newIssue("exact_quote", path+".exact_quote", "must contain verbatim source text"))
-        }
-        if !validHTTPURL(quote.URL) {
-          issues = append(issues, newIssue("quote_url", path+".url", "must be an absolute HTTP or HTTPS URL"))
-        }
-        if !validArtifactID(quote.ArtifactID) {
-          issues = append(issues, newIssue("artifact_id", path+".artifact_id", "must name a registered artifact ID authorized by r42"))
-        }
       }
 
       knowledgeIDs := make(map[string]struct{}, len(input.Knowledge))
@@ -234,35 +264,17 @@ go_tool "submit_knowledge" {
         default:
           issues = append(issues, newIssue("confidence", path+".confidence", "must be high, medium, or low"))
         }
-        if len(item.QuoteIDs) == 0 {
-          issues = append(issues, newIssue("quote_ids", path+".quote_ids", "reference at least one quote"))
+        if len(item.Citations) == 0 {
+          issues = append(issues, newIssue("citations", path+".citations", "reference at least one trusted quote_ref"))
         }
-        for quoteIndex, quoteID := range item.QuoteIDs {
-          quoteID = strings.TrimSpace(quoteID)
-          refPath := fmt.Sprintf("%s.quote_ids[%d]", path, quoteIndex)
-          if _, exists := quoteIDs[quoteID]; !exists {
-            issues = append(issues, newIssue("quote_reference", refPath, "must reference an ID declared in quotes"))
-            continue
+        for citationIndex, citation := range item.Citations {
+          citationPath := fmt.Sprintf("%s.citations[%d]", path, citationIndex)
+          if strings.TrimSpace(citation.QuoteRef) == "" {
+            issues = append(issues, newIssue("quote_ref", citationPath+".quote_ref", "must be returned by r42_search_artifact or r42_capture_quote"))
           }
-          usedQuoteIDs[quoteID] = struct{}{}
-        }
-      }
-      for quoteID := range quoteIDs {
-        if _, used := usedQuoteIDs[quoteID]; !used {
-          issues = append(issues, newIssue("unused_quote", "quotes", "quote "+quoteID+" is not referenced by any knowledge item"))
         }
       }
       return issues
-    }
-
-    func validHTTPURL(raw string) bool {
-      parsed, err := url.ParseRequestURI(strings.TrimSpace(raw))
-      return err == nil && parsed.Host != "" && (parsed.Scheme == "http" || parsed.Scheme == "https")
-    }
-
-    func validArtifactID(raw string) bool {
-      id := strings.TrimSpace(raw)
-      return strings.HasPrefix(id, "artifact-") && len(strings.TrimPrefix(id, "artifact-")) > 0
     }
 
     func validBlockArtifactPath(raw, name string) bool {
@@ -513,7 +525,7 @@ go_tool "submit_conflict_resolution" {
 }
 
 external_tool "audit_synthesis" {
-  description = "Audit final-report citation structure, source URL mappings, artifact existence, and quote text equivalence in one bounded call. The tool performs exact, line-ending, paragraph-whitespace, and Unicode-equivalent matching internally and writes the full result to synthesis-audit.json. Call it exactly once per QC round."
+  description = "Audit final-report citation structure, trusted quote references, source URL mappings, and artifact IDs in one bounded call. Quote content already came from the host quote registry and is not compared again. The tool writes the full result to synthesis-audit.json. Call it exactly once per QC round."
   program     = ["python", "${path.module}/audit_synthesis.py"]
 
   input_type = object({

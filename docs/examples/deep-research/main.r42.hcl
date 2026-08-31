@@ -68,6 +68,7 @@ locals {
 research "static" "plan" {
   for_each = length(coalesce(var.research_plan, [])) == 0 ? { default = true } : {}
 
+  phase_mode       = "research_only"
   model_provider   = model_provider.primary
   model            = var.model
   reasoning_effort = var.reasoning_effort
@@ -101,9 +102,9 @@ research "static" "plan" {
     r42_register_artifact afterward. A source identifier alone is not evidence.
     You must finish by calling ${go_tool.submit_research_plan.id}.
 
-    During Collection, do not acquire external evidence; the topic is the
-    complete input for planning, so submit an empty collection checkpoint.
-    During closed Research, create the plan and call the typed submission tool.
+    The topic is the complete input for planning. Do not acquire external
+    evidence. Create the plan in this closed Research session and call the
+    typed submission tool.
 
     Never use PowerShell, a shell, curl, wget, or scripts and command-line
     programs to search the web or download remote content. Do not use them as
@@ -131,10 +132,6 @@ research "static" "plan" {
   disallowed_tools  = local.offline_disallowed_tools
   permission        = "approve_all"
 
-  collection_qc {
-    model_provider = model_provider.qc
-  }
-
   qc {
     criteria = {
       coverage = "Verify the combined task set covers the topic's material perspectives, mechanisms, counterarguments, and evidence needs without assuming the answer."
@@ -144,7 +141,6 @@ research "static" "plan" {
     }
     model_provider   = model_provider.qc
     reasoning_effort = var.reasoning_effort
-    max_qc_rounds    = 2
     permission       = "approve_all"
   }
 }
@@ -178,15 +174,15 @@ research "dynamic" "parallel_deep_dive" {
         Source artifact directory: "${artifact("sources").path}"
         Submit a collection checkpoint once the evidence is sufficient.
 
-        During closed Research, do not search or fetch. Use the artifact IDs
-        supplied by r42 with r42_read_artifact to inspect registered evidence. Associate
-        every quote with its registered artifact_id, URL, locator, and verbatim
-        text. Then call
+        During closed Research, do not search or fetch. Use r42_search_artifact
+        or r42_search_artifacts to get a quote_ref for supporting text; call
+        r42_capture_quote when surrounding lines are needed. Pass only those
+        quote_ref values in each claim's citations; do not copy quote text or
+        source metadata. Then call
         ${go_tool.submit_knowledge.id}; r42 binds its declared knowledge
-        artifact_id and the subquestion exactly as
-        assigned above, atomic knowledge claims with IDs prefixed
-        "${task.id}-kb-", and exact quote records with IDs prefixed
-        "${task.id}-quote-". Do not finish with prose or a JSON code block.
+        artifact_id and the subquestion exactly as assigned above, with atomic
+        knowledge claim IDs prefixed "${task.id}-kb-". Do not finish with prose
+        or a JSON code block.
       PROMPT
       tool_use = {
         submit_knowledge = {
@@ -196,6 +192,7 @@ research "dynamic" "parallel_deep_dive" {
             artifact_id            = artifact("knowledge").id
             _r42_artifact_path     = ""
             subquestion            = task.subquestion
+            quote_id_prefix        = "${task.id}-quote-"
           }
         }
       }
@@ -224,12 +221,11 @@ research "dynamic" "parallel_deep_dive" {
       qc = {
         criteria = {
           knowledge_items = "Judge whether every knowledge claim answers the assigned subquestion, expresses uncertainty carefully, and is fully supported by its cited quote records."
-          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool artifact existence and text matching as authoritative."
+          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat the typed-tool trusted quote registry and canonical quote fields as authoritative."
           traceability = "Judge whether the cited evidence is sufficient and decision-relevant, and whether material contrary evidence or uncertainty is omitted. Treat typed-tool IDs and graph references as authoritative."
         }
         model_provider   = model_provider.qc
         reasoning_effort = var.reasoning_effort
-        max_qc_rounds    = 3
         permission       = "approve_all"
       }
     }
@@ -269,14 +265,14 @@ research "dynamic" "independent_serial_deep_dive" {
         Source artifact directory: "${artifact("sources").path}"
         Submit a collection checkpoint once the evidence is sufficient.
 
-        During closed Research, do not search or fetch. Use the artifact IDs
-        supplied by r42 with r42_read_artifact to inspect registered evidence. Associate
-        every quote with its registered artifact_id, URL, locator, and verbatim
-        text. Then call ${go_tool.submit_knowledge.id}
+        During closed Research, do not search or fetch. Use r42_search_artifact
+        or r42_search_artifacts to get a quote_ref for supporting text; call
+        r42_capture_quote when surrounding lines are needed. Pass only those
+        quote_ref values in each claim's citations; do not copy quote text or
+        source metadata. Then call ${go_tool.submit_knowledge.id}
         with its declared knowledge artifact_id and subquestion exactly
-        as assigned above, atomic knowledge claims with IDs prefixed
-        "${task.id}-kb-", and exact quote records with IDs prefixed
-        "${task.id}-quote-". Do not finish with prose or a JSON code block.
+        as assigned above, with atomic knowledge claim IDs prefixed
+        "${task.id}-kb-". Do not finish with prose or a JSON code block.
       PROMPT
       tool_use = {
         submit_knowledge = {
@@ -286,6 +282,7 @@ research "dynamic" "independent_serial_deep_dive" {
             artifact_id            = artifact("knowledge").id
             _r42_artifact_path     = ""
             subquestion            = task.subquestion
+            quote_id_prefix        = "${task.id}-quote-"
           }
         }
       }
@@ -314,12 +311,11 @@ research "dynamic" "independent_serial_deep_dive" {
       qc = {
         criteria = {
           knowledge_items = "Judge whether every knowledge claim answers the assigned subquestion, expresses uncertainty carefully, and is fully supported by its cited quote records."
-          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool artifact existence and text matching as authoritative."
+          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat the typed-tool trusted quote registry and canonical quote fields as authoritative."
           traceability = "Judge whether the cited evidence is sufficient and decision-relevant, and whether material contrary evidence or uncertainty is omitted. Treat typed-tool IDs and graph references as authoritative."
         }
         model_provider   = model_provider.qc
         reasoning_effort = var.reasoning_effort
-        max_qc_rounds    = 3
         permission       = "approve_all"
       }
     }
@@ -384,15 +380,16 @@ research "dynamic" "final_serial_deep_dive" {
         If the upstream JSON is sufficient, submit an empty
         collection checkpoint instead of searching.
 
-        During closed Research, do not search or fetch. Use the artifact IDs
-        supplied by r42 with r42_read_artifact for any newly registered evidence and use the
-        validated JSON above directly. Associate every new quote with its exact
-        artifact_id, URL, locator, and verbatim text. Then call
+        During closed Research, do not search or fetch. Use the validated JSON
+        above directly. Reuse its quote_ref values, or call
+        r42_search_artifact / r42_search_artifacts and optionally
+        r42_capture_quote for newly registered evidence. Pass only quote_ref
+        values in each claim's citations; do not copy quote text or source
+        metadata. Then call
         ${go_tool.submit_knowledge.id}
         with its declared knowledge artifact_id, subquestion exactly as
-        assigned above, atomic knowledge claims with IDs prefixed
-        "${task.id}-kb-", and exact quote records with IDs prefixed
-        "${task.id}-quote-". Do not finish with prose or a JSON code block.
+        assigned above, with atomic knowledge claim IDs prefixed
+        "${task.id}-kb-". Do not finish with prose or a JSON code block.
       PROMPT
       tool_use = {
         submit_knowledge = {
@@ -402,6 +399,7 @@ research "dynamic" "final_serial_deep_dive" {
             artifact_id            = artifact("knowledge").id
             _r42_artifact_path     = ""
             subquestion            = task.subquestion
+            quote_id_prefix        = "${task.id}-quote-"
           }
           input_from_agent = {
             knowledge = {
@@ -440,11 +438,10 @@ research "dynamic" "final_serial_deep_dive" {
         criteria = {
           upstream_use = "Judge whether the candidate accurately uses the relevant claims and quotes from the validated upstream JSON included in the prompt."
           knowledge_items = "Judge whether every new claim answers the assigned subquestion, expresses uncertainty carefully, and is fully supported by its cited quotes."
-          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat typed-tool artifact existence and text matching as authoritative."
+          quote_records = "Judge whether each accepted quote semantically entails the claim that cites it without changing party, period, scope, causality, or qualifiers. Treat the typed-tool trusted quote registry and canonical quote fields as authoritative."
         }
         model_provider   = model_provider.qc
         reasoning_effort = var.reasoning_effort
-        max_qc_rounds    = 3
         permission       = "approve_all"
       }
     }
@@ -566,11 +563,10 @@ research "static" "resolve_conflicts" {
       coverage = "Judge whether the resolution considers every subquestion represented in the validated upstream JSON. Treat typed-tool reviewed_artifacts validation as authoritative."
       detection = "Compare every knowledge claim across subquestions and verify contradictions in values, dates, scope, definitions, causality, and source interpretation were detected; verify an empty conflict list only when the files are genuinely compatible."
       decisions = "Check every conflict decision against its knowledge IDs and supporting quote IDs. A resolved decision must prefer the stronger evidence; an unresolved decision must preserve the uncertainty for synthesis."
-      evidence_semantics = "Judge whether the accepted quotes actually support each conflict decision without changing scope or qualifiers. Treat typed-tool paths, IDs, and text matching as authoritative."
+      evidence_semantics = "Judge whether the accepted quotes actually support each conflict decision without changing scope or qualifiers. Treat typed-tool paths, IDs, trusted quote references, and canonical quote fields as authoritative."
     }
     model_provider   = model_provider.qc
     reasoning_effort = var.reasoning_effort
-    max_qc_rounds    = 3
     permission       = "approve_all"
   }
 }
@@ -679,16 +675,15 @@ research "static" "synthesize" {
 
   qc {
     criteria = {
-      mechanical_audit = "Call ${external_tool.audit_synthesis.id} exactly once in each QC round before judging the current report revision. Pass report_path as the declared report artifact, knowledge_paths as the complete Validated knowledge artifacts list from the task, and resolution_path as the Conflict-resolution artifact. Treat its quote-ID, source-URL, unused-reference, and artifact-ID checks as authoritative; upstream Research typed tools already validated artifact authorization and exact quote text. Preserve every reported mechanical issue in the QC verdict, but do not repeat those checks with grep or view."
+      mechanical_audit = "Call ${external_tool.audit_synthesis.id} exactly once in each QC round before judging the current report revision. Pass report_path as the declared report artifact, knowledge_paths as the complete Validated knowledge artifacts list from the task, and resolution_path as the Conflict-resolution artifact. Treat its quote-ID, quote-ref, source-URL, unused-reference, and artifact-ID checks as authoritative; canonical quote text came from the upstream host quote registry and must not be compared with artifacts again. Preserve every reported mechanical issue in the QC verdict, but do not repeat those checks with grep or view."
       plan_coverage = "Use the validated knowledge JSON included in the task to judge whether the report answers every planner-produced subquestion."
-      factual_fidelity = "Use each knowledge item's claim, confidence, quote_ids, and exact_quote fields to judge whether every material report statement and conclusion is logically supported without extrapolation. Reject any statement that appears to come from model training, memory, general background knowledge, assumption, or opinion rather than the validated artifacts. This is a semantic judgment; do not repeat the typed tool's text matching."
+      factual_fidelity = "Use each knowledge item's claim, confidence, quote_ids, and exact_quote fields to judge whether every material report statement and conclusion is logically supported without extrapolation. Reject any statement that appears to come from model training, memory, general background knowledge, assumption, or opinion rather than the validated artifacts. This is a semantic judgment; do not compare canonical quote text with artifacts."
       conflict_handling = "Use the included conflict-resolution JSON to judge whether all resolved and unresolved conflicts are represented faithfully without hiding residual uncertainty."
-      citation_semantics = "For citations that mechanically pass, decide whether the cited exact quote actually supports the surrounding report claim. Do not reopen artifacts unless the mechanical audit itself reports an unreadable or unmatched quote."
+      citation_semantics = "For citations that mechanically pass, decide whether the cited exact quote actually supports the surrounding report claim. Do not reopen artifacts to compare canonical quote text."
       provenance_guard = "Reject a report that includes a 信源限制说明 or equivalent training-data/knowledge-cutoff/paywall/quota disclaimer, or that uses such limitations as a reason to introduce uncited model opinion. Require unsupported conclusions to be removed or explicitly marked as insufficient evidence."
     }
     model_provider   = model_provider.qc
     reasoning_effort = var.reasoning_effort
-    max_qc_rounds    = 10
     disallowed_tools = ["bash", "powershell", "edit", "task", "ask_user", "web_search", "web_fetch"]
     permission       = "approve_all"
     tool_ids          = [external_tool.audit_synthesis.id]

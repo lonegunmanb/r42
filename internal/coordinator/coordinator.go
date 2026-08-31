@@ -54,6 +54,8 @@ type Event struct {
 	Action           Action
 	Decision         string
 	CollectionRounds int
+	Round            int
+	IsRevision       bool
 }
 
 type Runner struct {
@@ -85,9 +87,25 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 	var finalQCIssues []corespec.Issue
 	var collectionState []collection.ActiveInformationNeedState
 	finalRounds := 0
+	revisionRounds := 0
 
 	for {
-		emit(config.Observe, Event{Phase: r.state.Phase(), Action: ActionStarted, CollectionRounds: r.state.CollectionRoundsUsed()})
+		phase := r.state.Phase()
+		event := Event{Phase: phase, Action: ActionStarted, CollectionRounds: r.state.CollectionRoundsUsed()}
+		switch phase {
+		case workflow.PhaseCollection, workflow.PhaseCollectionQC:
+			event.Round = r.state.CollectionRoundsUsed()
+		case workflow.PhaseResearch:
+			if len(finalQCIssues) > 0 {
+				revisionRounds++
+				event.Round = revisionRounds
+				event.IsRevision = true
+			}
+		case workflow.PhaseFinalQC:
+			finalRounds++
+			event.Round = finalRounds
+		}
+		emit(config.Observe, event)
 		switch r.state.Phase() {
 		case workflow.PhaseCollection:
 			collectionConfig := config.Collection
@@ -115,6 +133,7 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 			emit(config.Observe, Event{
 				Phase: workflow.PhaseCollectionQC, Action: ActionDecision,
 				Decision: collectionQCDecision(result), CollectionRounds: r.state.CollectionRoundsUsed(),
+				Round: r.state.CollectionRoundsUsed(),
 			})
 			if !result.CollectionLimitExhausted && r.state.Phase() == workflow.PhaseCollection {
 				continue
@@ -142,7 +161,6 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 				return researchruntime.Result{}, err
 			}
 		case workflow.PhaseFinalQC:
-			finalRounds++
 			config.FinalQC.OpenIssues = append([]corespec.Issue(nil), finalQCIssues...)
 			verdict, err := r.finalQC.Review(ctx, config.FinalQC, candidate)
 			if err != nil {
@@ -151,6 +169,7 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 			emit(config.Observe, Event{
 				Phase: workflow.PhaseFinalQC, Action: ActionDecision,
 				Decision: string(verdict.Decision), CollectionRounds: r.state.CollectionRoundsUsed(),
+				Round: finalRounds,
 			})
 			if verdict.Decision == qc.DecisionPass {
 				if err = r.state.Advance(workflow.EventPass); err != nil {

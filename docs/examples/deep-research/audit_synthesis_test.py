@@ -6,22 +6,6 @@ from pathlib import Path
 import audit_synthesis
 
 
-class MatchQuoteTests(unittest.TestCase):
-    def test_match_modes_and_boundaries(self):
-        cases = [
-            ("exact", "alpha beta", "alpha beta", "exact"),
-            ("line endings", "alpha\nbeta", "alpha\r\nbeta", "line_ending_equivalent"),
-            ("paragraph whitespace", "alpha beta", "alpha\n  beta", "whitespace_equivalent"),
-            ("unicode nfc", "caf\u00e9", "cafe\u0301", "unicode_equivalent"),
-            ("paragraph boundary", "alpha beta", "alpha\n\nbeta", "not_found"),
-            ("meaningful punctuation", "10-20", "10\u201320", "not_found"),
-        ]
-
-        for name, quote, artifact, expected in cases:
-            with self.subTest(name=name):
-                self.assertEqual(expected, audit_synthesis.match_quote(quote, artifact))
-
-
 class AuditTests(unittest.TestCase):
     def test_audit_accepts_builtin_uuid_artifact_id(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -41,6 +25,12 @@ class AuditTests(unittest.TestCase):
     def test_audit_accepts_typed_tool_validated_artifact_id(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = self._write_fixture(Path(directory))
+            knowledge_path = Path(paths["knowledge_paths"][0])
+            knowledge = json.loads(knowledge_path.read_text(encoding="utf-8"))
+            knowledge["quotes"][0]["exact_quote"] = (
+                "No artifact text comparison is needed."
+            )
+            knowledge_path.write_text(json.dumps(knowledge), encoding="utf-8")
 
             result = self._audit(paths)
 
@@ -57,6 +47,22 @@ class AuditTests(unittest.TestCase):
                 full_audit["matches"][0]["match_mode"],
             )
             self.assertEqual("topic-quote-001", full_audit["matches"][0]["quote_id"])
+
+    def test_audit_rejects_quote_without_trusted_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = self._write_fixture(Path(directory))
+            knowledge_path = Path(paths["knowledge_paths"][0])
+            knowledge = json.loads(knowledge_path.read_text(encoding="utf-8"))
+            del knowledge["quotes"][0]["quote_ref"]
+            knowledge_path.write_text(json.dumps(knowledge), encoding="utf-8")
+
+            result = self._audit(paths)
+
+            self.assertFalse(result["pass"])
+            self.assertIn(
+                "invalid_quote_ref",
+                {issue["code"] for issue in result["issues"]},
+            )
 
     def test_audit_reports_invented_unused_and_wrong_url_references(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -90,6 +96,7 @@ class AuditTests(unittest.TestCase):
             knowledge["quotes"].append(
                 {
                     "id": "topic-quote-002",
+                    "quote_ref": "quote-ref-22222222222222222222222222222222",
                     "source_title": "Unused example",
                     "url": "https://example.com/unused",
                     "artifact_id": knowledge["quotes"][0]["artifact_id"],
@@ -174,6 +181,7 @@ class AuditTests(unittest.TestCase):
                     "quotes": [
                         {
                             "id": "topic-quote-001",
+                            "quote_ref": "quote-ref-11111111111111111111111111111111",
                             "source_title": "Example",
                             "url": "https://example.com/source",
                             "artifact_id": "artifact-11111111111111111111111111111111",

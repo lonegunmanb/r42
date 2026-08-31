@@ -169,5 +169,5 @@ research "static" "downstream" {
 	require.NoError(t, config.RunPlan())
 	value := config.EvalContext().Variables["research"].GetAttr("static").GetAttr("downstream")
 	assert.False(t, value.GetAttr("phase_mode").IsKnown())
-	assert.Equal(t, researchspec.FinalQCStrictnessStrict, value.GetAttr("final_qc_strictness").AsString())
+	assert.Equal(t, researchspec.FinalQCStrictnessBalanced, value.GetAttr("final_qc_strictness").AsString())
 }

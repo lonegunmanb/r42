@@ -967,8 +967,9 @@ func evidenceToolsWithArtifactRegistry(
 	artifactsRegistry *artifactpkg.Registry,
 	artifactIDs []string,
 	additionalIDs func() []string,
+	quoteRegistries ...*evidence.QuoteRegistry,
 ) ([]sdk.Tool, error) {
-	return evidenceToolsWithAccess(workspace, artifacts, write, artifactsRegistry, artifactIDs, additionalIDs)
+	return evidenceToolsWithAccess(workspace, artifacts, write, artifactsRegistry, artifactIDs, additionalIDs, quoteRegistries...)
 }
 
 func evidenceToolsWithDynamicArtifacts(
@@ -978,8 +979,9 @@ func evidenceToolsWithDynamicArtifacts(
 	registry *artifactpkg.Registry,
 	artifactIDs []string,
 	additionalIDs func() []string,
+	quoteRegistries ...*evidence.QuoteRegistry,
 ) ([]sdk.Tool, error) {
-	return evidenceToolsWithAccess(workspace, artifacts, write, registry, artifactIDs, additionalIDs)
+	return evidenceToolsWithAccess(workspace, artifacts, write, registry, artifactIDs, additionalIDs, quoteRegistries...)
 }
 
 func evidenceToolsWithAccess(
@@ -989,9 +991,14 @@ func evidenceToolsWithAccess(
 	artifactsRegistry *artifactpkg.Registry,
 	artifactIDs []string,
 	additionalIDs func() []string,
+	quoteRegistries ...*evidence.QuoteRegistry,
 ) ([]sdk.Tool, error) {
 	if artifactsRegistry == nil {
 		return nil, errors.New("artifact registry is required")
+	}
+	quoteRegistry := evidence.NewQuoteRegistry()
+	if len(quoteRegistries) > 0 && quoteRegistries[0] != nil {
+		quoteRegistry = quoteRegistries[0]
 	}
 	writer, err := evidence.NewMarkdownWriter(workspace)
 	if err != nil {
@@ -1108,7 +1115,7 @@ func evidenceToolsWithAccess(
 			},
 		},
 		{
-			Name: "r42_search_artifact", Description: "Search an authorized evidence artifact by ID using a Go RE2 regular expression. Search uses Unicode-whitespace-normalized text and returns reusable exact matched_text plus bounded context.",
+			Name: "r42_search_artifact", Description: "Search an authorized evidence artifact by ID using a Go RE2 regular expression. Each match returns a trusted quote_ref that can be submitted directly or expanded with r42_capture_quote; do not copy matched text into terminal tools.",
 			Parameters: objectSchema(map[string]any{
 				"artifact_id":    map[string]any{"type": "string", "description": "Authorized evidence artifact ID; filesystem paths are not accepted"},
 				"pattern":        map[string]any{"type": "string", "description": "Go RE2 regular expression applied after Unicode whitespace normalization"},
@@ -1139,6 +1146,13 @@ func evidenceToolsWithAccess(
 				result, searchErr := access.Search(args.ArtifactID, args.Pattern, args.CaseSensitive, args.MaxMatches, args.ContextLines)
 				if searchErr != nil {
 					return rejectedToolResult("artifact_search_failed", searchErr.Error())
+				}
+				for index := range result.Matches {
+					captured, captureErr := quoteRegistry.CaptureMatch(artifactsRegistry, args.ArtifactID, result.Matches[index])
+					if captureErr != nil {
+						return rejectedToolResult("artifact_search_failed", captureErr.Error())
+					}
+					result.Matches[index].QuoteRef = captured.Ref
 				}
 				return acceptedToolResult(result)
 			},
@@ -1174,12 +1188,46 @@ func evidenceToolsWithAccess(
 				if searchErr != nil {
 					return rejectedToolResult("artifact_search_failed", searchErr.Error())
 				}
+				for index := range result.Matches {
+					match := &result.Matches[index]
+					captured, captureErr := quoteRegistry.CaptureMatch(artifactsRegistry, match.ArtifactID, match.ArtifactSearchMatch)
+					if captureErr != nil {
+						return rejectedToolResult("artifact_search_failed", captureErr.Error())
+					}
+					match.QuoteRef = captured.Ref
+				}
 				authorizedArtifactsMu.Lock()
 				for _, id := range discovered {
 					authorizedArtifacts[id] = struct{}{}
 				}
 				authorizedArtifactsMu.Unlock()
 				return acceptedToolResult(result)
+			},
+		},
+		{
+			Name: "r42_capture_quote", Description: "Expand a trusted quote_ref returned by r42_search_artifact or r42_search_artifacts to include bounded surrounding lines. Returns a new quote_ref and canonical quote fields; terminal tools only need the quote_ref.",
+			Parameters: objectSchema(map[string]any{
+				"quote_ref":    map[string]any{"type": "string", "description": "Trusted quote reference returned by an r42 artifact search tool"},
+				"before_lines": map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 0},
+				"after_lines":  map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 0},
+			}, []string{"quote_ref"}),
+			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+				args, decodeErr := decodeArguments[quoteCaptureArgs](invocation.Arguments)
+				if decodeErr != nil {
+					return rejectedToolResult("invalid_arguments", decodeErr.Error())
+				}
+				base, ok := quoteRegistry.Resolve(args.QuoteRef)
+				if !ok {
+					return rejectedToolResult("unknown_quote_ref", fmt.Sprintf("unknown quote_ref %q", args.QuoteRef))
+				}
+				if !isAuthorizedArtifact(base.ArtifactID) {
+					return rejectedToolResult("foreign_quote_ref", "quote_ref is not authorized for this research task")
+				}
+				captured, captureErr := quoteRegistry.Expand(artifactsRegistry, args.QuoteRef, args.BeforeLines, args.AfterLines)
+				if captureErr != nil {
+					return rejectedToolResult("quote_capture_failed", captureErr.Error())
+				}
+				return acceptedToolResult(captured)
 			},
 		},
 		{
@@ -1429,9 +1477,100 @@ func bindResearchToolUses(
 	artifactsRegistry *artifactpkg.Registry,
 	workspace, terminalToolName string,
 	terminal *researchruntime.TerminalRecorder,
+	quoteRegistries ...*evidence.QuoteRegistry,
 ) ([]sdk.Tool, error) {
 	guarded := enforceArtifactIDReferences(tools, access, workspace, terminalToolName, terminal)
+	if len(quoteRegistries) > 0 && quoteRegistries[0] != nil {
+		guarded = bindQuoteReferences(guarded, terminalToolName, terminal, quoteRegistries[0])
+	}
 	return applyToolUseBindings(guarded, toolUses, artifactsRegistry)
+}
+
+func bindQuoteReferences(
+	tools []sdk.Tool,
+	terminalToolName string,
+	terminal *researchruntime.TerminalRecorder,
+	quotes *evidence.QuoteRegistry,
+) []sdk.Tool {
+	result := slices.Clone(tools)
+	for index := range result {
+		result[index].Parameters = projectTrustedQuoteSchema(result[index].Parameters)
+		original := result[index].Handler
+		toolName := result[index].Name
+		result[index].Handler = func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			unknown := resolveQuoteReferences(invocation.Arguments, quotes)
+			if len(unknown) > 0 {
+				return rejectedArtifactReferenceResult(toolName, terminalToolName, terminal, "unknown_quote_ref", "unknown quote_ref values: "+strings.Join(unknown, ", "))
+			}
+			return original(invocation)
+		}
+	}
+	return result
+}
+
+func projectTrustedQuoteSchema(schema map[string]any) map[string]any {
+	result := maps.Clone(schema)
+	properties, ok := result["properties"].(map[string]any)
+	if !ok {
+		return result
+	}
+	properties = maps.Clone(properties)
+	_, quoteObject := properties["quote_ref"]
+	for name, property := range properties {
+		if nested, ok := property.(map[string]any); ok {
+			if items, hasItems := nested["items"].(map[string]any); hasItems {
+				nested = maps.Clone(nested)
+				nested["items"] = projectTrustedQuoteSchema(items)
+				properties[name] = nested
+			} else if _, hasProperties := nested["properties"]; hasProperties {
+				properties[name] = projectTrustedQuoteSchema(nested)
+			}
+		}
+	}
+	if quoteObject {
+		for _, field := range trustedQuoteFields {
+			delete(properties, field)
+		}
+	}
+	result["properties"] = properties
+	if required, ok := result["required"].([]string); ok && quoteObject {
+		result["required"] = slices.DeleteFunc(slices.Clone(required), func(field string) bool {
+			return slices.Contains(trustedQuoteFields, field)
+		})
+	}
+	return result
+}
+
+var trustedQuoteFields = []string{"artifact_id", "artifact_digest", "source_title", "source", "url", "source_url", "locator", "exact_quote"}
+
+func resolveQuoteReferences(value any, quotes *evidence.QuoteRegistry) (unknown []string) {
+	switch typed := value.(type) {
+	case map[string]any:
+		if ref, ok := typed["quote_ref"].(string); ok && strings.TrimSpace(ref) != "" {
+			record, exists := quotes.Resolve(ref)
+			if !exists {
+				unknown = append(unknown, ref)
+			} else {
+				typed["quote_ref"] = record.Ref
+				typed["artifact_id"] = record.ArtifactID
+				typed["artifact_digest"] = record.ArtifactDigest
+				typed["source_title"] = record.SourceTitle
+				typed["url"] = record.URL
+				typed["locator"] = record.Locator
+				typed["exact_quote"] = record.ExactQuote
+			}
+		}
+		for _, nested := range typed {
+			nestedUnknown := resolveQuoteReferences(nested, quotes)
+			unknown = append(unknown, nestedUnknown...)
+		}
+	case []any:
+		for _, nested := range typed {
+			nestedUnknown := resolveQuoteReferences(nested, quotes)
+			unknown = append(unknown, nestedUnknown...)
+		}
+	}
+	return unknown
 }
 
 func rejectedArtifactReferenceResult(
@@ -1472,8 +1611,9 @@ func invalidArtifactSources(arguments any, access *evidence.ArtifactEvidenceAcce
 func collectArtifactSources(value any, result *[]artifactSourceReference) {
 	switch typed := value.(type) {
 	case map[string]any:
+		trusted := hasTrustedQuoteRef(typed)
 		id, hasID := typed["artifact_id"].(string)
-		if hasID && strings.TrimSpace(id) != "" {
+		if !trusted && hasID && strings.TrimSpace(id) != "" {
 			for _, field := range []string{"source", "url", "source_url"} {
 				if source, ok := typed[field].(string); ok && strings.TrimSpace(source) != "" {
 					*result = append(*result, artifactSourceReference{id: id, source: source})
@@ -1535,9 +1675,10 @@ func collectArtifactQuotes(value any, result *[]artifactQuoteReference) {
 func collectArtifactQuotesAt(value any, path, recordIDLabel string, result *[]artifactQuoteReference) {
 	switch typed := value.(type) {
 	case map[string]any:
+		trusted := hasTrustedQuoteRef(typed)
 		id, hasID := typed["artifact_id"].(string)
 		quote, hasQuote := typed["exact_quote"].(string)
-		if hasID && hasQuote && strings.TrimSpace(id) != "" && strings.TrimSpace(quote) != "" {
+		if !trusted && hasID && hasQuote && strings.TrimSpace(id) != "" && strings.TrimSpace(quote) != "" {
 			recordID, _ := typed["id"].(string)
 			field := "exact_quote"
 			if path != "" {
@@ -1569,6 +1710,11 @@ func appendJSONPath(path, field string) string {
 		return field
 	}
 	return path + "." + field
+}
+
+func hasTrustedQuoteRef(value map[string]any) bool {
+	ref, ok := value["quote_ref"].(string)
+	return ok && strings.TrimSpace(ref) != ""
 }
 
 func nearbyArtifactText(access *evidence.ArtifactEvidenceAccess, reference artifactQuoteReference) string {
@@ -1747,9 +1893,13 @@ func materializeArtifactPathList(value any, registry *artifactpkg.Registry) ([]a
 func collectArtifactIDs(value any, result map[string]struct{}) {
 	switch typed := value.(type) {
 	case map[string]any:
+		trustedQuote := hasTrustedQuoteRef(typed)
 		for key, nested := range typed {
 			switch key {
 			case "artifact_id":
+				if trustedQuote {
+					continue
+				}
 				if id, ok := nested.(string); ok && strings.TrimSpace(id) != "" {
 					result[id] = struct{}{}
 				}
@@ -1829,6 +1979,11 @@ type artifactSearchArgs struct {
 	CaseSensitive bool   `json:"case_sensitive"`
 	MaxMatches    int    `json:"max_matches"`
 	ContextLines  int    `json:"context_lines"`
+}
+type quoteCaptureArgs struct {
+	QuoteRef    string `json:"quote_ref"`
+	BeforeLines int    `json:"before_lines"`
+	AfterLines  int    `json:"after_lines"`
 }
 type artifactReadArgs struct {
 	ID          string `json:"id"`

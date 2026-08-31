@@ -299,7 +299,7 @@ func (f *runtimeFactory) newResearchBlock(
 	}
 	collectionTools = wrapCollectionAcquisitionTools(collectionTools, collectionContext)
 	collectionArtifactTools, err := evidenceToolsWithArtifactRegistry(
-		workspace, planned.Config.Artifacts, true, artifactsRegistry, currentArtifactIDs, collectionContext.EvidenceArtifactIDs,
+		workspace, planned.Config.Artifacts, true, artifactsRegistry, currentArtifactIDs, collectionContext.EvidenceArtifactIDs, f.ensureQuoteRegistry(),
 	)
 	if err != nil {
 		return cleanupSetup(err)
@@ -339,7 +339,7 @@ func (f *runtimeFactory) newResearchBlock(
 
 	// Collection QC is always present and has fixed read-only capabilities.
 	collectionQCReadTools, err := evidenceToolsWithArtifactRegistry(
-		workspace, planned.Config.Artifacts, false, artifactsRegistry, currentArtifactIDs, collectionContext.EvidenceArtifactIDs,
+		workspace, planned.Config.Artifacts, false, artifactsRegistry, currentArtifactIDs, collectionContext.EvidenceArtifactIDs, f.ensureQuoteRegistry(),
 	)
 	if err != nil {
 		return cleanupSetup(err)
@@ -377,7 +377,7 @@ func (f *runtimeFactory) newResearchBlock(
 		return cleanupSetup(err)
 	}
 	readWriteTools, err := evidenceToolsWithDynamicArtifacts(
-		workspace, planned.Config.Artifacts, true, artifactsRegistry, researchArtifactIDs, collectionContext.EvidenceArtifactIDs,
+		workspace, planned.Config.Artifacts, true, artifactsRegistry, researchArtifactIDs, collectionContext.EvidenceArtifactIDs, f.ensureQuoteRegistry(),
 	)
 	if err != nil {
 		return cleanupSetup(err)
@@ -389,7 +389,7 @@ func (f *runtimeFactory) newResearchBlock(
 	researchTools, err = bindResearchToolUses(researchTools, planned.Config.ToolUses, func() (*evidence.ArtifactEvidenceAccess, error) {
 		ids := append(slices.Clone(researchArtifactIDs), collectionContext.EvidenceArtifactIDs()...)
 		return evidence.NewArtifactEvidenceAccess(artifactsRegistry, ids)
-	}, artifactsRegistry, workspace, terminateName, terminal)
+	}, artifactsRegistry, workspace, terminateName, terminal, f.ensureQuoteRegistry())
 	if err != nil {
 		return cleanupSetup(err)
 	}
@@ -467,10 +467,14 @@ func (f *runtimeFactory) newResearchBlock(
 			Workspace:           workspace, Artifacts: planned.Config.Artifacts, ArtifactIDs: artifactIDs,
 		},
 		Observe: func(event coordinator.Event) {
+			session := workflowSessionKind(event.Phase)
+			if event.IsRevision {
+				session = debuglog.SessionRevision
+			}
 			_ = f.recorder.Record(debuglog.Event{
 				Kind: debuglog.EventLifecycle, Action: "workflow.phase", Status: debuglog.StatusStarted,
-				BlockAddress: executionAddress, BlockType: "research", Session: workflowSessionKind(event.Phase),
-				Count: event.CollectionRounds, Content: event.Decision,
+				BlockAddress: executionAddress, BlockType: "research", Session: session,
+				Count: event.CollectionRounds, Round: event.Round, Content: event.Decision,
 			})
 		},
 	}
@@ -493,7 +497,7 @@ func (f *runtimeFactory) newResearchBlock(
 			return cleanupSetup(toolsErr)
 		}
 		finalEvidenceTools, toolsErr := evidenceToolsWithDynamicArtifacts(
-			workspace, planned.Config.Artifacts, false, artifactsRegistry, researchArtifactIDs, collectionContext.EvidenceArtifactIDs,
+			workspace, planned.Config.Artifacts, false, artifactsRegistry, researchArtifactIDs, collectionContext.EvidenceArtifactIDs, f.ensureQuoteRegistry(),
 		)
 		if toolsErr != nil {
 			return cleanupSetup(toolsErr)
@@ -588,7 +592,7 @@ func (f *runtimeFactory) newCollectionOnlyBlock(
 	terminateName := pointerValue(planned.Config.TerminateToolID)
 	tools, err = bindResearchToolUses(tools, planned.Config.ToolUses, func() (*evidence.ArtifactEvidenceAccess, error) {
 		return evidence.NewArtifactEvidenceAccess(artifactsRegistry, authorizedArtifacts)
-	}, artifactsRegistry, workspace, terminateName, terminal)
+	}, artifactsRegistry, workspace, terminateName, terminal, f.ensureQuoteRegistry())
 	if err != nil {
 		return nil, err
 	}
@@ -598,7 +602,7 @@ func (f *runtimeFactory) newCollectionOnlyBlock(
 	}
 	tools = retainCollectionToolResults(tools, artifactsRegistry, collectionToolNames)
 	artifactTools, err := evidenceToolsWithDynamicArtifacts(
-		workspace, planned.Config.Artifacts, true, artifactsRegistry, authorizedArtifacts, nil,
+		workspace, planned.Config.Artifacts, true, artifactsRegistry, authorizedArtifacts, nil, f.ensureQuoteRegistry(),
 	)
 	if err != nil {
 		return nil, err
@@ -698,7 +702,7 @@ func (f *runtimeFactory) newResearchOnlyBlock(
 		return nil, err
 	}
 	readWriteTools, err := evidenceToolsWithDynamicArtifacts(
-		workspace, planned.Config.Artifacts, true, artifactsRegistry, researchArtifactIDs, nil,
+		workspace, planned.Config.Artifacts, true, artifactsRegistry, researchArtifactIDs, nil, f.ensureQuoteRegistry(),
 	)
 	if err != nil {
 		return nil, err
@@ -709,7 +713,7 @@ func (f *runtimeFactory) newResearchOnlyBlock(
 	}
 	researchTools, err = bindResearchToolUses(researchTools, planned.Config.ToolUses, func() (*evidence.ArtifactEvidenceAccess, error) {
 		return evidence.NewArtifactEvidenceAccess(artifactsRegistry, researchArtifactIDs)
-	}, artifactsRegistry, workspace, terminateName, terminal)
+	}, artifactsRegistry, workspace, terminateName, terminal, f.ensureQuoteRegistry())
 	if err != nil {
 		return nil, err
 	}
@@ -775,7 +779,7 @@ func (f *runtimeFactory) newResearchOnlyBlock(
 		return cleanupSetup(err)
 	}
 	finalEvidenceTools, err := evidenceToolsWithDynamicArtifacts(
-		workspace, planned.Config.Artifacts, false, artifactsRegistry, researchArtifactIDs, nil,
+		workspace, planned.Config.Artifacts, false, artifactsRegistry, researchArtifactIDs, nil, f.ensureQuoteRegistry(),
 	)
 	if err != nil {
 		return cleanupSetup(err)
@@ -825,7 +829,7 @@ func initialResearchPrompt(prompt *string) string {
 
 func finalQCSystemPrompt(strictness string) string {
 	if strictness == "" {
-		strictness = researchspec.FinalQCStrictnessStrict
+		strictness = researchspec.DefaultFinalQCStrictness
 	}
 	levelGuidance := map[string]string{
 		researchspec.FinalQCStrictnessStrict:   "Strictness=\"strict\": source facts must remain materially consistent with their evidence or snapshot, and analysis or mixed claims must be strictly derivable from cited facts without unsupported inferential jumps.",

@@ -55,17 +55,14 @@ func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 		t.Parallel()
 		program, compileErr := compiler.Compile(t.Context(), goToolSource(t, "submit_knowledge"))
 		require.NoError(t, compileErr)
-		artifactPath := filepath.Join(current, "task", "knowledge.json")
+		artifactPath := filepath.Join(foreign, "task", "knowledge.json")
 
 		response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
 			"_r42_artifact_path": artifactPath,
+			"quote_id_prefix":    "task-quote-",
 			"subquestion":        "What happened?",
 			"knowledge": []any{map[string]any{
-				"id": "kb-1", "claim": "A claim", "confidence": "high", "quote_ids": []string{"quote-1"},
-			}},
-			"quotes": []any{map[string]any{
-				"id": "quote-1", "source_title": "Source", "url": "https://example.com/source",
-				"artifact_id": "invalid", "locator": "paragraph 1", "exact_quote": "quoted text",
+				"id": "kb-1", "claim": "A claim", "confidence": "high", "citations": []any{trustedCitation("quote-ref-1")},
 			}},
 		}), current)
 
@@ -108,13 +105,10 @@ func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
 
 		response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
 			"_r42_artifact_path": linkedArtifact,
+			"quote_id_prefix":    "task-quote-",
 			"subquestion":        "What happened?",
 			"knowledge": []any{map[string]any{
-				"id": "kb-1", "claim": "A claim", "confidence": "high", "quote_ids": []string{"quote-1"},
-			}},
-			"quotes": []any{map[string]any{
-				"id": "quote-1", "source_title": "Source", "url": "https://example.com/source",
-				"artifact_id": "artifact-33333333333333333333333333333333", "locator": "paragraph 1", "exact_quote": "quoted text",
+				"id": "kb-1", "claim": "A claim", "confidence": "high", "citations": []any{trustedCitation("quote-ref-1")},
 			}},
 		}), current)
 
@@ -140,13 +134,12 @@ func TestSubmitKnowledgeAcceptsBuiltinUUIDArtifactID(t *testing.T) {
 
 	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
 		"_r42_artifact_path": artifactPath,
+		"quote_id_prefix":    "task-quote-",
 		"subquestion":        "What happened?",
 		"knowledge": []any{map[string]any{
-			"id": "kb-1", "claim": "A claim", "confidence": "high", "quote_ids": []string{"quote-1"},
-		}},
-		"quotes": []any{map[string]any{
-			"id": "quote-1", "source_title": "Source", "url": "https://example.com/source",
-			"artifact_id": "artifact-123e4567-e89b-12d3-a456-426614174000", "locator": "paragraph 1", "exact_quote": "quoted text",
+			"id": "kb-1", "claim": "A claim", "confidence": "high", "citations": []any{
+				trustedCitation("quote-ref-1"), trustedCitation("quote-ref-1"),
+			},
 		}},
 	}), workspace)
 
@@ -154,7 +147,32 @@ func TestSubmitKnowledgeAcceptsBuiltinUUIDArtifactID(t *testing.T) {
 	assert.True(t, response.Accepted, "issues: %#v", response.Issues)
 	require.NotNil(t, response.Output)
 	assert.NotContains(t, string(*response.Output), artifactPath)
+	var payload struct {
+		Knowledge []struct {
+			QuoteIDs []string `json:"quote_ids"`
+		} `json:"knowledge"`
+		Quotes []struct {
+			ID       string `json:"id"`
+			QuoteRef string `json:"quote_ref"`
+		} `json:"quotes"`
+	}
+	var encoded string
+	require.NoError(t, json.Unmarshal([]byte(*response.Output), &encoded))
+	require.NoError(t, json.Unmarshal([]byte(encoded), &payload))
+	require.Len(t, payload.Knowledge, 1)
+	assert.Len(t, payload.Knowledge[0].QuoteIDs, 1)
+	require.Len(t, payload.Quotes, 1)
+	assert.Equal(t, "quote-ref-1", payload.Quotes[0].QuoteRef)
+	assert.Equal(t, payload.Quotes[0].ID, payload.Knowledge[0].QuoteIDs[0])
 	assert.FileExists(t, artifactPath)
+}
+
+func trustedCitation(ref string) map[string]any {
+	return map[string]any{
+		"quote_ref": ref, "source_title": "Source", "url": "https://example.com/source",
+		"artifact_id":     "artifact-123e4567-e89b-12d3-a456-426614174000",
+		"artifact_digest": "digest", "locator": "line 1", "exact_quote": "quoted text",
+	}
 }
 
 func TestTypedToolDescriptionsPublishAllowedValues(t *testing.T) {

@@ -3,7 +3,9 @@
 This example answers one topic through a planner-created research matrix. The
 caller normally supplies only `topic`; a static planner research workflow
 decomposes it into three task groups and submits the plan through a typed Go
-tool. An optional `research_plan = list(string)` can bypass that planner when
+tool. The planner runs directly in closed `research_only` mode, followed by
+Final QC; it has no Collection or Collection QC phase. An optional
+`research_plan = list(string)` can bypass that planner when
 the caller already has the subquestions: every supplied subquestion is sent to
 the parallel dynamic group, while the two serial groups remain empty.
 
@@ -119,17 +121,23 @@ subquestions, and vague instructions. Its accepted JSON becomes
 `research.static.plan["default"].result`, which the three dynamic blocks decode
 with HCL `for` expressions when no caller-supplied plan is present.
 
-Every deep-dive task must call `submit_knowledge`. The typed tool validates
-unique knowledge and quote IDs, bidirectional claim-to-quote references, valid
-source URLs, registered artifact IDs, and confidence
-values before writing `knowledge.json` under that task's workspace. Before
+Every deep-dive task must call `submit_knowledge`. During closed Research,
+`r42_search_artifact` and `r42_search_artifacts` return trusted `quote_ref`
+values; `r42_capture_quote` can expand one of those references to surrounding
+lines without making the model copy text. Each knowledge claim submits only
+the chosen `quote_ref` values. The host injects canonical artifact, source,
+locator, digest, and exact-quote fields before the typed tool runs. The tool
+validates unique knowledge IDs and confidence values, derives quote IDs and
+the quote list from citations, and deduplicates repeated references before
+writing `knowledge.json` under that task's workspace. There is no separately
+submitted quote list, so unused quote records cannot be created. Before
 submitting knowledge, Collection must retain the complete fetched material
 under the task's declared source artifact directory and obtain its registered
 `artifact_id` through the active capture flow described above. Collection QC
 reviews those registered artifacts. R42 supplies the approved IDs to closed
-Research, which can inspect them through
-`r42_read_artifact`; submitted quotes retain `artifact_id` rather than filesystem
-paths. Final QC reviews semantic support; failed QC returns a Research revision
+Research, which can inspect them through the artifact read and search tools;
+submitted quotes retain `quote_ref` and canonical `artifact_id` rather than
+filesystem paths. Final QC reviews semantic support; failed QC returns a Research revision
 up to `max_qc_rounds`. Final QC cannot reopen Collection.
 
 Each materialized deep-dive task has its own fetch entry in `tool_call_quota`.
@@ -144,11 +152,9 @@ groups, records resolved and unresolved contradictions in `resolution.json`,
 and has its own QC loop. The final synthesizer reads every knowledge artifact
 and the resolution, then writes `report.md` with source and quote references.
 Its QC calls `audit_synthesis` once per round for bounded mechanical checks:
-invented or unused quote IDs, source-table URL mappings, artifact existence,
-and quote text presence. Text matching first tries the original bytes, then
-line-ending equivalence, paragraph-preserving whitespace equivalence, and
-Unicode NFC equivalence. These modes never fold case, punctuation, numbers,
-hyphens, or paragraph boundaries. The complete audit is written beside the
+invented or unused quote IDs, trusted quote references, source-table URL
+mappings, and artifact IDs. Quote text is not compared again because canonical
+text came from the host quote registry. The complete audit is written beside the
 report as `synthesis-audit.json`; only compact statistics and issues enter the
 model context. The QC model remains responsible for semantic support,
 unsupported extrapolation, plan coverage, and faithful conflict handling.
@@ -159,9 +165,10 @@ own `result` and `artifacts` values in the parent block's `tasks` list, so
 downstream HCL can iterate over structured results without inventing extra DAG
 addresses.
 
-Research and Collection use `model_provider.primary`, while Collection QC and
-Final QC use `model_provider.qc`. Their complete configurations come from the
-`model_provider` and `qc_model_provider` object variables. The example uses
+Planner Research and deep-dive Research/Collection use `model_provider.primary`,
+while deep-dive Collection QC and all Final QC sessions use `model_provider.qc`.
+Their complete configurations come from the `model_provider` and
+`qc_model_provider` object variables. The example uses
 inline Go typed tools and either Copilot's built-in web tools or the optional
 copied PPLX module. Apply still requires an installed Copilot CLI, while BYOK
 means the selected provider does not require a GitHub Copilot subscription.

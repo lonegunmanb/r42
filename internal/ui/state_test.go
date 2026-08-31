@@ -263,6 +263,44 @@ func TestProjectorTracksFactoryFailuresAndRevisionPhase(t *testing.T) {
 	assert.Equal(t, debuglog.SessionRevision, projector.Snapshot().MustNode("research.static.market").Phase)
 }
 
+func TestProjectorTracksWorkflowRoundInNodeAndTimeline(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{
+		{Address: "research.static.market", Kind: "research"},
+	}, nil, nil, nil)
+	require.NoError(t, err)
+	projector := ui.NewProjector(planned)
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "workflow.phase", Status: debuglog.StatusStarted,
+		BlockAddress: "research.static.market", Session: debuglog.SessionCollection, Round: 2,
+	})
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "workflow.phase", Status: debuglog.StatusStarted,
+		BlockAddress: "research.static.market", Session: debuglog.SessionResearch,
+	})
+	assert.Zero(t, projector.Snapshot().MustNode("research.static.market").Round)
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "workflow.phase", Status: debuglog.StatusStarted,
+		BlockAddress: "research.static.market", Session: debuglog.SessionFinalQC, Round: 2,
+	})
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "workflow.phase", Status: debuglog.StatusStarted,
+		BlockAddress: "research.static.market", Session: debuglog.SessionRevision, Round: 1,
+	})
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "workflow.phase", Status: debuglog.StatusStarted,
+		BlockAddress: "research.static.market", Session: debuglog.SessionRevision, Round: 1,
+		Content: "revise_research",
+	})
+
+	snapshot := projector.Snapshot()
+	node := snapshot.MustNode("research.static.market")
+	assert.Equal(t, 1, node.Round)
+	require.Len(t, snapshot.Timeline, 1)
+	assert.Equal(t, 1, snapshot.Timeline[0].Round)
+}
+
 func TestRenderDAGSanitizesPlanAddresses(t *testing.T) {
 	t.Parallel()
 

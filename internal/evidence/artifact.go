@@ -1,6 +1,7 @@
 package evidence
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -110,6 +111,7 @@ func SearchArtifact(registry *artifactpkg.Registry, id, pattern string, caseSens
 		return ArtifactSearchResult{}, err
 	}
 	normalized, lineStarts := normalizeWhitespaceWithLines(string(content))
+	digest := fmt.Sprintf("%x", sha256.Sum256(content))
 	expression := pattern
 	if !caseSensitive {
 		expression = "(?i:" + pattern + ")"
@@ -135,8 +137,14 @@ func SearchArtifact(registry *artifactpkg.Registry, id, pattern string, caseSens
 	for _, index := range indices {
 		lineIndex := sort.Search(len(lineStarts), func(i int) bool { return lineStarts[i].normalizedByte > index[0] }) - 1
 		line := lineStarts[lineIndex].sourceLine
+		endLineIndex := sort.Search(len(lineStarts), func(i int) bool { return lineStarts[i].normalizedByte >= index[1] }) - 1
+		endLine := lineStarts[max(0, endLineIndex)].sourceLine
 		start, end := normalizedLineRange(lineStarts, max(1, line-contextLines), line+contextLines, len(normalized))
-		matches = append(matches, ArtifactSearchMatch{Line: line, MatchedText: normalized[index[0]:index[1]], Excerpt: boundedArtifactExcerpt(normalized[start:end], index[0]-start, index[1]-start)})
+		matches = append(matches, ArtifactSearchMatch{
+			Line: line, EndLine: endLine, MatchedText: normalized[index[0]:index[1]],
+			Excerpt:        boundedArtifactExcerpt(normalized[start:end], index[0]-start, index[1]-start),
+			artifactDigest: digest, normalizedStart: index[0], normalizedEnd: index[1],
+		})
 	}
 	return ArtifactSearchResult{Matches: matches, Truncated: truncated}, nil
 }

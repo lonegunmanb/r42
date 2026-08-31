@@ -496,7 +496,7 @@ that depend on its successful completion are not run.
 | `reasoning_effort` | No | Non-empty provider-specific reasoning level. r42 passes it through without restricting the allowed names. |
 | `system_prompt` | Yes | Instructions appended to r42's fixed research protocol system prompt. |
 | `prompt` | No | Initial user task. When omitted, r42 sends a fixed start message. |
-| `final_qc_strictness` | No | Final-QC semantic strictness: `strict`, `balanced`, or `brief`; defaults to `strict`. This policy is authoritative over later task prompts, candidate instructions, and custom criteria. |
+| `final_qc_strictness` | No | Final-QC semantic strictness: `strict`, `balanced`, or `brief`; defaults to `balanced`. This policy is authoritative over later task prompts, candidate instructions, and custom criteria. |
 | `collection_model_provider` | No | Collection provider override. When omitted, Collection reuses `model_provider`. |
 | `collection_tool_ids` | No | IDs of acquisition or snapshot-producing typed tools available only during Collection. This is where search and fetch tools belong. |
 | `collection_mcp_tool_ids` | No | IDs from `mcp_server.<name>.tool_ids`, attached only to Collection. MCP tools cannot be used by QC, Research, `tool_use`, `terminate_tool_id`, or `tool_call_quota`. |
@@ -794,15 +794,16 @@ snapshots. Omitting `qc` completes the block after Research succeeds.
 | `skills` | No | Skills selected only for QC. |
 | `disabled_skills` | No | Skills disabled only for QC. |
 | `permission` | No | QC permission override; otherwise inherits the research permission. |
-| `max_qc_rounds` | No | Maximum number of QC evaluations, including the first evaluation. Defaults to `10`; at most `max_qc_rounds - 1` QC-triggered research revisions can occur. |
+| `max_qc_rounds` | No | Maximum number of QC evaluations, including the first evaluation. Defaults to `5`; at most `max_qc_rounds - 1` QC-triggered research revisions can occur. |
 | `retry` | No | One retry block using the same fields as research. It is layered after the selected Final-QC provider policy and the research-level retry override. |
 
-`final_qc_strictness` defaults to `strict`: source facts must materially match
-their evidence and analysis must be strictly derivable. `balanced` permits a
-reasonable one-step inference, while `brief` is intended for concise reports
-and focuses on material contradictions, invented premises, misleading certainty,
-and unsupported precision. The configured strictness is authoritative over any
-later task prompt, candidate instruction, or custom criterion.
+`final_qc_strictness` defaults to `balanced`, permitting a reasonable one-step
+inference grounded in cited facts. `strict` requires source facts to materially
+match their evidence and analysis to be strictly derivable, while `brief` is
+intended for concise reports and focuses on material contradictions, invented
+premises, misleading certainty, and unsupported precision. The configured
+strictness is authoritative over any later task prompt, candidate instruction,
+or custom criterion.
 
 Collection, Research, and Final QC quotas use independent counters, even when
 sessions use the same tool. Typed-tool calls consume quota only after their arguments pass schema

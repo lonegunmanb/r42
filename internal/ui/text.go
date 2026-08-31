@@ -86,11 +86,15 @@ func (r *TextRenderer) Observe(event debuglog.Event) {
 		phase = "research"
 	}
 	if event.Action == "workflow.phase" {
+		round := event.Round
+		if round == 0 {
+			round = event.Count
+		}
 		decision := ""
 		if event.Content != "" {
 			decision = " decision=" + terminalText(event.Content)
 		}
-		_, _ = fmt.Fprintf(r.writer, "%s[%s] PHASE round=%d%s\n", prefix, phase, event.Count, decision)
+		_, _ = fmt.Fprintf(r.writer, "%s[%s] PHASE round=%d%s\n", prefix, phase, round, decision)
 		return
 	}
 	switch event.Action {

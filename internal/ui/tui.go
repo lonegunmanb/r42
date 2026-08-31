@@ -549,11 +549,15 @@ func (m TUIModel) detailContent() string {
 	if phase == "" {
 		phase = "not started"
 	}
+	phaseLine := "Phase: " + phase
+	if node.Round > 0 {
+		phaseLine += fmt.Sprintf(" (round=%d)", node.Round)
+	}
 	lines := []string{
 		"Address: " + terminalText(node.Address),
 		"Kind: " + terminalText(node.Kind),
 		"Status: " + string(node.Status),
-		"Phase: " + phase,
+		phaseLine,
 		"Activity: " + string(node.Activity),
 		fmt.Sprintf("Tokens: %d (input=%d output=%d reasoning=%d cache_read=%d cache_write=%d)",
 			node.Usage.TotalTokens(), node.Usage.InputTokens, node.Usage.OutputTokens,
@@ -591,6 +595,9 @@ func (m TUIModel) timelineContent() string {
 			phase = "run"
 		}
 		line := fmt.Sprintf("[%s] %s", phase, strings.ToUpper(string(entry.Activity)))
+		if entry.Round > 0 {
+			line += fmt.Sprintf(" round=%d", entry.Round)
+		}
 		if entry.ToolName != "" {
 			line += " " + entry.ToolName
 		}

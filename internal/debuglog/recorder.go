@@ -67,6 +67,7 @@ type Event struct {
 	Dependencies []string        `json:"dependencies,omitempty"`
 	SourceRange  string          `json:"source_range,omitempty"`
 	Count        int             `json:"count,omitempty"`
+	Round        int             `json:"round,omitempty"`
 	Bytes        int             `json:"bytes,omitempty"`
 	DurationMS   *int64          `json:"duration_ms,omitempty"`
 	Error        string          `json:"error,omitempty"`

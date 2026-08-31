@@ -244,15 +244,22 @@ research "static" "balanced" {
   system_prompt = "prompt"
   final_qc_strictness = "balanced"
 }
+research "static" "strict" {
+  model = "model"
+  system_prompt = "prompt"
+  final_qc_strictness = "strict"
+}
 `)
 	require.NoError(t, config.RunPlan())
 	blocks := golden.Blocks[*researchspec.ResearchBlock](config)
 	for _, block := range blocks {
 		switch block.Name() {
 		case "default":
-			assert.Equal(t, researchspec.FinalQCStrictnessStrict, block.ResearchConfig().FinalQCStrictness)
+			assert.Equal(t, researchspec.FinalQCStrictnessBalanced, block.ResearchConfig().FinalQCStrictness)
 		case "balanced":
 			assert.Equal(t, researchspec.FinalQCStrictnessBalanced, block.ResearchConfig().FinalQCStrictness)
+		case "strict":
+			assert.Equal(t, researchspec.FinalQCStrictnessStrict, block.ResearchConfig().FinalQCStrictness)
 		}
 	}
 }
