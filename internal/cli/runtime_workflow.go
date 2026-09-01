@@ -503,12 +503,24 @@ func (f *runtimeFactory) newResearchBlock(
 			return cleanupSetup(toolsErr)
 		}
 		finalTools = append(finalTools, finalEvidenceTools...)
+		finalTools = append(finalTools, qcExpandQuoteTool(
+			artifactsRegistry,
+			f.ensureQuoteRegistry(),
+			func(id string) bool {
+				roots := append(slices.Clone(researchArtifactIDs), collectionContext.EvidenceArtifactIDs()...)
+				return artifactIDAuthorized(artifactsRegistry, roots, id)
+			},
+		))
 		finalTools = append(finalTools, qcVerdictTool(executionAddress, f.recorder, finalVerdicts))
 		finalSession, openErr := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionFinalQC, copilot.SessionConfig{
 			Provider: finalQCProvider,
 			Retry:    effectiveFinalQC.Retry, Model: effectiveFinalQC.Model, Profile: effectiveFinalQC.Profile,
-			ReasoningEffort:  pointerValue(effectiveFinalQC.ReasoningEffort),
-			SystemPrompt:     appendBuiltInToolCallQuotaPrompt(finalQCSystemPrompt(planned.Config.FinalQCStrictness), finalBuiltInQuota),
+			ReasoningEffort: pointerValue(effectiveFinalQC.ReasoningEffort),
+			SystemPrompt: appendBuiltInToolCallQuotaPrompt(
+				finalQCSystemPrompt(planned.Config.FinalQCStrictness)+
+					" If a cited quote's surrounding context is insufficient to decide a semantic issue, call r42_qc_expand_quote once for that quote; it expands exactly one line before and after and returns a new submit-ready quote_ref for review. This read-only tool does not modify the candidate, so do not claim that it updated the submitted artifact.",
+				finalBuiltInQuota,
+			),
 			WorkingDirectory: workspace, Tools: finalTools,
 			AvailableTools: closedWorldAllowedTools(effectiveFinalQC.AllowedTools, toolNames(finalTools)),
 			ExcludedTools: finalQCDisallowedTools(
@@ -786,11 +798,22 @@ func (f *runtimeFactory) newResearchOnlyBlock(
 	}
 	finalVerdicts := qc.NewVerdictRecorder()
 	finalTools = append(finalTools, finalEvidenceTools...)
+	finalTools = append(finalTools, qcExpandQuoteTool(
+		artifactsRegistry,
+		f.ensureQuoteRegistry(),
+		func(id string) bool {
+			return artifactIDAuthorized(artifactsRegistry, researchArtifactIDs, id)
+		},
+	))
 	finalTools = append(finalTools, qcVerdictTool(executionAddress, f.recorder, finalVerdicts))
 	finalSession, err := f.openRecordedWorkflowSession(ctx, executionAddress, debuglog.SessionFinalQC, copilot.SessionConfig{
 		Provider: finalQCProvider, Retry: effectiveFinalQC.Retry, Model: effectiveFinalQC.Model, Profile: effectiveFinalQC.Profile,
-		ReasoningEffort:  pointerValue(effectiveFinalQC.ReasoningEffort),
-		SystemPrompt:     appendBuiltInToolCallQuotaPrompt(finalQCSystemPrompt(planned.Config.FinalQCStrictness), finalBuiltInQuota),
+		ReasoningEffort: pointerValue(effectiveFinalQC.ReasoningEffort),
+		SystemPrompt: appendBuiltInToolCallQuotaPrompt(
+			finalQCSystemPrompt(planned.Config.FinalQCStrictness)+
+				" If a cited quote's surrounding context is insufficient to decide a semantic issue, call r42_qc_expand_quote once for that quote; it expands exactly one line before and after and returns a new submit-ready quote_ref for review. This read-only tool does not modify the candidate, so do not claim that it updated the submitted artifact.",
+			finalBuiltInQuota,
+		),
 		WorkingDirectory: workspace, Tools: finalTools,
 		AvailableTools: closedWorldAllowedTools(effectiveFinalQC.AllowedTools, toolNames(finalTools)),
 		ExcludedTools: finalQCDisallowedTools(

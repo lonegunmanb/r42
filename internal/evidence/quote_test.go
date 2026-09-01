@@ -27,6 +27,7 @@ func TestQuoteRegistryCapturesAndExpandsSearchMatch(t *testing.T) {
 
 	captured, err := quotes.CaptureMatch(artifacts, registered.ID, result.Matches[0])
 	require.NoError(t, err)
+	assert.True(t, captured.SubmitReady)
 	again, err := quotes.CaptureMatch(artifacts, registered.ID, result.Matches[0])
 	require.NoError(t, err)
 	assert.Equal(t, captured.Ref, again.Ref)
@@ -45,6 +46,26 @@ func TestQuoteRegistryCapturesAndExpandsSearchMatch(t *testing.T) {
 	clamped, err := quotes.Expand(artifacts, captured.Ref, 0, 20)
 	require.NoError(t, err)
 	assert.Equal(t, "lines 4-5", clamped.Locator)
+}
+
+func TestQuoteRegistryCaptureMatchWithContextCreatesSubmitReadyCandidate(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "source.md")
+	require.NoError(t, os.WriteFile(path, []byte("first\nsecond target\nthird\nfourth\n"), 0o600))
+	artifacts := artifactpkg.NewRegistry()
+	registered, _, err := artifacts.RegisterEvidence(workspace, path, "", "Source title")
+	require.NoError(t, err)
+	result, err := SearchArtifact(artifacts, registered.ID, "target", true, 1, 1)
+	require.NoError(t, err)
+	quotes := NewQuoteRegistry()
+
+	captured, err := quotes.CaptureMatchWithContext(artifacts, registered.ID, result.Matches[0], 1, 1)
+	require.NoError(t, err)
+	assert.True(t, captured.SubmitReady)
+	assert.Equal(t, "first second target third", captured.ExactQuote)
+	assert.Equal(t, "lines 1-3", captured.Locator)
 }
 
 func TestQuoteRegistryRejectsExpansionAfterArtifactChangesButKeepsCapturedRecord(t *testing.T) {

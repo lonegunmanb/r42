@@ -1148,11 +1148,18 @@ func evidenceToolsWithAccess(
 					return rejectedToolResult("artifact_search_failed", searchErr.Error())
 				}
 				for index := range result.Matches {
-					captured, captureErr := quoteRegistry.CaptureMatch(artifactsRegistry, args.ArtifactID, result.Matches[index])
+					captured, captureErr := quoteRegistry.CaptureMatchWithContext(
+						artifactsRegistry,
+						args.ArtifactID,
+						result.Matches[index],
+						args.ContextLines,
+						args.ContextLines,
+					)
 					if captureErr != nil {
 						return rejectedToolResult("artifact_search_failed", captureErr.Error())
 					}
 					result.Matches[index].QuoteRef = captured.Ref
+					result.Matches[index].SubmitReady = captured.SubmitReady
 				}
 				return acceptedToolResult(result)
 			},
@@ -1190,11 +1197,18 @@ func evidenceToolsWithAccess(
 				}
 				for index := range result.Matches {
 					match := &result.Matches[index]
-					captured, captureErr := quoteRegistry.CaptureMatch(artifactsRegistry, match.ArtifactID, match.ArtifactSearchMatch)
+					captured, captureErr := quoteRegistry.CaptureMatchWithContext(
+						artifactsRegistry,
+						match.ArtifactID,
+						match.ArtifactSearchMatch,
+						args.ContextLines,
+						args.ContextLines,
+					)
 					if captureErr != nil {
 						return rejectedToolResult("artifact_search_failed", captureErr.Error())
 					}
 					match.QuoteRef = captured.Ref
+					match.SubmitReady = captured.SubmitReady
 				}
 				authorizedArtifactsMu.Lock()
 				for _, id := range discovered {
@@ -1205,7 +1219,7 @@ func evidenceToolsWithAccess(
 			},
 		},
 		{
-			Name: "r42_capture_quote", Description: "Expand a trusted quote_ref returned by r42_search_artifact or r42_search_artifacts to include bounded surrounding lines. Returns a new quote_ref and canonical quote fields; terminal tools only need the quote_ref.",
+			Name: "r42_capture_quote", Description: "Expand a trusted quote_ref returned by r42_search_artifact or r42_search_artifacts to include bounded surrounding lines. Returns a new submit-ready quote_ref and canonical quote fields; terminal tools only need the quote_ref.",
 			Parameters: objectSchema(map[string]any{
 				"quote_ref":    map[string]any{"type": "string", "description": "Trusted quote reference returned by an r42 artifact search tool"},
 				"before_lines": map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 0},
@@ -1541,7 +1555,75 @@ func projectTrustedQuoteSchema(schema map[string]any) map[string]any {
 	return result
 }
 
-var trustedQuoteFields = []string{"artifact_id", "artifact_digest", "source_title", "source", "url", "source_url", "locator", "exact_quote"}
+var trustedQuoteFields = []string{"artifact_id", "artifact_digest", "source_title", "source", "url", "source_url", "locator", "exact_quote", "submit_ready"}
+
+type qcQuoteExpansion struct {
+	BaseQuoteRef string `json:"base_quote_ref"`
+	evidence.QuoteRecord
+	BeforeLines int `json:"before_lines"`
+	AfterLines  int `json:"after_lines"`
+}
+
+func qcExpandQuoteTool(
+	artifactsRegistry *artifactpkg.Registry,
+	quotes *evidence.QuoteRegistry,
+	isAuthorizedArtifact func(string) bool,
+) sdk.Tool {
+	return sdk.Tool{
+		Name:        "r42_qc_expand_quote",
+		Description: "Expand one trusted quote_ref by exactly one line before and after it for semantic QC review. Returns a new submit-ready quote_ref; this tool is read-only and does not modify the candidate artifact.",
+		Parameters: objectSchema(map[string]any{
+			"quote_ref": map[string]any{"type": "string", "description": "Trusted quote_ref from the candidate or an artifact search result"},
+		}, []string{"quote_ref"}),
+		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			args, decodeErr := decodeArguments[struct {
+				QuoteRef string `json:"quote_ref"`
+			}](invocation.Arguments)
+			if decodeErr != nil {
+				return rejectedToolResult("invalid_arguments", decodeErr.Error())
+			}
+			base, ok := quotes.Resolve(args.QuoteRef)
+			if !ok {
+				return rejectedToolResult("unknown_quote_ref", fmt.Sprintf("unknown quote_ref %q", args.QuoteRef))
+			}
+			if !isAuthorizedArtifact(base.ArtifactID) {
+				return rejectedToolResult("foreign_quote_ref", "quote_ref is not authorized for this QC task")
+			}
+			expanded, expandErr := quotes.Expand(artifactsRegistry, base.Ref, 1, 1)
+			if expandErr != nil {
+				return rejectedToolResult("quote_capture_failed", expandErr.Error())
+			}
+			return acceptedToolResult(qcQuoteExpansion{
+				BaseQuoteRef: base.Ref,
+				QuoteRecord:  expanded,
+				BeforeLines:  1,
+				AfterLines:   1,
+			})
+		},
+	}
+}
+
+func artifactIDAuthorized(registry *artifactpkg.Registry, roots []string, id string) bool {
+	if slices.Contains(roots, id) {
+		return true
+	}
+	for _, rootID := range roots {
+		record, err := registry.Record(rootID)
+		if err != nil || record.Type != researchspec.ArtifactTypeDirectory {
+			continue
+		}
+		children, err := registry.ListDirectoryFiles(rootID)
+		if err != nil {
+			continue
+		}
+		if slices.ContainsFunc(children, func(child artifactpkg.Record) bool {
+			return child.ID == id
+		}) {
+			return true
+		}
+	}
+	return false
+}
 
 func resolveQuoteReferences(value any, quotes *evidence.QuoteRegistry) (unknown []string) {
 	switch typed := value.(type) {
@@ -1571,6 +1653,116 @@ func resolveQuoteReferences(value any, quotes *evidence.QuoteRegistry) (unknown 
 		}
 	}
 	return unknown
+}
+
+// materializeQuoteReferences replaces values at analyzer-recorded Quote paths
+// with canonical JSON quote objects. The wire type remains string so the model
+// submits only an opaque quote_ref while the typed tool receives one field.
+func materializeQuoteReferences(value any, paths [][]string, quotes *evidence.QuoteRegistry) ([]string, error) {
+	unknown := make([]string, 0)
+	for _, path := range paths {
+		updated, pathUnknown, err := materializeQuoteAt(value, path, quotes)
+		if err != nil {
+			return nil, err
+		}
+		if updated != nil {
+			if root, ok := updated.(map[string]any); ok {
+				value = root
+			}
+		}
+		unknown = append(unknown, pathUnknown...)
+	}
+	return unknown, nil
+}
+
+func materializeQuoteAt(value any, path []string, quotes *evidence.QuoteRegistry) (any, []string, error) {
+	if len(path) == 0 {
+		raw, ok := value.(string)
+		if !ok {
+			return value, nil, fmt.Errorf("quote value must be a string, got %T", value)
+		}
+		resolved, unknown, err := materializeQuoteString(raw, quotes)
+		if err != nil {
+			return value, nil, err
+		}
+		return resolved, unknown, nil
+	}
+
+	switch path[0] {
+	case "[]":
+		items, ok := value.([]any)
+		if !ok {
+			return value, nil, fmt.Errorf("quote list value must be an array, got %T", value)
+		}
+		unknown := make([]string, 0)
+		for index, item := range items {
+			updated, itemUnknown, err := materializeQuoteAt(item, path[1:], quotes)
+			if err != nil {
+				return value, nil, err
+			}
+			items[index] = updated
+			unknown = append(unknown, itemUnknown...)
+		}
+		return items, unknown, nil
+	case "*":
+		object, ok := value.(map[string]any)
+		if !ok {
+			return value, nil, fmt.Errorf("quote map value must be an object, got %T", value)
+		}
+		unknown := make([]string, 0)
+		for key, item := range object {
+			updated, itemUnknown, err := materializeQuoteAt(item, path[1:], quotes)
+			if err != nil {
+				return value, nil, err
+			}
+			object[key] = updated
+			unknown = append(unknown, itemUnknown...)
+		}
+		return object, unknown, nil
+	default:
+		object, ok := value.(map[string]any)
+		if !ok {
+			return value, nil, fmt.Errorf("quote parent value must be an object, got %T", value)
+		}
+		child, exists := object[path[0]]
+		if !exists {
+			return value, nil, fmt.Errorf("missing Quote field %q", path[0])
+		}
+		updated, unknown, err := materializeQuoteAt(child, path[1:], quotes)
+		if err != nil {
+			return value, nil, err
+		}
+		object[path[0]] = updated
+		return object, unknown, nil
+	}
+}
+
+func materializeQuoteString(raw string, quotes *evidence.QuoteRegistry) (string, []string, error) {
+	trimmed := strings.TrimSpace(raw)
+	ref := trimmed
+	if strings.HasPrefix(trimmed, "{") {
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+			return raw, nil, fmt.Errorf("invalid resolved Quote JSON: %w", err)
+		}
+		if marker, ok := payload["_r42_quote"].(bool); !ok || !marker {
+			return raw, nil, errors.New("resolved Quote JSON is missing _r42_quote marker")
+		}
+		var ok bool
+		ref, ok = payload["quote_ref"].(string)
+		if !ok || strings.TrimSpace(ref) == "" {
+			return raw, nil, errors.New("resolved Quote JSON is missing quote_ref")
+		}
+	}
+	record, ok := quotes.Resolve(ref)
+	if !ok {
+		return raw, []string{ref}, nil
+	}
+	encoded, err := json.Marshal(record.CanonicalMap())
+	if err != nil {
+		return raw, nil, fmt.Errorf("encode resolved Quote: %w", err)
+	}
+	return string(encoded), nil, nil
 }
 
 func rejectedArtifactReferenceResult(

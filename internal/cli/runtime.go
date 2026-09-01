@@ -579,6 +579,25 @@ func (f *runtimeFactory) buildTools(
 						nil, marshalErr, isTerminal, terminal,
 					)
 				}
+				if len(analysis.QuotePaths) > 0 {
+					unknown, materializeErr := materializeQuoteReferences(invocation.Arguments, analysis.QuotePaths, f.ensureQuoteRegistry())
+					if materializeErr != nil {
+						return f.rejectedArguments(
+							blockAddress, sessionKind, definition.ID, definition.Address,
+							arguments, materializeErr, isTerminal, terminal,
+						)
+					}
+					if len(unknown) > 0 {
+						return rejectedArtifactReferenceResult(definition.ID, pointerValue(terminateToolID), terminal, "unknown_quote_ref", "unknown quote_ref values: "+strings.Join(unknown, ", "))
+					}
+					arguments, marshalErr = json.Marshal(invocation.Arguments)
+					if marshalErr != nil {
+						return f.rejectedArguments(
+							blockAddress, sessionKind, definition.ID, definition.Address,
+							nil, marshalErr, isTerminal, terminal,
+						)
+					}
+				}
 				value, decodeErr := ctyjson.Unmarshal(arguments, input.Type())
 				if decodeErr != nil {
 					return f.rejectedArguments(

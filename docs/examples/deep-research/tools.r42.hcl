@@ -121,21 +121,13 @@ go_tool "submit_knowledge" {
       "strings"
     )
 
-    type Citation struct {
-      QuoteRef       string `json:"quote_ref"`
-      SourceTitle    string `json:"source_title"`
-      URL            string `json:"url"`
-      ArtifactID     string `json:"artifact_id"`
-      ArtifactDigest string `json:"artifact_digest"`
-      Locator        string `json:"locator"`
-      ExactQuote     string `json:"exact_quote"`
-    }
+    type Quote string
 
     type KnowledgeInput struct {
       ID         string     `json:"id"`
       Claim      string     `json:"claim"`
       Confidence string     `json:"confidence"`
-      Citations  []Citation `json:"citations"`
+      Citations  []Quote    `json:"citations"`
     }
 
     type Input struct {
@@ -146,7 +138,7 @@ go_tool "submit_knowledge" {
       Knowledge     []KnowledgeInput `json:"knowledge"`
     }
 
-    type Quote struct {
+    type QuoteRecord struct {
       ID             string `json:"id"`
       QuoteRef       string `json:"quote_ref"`
       SourceTitle    string `json:"source_title"`
@@ -168,10 +160,21 @@ go_tool "submit_knowledge" {
       ArtifactID  string          `json:"artifact_id"`
       Subquestion string          `json:"subquestion"`
       Knowledge   []KnowledgeItem `json:"knowledge"`
-      Quotes      []Quote         `json:"quotes"`
+      Quotes      []QuoteRecord   `json:"quotes"`
     }
 
     type Output string
+
+    func decodeQuote(raw Quote) (QuoteRecord, error) {
+      var quote QuoteRecord
+      if err := json.Unmarshal([]byte(raw), &quote); err != nil {
+        return QuoteRecord{}, fmt.Errorf("decode resolved quote: %w", err)
+      }
+      if strings.TrimSpace(quote.QuoteRef) == "" || strings.TrimSpace(quote.ExactQuote) == "" {
+        return QuoteRecord{}, fmt.Errorf("resolved quote is missing quote_ref or exact_quote")
+      }
+      return quote, nil
+    }
 
     func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
       issues := validateKnowledge(input)
@@ -201,19 +204,20 @@ go_tool "submit_knowledge" {
         ArtifactID: input.ArtifactID,
         Subquestion: input.Subquestion,
         Knowledge: make([]KnowledgeItem, 0, len(input.Knowledge)),
-        Quotes: make([]Quote, 0),
+        Quotes: make([]QuoteRecord, 0),
       }
       quoteIDs := make(map[string]string)
       for _, item := range input.Knowledge {
         outputItem := KnowledgeItem{ID: item.ID, Claim: item.Claim, Confidence: item.Confidence, QuoteIDs: make([]string, 0, len(item.Citations))}
         seen := make(map[string]struct{}, len(item.Citations))
-        for _, citation := range item.Citations {
+        for _, rawQuote := range item.Citations {
+          citation, _ := decodeQuote(rawQuote)
           quoteID, exists := quoteIDs[citation.QuoteRef]
           if !exists {
             digest := sha256.Sum256([]byte(citation.QuoteRef))
             quoteID = fmt.Sprintf("%s%x", input.QuoteIDPrefix, digest[:16])
             quoteIDs[citation.QuoteRef] = quoteID
-            artifact.Quotes = append(artifact.Quotes, Quote{
+            artifact.Quotes = append(artifact.Quotes, QuoteRecord{
               ID: quoteID, QuoteRef: citation.QuoteRef,
               SourceTitle: citation.SourceTitle, URL: citation.URL,
               ArtifactID: citation.ArtifactID, ArtifactDigest: citation.ArtifactDigest,
@@ -267,10 +271,14 @@ go_tool "submit_knowledge" {
         if len(item.Citations) == 0 {
           issues = append(issues, newIssue("citations", path+".citations", "reference at least one trusted quote_ref"))
         }
-        for citationIndex, citation := range item.Citations {
+        for citationIndex, rawQuote := range item.Citations {
           citationPath := fmt.Sprintf("%s.citations[%d]", path, citationIndex)
-          if strings.TrimSpace(citation.QuoteRef) == "" {
-            issues = append(issues, newIssue("quote_ref", citationPath+".quote_ref", "must be returned by r42_search_artifact or r42_capture_quote"))
+          if strings.TrimSpace(string(rawQuote)) == "" {
+            issues = append(issues, newIssue("quote_ref", citationPath, "must be returned by r42_search_artifact or r42_capture_quote"))
+            continue
+          }
+          if _, err := decodeQuote(rawQuote); err != nil {
+            issues = append(issues, newIssue("quote_ref", citationPath, err.Error()))
           }
         }
       }

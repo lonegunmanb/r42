@@ -22,6 +22,7 @@ const (
 
 type ArtifactSearchMatch struct {
 	QuoteRef    string `json:"quote_ref,omitempty"`
+	SubmitReady bool   `json:"submit_ready,omitempty"`
 	Line        int    `json:"line"`
 	EndLine     int    `json:"end_line"`
 	MatchedText string `json:"matched_text"`

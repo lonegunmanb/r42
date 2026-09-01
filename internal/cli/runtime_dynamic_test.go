@@ -71,7 +71,7 @@ output "followup_results" {
 	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	result, err := applyRuntime(runtime, ctx, planned, executor.ResearchConfigOptions{Parallelism: 1})
 

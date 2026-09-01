@@ -48,6 +48,8 @@ research "static" "source" {
 	assert.Contains(t, toolNamesFromConfig(opener.configs[1]), "r42_collection_qc_verdict")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[1]), "r42_read_information_needs")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_verdict")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_expand_quote")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "r42_qc_expand_quote")
 	assert.NotContains(t, opener.configs[0].ExcludedTools, "powershell")
 	assert.Contains(t, opener.configs[0].ExcludedTools, "shell")
 	assert.NotContains(t, opener.configs[1].ExcludedTools, "web_fetch")

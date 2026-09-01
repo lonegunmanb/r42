@@ -36,6 +36,9 @@ type ToolResponse[T any] struct {
 type Analysis struct {
 	InputType  cty.Type
 	OutputType cty.Type
+	// QuotePaths identifies input fields whose defined Go type is Quote.
+	// Each path uses field names, [] for list/array elements, and * for map values.
+	QuotePaths [][]string
 }
 
 func Analyze(source string) (Analysis, error) {
@@ -86,16 +89,18 @@ func Analyze(source string) (Analysis, error) {
 		}
 	}
 
-	mapper := typeMapper{pkg: checked, visiting: make(map[types.Type]bool)}
-	inputType, err := mapper.mapType(input, "Input")
+	quotePaths := make([][]string, 0)
+	mapper := typeMapper{pkg: checked, visiting: make(map[types.Type]bool), quotePaths: &quotePaths}
+	inputType, err := mapper.mapType(input, "Input", nil)
 	if err != nil {
 		return Analysis{}, err
 	}
-	outputType, err := mapper.mapType(output, "Output")
+	outputMapper := typeMapper{pkg: checked, visiting: make(map[types.Type]bool)}
+	outputType, err := outputMapper.mapType(output, "Output", nil)
 	if err != nil {
 		return Analysis{}, err
 	}
-	return Analysis{InputType: inputType, OutputType: outputType}, nil
+	return Analysis{InputType: inputType, OutputType: outputType, QuotePaths: quotePaths}, nil
 }
 
 func containsPackageClause(source string) bool {
@@ -199,11 +204,12 @@ func validateInvoke(pkg *types.Package, input, output *types.Named) error {
 }
 
 type typeMapper struct {
-	pkg      *types.Package
-	visiting map[types.Type]bool
+	pkg        *types.Package
+	visiting   map[types.Type]bool
+	quotePaths *[][]string
 }
 
-func (m typeMapper) mapType(source types.Type, path string) (cty.Type, error) {
+func (m typeMapper) mapType(source types.Type, path string, jsonPath []string) (cty.Type, error) {
 	if m.visiting[source] {
 		return cty.NilType, fmt.Errorf("%s: recursive Go types are not supported", path)
 	}
@@ -217,6 +223,15 @@ func (m typeMapper) mapType(source types.Type, path string) (cty.Type, error) {
 		if err := rejectCustomWireMethods(named, path); err != nil {
 			return cty.NilType, err
 		}
+		if named.Obj().Name() == "Quote" {
+			basic, ok := named.Underlying().(*types.Basic)
+			if !ok || basic.Kind() != types.String {
+				return cty.NilType, fmt.Errorf("%s: Quote must have string underlying type", path)
+			}
+			if m.quotePaths != nil {
+				*m.quotePaths = append(*m.quotePaths, slices.Clone(jsonPath))
+			}
+		}
 		source = named.Underlying()
 	}
 
@@ -227,13 +242,13 @@ func (m typeMapper) mapType(source types.Type, path string) (cty.Type, error) {
 		if basic, ok := value.Elem().Underlying().(*types.Basic); ok && basic.Kind() == types.Byte {
 			return cty.NilType, fmt.Errorf("%s: []byte has JSON string semantics and is not supported", path)
 		}
-		element, err := m.mapType(value.Elem(), path+"[]")
+		element, err := m.mapType(value.Elem(), path+"[]", appendJSONPath(jsonPath, "[]"))
 		if err != nil {
 			return cty.NilType, err
 		}
 		return cty.List(element), nil
 	case *types.Array:
-		element, err := m.mapType(value.Elem(), path+"[]")
+		element, err := m.mapType(value.Elem(), path+"[]", appendJSONPath(jsonPath, "[]"))
 		if err != nil {
 			return cty.NilType, err
 		}
@@ -243,20 +258,20 @@ func (m typeMapper) mapType(source types.Type, path string) (cty.Type, error) {
 		}
 		return cty.Tuple(elements), nil
 	case *types.Map:
-		key, err := m.mapType(value.Key(), path+".<key>")
+		key, err := m.mapType(value.Key(), path+".<key>", appendJSONPath(jsonPath, "*"))
 		if err != nil {
 			return cty.NilType, err
 		}
 		if !key.Equals(cty.String) {
 			return cty.NilType, fmt.Errorf("%s: map keys must be strings", path)
 		}
-		element, err := m.mapType(value.Elem(), path+".*")
+		element, err := m.mapType(value.Elem(), path+".*", appendJSONPath(jsonPath, "*"))
 		if err != nil {
 			return cty.NilType, err
 		}
 		return cty.Map(element), nil
 	case *types.Struct:
-		return m.mapStruct(value, path)
+		return m.mapStruct(value, path, jsonPath)
 	default:
 		return cty.NilType, fmt.Errorf("%s: unsupported Go type %s", path, source.String())
 	}
@@ -295,7 +310,7 @@ func mapBasic(value *types.Basic, path string) (cty.Type, error) {
 	}
 }
 
-func (m typeMapper) mapStruct(value *types.Struct, path string) (cty.Type, error) {
+func (m typeMapper) mapStruct(value *types.Struct, path string, jsonPath []string) (cty.Type, error) {
 	attributes := make(map[string]cty.Type)
 	optional := make([]string, 0)
 	for index := range value.NumFields() {
@@ -318,7 +333,7 @@ func (m typeMapper) mapStruct(value *types.Struct, path string) (cty.Type, error
 		if _, exists := attributes[name]; exists {
 			return cty.NilType, fmt.Errorf("%s: duplicate JSON field %q", path, name)
 		}
-		mapped, err := m.mapType(fieldType, path+"."+name)
+		mapped, err := m.mapType(fieldType, path+"."+name, appendJSONPath(jsonPath, name))
 		if err != nil {
 			return cty.NilType, err
 		}
@@ -328,6 +343,12 @@ func (m typeMapper) mapStruct(value *types.Struct, path string) (cty.Type, error
 		}
 	}
 	return cty.ObjectWithOptionalAttrs(attributes, optional), nil
+}
+
+func appendJSONPath(path []string, segment string) []string {
+	result := make([]string, 0, len(path)+1)
+	result = append(result, path...)
+	return append(result, segment)
 }
 
 func jsonField(fallback, tag, path string) (string, bool, bool, error) {

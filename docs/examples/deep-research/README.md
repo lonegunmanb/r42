@@ -124,8 +124,12 @@ with HCL `for` expressions when no caller-supplied plan is present.
 Every deep-dive task must call `submit_knowledge`. During closed Research,
 `r42_search_artifact` and `r42_search_artifacts` return trusted `quote_ref`
 values; `r42_capture_quote` can expand one of those references to surrounding
-lines without making the model copy text. Each knowledge claim submits only
-the chosen `quote_ref` values. The host injects canonical artifact, source,
+lines without making the model copy text. Search results and expanded quotes
+are marked `submit_ready` and can be submitted directly. Each knowledge claim
+submits only the chosen `quote_ref` values. Final QC can call
+`r42_qc_expand_quote` to inspect exactly one additional line before and after a
+quote; this is read-only and does not modify the candidate artifact. The host
+injects canonical artifact, source,
 locator, digest, and exact-quote fields before the typed tool runs. The tool
 validates unique knowledge IDs and confidence values, derives quote IDs and
 the quote list from citations, and deduplicates repeated references before

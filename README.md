@@ -728,8 +728,8 @@ authorized directories, is enforced by every read operation.
 | `r42_list_artifacts` | Collection, Collection QC, Research, Final QC | List authorized artifacts and their IDs, paths, types, and descriptions. Call this when an ID is uncertain. |
 | `r42_list_artifact_files` | Collection, Collection QC, Research, Final QC | Enumerate regular files inside an authorized directory; use each returned child ID with a reader. |
 | `r42_read_artifact` | Collection, Collection QC, Research, Final QC | Read a bounded page by ID. Use `offset_bytes` and `next_offset_bytes` to continue when `truncated` is true. |
-| `r42_search_artifact` | Collection, Collection QC, Research, Final QC | Search one authorized artifact with a Go RE2 regular expression and return matched text plus context. |
-| `r42_search_artifacts` | Collection, Collection QC, Research, Final QC | Search all authorized readable artifacts, including imported artifacts and directory children; each match includes its artifact ID. |
+| `r42_search_artifact` | Collection, Collection QC, Research, Final QC | Search one authorized artifact with a Go RE2 regular expression and return matched text plus a submit-ready `quote_ref` covering the requested context. |
+| `r42_search_artifacts` | Collection, Collection QC, Research, Final QC | Search all authorized readable artifacts, including imported artifacts and directory children; each match includes its artifact ID and submit-ready `quote_ref`. |
 | `r42_read_artifact_json_schema` | Collection, Collection QC, Research, Final QC | Infer the JSON shape of one complete JSON artifact. |
 | `r42_query_artifact_json` | Collection, Collection QC, Research, Final QC | Run a read-only jq query such as `.claims[0].id` against a JSON artifact. |
 | `r42_write_markdown` | Collection and Research | Write content to a declared file artifact using `artifact_id`; it does not accept a path or artifact name. |
@@ -737,6 +737,7 @@ authorized directories, is enforced by every read operation.
 | `r42_register_artifact` | Collection | Register an existing workspace file or retained typed-tool result; optional `source` and `description` can supply missing metadata. Do not call it after `r42_save_artifact`. |
 | `r42_collection_checkpoint` | Collection | Submit newly registered evidence and one continue/stalled disposition for every active need to Collection QC. |
 | `r42_collection_qc_verdict` | Collection QC | Assess each active need as `sufficient` or `needs_more` with only remaining unsatisfied condition IDs. |
+| `r42_qc_expand_quote` | Final QC | Expand a trusted quote by exactly one line before and after for read-only semantic review; returns a new submit-ready `quote_ref`. |
 | `r42_qc_verdict` | Final QC, when configured | Return `pass` or `revise_research` with semantic QC issues. |
 
 Collection is the only open-world phase: it can acquire evidence through the

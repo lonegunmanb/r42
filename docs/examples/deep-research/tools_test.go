@@ -167,12 +167,8 @@ func TestSubmitKnowledgeAcceptsBuiltinUUIDArtifactID(t *testing.T) {
 	assert.FileExists(t, artifactPath)
 }
 
-func trustedCitation(ref string) map[string]any {
-	return map[string]any{
-		"quote_ref": ref, "source_title": "Source", "url": "https://example.com/source",
-		"artifact_id":     "artifact-123e4567-e89b-12d3-a456-426614174000",
-		"artifact_digest": "digest", "locator": "line 1", "exact_quote": "quoted text",
-	}
+func trustedCitation(ref string) string {
+	return `{"_r42_quote":true,"quote_ref":"` + ref + `","source_title":"Source","url":"https://example.com/source","artifact_id":"artifact-123e4567-e89b-12d3-a456-426614174000","artifact_digest":"digest","locator":"line 1","exact_quote":"quoted text"}`
 }
 
 func TestTypedToolDescriptionsPublishAllowedValues(t *testing.T) {

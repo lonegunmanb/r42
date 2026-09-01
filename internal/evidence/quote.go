@@ -16,6 +16,7 @@ const maxCapturedQuoteRunes = 12000
 // QuoteRecord is immutable evidence text captured by a host-provided tool.
 type QuoteRecord struct {
 	Ref            string `json:"quote_ref"`
+	SubmitReady    bool   `json:"submit_ready"`
 	ArtifactID     string `json:"artifact_id"`
 	ArtifactDigest string `json:"artifact_digest"`
 	SourceTitle    string `json:"source_title"`
@@ -27,6 +28,21 @@ type QuoteRecord struct {
 	endLine         int
 	normalizedStart int
 	normalizedEnd   int
+}
+
+// CanonicalMap returns the quote fields that may cross the typed-tool boundary.
+// Host-only state such as SubmitReady is intentionally excluded.
+func (r QuoteRecord) CanonicalMap() map[string]any {
+	return map[string]any{
+		"_r42_quote":      true,
+		"quote_ref":       r.Ref,
+		"artifact_id":     r.ArtifactID,
+		"artifact_digest": r.ArtifactDigest,
+		"source_title":    r.SourceTitle,
+		"url":             r.URL,
+		"locator":         r.Locator,
+		"exact_quote":     r.ExactQuote,
+	}
 }
 
 // QuoteRegistry owns trusted quote references for one apply run.
@@ -55,13 +71,32 @@ func (r *QuoteRegistry) CaptureMatch(registry *artifactpkg.Registry, artifactID 
 		return QuoteRecord{}, err
 	}
 	quote := QuoteRecord{
-		ArtifactID: artifactID, ArtifactDigest: match.artifactDigest,
+		SubmitReady: true,
+		ArtifactID:  artifactID, ArtifactDigest: match.artifactDigest,
 		SourceTitle: record.Description, URL: record.Source,
 		Locator: lineLocator(match.Line, match.EndLine), ExactQuote: match.MatchedText,
 		startLine: match.Line, endLine: match.EndLine,
 		normalizedStart: match.normalizedStart, normalizedEnd: match.normalizedEnd,
 	}
 	return r.store(quote), nil
+}
+
+// CaptureMatchWithContext stores a search match with bounded surrounding lines
+// as a submit-ready canonical quote.
+func (r *QuoteRegistry) CaptureMatchWithContext(
+	registry *artifactpkg.Registry,
+	artifactID string,
+	match ArtifactSearchMatch,
+	beforeLines, afterLines int,
+) (QuoteRecord, error) {
+	base, err := r.CaptureMatch(registry, artifactID, match)
+	if err != nil {
+		return QuoteRecord{}, err
+	}
+	if beforeLines == 0 && afterLines == 0 {
+		return base, nil
+	}
+	return r.Expand(registry, base.Ref, beforeLines, afterLines)
 }
 
 func (r *QuoteRegistry) Expand(registry *artifactpkg.Registry, ref string, beforeLines, afterLines int) (QuoteRecord, error) {
@@ -102,7 +137,8 @@ func (r *QuoteRegistry) Expand(registry *artifactpkg.Registry, ref string, befor
 		return QuoteRecord{}, fmt.Errorf("expanded quote exceeds maximum %d characters", maxCapturedQuoteRunes)
 	}
 	expanded := QuoteRecord{
-		ArtifactID: base.ArtifactID, ArtifactDigest: base.ArtifactDigest,
+		SubmitReady: true,
+		ArtifactID:  base.ArtifactID, ArtifactDigest: base.ArtifactDigest,
 		SourceTitle: base.SourceTitle, URL: base.URL,
 		Locator: lineLocator(startLine, endLine), ExactQuote: exact,
 		startLine: startLine, endLine: endLine, normalizedStart: start, normalizedEnd: end,

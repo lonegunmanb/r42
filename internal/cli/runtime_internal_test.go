@@ -14,8 +14,10 @@ import (
 	"time"
 
 	sdk "github.com/github/copilot-sdk/go"
+	artifactpkg "github.com/lonegunmanb/r42/internal/artifact"
 	"github.com/lonegunmanb/r42/internal/copilot"
 	"github.com/lonegunmanb/r42/internal/debuglog"
+	"github.com/lonegunmanb/r42/internal/evidence"
 	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/qc"
@@ -332,6 +334,69 @@ func TestTypedToolHandlerConsumesOnlySuccessfulCalls(t *testing.T) {
 
 	_, err = tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"Mode": "accept"}})
 	assert.ErrorContains(t, err, `tool "tool_lookup" per-session call quota exhausted (limit 1 successful calls)`)
+}
+
+func TestBuildToolsMaterializesQuoteBeforeInlineGoInvocation(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	artifactPath := filepath.Join(workspace, "source.md")
+	require.NoError(t, os.WriteFile(artifactPath, []byte("trusted evidence\n"), 0o600))
+	artifacts := artifactpkg.NewRegistry()
+	artifact, _, err := artifacts.RegisterEvidence(workspace, artifactPath, "https://example.test/source", "Source")
+	require.NoError(t, err)
+	search, err := evidence.SearchArtifact(artifacts, artifact.ID, "trusted evidence", true, 1, 0)
+	require.NoError(t, err)
+	require.Len(t, search.Matches, 1)
+	quotes := evidence.NewQuoteRegistry()
+	captured, err := quotes.CaptureMatch(artifacts, artifact.ID, search.Matches[0])
+	require.NoError(t, err)
+
+	const toolID = "tool_go_tool_quote_echo_12345678-1234-8234-9234-123456789abc"
+	recorder, err := debuglog.NewRecorder(t.TempDir(), false)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
+	factory := &runtimeFactory{
+		recorder:         recorder,
+		state:            new(runtimeState),
+		artifactRegistry: artifacts,
+		quoteRegistry:    quotes,
+		tools: map[string]plan.ToolSpec{toolID: {
+			ID: toolID, Address: "go_tool.quote_echo", Kind: "go", Description: "echo a trusted quote",
+			Source: `
+import "context"
+type Quote string
+type Input struct { Q Quote ` + "`json:\"q\"`" + ` }
+type Output string
+func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
+    output := Output(input.Q)
+    return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+}`,
+		}},
+	}
+	tools, _, err := factory.buildTools(
+		t.Context(), "research.static.quote", debuglog.SessionResearch, workspace,
+		[]string{toolID}, nil, nil, newToolCallQuota(nil),
+	)
+	require.NoError(t, err)
+	require.Len(t, tools, 1)
+
+	result, err := tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{"q": captured.Ref}})
+	require.NoError(t, err)
+	var response corespec.ToolResponse[string]
+	require.NoError(t, json.Unmarshal([]byte(result.TextResultForLLM), &response))
+	require.True(t, response.Accepted)
+	require.NotNil(t, response.Output)
+	var canonical map[string]any
+	require.NoError(t, json.Unmarshal([]byte(*response.Output), &canonical))
+	assert.Equal(t, true, canonical["_r42_quote"])
+	assert.Equal(t, captured.Ref, canonical["quote_ref"])
+	assert.Equal(t, captured.ExactQuote, canonical["exact_quote"])
+	assert.NotContains(t, canonical, "submit_ready")
+
+	unknown, err := tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{"q": "quote-ref-unknown"}})
+	require.NoError(t, err)
+	assert.Contains(t, unknown.TextResultForLLM, `"code":"unknown_quote_ref"`)
 }
 
 func TestStarlarkToolHandlerReturnsRepairableFailuresAndRecordsCalls(t *testing.T) {

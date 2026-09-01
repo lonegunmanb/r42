@@ -104,6 +104,30 @@ func TestAnalyzeMapsSupportedGoTypeFamilies(t *testing.T) {
 	assert.True(t, cty.List(cty.Map(cty.Number)).Equals(analysis.OutputType))
 }
 
+func TestAnalyzeTracksQuoteTypePaths(t *testing.T) {
+	t.Parallel()
+
+	analysis, err := Analyze(`
+import "context"
+type Quote string
+type Input struct {
+  Primary Quote ` + "`json:\"primary\"`" + `
+  Many []Quote ` + "`json:\"many\"`" + `
+  Nested struct {
+    Sources []Quote ` + "`json:\"sources\"`" + `
+  } ` + "`json:\"nested\"`" + `
+}
+type Output string
+func Invoke(_ context.Context, _ Input) (ToolResponse[Output], error) { return ToolResponse[Output]{}, nil }
+`)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, [][]string{
+		{"primary"},
+		{"many", "[]"},
+		{"nested", "sources", "[]"},
+	}, analysis.QuotePaths)
+}
+
 func readFixture(t *testing.T, name string) string {
 	t.Helper()
 	content, err := os.ReadFile(filepath.Join("testdata", name))
