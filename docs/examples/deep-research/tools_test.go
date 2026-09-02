@@ -43,6 +43,24 @@ func TestDeepDiveCollectionsCanUseCopiedPPLXTools(t *testing.T) {
 	assert.NotContains(t, main[planStart:planStart+planEnd], "\n  qc {")
 }
 
+func TestDeepResearchResearchSessionsUseExactCalculator(t *testing.T) {
+	t.Parallel()
+
+	configuration, err := os.ReadFile("main.r42.hcl")
+	require.NoError(t, err)
+	main := string(configuration)
+	assert.Contains(t, main, `starlark_tool "calculator"`)
+	assert.Contains(t, main, "max_steps   = 1000000")
+	assert.Contains(t, main, "timeout     = \"5s\"")
+	assert.Equal(t, 6, strings.Count(main, "tool_id = starlark_tool.calculator.id"))
+	assert.Equal(t, 3, strings.Count(main, "calculate = {"))
+	assert.Equal(t, 4, strings.Count(main, "tool_ids         = [starlark_tool.calculator.id]"))
+	assert.Contains(t, main, "tool_ids          = [starlark_tool.calculator.id, external_tool.audit_synthesis.id, go_tool.generate_source_table.id]")
+	assert.Contains(t, main, "(go_tool.generate_source_table.id) = 10")
+	assert.Equal(t, 5, strings.Count(main, "(starlark_tool.calculator.id) = 20"))
+	assert.Contains(t, main, "All exact or derived numerical work must be calculated by calling ${starlark_tool.calculator.id}")
+}
+
 func TestDeepResearchClosedSynthesisBlocksSkipCollection(t *testing.T) {
 	t.Parallel()
 

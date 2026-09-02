@@ -158,6 +158,9 @@ The conflict resolver reads all knowledge artifacts from all three dynamic
 groups, records resolved and unresolved contradictions in `resolution.json`,
 and has its own QC loop. The final synthesizer reads every knowledge artifact
 and the resolution, then writes `report.md` with source and quote references.
+Every Research session also has an isolated Starlark calculator; exact or
+derived numerical work must be performed through that tool and its returned
+result, rather than calculated mentally or in prose.
 The final Researcher explicitly calls the `generate_source_table` Go tool with
 the report artifact ID. The tool derives the complete Quote ID--URL table from
 cited quote IDs and canonical knowledge metadata, and replaces any existing

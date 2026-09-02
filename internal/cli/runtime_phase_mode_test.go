@@ -199,6 +199,8 @@ research "static" "juror" {
 	assert.Len(t, opener.research.prompts, 1)
 	assert.Equal(t, 1, opener.research.closeCalls)
 	assert.Equal(t, 1, opener.qc.closeCalls)
+	assert.Contains(t, toolNamesFromConfig(opener.qc.config), "r42_final_qc_calculator")
+	assert.Contains(t, opener.qc.config.SystemPrompt, "r42_final_qc_calculator")
 	assert.Zero(t, opener.collection.sendCalls)
 	assert.Zero(t, opener.collectionQC.sendCalls)
 	assert.Equal(t, []string{"research", "final_qc"}, workflowDebugSessionOpens(t, directory))

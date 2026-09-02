@@ -50,6 +50,16 @@ research "static" "source" {
 	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_verdict")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_expand_quote")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_open_issues")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_final_qc_calculator")
+	var calculator sdk.Tool
+	for _, tool := range opener.configs[3].Tools {
+		if tool.Name == "r42_final_qc_calculator" {
+			calculator = tool
+			break
+		}
+	}
+	assert.Contains(t, calculator.Description, "at most 20 accepted calls")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "r42_final_qc_calculator")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "r42_qc_expand_quote")
 	assert.NotContains(t, opener.configs[0].ExcludedTools, "powershell")
 	assert.Contains(t, opener.configs[0].ExcludedTools, "shell")
@@ -61,6 +71,10 @@ research "static" "source" {
 	assert.Contains(t, opener.configs[3].ExcludedTools, "shell")
 	assert.Contains(t, opener.configs[3].SystemPrompt, `Strictness="balanced"`)
 	assert.Contains(t, opener.configs[3].SystemPrompt, "Balanced provenance")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "Independently recalculate every material number")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "unit conversion")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "trace every dependent number")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "and conclusion that it may have affected")
 	assert.Equal(t, 1, opener.research.sendCalls)
 	assert.Equal(t, 1, opener.qc.sendCalls)
 	assert.Equal(t, 1, opener.collection.closeCalls)
@@ -254,6 +268,10 @@ research "static" "source" {
 	assert.Contains(t, opener.configs[3].SystemPrompt, "all independent issues")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "do not stop after the first issue")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "Repeat the full audit after every repair")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "Independently recalculate every material number")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "unit conversion")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "trace every dependent number")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "and conclusion that it may have affected")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "use r42_qc_patch_knowledge")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "provide exactly one patch per call")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "Never batch multiple changes")

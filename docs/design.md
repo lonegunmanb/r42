@@ -776,6 +776,13 @@ and data never become temporary source files; diagnostics use the virtual name
 no filesystem, environment, network, subprocess, clock, randomness, or mutable
 host object. Cancellation and timeout terminate the worker process tree.
 
+Final QC always has a numerical calculator available. If the QC configuration
+does not include a `starlark_tool`, r42 injects `r42_final_qc_calculator` with
+the bounded defaults above (1,000,000 steps, 5 seconds, 64 KiB source, 1 MiB
+input and result, 16 KiB stdout, and 128 MiB memory). If a QC configuration
+already provides a Starlark tool, that configured tool is reused instead of
+adding a second calculator.
+
 The execution environment predeclares:
 
 - `data`, the frozen value decoded from `data_json`;

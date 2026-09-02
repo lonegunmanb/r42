@@ -2,6 +2,12 @@ module "pplx_tools" {
   source = "./modules/pplx_tools"
 }
 
+starlark_tool "calculator" {
+  description = "Perform isolated, resource-bounded numerical calculations for deep research. Use this tool for every exact or derived numeric result."
+  max_steps   = 1000000
+  timeout     = "5s"
+}
+
 locals {
   supplied_research_tasks = [
     for index, question in coalesce(var.research_plan, []) : {
@@ -13,6 +19,8 @@ locals {
 
   deep_dive_system_prompt = <<-PROMPT
     ${var.system_prompt}
+
+    ${local.calculator_guidance}
 
     Search discipline is mandatory. Use search and source-reading tools
     selectively. After every search and after reading each source, pause and
@@ -63,6 +71,10 @@ locals {
   ])
 
   offline_disallowed_tools = ["web_search", "web_fetch"]
+
+  calculator_guidance = <<-PROMPT
+    All exact or derived numerical work must be calculated by calling ${starlark_tool.calculator.id}. Pass raw inputs through data_json and use result_json. Do not perform arithmetic, ratios, percentages, unit conversions, averages, ranges, interpolation, or other derived numerical calculations mentally or outside the calculator. If calculation is not needed, do not call it.
+  PROMPT
 }
 
 research "static" "plan" {
@@ -76,6 +88,8 @@ research "static" "plan" {
     You design evidence-oriented deep-research programs. Decompose one topic
     into a small set of orthogonal, falsifiable subquestions with minimal
     overlap and enough combined coverage to support a final answer.
+
+    ${local.calculator_guidance}
 
     Assign every task to exactly one execution group:
 
@@ -129,6 +143,19 @@ research "static" "plan" {
       topic = var.topic
     }
   }
+  tool_use "calculate" {
+    tool_id = starlark_tool.calculator.id
+    input_from_agent = {
+      code = {
+        desc    = "A Starlark program for exact or derived numerical calculations needed by the planning session."
+        sources = []
+      }
+      data_json = {
+        desc    = "A JSON string containing raw inputs for the Starlark calculation."
+        sources = []
+      }
+    }
+  }
   disallowed_tools  = local.offline_disallowed_tools
   permission        = "approve_all"
 
@@ -174,6 +201,19 @@ research "dynamic" "parallel_deep_dive" {
         or a JSON code block.
       PROMPT
       tool_use = {
+        calculate = {
+          tool_id = starlark_tool.calculator.id
+          input_from_agent = {
+            code = {
+              desc    = "A Starlark program for exact or derived numerical calculations in this research task."
+              sources = []
+            }
+            data_json = {
+              desc    = "A JSON string containing raw inputs for the Starlark calculation."
+              sources = []
+            }
+          }
+        }
         submit_knowledge = {
           tool_id   = go_tool.submit_knowledge.id
           terminate = true
@@ -216,6 +256,8 @@ research "dynamic" "parallel_deep_dive" {
         model_provider   = model_provider.qc
         reasoning_effort = var.reasoning_effort
         permission       = "approve_all"
+        tool_ids         = [starlark_tool.calculator.id]
+        tool_call_quota  = { (starlark_tool.calculator.id) = 20 }
       }
     }
   ]
@@ -264,6 +306,19 @@ research "dynamic" "independent_serial_deep_dive" {
         "${task.id}-kb-". Do not finish with prose or a JSON code block.
       PROMPT
       tool_use = {
+        calculate = {
+          tool_id = starlark_tool.calculator.id
+          input_from_agent = {
+            code = {
+              desc    = "A Starlark program for exact or derived numerical calculations in this research task."
+              sources = []
+            }
+            data_json = {
+              desc    = "A JSON string containing raw inputs for the Starlark calculation."
+              sources = []
+            }
+          }
+        }
         submit_knowledge = {
           tool_id   = go_tool.submit_knowledge.id
           terminate = true
@@ -306,6 +361,8 @@ research "dynamic" "independent_serial_deep_dive" {
         model_provider   = model_provider.qc
         reasoning_effort = var.reasoning_effort
         permission       = "approve_all"
+        tool_ids         = [starlark_tool.calculator.id]
+        tool_call_quota  = { (starlark_tool.calculator.id) = 20 }
       }
     }
   ]
@@ -381,6 +438,19 @@ research "dynamic" "final_serial_deep_dive" {
         "${task.id}-kb-". Do not finish with prose or a JSON code block.
       PROMPT
       tool_use = {
+        calculate = {
+          tool_id = starlark_tool.calculator.id
+          input_from_agent = {
+            code = {
+              desc    = "A Starlark program for exact or derived numerical calculations in this research task."
+              sources = []
+            }
+            data_json = {
+              desc    = "A JSON string containing raw inputs for the Starlark calculation."
+              sources = []
+            }
+          }
+        }
         submit_knowledge = {
           tool_id   = go_tool.submit_knowledge.id
           terminate = true
@@ -432,6 +502,8 @@ research "dynamic" "final_serial_deep_dive" {
         model_provider   = model_provider.qc
         reasoning_effort = var.reasoning_effort
         permission       = "approve_all"
+        tool_ids         = [starlark_tool.calculator.id]
+        tool_call_quota  = { (starlark_tool.calculator.id) = 20 }
       }
     }
   ]
@@ -449,6 +521,8 @@ research "static" "resolve_conflicts" {
     definition, causality, or source interpretation. Resolve a conflict only
     when the quotes justify a preference; otherwise preserve it as unresolved.
     Never silently drop a minority finding.
+
+    ${local.calculator_guidance}
 
     You must finish by calling ${go_tool.submit_conflict_resolution.id}.
 
@@ -533,6 +607,19 @@ research "static" "resolve_conflicts" {
       }
     }
   }
+  tool_use "calculate" {
+    tool_id = starlark_tool.calculator.id
+    input_from_agent = {
+      code = {
+        desc    = "A Starlark program for exact or derived numerical calculations needed for conflict analysis."
+        sources = []
+      }
+      data_json = {
+        desc    = "A JSON string containing raw inputs for the Starlark calculation."
+        sources = []
+      }
+    }
+  }
   disallowed_tools  = local.offline_disallowed_tools
   permission        = "approve_all"
 
@@ -554,6 +641,8 @@ research "static" "resolve_conflicts" {
     model_provider   = model_provider.qc
     reasoning_effort = var.reasoning_effort
     permission       = "approve_all"
+    tool_ids         = [starlark_tool.calculator.id]
+    tool_call_quota  = { (starlark_tool.calculator.id) = 20 }
   }
 }
 
@@ -570,6 +659,8 @@ research "static" "synthesize" {
     revising the report, call ${go_tool.generate_source_table.id} with the
     report artifact ID before finalizing; do not write or copy source URLs
     yourself.
+
+    ${local.calculator_guidance}
 
     The validated knowledge artifacts and conflict-resolution record are the
     report's only permitted factual basis. Derive every finding, comparison,
@@ -667,6 +758,19 @@ research "static" "synthesize" {
       }
     }
   }
+  tool_use "calculate" {
+    tool_id = starlark_tool.calculator.id
+    input_from_agent = {
+      code = {
+        desc    = "A Starlark program for exact or derived numerical calculations used in the synthesis."
+        sources = []
+      }
+      data_json = {
+        desc    = "A JSON string containing raw inputs for the Starlark calculation."
+        sources = []
+      }
+    }
+  }
   disallowed_tools = concat(["ask_user"], local.offline_disallowed_tools)
   permission       = "approve_all"
   artifact "report" {
@@ -679,7 +783,7 @@ research "static" "synthesize" {
 
   qc {
     criteria = {
-      mechanical_audit = "Call ${external_tool.audit_synthesis.id} exactly once in each QC round before judging the current report revision. Pass report_path as the declared report artifact, knowledge_paths as the complete Validated knowledge artifacts list from the task, and resolution_path as the Conflict-resolution artifact. Treat only its path, readability, schema, and artifact-ID checks as authoritative. The Researcher calls ${go_tool.generate_source_table.id}; do not repeat source-table, quote-ID, quote-reference, or URL checks with grep or view."
+      mechanical_audit = "Call ${external_tool.audit_synthesis.id} exactly once in each QC round before judging the current report revision. Pass report_path as the declared report artifact, knowledge_paths as the complete Validated knowledge artifacts list from the task, and resolution_path as the Conflict-resolution artifact. Treat only its path, readability, schema, and artifact-ID checks as authoritative. After completing all Final QC repairs in the current round, call ${go_tool.generate_source_table.id} exactly once with the declared report artifact ID, before calling the QC verdict tool. Do not inspect or reproduce source-table, quote-ID, quote-reference, or URL validation with grep, view, shell, or another tool."
       plan_coverage = "Use the validated knowledge JSON included in the task to judge whether the report answers every planner-produced subquestion."
       factual_fidelity = "Use each knowledge item's claim, confidence, quote_ids, and exact_quote fields to judge whether every material report statement and conclusion is logically supported without extrapolation. Reject any statement that appears to come from model training, memory, general background knowledge, assumption, or opinion rather than the validated artifacts. This is a semantic judgment; do not compare canonical quote text with artifacts."
       conflict_handling = "Use the included conflict-resolution JSON to judge whether all resolved and unresolved conflicts are represented faithfully without hiding residual uncertainty."
@@ -690,9 +794,11 @@ research "static" "synthesize" {
     reasoning_effort = var.reasoning_effort
     disallowed_tools = ["bash", "powershell", "edit", "task", "ask_user", "web_search", "web_fetch"]
     permission       = "approve_all"
-    tool_ids          = [external_tool.audit_synthesis.id]
+    tool_ids          = [starlark_tool.calculator.id, external_tool.audit_synthesis.id, go_tool.generate_source_table.id]
     tool_call_quota = {
-      for tool_id in [external_tool.audit_synthesis.id] : tool_id => 10
+      (starlark_tool.calculator.id) = 20
+      (external_tool.audit_synthesis.id) = 10
+      (go_tool.generate_source_table.id) = 10
     }
   }
 }

@@ -308,6 +308,70 @@ type runtimeFactory struct {
 	s3EnvLookup         internals3.EnvLookup
 }
 
+const (
+	finalQCCalculatorToolID            = "r42_final_qc_calculator"
+	finalQCCalculatorTimeout           = 5 * time.Second
+	finalQCCalculatorMemoryLimit int64 = 128 << 20
+)
+
+func defaultFinalQCCalculatorDefinition() plan.ToolSpec {
+	defaults := starlarktool.DefaultConfig()
+	return plan.ToolSpec{
+		ID:      finalQCCalculatorToolID,
+		Address: "r42.starlark.final_qc_calculator",
+		Kind:    string(config.AddressKindStarlark),
+		Description: "Perform isolated, resource-bounded numerical calculations for Final QC. " +
+			"code is Starlark source and data_json is one JSON value; read it as data " +
+			"and assign a JSON-compatible value to top-level result. Available values " +
+			"are data, math, stats, matrix, and fail; imports, files, network, and " +
+			"processes are unavailable.",
+		Starlark: &plan.StarlarkToolSpec{
+			MaxSteps:       defaults.MaxSteps,
+			TimeoutNanos:   int64(finalQCCalculatorTimeout),
+			MaxSourceBytes: defaults.MaxSourceBytes,
+			MaxDataBytes:   defaults.MaxDataBytes,
+			MaxResultBytes: defaults.MaxResultBytes,
+			MaxStdoutBytes: defaults.MaxStdoutBytes,
+			MemoryLimit:    int(finalQCCalculatorMemoryLimit),
+		},
+	}
+}
+
+type finalQCCalculatorOptions struct {
+	ctx               context.Context
+	blockAddress      string
+	sessionKind       debuglog.SessionKind
+	configuredToolIDs []string
+	tools             []sdk.Tool
+	typedQuota        map[string]int
+}
+
+func (f *runtimeFactory) ensureFinalQCCalculator(
+	opts finalQCCalculatorOptions,
+) ([]sdk.Tool, string, error) {
+	definitions, err := f.resolveToolDefinitions(opts.configuredToolIDs, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	for _, definition := range definitions {
+		if definition.Kind == string(config.AddressKindStarlark) {
+			return opts.tools, definition.ID, nil
+		}
+	}
+	definition := defaultFinalQCCalculatorDefinition()
+	if opts.typedQuota == nil {
+		opts.typedQuota = make(map[string]int)
+	}
+	opts.typedQuota[definition.ID] = 20
+	calculator, err := f.buildStarlarkTool(
+		opts.ctx, opts.blockAddress, opts.sessionKind, definition, newToolCallQuota(opts.typedQuota),
+	)
+	if err != nil {
+		return nil, "", err
+	}
+	return append(opts.tools, calculator), definition.ID, nil
+}
+
 type starlarkRunner interface {
 	Run(context.Context, starlarktool.WorkerRequest) (starlarktool.WorkerResponse, error)
 }
