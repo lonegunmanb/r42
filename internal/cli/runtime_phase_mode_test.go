@@ -194,10 +194,9 @@ research "static" "juror" {
 	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1, Debug: true})
 
 	require.NoError(t, err)
-	assert.Equal(t, 2, opener.research.sendCalls)
+	assert.Equal(t, 1, opener.research.sendCalls)
 	assert.Equal(t, 2, opener.qc.sendCalls)
-	assert.Len(t, opener.research.prompts, 2)
-	assert.Contains(t, opener.research.prompts[1], "add a citation")
+	assert.Len(t, opener.research.prompts, 1)
 	assert.Equal(t, 1, opener.research.closeCalls)
 	assert.Equal(t, 1, opener.qc.closeCalls)
 	assert.Zero(t, opener.collection.sendCalls)
@@ -273,7 +272,7 @@ research "dynamic" "jurors" {
 	require.Len(t, opener.finalRounds, 2)
 	for workspace, rounds := range opener.finalRounds {
 		assert.Equal(t, 2, rounds)
-		assert.Contains(t, opener.handoffPrompts[workspace], "correct the task result")
+		assert.Empty(t, opener.handoffPrompts[workspace])
 	}
 	assert.ElementsMatch(t, []string{"research", "final_qc", "research", "final_qc"}, workflowDebugSessionOpens(t, directory))
 }

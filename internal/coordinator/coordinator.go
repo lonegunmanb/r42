@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/lonegunmanb/r42/internal/collection"
 	"github.com/lonegunmanb/r42/internal/collectionqc"
@@ -84,10 +83,8 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 		return researchruntime.Result{}, err
 	}
 	var candidate researchruntime.Result
-	var finalQCIssues []corespec.Issue
 	var collectionState []collection.ActiveInformationNeedState
 	finalRounds := 0
-	revisionRounds := 0
 
 	for {
 		phase := r.state.Phase()
@@ -96,11 +93,7 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 		case workflow.PhaseCollection, workflow.PhaseCollectionQC:
 			event.Round = r.state.CollectionRoundsUsed()
 		case workflow.PhaseResearch:
-			if len(finalQCIssues) > 0 {
-				revisionRounds++
-				event.Round = revisionRounds
-				event.IsRevision = true
-			}
+			event.Round = 1
 		case workflow.PhaseFinalQC:
 			finalRounds++
 			event.Round = finalRounds
@@ -141,13 +134,6 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 		case workflow.PhaseResearch:
 			researchConfig := config.Research
 			researchConfig.InitialPrompt = researchOutcomesPrompt(researchConfig.InitialPrompt, r.state.InformationNeedOutcomes())
-			if len(finalQCIssues) > 0 {
-				researchConfig.InitialPrompt = appendIssuePrompt(
-					researchConfig.InitialPrompt,
-					"Address these Final QC issues while completing the original task:",
-					finalQCIssues,
-				)
-			}
 			var err error
 			candidate, err = r.research.Run(ctx, researchConfig)
 			if err != nil {
@@ -161,7 +147,6 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 				return researchruntime.Result{}, err
 			}
 		case workflow.PhaseFinalQC:
-			config.FinalQC.OpenIssues = append([]corespec.Issue(nil), finalQCIssues...)
 			verdict, err := r.finalQC.Review(ctx, config.FinalQC, candidate)
 			if err != nil {
 				return researchruntime.Result{}, fmt.Errorf("run final qc: %w", err)
@@ -183,8 +168,8 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 			if finalRounds >= config.MaxFinalQCRounds {
 				return researchruntime.Result{}, fmt.Errorf("final qc rounds exhausted after %d rounds", finalRounds)
 			}
-			finalQCIssues = append([]corespec.Issue(nil), verdict.Issues...)
-			if err = r.state.Advance(workflow.EventReviseResearch); err != nil {
+			config.FinalQC.OpenIssues = append([]corespec.Issue(nil), verdict.Issues...)
+			if err = r.state.Advance(workflow.EventFinalQCRetry); err != nil {
 				return researchruntime.Result{}, err
 			}
 		case workflow.PhaseComplete:
@@ -270,21 +255,4 @@ func (r *Runner) validate(config Config) error {
 		}
 	}
 	return nil
-}
-
-func issuePrompt(header string, issues []corespec.Issue) string {
-	var result strings.Builder
-	result.WriteString(header)
-	for _, issue := range issues {
-		fmt.Fprintf(&result, "\n- [%s] [%s] %s", issue.ID, issue.Code, issue.Message)
-	}
-	return result.String()
-}
-
-func appendIssuePrompt(initialPrompt, header string, issues []corespec.Issue) string {
-	revisionPrompt := issuePrompt(header, issues)
-	if strings.TrimSpace(initialPrompt) == "" {
-		return revisionPrompt
-	}
-	return strings.TrimRight(initialPrompt, "\r\n") + "\n\n" + revisionPrompt
 }

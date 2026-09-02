@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -126,13 +127,10 @@ func (r *Runner) Run(ctx context.Context, config Config) (Result, error) {
 		if round == config.MaxRounds {
 			return Result{}, fmt.Errorf("qc rounds exhausted after %d rounds", round)
 		}
+		// Final QC repairs the existing candidate through its typed patch tools.
+		// Keep reviewing the same artifact set instead of starting a new
+		// researcher session and rewriting the whole candidate.
 		config.OpenIssues = cloneIssues(verdict.Issues)
-		revision := config.Research
-		revision.InitialPrompt = revisionPrompt(verdict.Issues)
-		candidate, err = r.research.Run(ctx, revision)
-		if err != nil {
-			return Result{}, fmt.Errorf("run research revision: %w", err)
-		}
 	}
 }
 
@@ -206,6 +204,18 @@ func NewVerdictRecorder() *VerdictRecorder {
 	return &VerdictRecorder{}
 }
 
+// FinalIssues returns a snapshot of the current Final-QC issue baseline.
+func (r *VerdictRecorder) FinalIssues() []corespec.Issue {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	issues := make([]corespec.Issue, 0, len(r.finalIssues))
+	for _, issue := range r.finalIssues {
+		issues = append(issues, issue)
+	}
+	slices.SortFunc(issues, func(a, b corespec.Issue) int { return strings.Compare(a.ID, b.ID) })
+	return cloneIssues(issues)
+}
+
 func (r *VerdictRecorder) Record(verdict Verdict) error {
 	if err := verdict.Validate(); err != nil {
 		return fmt.Errorf("record qc verdict: %w", err)
@@ -218,9 +228,9 @@ func (r *VerdictRecorder) Record(verdict Verdict) error {
 	return nil
 }
 
-// RecordFinal validates and records one Final QC verdict. Final QC establishes
-// an issue-ID baseline on its first revision and may only carry IDs from the
-// previous baseline on later revisions.
+// RecordFinal validates and records one Final QC verdict. Issue IDs are useful
+// for continuity in the QC prompt, but a repaired candidate may legitimately
+// change an issue's wording or classification between confirmation attempts.
 func (r *VerdictRecorder) RecordFinal(verdict Verdict) error {
 	if err := verdict.Validate(); err != nil {
 		return fmt.Errorf("record qc verdict: %w", err)
@@ -241,17 +251,6 @@ func (r *VerdictRecorder) RecordFinal(verdict Verdict) error {
 		}
 		r.mu.Lock()
 		defer r.mu.Unlock()
-		for id, issue := range seen {
-			if r.finalReviewed {
-				previous, allowed := r.finalIssues[id]
-				if !allowed {
-					return fmt.Errorf("record qc verdict: new final qc issue id %q is not allowed; only previous issue IDs may be reused", id)
-				}
-				if !sameIssueIdentity(previous, issue) {
-					return fmt.Errorf("record qc verdict: final qc issue id %q changes final qc issue identity", id)
-				}
-			}
-		}
 		r.finalIssues = seen
 		r.finalReviewed = true
 		verdict.Issues = cloneIssues(verdict.Issues)
@@ -365,24 +364,6 @@ func criteriaMap(value cty.Value) (map[string]string, error) {
 	return result, nil
 }
 
-func revisionPrompt(issues []corespec.Issue) string {
-	var result strings.Builder
-	result.WriteString("QC rejected the candidate. Revise the research to fix these issues:\n")
-	for index, issue := range issues {
-		if index > 0 {
-			result.WriteByte('\n')
-		}
-		fmt.Fprintf(&result, "- [%s] [%s] %s", issue.ID, issue.Code, issue.Message)
-		if issue.Path != nil {
-			fmt.Fprintf(&result, " (path: %s)", *issue.Path)
-		}
-		if issue.RepairHint != nil {
-			fmt.Fprintf(&result, " Repair: %s", *issue.RepairHint)
-		}
-	}
-	return result.String()
-}
-
 func cloneIssues(source []corespec.Issue) []corespec.Issue {
 	result := make([]corespec.Issue, len(source))
 	for index, issue := range source {
@@ -399,14 +380,4 @@ func cloneString(value *string) *string {
 	}
 	result := *value
 	return &result
-}
-
-func sameIssueIdentity(previous, current corespec.Issue) bool {
-	if previous.Code != current.Code {
-		return false
-	}
-	if previous.Path == nil || current.Path == nil {
-		return previous.Path == nil && current.Path == nil
-	}
-	return *previous.Path == *current.Path
 }

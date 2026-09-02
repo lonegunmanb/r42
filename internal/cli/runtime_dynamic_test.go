@@ -417,7 +417,7 @@ research "dynamic" "reviewed" {
 	require.Len(t, opener.finalRounds, 2)
 	for workspace, rounds := range opener.finalRounds {
 		assert.Equal(t, 2, rounds)
-		assert.Contains(t, opener.handoffPrompts[workspace], "correct the task result")
+		assert.Empty(t, opener.handoffPrompts[workspace])
 	}
 }
 

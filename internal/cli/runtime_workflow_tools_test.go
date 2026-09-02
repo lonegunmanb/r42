@@ -800,6 +800,179 @@ func TestQCExpandQuoteToolReturnsFixedSubmitReadyExpansion(t *testing.T) {
 	assert.Equal(t, result.TextResultForLLM, repeated.TextResultForLLM)
 }
 
+func TestQCPatchArtifactToolRepairsAuthorizedArtifactOneChangeAtATime(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	record, err := registry.Declare(workspace, researchspec.Artifact{Name: "report", Path: "report.md", Type: researchspec.ArtifactTypeFile, Description: "Report"})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(record.Path, []byte("old claim\n"), 0o600))
+	tool := qcPatchArtifactTool(workspace, registry, []string{record.ID})
+	result, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"artifact_id": record.ID,
+		"patch":       map[string]any{"expected": "old claim", "replacement": "repaired claim"},
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"patch_count":1`)
+	content, readErr := os.ReadFile(record.Path)
+	require.NoError(t, readErr)
+	assert.Equal(t, "repaired claim\n", string(content))
+
+	result, err = tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"artifact_id": record.ID,
+		"patch":       map[string]any{"expected": "missing", "replacement": "x"},
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"accepted":false`)
+	content, readErr = os.ReadFile(record.Path)
+	require.NoError(t, readErr)
+	assert.Equal(t, "repaired claim\n", string(content))
+}
+
+func TestQCPatchArtifactToolRejectsMultiplePatches(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	record, err := registry.Declare(workspace, researchspec.Artifact{Name: "report", Path: "report.md", Type: researchspec.ArtifactTypeFile, Description: "Report"})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(record.Path, []byte("old A\nold B\n"), 0o600))
+	tool := qcPatchArtifactTool(workspace, registry, []string{record.ID})
+	properties, ok := tool.Parameters["properties"].(map[string]any)
+	require.True(t, ok)
+	assert.Contains(t, properties, "patch")
+	assert.NotContains(t, properties, "patches")
+	result, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"artifact_id": record.ID,
+		"patches": []any{
+			map[string]any{"expected": "old A", "replacement": "new A"},
+			map[string]any{"expected": "old B", "replacement": "new B"},
+		},
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"accepted":false`)
+	assert.Contains(t, result.TextResultForLLM, `"single_patch_required"`)
+}
+
+func TestQCPatchArtifactToolRejectsUnauthorizedArtifact(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	record, err := registry.Declare(workspace, researchspec.Artifact{Name: "report", Path: "report.md", Type: researchspec.ArtifactTypeFile, Description: "Report"})
+	require.NoError(t, err)
+	tool := qcPatchArtifactTool(workspace, registry, nil)
+	result, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"artifact_id": record.ID,
+		"patch":       map[string]any{"expected": "old", "replacement": "new"},
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"artifact_not_authorized"`)
+}
+
+func TestQCPatchKnowledgeToolRepairsObservedSemanticIssuesByItemAndQuoteRef(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	knowledgeRecord, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "knowledge", Path: "knowledge.json", Type: researchspec.ArtifactTypeFile, Description: "Knowledge",
+	})
+	require.NoError(t, err)
+	sourcePath := filepath.Join(workspace, "source.md")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("IEA demand growth is 3.6 percent.\nENTSO-E reports 473 TWh curtailment.\nIRENA explains capacity factors.\n"), 0o600))
+	sourceRecord, _, err := registry.RegisterEvidence(workspace, sourcePath, "https://example.test/source", "Source")
+	require.NoError(t, err)
+	quotes := evidence.NewQuoteRegistry()
+	search, err := evidence.SearchArtifact(registry, sourceRecord.ID, "IEA demand", true, 1, 0)
+	require.NoError(t, err)
+	quote, err := quotes.CaptureMatchWithContext(registry, sourceRecord.ID, search.Matches[0], 0, 0)
+	require.NoError(t, err)
+	badQuote := strings.Repeat(". ", 5000)
+	payload := map[string]any{
+		"artifact_id": knowledgeRecord.ID,
+		"subquestion": "observed run",
+		"knowledge": []any{
+			map[string]any{"id": "future-kb-001", "claim": "增长率区间与近期权威趋势相容但不等同于外推承诺：IEA预计2026—2030年全球电力需求年均增长3.6%，可再生能源年均增长约8%，核电年均增长约2.8%。", "confidence": "high", "quote_ids": []string{"bad-1"}},
+			map[string]any{"id": "future-kb-002", "claim": "欧洲跨境可达性是独立于年发电量的约束：ENTSO-E在2040年识别出额外108 GW跨境容量和227 GW电池功率需求，并指出现有项目组合只覆盖约80 GW；若停止投资，可能出现每年473 TWh弃电及263 TWh额外燃气发电。", "confidence": "high", "quote_ids": []string{"bad-2"}},
+			map[string]any{"id": "future-kb-003", "claim": "IRENA定义容量因子为实际年发电量与理论最大年发电量之比，并指出预期新增容量只能提供约59%的可再生发电量三倍目标所要求的发电增量。", "confidence": "medium", "quote_ids": []string{"bad-3"}},
+		},
+		"quotes": []any{
+			map[string]any{"id": "bad-1", "quote_ref": "quote-ref-bad-1", "source_title": "bad", "url": "https://bad.test", "artifact_id": sourceRecord.ID, "artifact_digest": "bad", "locator": "lines 1-1", "exact_quote": badQuote},
+			map[string]any{"id": "bad-2", "quote_ref": "quote-ref-bad-2", "source_title": "bad", "url": "https://bad.test", "artifact_id": sourceRecord.ID, "artifact_digest": "bad", "locator": "lines 2-2", "exact_quote": badQuote},
+			map[string]any{"id": "bad-3", "quote_ref": "quote-ref-bad-3", "source_title": "bad", "url": "https://bad.test", "artifact_id": sourceRecord.ID, "artifact_digest": "bad", "locator": "lines 3-3", "exact_quote": badQuote},
+		},
+	}
+	encoded, err := json.Marshal(payload)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(knowledgeRecord.Path, encoded, 0o600))
+
+	tool := qcPatchKnowledgeTool(workspace, registry, quotes, []string{knowledgeRecord.ID, sourceRecord.ID})
+	parameters := tool.Parameters
+	properties, ok := parameters["properties"].(map[string]any)
+	require.True(t, ok)
+	patchSchema, ok := properties["patch"].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, properties, "patches")
+	patchProperties, ok := patchSchema["properties"].(map[string]any)
+	require.True(t, ok)
+	assert.NotContains(t, patchProperties, "expected")
+	assert.NotContains(t, patchProperties, "replacement")
+	legacyBatchResult, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"artifact_id": knowledgeRecord.ID,
+		"patches":     []any{map[string]any{"id": "future-kb-001", "claim": "batch must be rejected"}},
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, legacyBatchResult.TextResultForLLM, `"single_change_required"`)
+	legacyTool := qcPatchArtifactTool(workspace, registry, []string{knowledgeRecord.ID})
+	legacyResult, err := legacyTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"artifact_id": knowledgeRecord.ID,
+		"patch":       map[string]any{"expected": "old", "replacement": "new"},
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, legacyResult.TextResultForLLM, `"use_knowledge_patch"`)
+	claims := []struct {
+		id    string
+		claim string
+	}{
+		{id: "future-kb-001", claim: "IEA预计2026—2030年可再生能源发电量年均增长约8.4%、核电年均增长约2.8%；该趋势用于情景参数，不是全球电力需求外推承诺。"},
+		{id: "future-kb-002", claim: "ENTSO-E的证据支持额外跨境容量和电池功率需求，但本条不再把其他文档中的弃电与燃气数字归给该引文。"},
+		{id: "future-kb-003", claim: "IRENA的材料说明装机容量不能直接视为年度发电量，情景计算还需考虑容量因子、弃电、储能损耗、地理错配和输电限制。"},
+	}
+	for _, item := range claims {
+		result, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+			"artifact_id": knowledgeRecord.ID,
+			"patch":       map[string]any{"id": item.id, "claim": item.claim, "citations": []string{quote.Ref}},
+		}})
+		require.NoError(t, err)
+		assert.Contains(t, result.TextResultForLLM, `"accepted":true`)
+		assert.Contains(t, result.TextResultForLLM, `"patch_count":1`)
+	}
+	finalPayload, err := os.ReadFile(knowledgeRecord.Path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(finalPayload), badQuote)
+	assert.Contains(t, string(finalPayload), quote.Ref)
+}
+
+func TestQCPatchKnowledgeToolRejectsDanglingQuoteIDsAtomically(t *testing.T) {
+	t.Parallel()
+	workspace := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	record, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "knowledge", Path: "knowledge.json", Type: researchspec.ArtifactTypeFile, Description: "Knowledge",
+	})
+	require.NoError(t, err)
+	original := `{"artifact_id":"knowledge","knowledge":[{"id":"item-1","claim":"claim","confidence":"high","quote_ids":["missing-quote"]}],"quotes":[]}`
+	require.NoError(t, os.WriteFile(record.Path, []byte(original), 0o600))
+	tool := qcPatchKnowledgeTool(workspace, registry, evidence.NewQuoteRegistry(), []string{record.ID})
+	result, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"artifact_id": record.ID,
+		"patch":       map[string]any{"id": "item-1", "claim": "repaired claim"},
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"accepted":false`)
+	updated, err := os.ReadFile(record.Path)
+	require.NoError(t, err)
+	assert.Equal(t, original, string(updated))
+}
+
 func TestQCExpandQuoteToolRejectsUnknownAndForeignQuotes(t *testing.T) {
 	t.Parallel()
 
@@ -1828,7 +2001,7 @@ func TestEvidenceToolsExposeIDsAndDeclaredArtifactNamesOnly(t *testing.T) {
 		"r42_list_artifacts", "r42_list_artifact_files", "r42_read_artifact", "r42_search_artifact",
 		"r42_search_artifacts", "r42_capture_quote",
 		"r42_read_artifact_json_schema", "r42_query_artifact_json",
-		"r42_write_markdown",
+		"r42_write_markdown", "r42_patch_markdown",
 	}, toolNames(tools))
 	read, err := toolByName(t, tools, "r42_read_artifact").Handler(sdk.ToolInvocation{Arguments: map[string]any{"id": registered.ID, "max_bytes": float64(100)}})
 	require.NoError(t, err)

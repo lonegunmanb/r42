@@ -1052,14 +1052,27 @@ task prompts, candidate instructions, and custom criteria.
 Its mandatory `r42_qc_verdict` decision is one of:
 
 - `pass`, with no issues, completes the workflow;
-- `revise_research`, with one or more issues, returns to closed Research.
+- `revise_research`, with one or more issues, requests another Final QC
+  confirmation after direct repairs.
 
-Final QC can never reopen Collection and must not reject a candidate for
-missing coverage. It may return the candidate only when a claim actually
-present exceeds or misrepresents its cited evidence; Research must then delete
-or narrow that claim rather than collect or add evidence. `max_qc_rounds`
-defaults to 5; a non-pass
-decision on the last review fails without starting work that cannot be reviewed.
+Final QC can never reopen Collection or hand work back to Research, and must
+not reject a candidate for missing coverage. After a material finding, it must
+patch the smallest exact artifact text, reread it, and submit a confirmation
+verdict. `max_qc_rounds` defaults to 5; a non-pass decision on the last review
+fails with the unresolved issues.
+
+The host exposes `r42_qc_open_issues` as a read-only lookup for the current
+stable issue baseline. If a revision verdict uses an unknown issue ID, the
+verdict is rejected immediately and the response identifies the current IDs.
+Closed Research can use `r42_patch_markdown` for one exact
+unique replacement outside the protected `Sources` section, while
+`r42_write_markdown` remains available for full rewrites.
+
+The deep-research example declares a `generate_source_table` Go tool. Its only
+model-visible argument is the opaque report artifact ID; the tool resolves cited
+quote IDs against the validated knowledge artifacts bound by that example and
+rebuilds the `Sources` section after each report revision. Other research
+workflows do not receive or depend on this deep-research-specific tool.
 
 Final QC inherits only effective provider/model/reasoning/retry/permission
 values. Its tools, skills, quotas, allowlist, and denylist are explicitly scoped

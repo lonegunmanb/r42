@@ -49,6 +49,7 @@ research "static" "source" {
 	assert.Contains(t, toolNamesFromConfig(opener.configs[1]), "r42_read_information_needs")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_verdict")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_expand_quote")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_open_issues")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "r42_qc_expand_quote")
 	assert.NotContains(t, opener.configs[0].ExcludedTools, "powershell")
 	assert.Contains(t, opener.configs[0].ExcludedTools, "shell")
@@ -59,6 +60,7 @@ research "static" "source" {
 	assert.NotContains(t, opener.configs[3].ExcludedTools, "edit")
 	assert.Contains(t, opener.configs[3].ExcludedTools, "shell")
 	assert.Contains(t, opener.configs[3].SystemPrompt, `Strictness="balanced"`)
+	assert.Contains(t, opener.configs[3].SystemPrompt, "Balanced provenance")
 	assert.Equal(t, 1, opener.research.sendCalls)
 	assert.Equal(t, 1, opener.qc.sendCalls)
 	assert.Equal(t, 1, opener.collection.closeCalls)
@@ -116,15 +118,41 @@ research "static" "source" {
 	require.NoError(t, err)
 	require.Len(t, opener.configs, 4)
 	assert.NotContains(t, toolNamesFromConfig(opener.configs[2]), "r42_report_qc_issue_resolutions")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_patch_artifact")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_patch_knowledge")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "focused audit of material semantic issues")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "analysis and mixed claims")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "Do not demand a formal reasoning chain")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "final_qc_strictness is authoritative")
 	assert.Contains(t, opener.configs[3].SystemPrompt, `Strictness="brief"`)
+	assert.Contains(t, opener.configs[3].SystemPrompt, "Brief provenance")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "Final QC is a convergent, narrow audit")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "must not reject a plausible analysis")
-	assert.Contains(t, opener.configs[2].SystemPrompt, "Final QC may return this block to Research multiple times")
-	assert.Contains(t, opener.configs[2].SystemPrompt, "accepted terminal call completes only the current Research pass")
+	assert.Contains(t, opener.configs[2].SystemPrompt, "Final QC reviews and repairs the candidate directly")
+	assert.NotContains(t, opener.configs[2].SystemPrompt, "return this block to Research")
+}
+
+func TestProductionRuntimeUsesStrictProvenanceGuidance(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+research "static" "source" {
+  model = "test-model"
+  system_prompt = "Collect evidence."
+  final_qc_strictness = "strict"
+  qc { criteria = { accuracy = "Must be accurate" } }
+}
+`), 0o600))
+	opener := &qcOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+	require.NoError(t, err)
+	require.Len(t, opener.configs, 4)
+	assert.Contains(t, opener.configs[3].SystemPrompt, `Strictness="strict"`)
+	assert.Contains(t, opener.configs[3].SystemPrompt, "Strict provenance")
 }
 
 func TestProductionRuntimeReusesResearchProviderAcrossWorkflowSessions(t *testing.T) {
@@ -225,7 +253,10 @@ research "static" "source" {
 	assert.Contains(t, opener.configs[3].SystemPrompt, "every configured criterion")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "all independent issues")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "do not stop after the first issue")
-	assert.Contains(t, opener.configs[3].SystemPrompt, "Repeat the full audit after every revision")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "Repeat the full audit after every repair")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "use r42_qc_patch_knowledge")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "provide exactly one patch per call")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "Never batch multiple changes")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "must not judge whether evidence coverage is sufficient")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "claims actually present in the candidate")
 	assert.NotContains(t, opener.configs[3].SystemPrompt, "if evidence is insufficient")
@@ -318,13 +349,22 @@ research "static" "source" {
 	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
-	assert.Equal(t, 2, opener.research.sendCalls)
-	require.Len(t, opener.research.prompts, 2)
-	assert.Contains(t, opener.research.prompts[1], "add a citation")
+	assert.Equal(t, 1, opener.research.sendCalls)
+	require.Len(t, opener.research.prompts, 1)
 	assert.Equal(t, 2, opener.qc.sendCalls)
 	require.Len(t, opener.qc.prompts, 2)
 	assert.Contains(t, opener.qc.prompts[1], `"open_issues"`)
 	assert.Contains(t, opener.qc.prompts[1], `"message":"add a citation"`)
+	var openIssuesTool sdk.Tool
+	for _, tool := range opener.qc.config.Tools {
+		if tool.Name == "r42_qc_open_issues" {
+			openIssuesTool = tool
+		}
+	}
+	require.NotNil(t, openIssuesTool.Handler)
+	query, queryErr := openIssuesTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+	require.NoError(t, queryErr)
+	assert.Contains(t, query.TextResultForLLM, "issue-source")
 	assert.Equal(t, 1, opener.research.closeCalls)
 	assert.Equal(t, 1, opener.qc.closeCalls)
 }
@@ -348,10 +388,7 @@ research "static" "source" {
 	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
-	assert.Equal(t, 2, opener.research.sendCalls)
-	require.Len(t, opener.research.prompts, 2)
-	assert.Contains(t, opener.research.prompts[1], "add a citation")
-	assert.NotContains(t, opener.research.prompts[1], "correct the changed total")
+	assert.Equal(t, 1, opener.research.sendCalls)
 	assert.Equal(t, 3, opener.qc.sendCalls)
 }
 

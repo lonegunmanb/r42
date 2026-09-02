@@ -32,6 +32,7 @@ const (
 	EventResearchComplete          Event = "research_complete"
 	EventResearchCompleteWithoutQC Event = "research_complete_without_qc"
 	EventReviseResearch            Event = "revise_research"
+	EventFinalQCRetry              Event = "final_qc_retry"
 	EventPass                      Event = "pass"
 )
 
@@ -278,6 +279,8 @@ func (s *State) Advance(event Event) error {
 		switch event {
 		case EventPass:
 			s.phase = PhaseComplete
+			return nil
+		case EventFinalQCRetry:
 			return nil
 		case EventReviseResearch:
 			s.phase = PhaseResearch

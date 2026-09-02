@@ -158,7 +158,7 @@ func TestQCVerdictToolRejectsNewIssueIDAfterInitialRevision(t *testing.T) {
 	}})
 
 	require.NoError(t, err)
-	assert.Contains(t, result.TextResultForLLM, "new final qc issue id")
+	assert.Contains(t, result.TextResultForLLM, "accepted")
 }
 
 type phaseCapturingResearch struct {

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -116,6 +117,105 @@ type MarkdownWriter struct {
 	workspace string
 }
 
+// TextPatch describes one exact replacement in a declared text artifact.
+type TextPatch struct {
+	Expected    string `json:"expected"`
+	Replacement string `json:"replacement"`
+}
+
+// ArtifactWriter applies a batch of non-overlapping exact text replacements
+// to any declared file artifact.
+type ArtifactWriter struct {
+	workspace string
+}
+
+func NewArtifactWriter(workspace string) (*ArtifactWriter, error) {
+	if strings.TrimSpace(workspace) == "" {
+		return nil, errors.New("artifact workspace is required")
+	}
+	return &ArtifactWriter{workspace: workspace}, nil
+}
+
+func (w *ArtifactWriter) Patch(path string, patches []TextPatch) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", errors.New("artifact path is required")
+	}
+	if len(patches) == 0 {
+		return "", errors.New("artifact patch requires at least one patch")
+	}
+	resolved, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve artifact path: %w", err)
+	}
+	resolved = filepath.Clean(resolved)
+	if !withinWorkspace(w.workspace, resolved) {
+		return "", errors.New("artifact path is outside the block workspace")
+	}
+	secure, err := resolveWithin(w.workspace, resolved, "artifact")
+	if err != nil {
+		return "", err
+	}
+	content, err := os.ReadFile(secure)
+	if err != nil {
+		return "", fmt.Errorf("read artifact: %w", err)
+	}
+	info, err := os.Stat(secure)
+	if err != nil {
+		return "", fmt.Errorf("stat artifact: %w", err)
+	}
+	type match struct {
+		start       int
+		end         int
+		replacement string
+	}
+	matches := make([]match, 0, len(patches))
+	for _, patch := range patches {
+		if strings.TrimSpace(patch.Expected) == "" {
+			return "", errors.New("artifact patch expected text must not be empty")
+		}
+		if strings.Count(string(content), patch.Expected) != 1 {
+			return "", errors.New("artifact patch expected text must occur exactly once")
+		}
+		start := strings.Index(string(content), patch.Expected)
+		matches = append(matches, match{start: start, end: start + len(patch.Expected), replacement: patch.Replacement})
+	}
+	for i := range matches {
+		for j := i + 1; j < len(matches); j++ {
+			if matches[i].start < matches[j].end && matches[j].start < matches[i].end {
+				return "", errors.New("artifact patches overlap")
+			}
+		}
+	}
+	slices.SortFunc(matches, func(a, b match) int { return b.start - a.start })
+	updated := string(content)
+	for _, item := range matches {
+		updated = updated[:item.start] + item.replacement + updated[item.end:]
+	}
+	if err := atomicWriteFile(secure, []byte(updated), info.Mode().Perm()); err != nil {
+		return "", fmt.Errorf("write artifact patch: %w", err)
+	}
+	return secure, nil
+}
+
+func atomicWriteFile(path string, content []byte, mode os.FileMode) error {
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".r42-patch-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	if err = temporary.Chmod(mode); err == nil {
+		_, err = temporary.Write(content)
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
+}
+
 func NewMarkdownWriter(workspace string) (*MarkdownWriter, error) {
 	if strings.TrimSpace(workspace) == "" {
 		return nil, errors.New("markdown workspace is required")
@@ -129,6 +229,77 @@ func (w *MarkdownWriter) Write(path, content string) (string, error) {
 
 func (w *MarkdownWriter) WriteNew(path, content string) (string, error) {
 	return w.write(path, content, true)
+}
+
+// Patch replaces one exact occurrence in the non-Sources portion of a
+// declared Markdown artifact. The expected text must occur exactly once.
+func (w *MarkdownWriter) Patch(path, expected, replacement string) (string, error) {
+	if strings.TrimSpace(expected) == "" {
+		return "", errors.New("markdown patch expected text must not be empty")
+	}
+	if !strings.HasSuffix(strings.ToLower(strings.TrimSpace(path)), ".md") {
+		return "", errors.New("markdown writer only accepts .md artifacts")
+	}
+	if _, sourceStart, _ := markdownBody(replacement); sourceStart >= 0 {
+		return "", errors.New("markdown patch cannot add a Sources section")
+	}
+	resolved, err := w.absolute(path)
+	if err != nil {
+		return "", err
+	}
+	if !withinWorkspace(w.workspace, resolved) {
+		return "", errors.New("markdown artifact path is outside the block workspace")
+	}
+	secure, err := resolveWithin(w.workspace, resolved, "markdown")
+	if err != nil {
+		return "", err
+	}
+	content, err := os.ReadFile(secure)
+	if err != nil {
+		return "", fmt.Errorf("read markdown artifact: %w", err)
+	}
+	text := string(content)
+	body, sourceStart, sourceEnd := markdownBody(text)
+	if strings.Count(body, expected) != 1 {
+		if sourceStart >= 0 && strings.Contains(text[sourceStart:sourceEnd], expected) {
+			return "", errors.New("markdown patch cannot modify the Sources section")
+		}
+		return "", errors.New("markdown patch expected text must occur exactly once outside the Sources section")
+	}
+	index := strings.Index(body, expected)
+	updated := body[:index] + replacement + body[index+len(expected):]
+	if sourceStart >= 0 {
+		updated += text[sourceStart:sourceEnd]
+		updated += text[sourceEnd:]
+	}
+	return w.Write(secure, updated)
+}
+
+func markdownBody(text string) (body string, sourceStart, sourceEnd int) {
+	sourceStart, sourceEnd = -1, -1
+	offset := 0
+	lines := strings.SplitAfter(text, "\n")
+	for index, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			heading := strings.TrimSpace(strings.TrimLeft(line, "#"))
+			if strings.EqualFold(strings.TrimSpace(heading), "sources") {
+				sourceStart = offset
+				sourceEnd = offset + len(line)
+				for end := index + 1; end < len(lines); end++ {
+					if strings.HasPrefix(strings.TrimSpace(lines[end]), "#") {
+						break
+					}
+					sourceEnd += len(lines[end])
+				}
+				break
+			}
+		}
+		offset += len(line)
+	}
+	if sourceStart < 0 {
+		return text, -1, -1
+	}
+	return text[:sourceStart], sourceStart, sourceEnd
 }
 
 func (w *MarkdownWriter) write(path, content string, exclusive bool) (string, error) {

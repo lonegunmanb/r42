@@ -1361,7 +1361,7 @@ func (f *runtimeFactory) publish(address string, value cty.Value) {
 func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.VerdictRecorder) sdk.Tool {
 	return sdk.Tool{
 		Name:        "r42_qc_verdict",
-		Description: "Submit pass with no issues, or revise_research with unresolved issues from the current Final QC baseline. Each issue must reuse its stable id; after the first review, do not introduce new ids or change issue identity. Final QC cannot reopen Collection.",
+		Description: "Submit pass with no issues, or revise_research when a direct QC repair still needs another confirmation attempt. Final QC repairs the candidate itself and never reopens Collection or starts Research.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -1406,7 +1406,13 @@ func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.Ver
 				return sdk.ToolResult{TextResultForLLM: string(rejected), ResultType: "success"}, nil
 			}
 			if recordErr := verdicts.RecordFinal(verdict); recordErr != nil {
-				return rejectedToolResult("invalid_qc_issue_transition", recordErr.Error())
+				verdicts.RecordError(recordErr)
+				allowed := verdicts.FinalIssues()
+				ids := make([]string, 0, len(allowed))
+				for _, issue := range allowed {
+					ids = append(ids, issue.ID)
+				}
+				return rejectedToolResult("invalid_qc_issue_transition", fmt.Sprintf("%s; allowed issue IDs: %s", recordErr, strings.Join(ids, ", ")))
 			}
 			result, _ := json.Marshal(map[string]any{"accepted": true})
 			if recordErr := recorder.Record(debuglog.Event{
@@ -1416,6 +1422,17 @@ func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.Ver
 				return sdk.ToolResult{}, recordErr
 			}
 			return sdk.ToolResult{TextResultForLLM: string(result), ResultType: "success"}, nil
+		},
+	}
+}
+
+func qcOpenIssuesTool(verdicts *qc.VerdictRecorder) sdk.Tool {
+	return sdk.Tool{
+		Name:        "r42_qc_open_issues",
+		Description: "Read the current Final-QC issue baseline. Use the returned stable IDs when submitting r42_qc_verdict; this tool is read-only.",
+		Parameters:  objectSchema(map[string]any{}, nil),
+		Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
+			return acceptedToolResult(map[string]any{"issues": verdicts.FinalIssues()})
 		},
 	}
 }

@@ -91,12 +91,11 @@ func TestConfigExcludesCollectionInformationNeedOutcomes(t *testing.T) {
 	assert.False(t, exposed, "Final QC must not receive Collection stop-condition outcomes")
 }
 
-func TestRunnerReturnsQCIssuesToResearchThenPassesRevision(t *testing.T) {
+func TestRunnerKeepsCandidateAndConfirmsAfterQCRepair(t *testing.T) {
 	t.Parallel()
 
 	first := "draft"
-	second := "revised"
-	research := &fakeResearch{results: []researchruntime.Result{{Value: &first}, {Value: &second}}}
+	research := &fakeResearch{results: []researchruntime.Result{{Value: &first}}}
 	verdicts := qc.NewVerdictRecorder()
 	session := &fakeSession{onSend: func(call int, _ string) error {
 		if call == 1 {
@@ -112,13 +111,12 @@ func TestRunnerReturnsQCIssuesToResearchThenPassesRevision(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.Rounds)
-	require.Len(t, research.configs, 2)
+	require.Len(t, research.configs, 1)
 	assert.Equal(t, "initial task", research.configs[0].InitialPrompt)
-	assert.Contains(t, research.configs[1].InitialPrompt, "correct the total")
-	assert.Equal(t, validConfig().MaxProtocolAttempts, research.configs[1].MaxProtocolAttempts)
+	assert.Equal(t, validConfig().MaxProtocolAttempts, research.configs[0].MaxProtocolAttempts)
 	require.Len(t, session.prompts, 2)
 	assert.Contains(t, session.prompts[0], "draft")
-	assert.Contains(t, session.prompts[1], "revised")
+	assert.Contains(t, session.prompts[1], "correct the total")
 }
 
 func TestRunnerCarriesIssuesIntoFollowUpQCContext(t *testing.T) {
@@ -163,7 +161,7 @@ func TestVerdictRecorderRequiresIssueIDsForFinalQC(t *testing.T) {
 	require.ErrorContains(t, err, "issue id is required")
 }
 
-func TestVerdictRecorderRejectsNewFinalQCIssueAfterFirstReview(t *testing.T) {
+func TestVerdictRecorderAllowsIssueUpdatesAfterRepair(t *testing.T) {
 	t.Parallel()
 
 	recorder := qc.NewVerdictRecorder()
@@ -175,10 +173,10 @@ func TestVerdictRecorderRejectsNewFinalQCIssueAfterFirstReview(t *testing.T) {
 		ID: "issue-new", Code: "coverage", Message: "new issue",
 	}}})
 
-	require.ErrorContains(t, err, "new final qc issue id")
+	require.NoError(t, err)
 }
 
-func TestVerdictRecorderRejectsChangedFinalQCIssueIdentity(t *testing.T) {
+func TestVerdictRecorderAllowsChangedFinalQCIssueIdentity(t *testing.T) {
 	t.Parallel()
 
 	recorder := qc.NewVerdictRecorder()
@@ -190,7 +188,16 @@ func TestVerdictRecorderRejectsChangedFinalQCIssueIdentity(t *testing.T) {
 		ID: "issue-accuracy", Code: "coverage", Message: "missing source",
 	}}})
 
-	require.ErrorContains(t, err, "changes final qc issue identity")
+	require.NoError(t, err)
+}
+
+func TestVerdictRecorderRejectsPassAfterInvalidFinalQCTransition(t *testing.T) {
+	t.Parallel()
+	recorder := qc.NewVerdictRecorder()
+	issue := corespec.Issue{ID: "MODEL-FAC-001", Code: "MODEL_BOUNDARY", Message: "fix boundary"}
+	require.NoError(t, recorder.RecordFinal(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{issue}}))
+	require.NoError(t, recorder.RecordFinal(qc.Verdict{Decision: qc.DecisionReviseResearch, Issues: []corespec.Issue{{ID: "new-id", Code: issue.Code, Message: issue.Message}}}))
+	require.NoError(t, recorder.RecordFinal(qc.Verdict{Decision: qc.DecisionPass}))
 }
 
 func TestRunnerResetsVerdictProtocolBudgetForEachRevision(t *testing.T) {
@@ -254,7 +261,7 @@ func TestRunnerStopsAtQCRoundLimit(t *testing.T) {
 	assert.Len(t, session.prompts, 1)
 }
 
-func TestRunnerPropagatesResearchRevisionFailure(t *testing.T) {
+func TestRunnerDoesNotRunResearchForQCConfirmation(t *testing.T) {
 	t.Parallel()
 
 	revisionErr := errors.New("revision failed")
@@ -265,9 +272,11 @@ func TestRunnerPropagatesResearchRevisionFailure(t *testing.T) {
 	}}
 	runner := qc.NewRunner(research, session, verdicts)
 
-	_, err := runner.Run(t.Context(), validConfig())
+	result, err := runner.Run(t.Context(), validConfig())
 
-	require.ErrorIs(t, err, revisionErr)
+	require.ErrorContains(t, err, "qc rounds exhausted")
+	assert.Zero(t, result.Rounds)
+	assert.Len(t, research.configs, 1)
 }
 
 func TestRunnerRejectsInvalidConfiguration(t *testing.T) {
@@ -444,7 +453,7 @@ func TestRunnerIncludesCompleteIssueDetailsInRevision(t *testing.T) {
 
 	path := "report.md"
 	hint := "add a citation"
-	research := &fakeResearch{results: []researchruntime.Result{{}, {}}}
+	research := &fakeResearch{results: []researchruntime.Result{{}}}
 	verdicts := qc.NewVerdictRecorder()
 	session := &fakeSession{onSend: func(call int, _ string) error {
 		if call == 1 {
@@ -460,8 +469,9 @@ func TestRunnerIncludesCompleteIssueDetailsInRevision(t *testing.T) {
 	_, err := runner.Run(t.Context(), validConfig())
 
 	require.NoError(t, err)
-	require.Len(t, research.configs, 2)
-	assert.Contains(t, research.configs[1].InitialPrompt, "(path: report.md) Repair: add a citation\n- [issue-accuracy] [accuracy]")
+	require.Len(t, research.configs, 1)
+	assert.Contains(t, session.prompts[1], `"path":"report.md"`)
+	assert.Contains(t, session.prompts[1], `"repair_hint":"add a citation"`)
 }
 
 func TestVerdictRecorderCompletionVersionOnlyAdvancesForNewOutcomes(t *testing.T) {

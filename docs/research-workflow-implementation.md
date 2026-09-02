@@ -7,6 +7,15 @@ QC design in [design.md](design.md) into single-purpose pull requests. Each task
 must follow the repository TDD, local-check, CI-coverage, and independent-review
 requirements in `AGENTS.md`.
 
+## Next Development Queue
+
+| Order | Task | Scope | Acceptance criteria | Status |
+| --- | --- | --- | --- | --- |
+| 1 | Researcher-invoked source-table generation | The deep-research example declares a Go typed tool that accepts the report artifact ID; it reads cited quote IDs and bound validated knowledge metadata, then writes/replaces the Markdown Quote ID--URL table. The model does not hand-copy source URLs. | The tool exposes only the report artifact ID to the model; repeated generation is idempotent; every cited quote gets exactly one generated row; rows use canonical knowledge metadata; missing or conflicting quote metadata returns a repairable typed issue; Final QC does not inspect source-table metadata; unrelated research workflows do not receive the tool. | completed |
+| 2 | Final QC issue lookup and localized report patching | Give Final QC a read-only `r42_qc_open_issues` tool for the current issue context. Give closed Research an `r42_patch_markdown` tool for one exact, unique replacement outside the protected Sources section; retain full `r42_write_markdown` for broad rewrites. | QC can recover issue IDs after context compaction; small repairs preserve unrelated report content and generated Sources. | completed |
+| 3 | Final QC direct artifact repair and confirmation | Let Final QC patch authorized output artifacts directly, then re-run its semantic confirmation on the same candidate for up to `final_qc_rounds`; do not start a researcher revision. Add a knowledge-specific local patch tool for deep-research artifacts. | Patch batches are unique, non-overlapping, atomic, and path-safe; Final QC retries keep the same candidate and sessions; unresolved issues fail only after the configured confirmation budget. | completed |
+| 4 | Keep QC scoped to research semantics | Planner and closed synthesis/conflict-resolution blocks must not run Collection or Collection QC when they consume already validated upstream artifacts. Mechanical plan validation stays in typed tools; QC reviews only semantic support, logic, and numeric correctness. | Deep-research planner, conflict resolver, and synthesizer avoid spurious Collection rounds; configuration regression tests cover the phase modes. | completed |
+
 ## Delivery Rules
 
 - Implement tasks in dependency order. Tasks with satisfied dependencies may be

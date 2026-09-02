@@ -143,10 +143,9 @@ func TestQCIssuesTriggerRevisionAndPassInPersistentSessions(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 4, opener.opens)
-	assert.Equal(t, 2, opener.research.sends)
+	assert.Equal(t, 1, opener.research.sends)
 	assert.Equal(t, 2, opener.qc.sends)
-	require.Len(t, opener.research.prompts, 2)
-	assert.Contains(t, opener.research.prompts[1], "add a citation")
+	require.Len(t, opener.research.prompts, 1)
 }
 
 func TestNestedModulesPublishOutputsWithGoldenTraversal(t *testing.T) {

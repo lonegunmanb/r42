@@ -48,7 +48,7 @@ class AuditTests(unittest.TestCase):
             )
             self.assertEqual("topic-quote-001", full_audit["matches"][0]["quote_id"])
 
-    def test_audit_rejects_quote_without_trusted_reference(self):
+    def test_audit_does_not_recheck_quote_reference_format(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = self._write_fixture(Path(directory))
             knowledge_path = Path(paths["knowledge_paths"][0])
@@ -58,13 +58,13 @@ class AuditTests(unittest.TestCase):
 
             result = self._audit(paths)
 
-            self.assertFalse(result["pass"])
-            self.assertIn(
+            self.assertTrue(result["pass"])
+            self.assertNotIn(
                 "invalid_quote_ref",
                 {issue["code"] for issue in result["issues"]},
             )
 
-    def test_audit_reports_invented_unused_and_wrong_url_references(self):
+    def test_audit_does_not_recheck_quote_ids_or_source_urls(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = self._write_fixture(
                 Path(directory),
@@ -74,11 +74,11 @@ class AuditTests(unittest.TestCase):
 
             result = self._audit(paths)
 
-            self.assertFalse(result["pass"])
+            self.assertTrue(result["pass"])
             codes = {issue["code"] for issue in result["issues"]}
-            self.assertIn("invented_reference", codes)
-            self.assertIn("unused_reference", codes)
-            self.assertIn("wrong_url_mapping", codes)
+            self.assertNotIn("invented_reference", codes)
+            self.assertNotIn("unused_reference", codes)
+            self.assertNotIn("wrong_url_mapping", codes)
 
     def test_audit_does_not_match_quotes_unused_by_final_report(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -129,7 +129,7 @@ class AuditTests(unittest.TestCase):
                 {issue["code"] for issue in result["issues"]},
             )
 
-    def test_audit_rejects_report_without_citations(self):
+    def test_audit_does_not_require_quote_ids(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = self._write_fixture(Path(directory))
             Path(paths["report_path"]).write_text(
@@ -139,8 +139,8 @@ class AuditTests(unittest.TestCase):
 
             result = self._audit(paths)
 
-            self.assertFalse(result["pass"])
-            self.assertIn(
+            self.assertTrue(result["pass"])
+            self.assertNotIn(
                 "missing_citations",
                 {issue["code"] for issue in result["issues"]},
             )

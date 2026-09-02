@@ -3,8 +3,9 @@
 This example answers one topic through a planner-created research matrix. The
 caller normally supplies only `topic`; a static planner research workflow
 decomposes it into three task groups and submits the plan through a typed Go
-tool. The planner runs directly in closed `research_only` mode, followed by
-Final QC; it has no Collection or Collection QC phase. An optional
+tool. The planner runs directly in closed `research_only` mode without a QC
+pass; the resulting research artifacts are reviewed by their own QC phases. It
+has no Collection or Collection QC phase. An optional
 `research_plan = list(string)` can bypass that planner when
 the caller already has the subquestions: every supplied subquestion is sent to
 the parallel dynamic group, while the two serial groups remain empty.
@@ -94,7 +95,8 @@ paths.
 ## Evidence pipeline
 
 This example requires Python 3 for the local `audit_synthesis` external tool;
-the research and planning tools remain inline Go tools compiled by r42.
+the host-side source-table generator and research/planning tools are compiled
+into r42.
 
 By default, the built-in `r42_save_artifact` tool is the typed boundary for
 source capture: during Collection it accepts complete Markdown content plus a
@@ -141,8 +143,9 @@ under the task's declared source artifact directory and obtain its registered
 reviews those registered artifacts. R42 supplies the approved IDs to closed
 Research, which can inspect them through the artifact read and search tools;
 submitted quotes retain `quote_ref` and canonical `artifact_id` rather than
-filesystem paths. Final QC reviews semantic support; failed QC returns a Research revision
-up to `max_qc_rounds`. Final QC cannot reopen Collection.
+filesystem paths. Final QC reviews semantic support and repairs the candidate
+directly with its patch tools; `max_qc_rounds` controls confirmation attempts.
+Final QC cannot reopen Collection or start another Research pass.
 
 Each materialized deep-dive task has its own fetch entry in `tool_call_quota`.
 The `web_fetch_tool_call_quota` input variable controls successful built-in
@@ -155,13 +158,17 @@ The conflict resolver reads all knowledge artifacts from all three dynamic
 groups, records resolved and unresolved contradictions in `resolution.json`,
 and has its own QC loop. The final synthesizer reads every knowledge artifact
 and the resolution, then writes `report.md` with source and quote references.
-Its QC calls `audit_synthesis` once per round for bounded mechanical checks:
-invented or unused quote IDs, trusted quote references, source-table URL
-mappings, and artifact IDs. Quote text is not compared again because canonical
-text came from the host quote registry. The complete audit is written beside the
-report as `synthesis-audit.json`; only compact statistics and issues enter the
-model context. The QC model remains responsible for semantic support,
-unsupported extrapolation, plan coverage, and faithful conflict handling.
+The final Researcher explicitly calls the `generate_source_table` Go tool with
+the report artifact ID. The tool derives the complete Quote ID--URL table from
+cited quote IDs and canonical knowledge metadata, and replaces any existing
+Sources section idempotently. Final QC
+calls `audit_synthesis` once per round only for bounded path, readability,
+schema, and artifact-ID checks. It does not recheck quote IDs, quote references,
+or source URLs. Quote text is not compared again because canonical text came
+from the host quote registry. The complete audit is written beside the report
+as `synthesis-audit.json`; only compact statistics and issues enter the model
+context. The QC model remains responsible for semantic support, unsupported
+extrapolation, plan coverage, and faithful conflict handling.
 
 The `knowledge_paths`, `conflict_resolution_path`, and `report_path` outputs
 expose the resulting artifact locations. Each dynamic task also retains its

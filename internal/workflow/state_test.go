@@ -22,6 +22,7 @@ func TestStateMachineValidTransitions(t *testing.T) {
 		{name: "sufficient advances to research", start: PhaseCollectionQC, event: EventSufficient, expected: PhaseResearch, consumesRound: false},
 		{name: "needs more resumes collection", start: PhaseCollectionQC, event: EventNeedsMore, expected: PhaseCollection, consumesRound: true},
 		{name: "research completes to final qc", start: PhaseResearch, event: EventResearchComplete, expected: PhaseFinalQC, consumesRound: false},
+		{name: "final qc retry stays in final qc", start: PhaseFinalQC, event: EventFinalQCRetry, expected: PhaseFinalQC, consumesRound: false},
 		{name: "revise research returns to research", start: PhaseFinalQC, event: EventReviseResearch, expected: PhaseResearch, consumesRound: false},
 		{name: "final pass completes", start: PhaseFinalQC, event: EventPass, expected: PhaseComplete, consumesRound: false},
 	}

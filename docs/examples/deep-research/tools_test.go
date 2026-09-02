@@ -36,6 +36,42 @@ func TestDeepDiveCollectionsCanUseCopiedPPLXTools(t *testing.T) {
 	assert.Equal(t, 3, strings.Count(main, "${local.source_tool_guidance}"))
 	assert.Contains(t, main, "pplx_pro_search_tool_id")
 	assert.Contains(t, main, "pplx_fetch_tool_id")
+	planStart := strings.Index(main, `research "static" "plan"`)
+	require.NotEqual(t, -1, planStart)
+	planEnd := strings.Index(main[planStart:], "\nresearch ")
+	require.NotEqual(t, -1, planEnd)
+	assert.NotContains(t, main[planStart:planStart+planEnd], "\n  qc {")
+}
+
+func TestDeepResearchClosedSynthesisBlocksSkipCollection(t *testing.T) {
+	t.Parallel()
+
+	configuration, err := os.ReadFile("main.r42.hcl")
+	require.NoError(t, err)
+	parser := hclparse.NewParser()
+	file, diagnostics := parser.ParseHCL(configuration, "main.r42.hcl")
+	require.False(t, diagnostics.HasErrors(), diagnostics.Error())
+	body, ok := file.Body.(*hclsyntax.Body)
+	require.True(t, ok)
+
+	found := map[string]bool{}
+	for _, block := range body.Blocks {
+		if block.Type != "research" || len(block.Labels) != 2 || block.Labels[0] != "static" {
+			continue
+		}
+		if block.Labels[1] != "resolve_conflicts" && block.Labels[1] != "synthesize" {
+			continue
+		}
+		found[block.Labels[1]] = true
+		phase, phaseDiagnostics := block.Body.Attributes["phase_mode"].Expr.Value(nil)
+		require.False(t, phaseDiagnostics.HasErrors(), phaseDiagnostics.Error())
+		assert.Equal(t, "research_only", phase.AsString(), block.Labels[1])
+		for _, nested := range block.Body.Blocks {
+			assert.NotEqual(t, "collection_qc", nested.Type, block.Labels[1])
+		}
+	}
+	assert.True(t, found["resolve_conflicts"])
+	assert.True(t, found["synthesize"])
 }
 
 func TestArtifactToolsRejectPathsOutsideWorkingDirectory(t *testing.T) {
@@ -165,6 +201,107 @@ func TestSubmitKnowledgeAcceptsBuiltinUUIDArtifactID(t *testing.T) {
 	assert.Equal(t, "quote-ref-1", payload.Quotes[0].QuoteRef)
 	assert.Equal(t, payload.Quotes[0].ID, payload.Knowledge[0].QuoteIDs[0])
 	assert.FileExists(t, artifactPath)
+}
+
+func TestGenerateSourceTableGoToolUsesCanonicalKnowledgeMetadata(t *testing.T) {
+	t.Parallel()
+
+	workspace := filepath.Join(t.TempDir(), ".r42", "runs", "current", "blocks", "synthesis")
+	require.NoError(t, os.MkdirAll(workspace, 0o700))
+	reportPath := filepath.Join(workspace, "report.md")
+	knowledgePath := filepath.Join(workspace, "knowledge.json")
+	require.NoError(t, os.WriteFile(reportPath, []byte("# Report\n\nClaim [task-quote-001]\n\n## Sources\n\n| Quote ID | URL |\n| --- | --- |\n| task-quote-001 | https://wrong.example |\n"), 0o600))
+	require.NoError(t, os.WriteFile(knowledgePath, []byte(`{"quotes":[{"id":"task-quote-001","url":"https://canonical.example/source"}]}`), 0o600))
+
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "generate_source_table"))
+	require.NoError(t, err)
+	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"report_artifact_id":     "artifact-report",
+		"_r42_report_path":       reportPath,
+		"knowledge_artifact_ids": []string{"artifact-knowledge"},
+		"_r42_knowledge_paths":   []string{knowledgePath},
+	}), workspace)
+	require.NoError(t, err)
+	assert.True(t, response.Accepted, "issues: %#v", response.Issues)
+	content, err := os.ReadFile(reportPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "https://canonical.example/source")
+	assert.NotContains(t, string(content), "https://wrong.example")
+
+	second, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"report_artifact_id": "artifact-report", "_r42_report_path": reportPath,
+		"knowledge_artifact_ids": []string{"artifact-knowledge"}, "_r42_knowledge_paths": []string{knowledgePath},
+	}), workspace)
+	require.NoError(t, err)
+	assert.True(t, second.Accepted, "repeat call issues: %#v", second.Issues)
+}
+
+func TestGenerateSourceTableGoToolRemovesDerivedQuotesAndLinksURLs(t *testing.T) {
+	t.Parallel()
+
+	workspace := filepath.Join(t.TempDir(), ".r42", "runs", "current", "blocks", "synthesis")
+	require.NoError(t, os.MkdirAll(workspace, 0o700))
+	reportPath := filepath.Join(workspace, "report.md")
+	knowledgePath := filepath.Join(workspace, "knowledge.json")
+	require.NoError(t, os.WriteFile(reportPath, []byte("# Report\n\nDerived [derived-quote-001](https://wrong.example/derived) and sourced [task-quote-001](https://wrong.example/topic-quote-999).\n\n## Sources\n\n| Quote ID | URL |\n| --- | --- |\n| derived-quote-001 | model-derived calculation snapshot |\n| task-quote-001 | https://wrong.example |\n"), 0o600))
+	require.NoError(t, os.WriteFile(knowledgePath, []byte(`{"quotes":[
+{"id":"derived-quote-001","url":"model-derived calculation snapshot"},
+{"id":"task-quote-001","url":"HTTPS://canonical.example/source"}
+]}`), 0o600))
+
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "generate_source_table"))
+	require.NoError(t, err)
+	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"report_artifact_id":     "artifact-report",
+		"_r42_report_path":       reportPath,
+		"knowledge_artifact_ids": []string{"artifact-knowledge"},
+		"_r42_knowledge_paths":   []string{knowledgePath},
+	}), workspace)
+	require.NoError(t, err)
+	assert.True(t, response.Accepted, "issues: %#v", response.Issues)
+	content, err := os.ReadFile(reportPath)
+	require.NoError(t, err)
+	text := string(content)
+	assert.NotContains(t, text, "derived-quote-001")
+	assert.Contains(t, text, "[task-quote-001](HTTPS://canonical.example/source)")
+	assert.NotContains(t, text, "topic-quote-999")
+}
+
+func TestGenerateSourceTableGoToolRejectsSymlinkedArtifacts(t *testing.T) {
+	t.Parallel()
+
+	workspace := filepath.Join(t.TempDir(), ".r42", "runs", "current", "blocks", "synthesis")
+	require.NoError(t, os.MkdirAll(workspace, 0o700))
+	outside := filepath.Join(t.TempDir(), "outside")
+	require.NoError(t, os.MkdirAll(outside, 0o700))
+	reportTarget := filepath.Join(outside, "report.md")
+	knowledgeTarget := filepath.Join(outside, "knowledge.json")
+	require.NoError(t, os.WriteFile(reportTarget, []byte("# Report\n\nClaim [task-quote-001]\n"), 0o600))
+	require.NoError(t, os.WriteFile(knowledgeTarget, []byte(`{"quotes":[{"id":"task-quote-001","url":"https://canonical.example/source"}]}`), 0o600))
+
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "generate_source_table"))
+	require.NoError(t, err)
+
+	linkedReport := filepath.Join(workspace, "report.md")
+	linkedKnowledge := filepath.Join(workspace, "knowledge.json")
+	require.NoError(t, os.Symlink(reportTarget, linkedReport))
+	require.NoError(t, os.Symlink(knowledgeTarget, linkedKnowledge))
+	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+		"report_artifact_id": "artifact-report", "_r42_report_path": linkedReport,
+		"knowledge_artifact_ids": []string{"artifact-knowledge"}, "_r42_knowledge_paths": []string{linkedKnowledge},
+	}), workspace)
+	require.NoError(t, err)
+	assert.False(t, response.Accepted)
+	assert.NotEmpty(t, response.Issues)
 }
 
 func trustedCitation(ref string) string {

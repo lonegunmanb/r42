@@ -132,17 +132,6 @@ research "static" "plan" {
   disallowed_tools  = local.offline_disallowed_tools
   permission        = "approve_all"
 
-  qc {
-    criteria = {
-      coverage = "Verify the combined task set covers the topic's material perspectives, mechanisms, counterarguments, and evidence needs without assuming the answer."
-      orthogonality = "Compare every pair of tasks and reject avoidable overlap, duplicate evidence scopes, vague omnibus questions, and decompositions that would produce the same claims twice."
-      scheduling = "Verify parallel tasks are mutually independent, independent_serial tasks require no output from either earlier group, and final_serial tasks are meaningful only after both earlier groups have completed."
-      executability = "Verify every task has a globally unique safe ID, a falsifiable subquestion, concrete instructions, explicit evidence expectations, and enough context to execute without asking the planner for clarification."
-    }
-    model_provider   = model_provider.qc
-    reasoning_effort = var.reasoning_effort
-    permission       = "approve_all"
-  }
 }
 
 research "dynamic" "parallel_deep_dive" {
@@ -449,6 +438,7 @@ research "dynamic" "final_serial_deep_dive" {
 }
 
 research "static" "resolve_conflicts" {
+  phase_mode       = "research_only"
   model_provider   = model_provider.primary
   model            = var.model
   reasoning_effort = var.reasoning_effort
@@ -462,9 +452,9 @@ research "static" "resolve_conflicts" {
 
     You must finish by calling ${go_tool.submit_conflict_resolution.id}.
 
-    During Collection, do not acquire external evidence; the validated upstream
-    JSON is the complete evidence basis, so submit an empty collection checkpoint.
-    During closed Research, compare that JSON and submit the resolution.
+    This is a closed Research phase. Do not acquire external evidence; the
+    validated upstream JSON is the complete evidence basis. Compare that JSON
+    and submit the resolution.
 
     Never use PowerShell, a shell, curl, wget, or scripts and command-line
     programs to search the web or download remote content. Do not use them as
@@ -554,10 +544,6 @@ research "static" "resolve_conflicts" {
     non_empty = true
   }
 
-  collection_qc {
-    model_provider = model_provider.qc
-  }
-
   qc {
     criteria = {
       coverage = "Judge whether the resolution considers every subquestion represented in the validated upstream JSON. Treat typed-tool reviewed_artifacts validation as authoritative."
@@ -572,14 +558,18 @@ research "static" "resolve_conflicts" {
 }
 
 research "static" "synthesize" {
+  phase_mode       = "research_only"
   model_provider   = model_provider.primary
   model            = var.model
   reasoning_effort = var.reasoning_effort
   system_prompt = <<-PROMPT
     You are the senior editor. Produce one evidence-dense Markdown report from
     the validated knowledge artifacts and conflict-resolution record. Every
-    material factual statement must cite the source URL and quote ID that
-    supports it. Clearly label unresolved conflicts and limitations.
+    material factual statement must cite the quote ID that supports it.
+    Clearly label unresolved conflicts and limitations. After writing or
+    revising the report, call ${go_tool.generate_source_table.id} with the
+    report artifact ID before finalizing; do not write or copy source URLs
+    yourself.
 
     The validated knowledge artifacts and conflict-resolution record are the
     report's only permitted factual basis. Derive every finding, comparison,
@@ -597,9 +587,9 @@ research "static" "synthesize" {
     quotas. Evidence limitations may be mentioned only when they are stated
     in the validated artifacts and are relevant to the supported conclusion.
 
-    During Collection, do not acquire external evidence; the validated upstream
-    JSON is the complete evidence basis, so submit an empty collection checkpoint.
-    During closed Research, synthesize only that JSON and write the report.
+    This is a closed Research phase. Do not acquire external evidence; the
+    validated upstream JSON is the complete evidence basis. Synthesize only
+    that JSON and write the report.
 
     Never use PowerShell, a shell, curl, wget, or scripts and command-line
     programs to search the web or download remote content. Do not use them as
@@ -635,12 +625,13 @@ research "static" "synthesize" {
     Use only the included validated JSON and registered artifacts, then write
     the final report to ${artifact("report").path}. Include
     an executive summary, findings organized around the planner-produced task groups,
-    resolved and unresolved contradictions, limitations, and a source table
-    mapping each cited quote ID to its URL. Before writing, remove every
+    resolved and unresolved contradictions, and limitations. Before writing,
+    remove every
     statement that cannot be traced to a validated knowledge claim, its quote,
     or an explicit conflict-resolution decision. Do not merely concatenate the
     files, and do not use pretrained knowledge or opinion to make the report
-    sound complete.
+    sound complete. Then call ${go_tool.generate_source_table.id} with the
+    report artifact ID before calling the Research terminal tool.
   PROMPT
   import_artifact "parallel_knowledge" {
     desc    = "Validated knowledge artifacts from parallel deep-dive tasks."
@@ -658,9 +649,26 @@ research "static" "synthesize" {
     desc    = "Validated cross-subquestion conflict-resolution record."
     sources = values(research.static.resolve_conflicts.artifact)
   }
+  tool_use "generate_source_table" {
+    tool_id = go_tool.generate_source_table.id
+    input = {
+      _r42_report_path = ""
+      knowledge_artifact_ids = concat(
+        [for item in research.dynamic.parallel_deep_dive.tasks : item.artifact.knowledge.id],
+        [for item in research.dynamic.independent_serial_deep_dive.tasks : item.artifact.knowledge.id],
+        [for item in research.dynamic.final_serial_deep_dive.tasks : item.artifact.knowledge.id],
+      )
+      _r42_knowledge_paths = []
+    }
+    input_from_agent = {
+      report_artifact_id = {
+        desc    = "The declared final report artifact ID."
+        sources = []
+      }
+    }
+  }
   disallowed_tools = concat(["ask_user"], local.offline_disallowed_tools)
   permission       = "approve_all"
-
   artifact "report" {
     type      = "file"
     path      = "${block_wd()}/report.md"
@@ -669,18 +677,14 @@ research "static" "synthesize" {
     non_empty = true
   }
 
-  collection_qc {
-    model_provider = model_provider.qc
-  }
-
   qc {
     criteria = {
-      mechanical_audit = "Call ${external_tool.audit_synthesis.id} exactly once in each QC round before judging the current report revision. Pass report_path as the declared report artifact, knowledge_paths as the complete Validated knowledge artifacts list from the task, and resolution_path as the Conflict-resolution artifact. Treat its quote-ID, quote-ref, source-URL, unused-reference, and artifact-ID checks as authoritative; canonical quote text came from the upstream host quote registry and must not be compared with artifacts again. Preserve every reported mechanical issue in the QC verdict, but do not repeat those checks with grep or view."
+      mechanical_audit = "Call ${external_tool.audit_synthesis.id} exactly once in each QC round before judging the current report revision. Pass report_path as the declared report artifact, knowledge_paths as the complete Validated knowledge artifacts list from the task, and resolution_path as the Conflict-resolution artifact. Treat only its path, readability, schema, and artifact-ID checks as authoritative. The Researcher calls ${go_tool.generate_source_table.id}; do not repeat source-table, quote-ID, quote-reference, or URL checks with grep or view."
       plan_coverage = "Use the validated knowledge JSON included in the task to judge whether the report answers every planner-produced subquestion."
       factual_fidelity = "Use each knowledge item's claim, confidence, quote_ids, and exact_quote fields to judge whether every material report statement and conclusion is logically supported without extrapolation. Reject any statement that appears to come from model training, memory, general background knowledge, assumption, or opinion rather than the validated artifacts. This is a semantic judgment; do not compare canonical quote text with artifacts."
       conflict_handling = "Use the included conflict-resolution JSON to judge whether all resolved and unresolved conflicts are represented faithfully without hiding residual uncertainty."
-      citation_semantics = "For citations that mechanically pass, decide whether the cited exact quote actually supports the surrounding report claim. Do not reopen artifacts to compare canonical quote text."
-      provenance_guard = "Reject a report that includes a 信源限制说明 or equivalent training-data/knowledge-cutoff/paywall/quota disclaimer, or that uses such limitations as a reason to introduce uncited model opinion. Require unsupported conclusions to be removed or explicitly marked as insufficient evidence."
+      citation_semantics = "For citations in the report, decide whether the cited exact quote semantically supports the surrounding claim. Do not reopen artifacts to compare canonical quote text."
+      provenance_guard = "Apply the configured final_qc_strictness to provenance wording. Reject material claims that rely on uncited model opinion or on a source limitation as a substitute for evidence. Do not turn a harmless, evidence-grounded limitation statement into a separate issue when it does not affect a conclusion."
     }
     model_provider   = model_provider.qc
     reasoning_effort = var.reasoning_effort

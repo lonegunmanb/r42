@@ -41,7 +41,7 @@ research "static" "source" {
 	require.NoError(t, err)
 	assert.Equal(t, 2, opener.collectionRounds)
 	assert.Equal(t, 2, opener.collectionQCRounds)
-	assert.Equal(t, 2, opener.researchRounds)
+	assert.Equal(t, 1, opener.researchRounds)
 	assert.Equal(t, 2, opener.finalQCRounds)
 }
 

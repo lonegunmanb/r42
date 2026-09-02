@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1329,6 +1331,35 @@ func evidenceToolsWithAccess(
 			return acceptedToolResult(path)
 		},
 	})
+	tools = append(tools, sdk.Tool{
+		Name: "r42_patch_markdown", Description: "Replace exactly one expected text occurrence in a declared Markdown artifact. The Sources section is protected; use this for small research revisions and r42_write_markdown only for full rewrites.",
+		Parameters: objectSchema(map[string]any{
+			"artifact_id":      map[string]any{"type": "string", "description": "Declared file artifact ID from r42_list_artifacts"},
+			"expected_text":    map[string]any{"type": "string", "description": "Exact existing Markdown text to replace; it must occur once outside Sources"},
+			"replacement_text": map[string]any{"type": "string", "description": "Replacement Markdown text; may be empty when removing a small passage"},
+		}, []string{"artifact_id", "expected_text", "replacement_text"}),
+		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			args, decodeErr := decodeArguments[markdownPatchArgs](invocation.Arguments)
+			if decodeErr != nil {
+				return rejectedToolResult("invalid_arguments", decodeErr.Error())
+			}
+			if !isAuthorizedArtifact(args.ArtifactID) {
+				return rejectedToolResult("unknown_artifact", fmt.Sprintf("unknown artifact %q", args.ArtifactID))
+			}
+			record, recordErr := artifactsRegistry.Record(args.ArtifactID)
+			if recordErr != nil {
+				return rejectedToolResult("artifact_patch_failed", recordErr.Error())
+			}
+			if !artifactsRegistry.HasPurpose(args.ArtifactID, artifactpkg.PurposeOutput) || record.Type != researchspec.ArtifactTypeFile {
+				return rejectedToolResult("invalid_artifact_type", "markdown patch requires a declared output file artifact")
+			}
+			path, patchErr := writer.Patch(record.Path, args.ExpectedText, args.ReplacementText)
+			if patchErr != nil {
+				return rejectedToolResult("artifact_patch_failed", patchErr.Error())
+			}
+			return acceptedToolResult(path)
+		},
+	})
 	return tools, nil
 }
 
@@ -1564,6 +1595,364 @@ type qcQuoteExpansion struct {
 	AfterLines  int `json:"after_lines"`
 }
 
+type qcArtifactPatchArgs struct {
+	ArtifactID string              `json:"artifact_id"`
+	Patch      *evidence.TextPatch `json:"patch"`
+}
+
+// qcPatchArtifactTool lets Final QC repair an authorized output artifact in
+// place using one exact, uniquely matching replacement at a time.
+func qcPatchArtifactTool(workspace string, registry *artifactpkg.Registry, authorizedIDs []string) sdk.Tool {
+	return sdk.Tool{
+		Name:        "r42_qc_patch_artifact",
+		Description: "Apply exactly one exact text replacement to an authorized Markdown or text output artifact. Call again for another independent change. Do not use this for knowledge.json; use r42_qc_patch_knowledge instead.",
+		Parameters: objectSchema(map[string]any{
+			"artifact_id": map[string]any{"type": "string", "description": "Registered output artifact ID"},
+			"patch": objectSchema(map[string]any{
+				"expected":    map[string]any{"type": "string"},
+				"replacement": map[string]any{"type": "string"},
+			}, []string{"expected", "replacement"}),
+		}, []string{"artifact_id", "patch"}),
+		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			args, err := decodeArguments[qcArtifactPatchArgs](invocation.Arguments)
+			if err != nil {
+				return rejectedToolResult("invalid_arguments", err.Error())
+			}
+			if args.Patch == nil {
+				return rejectedToolResult("single_patch_required", "provide exactly one patch object; call the tool again for another change")
+			}
+			if !slices.Contains(authorizedIDs, args.ArtifactID) {
+				return rejectedToolResult("artifact_not_authorized", "artifact_id is not an authorized output artifact for this QC task")
+			}
+			if registry == nil {
+				return rejectedToolResult("artifact_patch_failed", "artifact registry is required")
+			}
+			record, err := registry.Record(args.ArtifactID)
+			if err != nil {
+				return rejectedToolResult("unknown_artifact_id", err.Error())
+			}
+			if record.Type == researchspec.ArtifactTypeDirectory {
+				return rejectedToolResult("artifact_patch_failed", "directory artifacts cannot be patched")
+			}
+			if strings.EqualFold(filepath.Base(record.Path), "knowledge.json") {
+				return rejectedToolResult("use_knowledge_patch", "knowledge.json requires r42_qc_patch_knowledge with item IDs and quote_ref values")
+			}
+			writer, err := evidence.NewArtifactWriter(workspace)
+			if err != nil {
+				return rejectedToolResult("artifact_patch_failed", err.Error())
+			}
+			if _, err = writer.Patch(record.Path, []evidence.TextPatch{*args.Patch}); err != nil {
+				return rejectedToolResult("artifact_patch_failed", err.Error())
+			}
+			return acceptedToolResult(struct {
+				ArtifactID string `json:"artifact_id"`
+				PatchCount int    `json:"patch_count"`
+			}{ArtifactID: args.ArtifactID, PatchCount: 1})
+		},
+	}
+}
+
+type qcKnowledgePatch struct {
+	ID         string    `json:"id"`
+	Claim      *string   `json:"claim,omitempty"`
+	Confidence *string   `json:"confidence,omitempty"`
+	Citations  *[]string `json:"citations,omitempty"`
+}
+
+type qcKnowledgePatchArgs struct {
+	ArtifactID string            `json:"artifact_id"`
+	Patch      *qcKnowledgePatch `json:"patch,omitempty"`
+	RemoveID   string            `json:"remove_id,omitempty"`
+}
+
+// qcPatchKnowledgeTool applies field-level changes to knowledge.json. Quote
+// references are resolved by the host so QC never has to copy quote JSON.
+func qcPatchKnowledgeTool(workspace string, registry *artifactpkg.Registry, quotes *evidence.QuoteRegistry, authorizedIDs []string) sdk.Tool {
+	return sdk.Tool{
+		Name:        "r42_qc_patch_knowledge",
+		Description: "Apply exactly one small field-level repair to an authorized knowledge.json by existing item ID. Send only changed claim/confidence fields and quote_ref strings; call again for another item. The host resolves trusted quote metadata and returns a change summary.",
+		Parameters: objectSchema(map[string]any{
+			"artifact_id": map[string]any{"type": "string", "description": "Registered knowledge.json artifact ID"},
+			"patch": objectSchema(map[string]any{
+				"id":         map[string]any{"type": "string", "description": "Existing knowledge item ID"},
+				"claim":      map[string]any{"type": "string"},
+				"confidence": map[string]any{"type": "string", "enum": []string{"high", "medium", "low"}},
+				"citations":  map[string]any{"type": "array", "items": map[string]any{"type": "string", "description": "Trusted quote_ref returned by r42 search/capture tools"}},
+			}, []string{"id"}),
+			"remove_id": map[string]any{"type": "string", "description": "Existing knowledge item ID to remove; use instead of patch"},
+		}, []string{"artifact_id"}),
+		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			args, err := decodeArguments[qcKnowledgePatchArgs](invocation.Arguments)
+			if err != nil {
+				return rejectedToolResult("invalid_arguments", err.Error())
+			}
+			if !slices.Contains(authorizedIDs, args.ArtifactID) {
+				return rejectedToolResult("artifact_not_authorized", "artifact_id is not an authorized output artifact for this QC task")
+			}
+			if registry == nil || quotes == nil {
+				return rejectedToolResult("knowledge_patch_failed", "artifact and quote registries are required")
+			}
+			record, err := registry.Record(args.ArtifactID)
+			if err != nil {
+				return rejectedToolResult("unknown_artifact_id", err.Error())
+			}
+			if record.Type == researchspec.ArtifactTypeDirectory || strings.ToLower(filepath.Base(record.Path)) != "knowledge.json" {
+				return rejectedToolResult("invalid_knowledge_artifact", "artifact_id must refer to knowledge.json")
+			}
+			if (args.Patch == nil) == (strings.TrimSpace(args.RemoveID) == "") {
+				return rejectedToolResult("single_change_required", "provide exactly one patch or one remove_id; call the tool again for another change")
+			}
+			payload, err := os.ReadFile(record.Path)
+			if err != nil {
+				return rejectedToolResult("knowledge_patch_failed", err.Error())
+			}
+			var document map[string]json.RawMessage
+			if err = json.Unmarshal(payload, &document); err != nil {
+				return rejectedToolResult("invalid_knowledge_artifact", "knowledge.json must be valid JSON")
+			}
+			var items []map[string]json.RawMessage
+			if err = unmarshalRawField(document, "knowledge", &items); err != nil {
+				return rejectedToolResult("invalid_knowledge_artifact", "knowledge.json knowledge must be an array")
+			}
+			var storedQuotes []map[string]json.RawMessage
+			if err = unmarshalRawField(document, "quotes", &storedQuotes); err != nil {
+				return rejectedToolResult("invalid_knowledge_artifact", "knowledge.json quotes must be an array")
+			}
+			changed, removed, issue := applyQCKnowledgePatch(&items, &storedQuotes, args, quotes, func(id string) bool {
+				return artifactIDAuthorized(registry, authorizedIDs, id)
+			})
+			if issue != "" {
+				return rejectedToolResult("knowledge_patch_invalid", issue)
+			}
+			encodedItems, err := json.Marshal(items)
+			if err != nil {
+				return rejectedToolResult("knowledge_patch_failed", err.Error())
+			}
+			document["knowledge"] = encodedItems
+			encodedQuotes, err := json.Marshal(storedQuotes)
+			if err != nil {
+				return rejectedToolResult("knowledge_patch_failed", err.Error())
+			}
+			document["quotes"] = encodedQuotes
+			encoded, err := json.MarshalIndent(document, "", "  ")
+			if err != nil {
+				return rejectedToolResult("knowledge_patch_failed", err.Error())
+			}
+			encoded = append(encoded, '\n')
+			if err = atomicReplaceFile(record.Path, encoded); err != nil {
+				return rejectedToolResult("knowledge_patch_failed", err.Error())
+			}
+			digest := sha256.Sum256(encoded)
+			return acceptedToolResult(struct {
+				ArtifactID string   `json:"artifact_id"`
+				ChangedIDs []string `json:"changed_ids"`
+				RemovedIDs []string `json:"removed_ids"`
+				PatchCount int      `json:"patch_count"`
+				Digest     string   `json:"digest"`
+			}{args.ArtifactID, changed, removed, len(changed), "sha256:" + hex.EncodeToString(digest[:])})
+		},
+	}
+}
+
+func unmarshalRawField(document map[string]json.RawMessage, field string, target any) error {
+	payload, ok := document[field]
+	if !ok || len(payload) == 0 {
+		return errors.New("missing field")
+	}
+	return json.Unmarshal(payload, target)
+}
+
+func applyQCKnowledgePatch(
+	itemsPtr *[]map[string]json.RawMessage,
+	storedQuotes *[]map[string]json.RawMessage,
+	args qcKnowledgePatchArgs,
+	quotes *evidence.QuoteRegistry,
+	authorized func(string) bool,
+) ([]string, []string, string) {
+	items := *itemsPtr
+	indices := make(map[string]int, len(items))
+	for index, item := range items {
+		id, ok := rawString(item["id"])
+		if !ok || strings.TrimSpace(id) == "" {
+			return nil, nil, "knowledge items require non-empty id"
+		}
+		if _, exists := indices[id]; exists {
+			return nil, nil, "knowledge item IDs must be unique"
+		}
+		indices[id] = index
+	}
+	patches := make([]qcKnowledgePatch, 0, 1)
+	if args.Patch != nil {
+		patches = append(patches, *args.Patch)
+	}
+	seenPatches := make(map[string]struct{}, len(patches))
+	quoteByRef := make(map[string]map[string]json.RawMessage, len(*storedQuotes))
+	quoteIDByRef := make(map[string]string, len(*storedQuotes))
+	for _, quote := range *storedQuotes {
+		ref, _ := rawString(quote["quote_ref"])
+		id, _ := rawString(quote["id"])
+		if ref != "" && id != "" {
+			quoteByRef[ref] = quote
+			quoteIDByRef[ref] = id
+		}
+	}
+	changed := make([]string, 0, len(patches))
+	for _, patch := range patches {
+		id := strings.TrimSpace(patch.ID)
+		if id == "" {
+			return nil, nil, "patch id must not be empty"
+		}
+		if _, duplicate := seenPatches[id]; duplicate {
+			return nil, nil, "patch IDs must be unique"
+		}
+		seenPatches[id] = struct{}{}
+		index, exists := indices[id]
+		if !exists {
+			return nil, nil, "unknown knowledge item ID: " + id
+		}
+		item := items[index]
+		if patch.Claim != nil {
+			claim := strings.TrimSpace(*patch.Claim)
+			if claim == "" {
+				return nil, nil, "claim must not be empty"
+			}
+			item["claim"], _ = json.Marshal(claim)
+		}
+		if patch.Confidence != nil {
+			confidence := strings.ToLower(strings.TrimSpace(*patch.Confidence))
+			if confidence != "high" && confidence != "medium" && confidence != "low" {
+				return nil, nil, "confidence must be high, medium, or low"
+			}
+			item["confidence"], _ = json.Marshal(confidence)
+		}
+		if patch.Citations != nil {
+			quoteIDs := make([]string, 0, len(*patch.Citations))
+			if len(*patch.Citations) == 0 {
+				return nil, nil, "citations must not be empty"
+			}
+			for _, rawRef := range *patch.Citations {
+				ref := strings.TrimSpace(rawRef)
+				quote, ok := quotes.Resolve(ref)
+				if !ok || !quote.SubmitReady {
+					return nil, nil, "citation must be a trusted submit-ready quote_ref"
+				}
+				if !authorized(quote.ArtifactID) {
+					return nil, nil, "citation quote_ref is not authorized for this QC task"
+				}
+				quoteID := quoteIDByRef[ref]
+				if quoteID == "" {
+					sum := sha256.Sum256([]byte(ref))
+					quoteID = "quote-" + hex.EncodeToString(sum[:8])
+				}
+				quoteIDs = append(quoteIDs, quoteID)
+				if _, exists := quoteByRef[ref]; !exists {
+					quoteByRef[ref] = qcQuoteJSON(quoteID, quote)
+				}
+			}
+			item["quote_ids"], _ = json.Marshal(quoteIDs)
+		}
+		changed = append(changed, id)
+	}
+	remove := make(map[string]struct{}, 1)
+	if id := strings.TrimSpace(args.RemoveID); id != "" {
+		remove[id] = struct{}{}
+	}
+	filteredItems := items[:0]
+	removed := make([]string, 0, len(remove))
+	for _, item := range items {
+		id, _ := rawString(item["id"])
+		if _, drop := remove[id]; drop {
+			removed = append(removed, id)
+			continue
+		}
+		filteredItems = append(filteredItems, item)
+	}
+	copy(items, filteredItems)
+	items = items[:len(filteredItems)]
+	*itemsPtr = items
+	used := make(map[string]struct{})
+	for _, item := range items {
+		var ids []string
+		if json.Unmarshal(item["quote_ids"], &ids) != nil || len(ids) == 0 {
+			return nil, nil, "knowledge items require citations"
+		}
+		for _, id := range ids {
+			used[id] = struct{}{}
+		}
+	}
+	quoteByID := make(map[string]struct{}, len(quoteByRef))
+	for _, quote := range quoteByRef {
+		if id, ok := rawString(quote["id"]); ok && id != "" {
+			quoteByID[id] = struct{}{}
+		}
+	}
+	for id := range used {
+		if _, exists := quoteByID[id]; !exists {
+			return nil, nil, "knowledge item references unknown quote " + id
+		}
+	}
+	kept := (*storedQuotes)[:0]
+	for _, quote := range quoteByRef {
+		id, _ := rawString(quote["id"])
+		if _, exists := used[id]; exists {
+			kept = append(kept, quote)
+		}
+	}
+	*storedQuotes = kept
+	for _, item := range items {
+		claim, _ := rawString(item["claim"])
+		confidence, _ := rawString(item["confidence"])
+		if strings.TrimSpace(claim) == "" || (confidence != "high" && confidence != "medium" && confidence != "low") {
+			return nil, nil, "knowledge items require valid claim and confidence"
+		}
+	}
+	return changed, removed, ""
+}
+
+func rawString(raw json.RawMessage) (string, bool) {
+	var value string
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
+		return "", false
+	}
+	return value, true
+}
+
+func qcQuoteJSON(id string, quote evidence.QuoteRecord) map[string]json.RawMessage {
+	result := make(map[string]json.RawMessage)
+	for key, value := range quote.CanonicalMap() {
+		if key == "_r42_quote" {
+			continue
+		}
+		encoded, _ := json.Marshal(value)
+		result[key] = encoded
+	}
+	result["id"], _ = json.Marshal(id)
+	return result
+}
+
+func atomicReplaceFile(path string, content []byte) error {
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".r42-qc-patch-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	mode := os.FileMode(0o600)
+	if info, statErr := os.Stat(path); statErr == nil {
+		mode = info.Mode().Perm()
+	}
+	if err = temporary.Chmod(mode); err == nil {
+		_, err = temporary.Write(content)
+	}
+	if closeErr := temporary.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, path)
+}
+
 func qcExpandQuoteTool(
 	artifactsRegistry *artifactpkg.Registry,
 	quotes *evidence.QuoteRegistry,
@@ -1642,17 +2031,46 @@ func resolveQuoteReferences(value any, quotes *evidence.QuoteRegistry) (unknown 
 				typed["exact_quote"] = record.ExactQuote
 			}
 		}
-		for _, nested := range typed {
+		for key, nested := range typed {
+			if key == "quote_ref" {
+				continue
+			}
+			if raw, ok := nested.(string); ok {
+				resolved, stringUnknown, err := resolveQuoteString(raw, quotes)
+				if err != nil {
+					continue
+				}
+				typed[key] = resolved
+				unknown = append(unknown, stringUnknown...)
+				continue
+			}
 			nestedUnknown := resolveQuoteReferences(nested, quotes)
 			unknown = append(unknown, nestedUnknown...)
 		}
 	case []any:
-		for _, nested := range typed {
+		for index, nested := range typed {
+			if raw, ok := nested.(string); ok {
+				resolved, stringUnknown, err := resolveQuoteString(raw, quotes)
+				if err != nil {
+					continue
+				}
+				typed[index] = resolved
+				unknown = append(unknown, stringUnknown...)
+				continue
+			}
 			nestedUnknown := resolveQuoteReferences(nested, quotes)
 			unknown = append(unknown, nestedUnknown...)
 		}
 	}
 	return unknown
+}
+
+func resolveQuoteString(raw string, quotes *evidence.QuoteRegistry) (string, []string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "quote-ref-") {
+		return raw, nil, nil
+	}
+	return materializeQuoteString(raw, quotes)
 }
 
 // materializeQuoteReferences replaces values at analyzer-recorded Quote paths
@@ -2192,6 +2610,11 @@ type artifactJSONQueryArgs struct {
 type markdownWriteArgs struct {
 	ArtifactID string `json:"artifact_id"`
 	Content    string `json:"content"`
+}
+type markdownPatchArgs struct {
+	ArtifactID      string `json:"artifact_id"`
+	ExpectedText    string `json:"expected_text"`
+	ReplacementText string `json:"replacement_text"`
 }
 
 const maxJSONArtifactBytes = 4 * 1024 * 1024

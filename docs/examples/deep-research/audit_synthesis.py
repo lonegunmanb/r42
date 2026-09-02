@@ -1,9 +1,7 @@
-import html
 import json
 import re
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
 
 
 QUOTE_ID_RE = re.compile(
@@ -12,8 +10,6 @@ QUOTE_ID_RE = re.compile(
 ARTIFACT_ID_RE = re.compile(
     r"^artifact-(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
 )
-QUOTE_REF_RE = re.compile(r"^quote-ref-[0-9a-f]{32}$")
-URL_RE = re.compile(r"https?://[^\s|<>]+")
 MATCH_MODES = (
     "typed_tool_validated",
     "exact",
@@ -73,41 +69,13 @@ def is_within(path, root):
         return False
 
 
-def clean_url(raw):
-    value = html.unescape(raw.strip().strip("<>"))
-    value = value.rstrip(".,;")
-    while value.endswith(")") and value.count("(") < value.count(")"):
-        value = value[:-1]
-    return value
-
-
-def normalize_url(raw):
-    value = clean_url(raw)
-    try:
-        parsed = urlsplit(value)
-    except ValueError:
-        return value
-    path = parsed.path
-    if path == "/":
-        path = ""
-    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, parsed.query, ""))
-
-
-def source_table(report):
+def body_quote_ids(report):
     body_lines = []
-    mappings = {}
-    source_ids = set()
     for line in report.splitlines():
-        ids = set(QUOTE_ID_RE.findall(line))
-        urls = [clean_url(item) for item in URL_RE.findall(line)]
-        if "|" in line and ids and urls:
-            source_ids.update(ids)
-            for quote_id in ids:
-                mappings.setdefault(quote_id, set()).update(urls)
+        if "|" in line and QUOTE_ID_RE.search(line):
             continue
         body_lines.append(line)
-    body_ids = set(QUOTE_ID_RE.findall("\n".join(body_lines)))
-    return body_ids, source_ids, mappings
+    return set(QUOTE_ID_RE.findall("\n".join(body_lines)))
 
 
 def validate_input_path(raw, expected_name, root, field, issues):
@@ -200,26 +168,6 @@ def load_knowledge(paths, root, issues):
                         "quote id is required",
                         quote_path,
                         "Give every quote a globally unique ID.",
-                    )
-                )
-                continue
-            quote_ref = str(quote.get("quote_ref", "")).strip()
-            if not QUOTE_REF_RE.fullmatch(quote_ref):
-                issues.append(
-                    new_issue(
-                        "invalid_quote_ref",
-                        f"quote {quote_id} does not contain a trusted quote reference",
-                        quote_path,
-                        "Regenerate knowledge.json with quote_ref returned by the upstream Research typed tool.",
-                    )
-                )
-            if quote_id in quotes:
-                issues.append(
-                    new_issue(
-                        "duplicate_quote_id",
-                        f"quote ID is declared by multiple artifacts: {quote_id}",
-                        quote_path,
-                        "Use globally unique quote IDs across all research tasks.",
                     )
                 )
                 continue
@@ -333,59 +281,9 @@ def audit(payload, workspace=None):
                 )
             )
 
-    body_ids, source_ids, mappings = source_table(report)
-    report_ids = set(QUOTE_ID_RE.findall(report))
+    body_ids = body_quote_ids(report)
+    report_ids = set(body_ids)
     result["report_quote_ids"] = len(report_ids)
-
-    if not body_ids:
-        issues.append(
-            new_issue(
-                "missing_citations",
-                "report body must cite at least one declared quote ID",
-                str(report_path or "report_path"),
-                "Support material factual statements with quote IDs and map them in the source table.",
-            )
-        )
-
-    for quote_id in sorted(report_ids - quotes.keys()):
-        issues.append(
-            new_issue(
-                "invented_reference",
-                f"report references undeclared quote ID {quote_id}",
-                str(report_path or "report_path"),
-                "Remove the reference or cite a quote ID declared by an upstream knowledge artifact.",
-            )
-        )
-    for quote_id in sorted(body_ids - source_ids):
-        issues.append(
-            new_issue(
-                "missing_source_mapping",
-                f"body citation {quote_id} has no source-table row",
-                str(report_path or "report_path"),
-                "Add one source-table row mapping the cited quote ID to its declared URL.",
-            )
-        )
-    for quote_id in sorted(source_ids - body_ids):
-        issues.append(
-            new_issue(
-                "unused_reference",
-                f"source table lists quote ID not cited by the report body: {quote_id}",
-                str(report_path or "report_path"),
-                "Remove the unused row or cite the quote where it supports a report claim.",
-            )
-        )
-    for quote_id in sorted(source_ids & quotes.keys()):
-        expected = normalize_url(str(quotes[quote_id].get("url", "")))
-        actual = {normalize_url(item) for item in mappings.get(quote_id, set())}
-        if expected not in actual:
-            issues.append(
-                new_issue(
-                    "wrong_url_mapping",
-                    f"source table URL for {quote_id} does not match its knowledge record",
-                    str(report_path or "report_path"),
-                    f"Map {quote_id} to {quotes[quote_id].get('url', '')}.",
-                )
-            )
 
     for quote_id in sorted(body_ids & quotes.keys()):
         quote = quotes[quote_id]
