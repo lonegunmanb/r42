@@ -955,7 +955,8 @@ func TestApplyDefaultTimeout(t *testing.T) {
 	runtime := &fakeRuntime{planned: mustPlan(t)}
 	_, _, err := execute(t, runtime, "apply")
 	require.NoError(t, err)
-	assert.False(t, runtime.applyDeadline)
+	require.True(t, runtime.applyDeadline)
+	assert.Greater(t, time.Until(runtime.applyDeadlineAt), 100*365*24*time.Hour)
 }
 
 func TestApplyDefaultSessionStallTimeout(t *testing.T) {

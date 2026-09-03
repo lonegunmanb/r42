@@ -271,8 +271,11 @@ func TestGenerateSourceTableGoToolUsesCanonicalKnowledgeMetadata(t *testing.T) {
 	require.NoError(t, os.MkdirAll(workspace, 0o700))
 	reportPath := filepath.Join(workspace, "report.md")
 	knowledgePath := filepath.Join(workspace, "knowledge.json")
-	require.NoError(t, os.WriteFile(reportPath, []byte("# Report\n\nClaim [task-quote-001]\n\n## Sources\n\n| Quote ID | URL |\n| --- | --- |\n| task-quote-001 | https://wrong.example |\n"), 0o600))
-	require.NoError(t, os.WriteFile(knowledgePath, []byte(`{"quotes":[{"id":"task-quote-001","url":"https://canonical.example/source"}]}`), 0o600))
+	require.NoError(t, os.WriteFile(reportPath, []byte("# Report\n\nClaim [task-quote-001] and [quote-standalone-001]\n\n## Sources\n\n| Quote ID | URL |\n| --- | --- |\n| task-quote-001 | https://wrong.example |\n| quote-standalone-001 | https://wrong.example/standalone |\n"), 0o600))
+	require.NoError(t, os.WriteFile(knowledgePath, []byte(`{"quotes":[
+{"id":"task-quote-001","url":"https://canonical.example/source"},
+{"id":"quote-standalone-001","url":"https://canonical.example/standalone"}
+]}`), 0o600))
 
 	compiler, err := gotool.NewCompiler()
 	require.NoError(t, err)
@@ -290,6 +293,7 @@ func TestGenerateSourceTableGoToolUsesCanonicalKnowledgeMetadata(t *testing.T) {
 	content, err := os.ReadFile(reportPath)
 	require.NoError(t, err)
 	assert.Contains(t, string(content), "https://canonical.example/source")
+	assert.Contains(t, string(content), "[quote-standalone-001](https://canonical.example/standalone)")
 	assert.NotContains(t, string(content), "https://wrong.example")
 
 	second, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{

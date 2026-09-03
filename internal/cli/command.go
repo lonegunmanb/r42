@@ -29,6 +29,9 @@ const (
 	ExitFailure                = 1
 	ExitUsage                  = 2
 	defaultSessionStallTimeout = 15 * time.Minute
+	// maxApplyTimeout keeps a deadline visible to SDKs that otherwise install
+	// their own short default while remaining effectively unlimited to users.
+	maxApplyTimeout = time.Duration(1<<63 - 1)
 )
 
 type Runtime interface {
@@ -246,9 +249,13 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 				return fmt.Errorf("runtime is required")
 			}
 			ctx := command.Context()
-			if timeout > 0 {
+			effectiveTimeout := timeout
+			if !command.Flags().Changed("timeout") {
+				effectiveTimeout = maxApplyTimeout
+			}
+			if effectiveTimeout > 0 {
 				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, timeout)
+				ctx, cancel = context.WithTimeout(ctx, effectiveTimeout)
 				defer cancel()
 			}
 			ctx, cancelRun := context.WithCancel(ctx)

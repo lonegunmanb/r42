@@ -1264,10 +1264,11 @@ orchestration callbacks therefore do not consume research permits, while ready
 research blocks can execute concurrently up to all effective limits.
 
 Research blocks and modules may set `timeout` using Go duration strings such as
-`30m` and `2h`. CLI overall `--timeout` has no default; research and module
-timeouts also have no default. The effective deadline is the earliest of any
-configured overall deadline, ancestor module deadlines, and the research block
-deadline.
+`30m` and `2h`. CLI overall `--timeout` has no practical limit unless supplied;
+when omitted, r42 uses a long-lived internal deadline so the Copilot SDK does
+not apply its 60-second default. Research and module timeouts also have no
+default. The effective deadline is the earliest of any configured overall
+deadline, ancestor module deadlines, and the research block deadline.
 
 Every active workflow phase session also has one inactivity timer. It defaults
 to `15m` and is configurable for the complete root-and-module Apply with
@@ -1587,7 +1588,7 @@ than changing that outcome.
 The CLI also exposes:
 
 - `--parallelism`, default 10.
-- Overall `--timeout`, unset by default.
+- Overall `--timeout`, with no practical limit by default.
 - Per-session inactivity `--session-stall-timeout`, default `15m`.
 - `--debug`, disabled by default.
 - `--ui`, default `auto`; accepted values are `auto`, `tui`, `repl`, and `jsonl`.

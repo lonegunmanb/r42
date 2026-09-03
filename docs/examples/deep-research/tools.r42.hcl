@@ -609,7 +609,7 @@ go_tool "generate_source_table" {
       URLs []string
     }
 
-    const sourceQuoteIDPatternText = `[A-Za-z0-9][A-Za-z0-9_-]*-quote-[A-Za-z0-9][A-Za-z0-9_-]*`
+    const sourceQuoteIDPatternText = `(?:[A-Za-z0-9][A-Za-z0-9_-]*-quote-[A-Za-z0-9][A-Za-z0-9_-]*|quote-[A-Za-z0-9][A-Za-z0-9_-]*)`
     var sourceCitationPattern = regexp.MustCompile(`\[(` + sourceQuoteIDPatternText + `)\](?:\([^\)\r\n]*\))?`)
 
     func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
