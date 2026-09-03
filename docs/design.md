@@ -1264,9 +1264,10 @@ orchestration callbacks therefore do not consume research permits, while ready
 research blocks can execute concurrently up to all effective limits.
 
 Research blocks and modules may set `timeout` using Go duration strings such as
-`30m` and `2h`. CLI overall `--timeout` defaults to `1h`; research and module
-timeouts have no default. The effective deadline is the earliest of the overall
-deadline, all ancestor module deadlines, and the research block deadline.
+`30m` and `2h`. CLI overall `--timeout` has no default; research and module
+timeouts also have no default. The effective deadline is the earliest of any
+configured overall deadline, ancestor module deadlines, and the research block
+deadline.
 
 Every active workflow phase session also has one inactivity timer. It defaults
 to `15m` and is configurable for the complete root-and-module Apply with
@@ -1586,7 +1587,7 @@ than changing that outcome.
 The CLI also exposes:
 
 - `--parallelism`, default 10.
-- Overall `--timeout`, default `1h`.
+- Overall `--timeout`, unset by default.
 - Per-session inactivity `--session-stall-timeout`, default `15m`.
 - `--debug`, disabled by default.
 - `--ui`, default `auto`; accepted values are `auto`, `tui`, `repl`, and `jsonl`.

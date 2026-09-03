@@ -577,7 +577,7 @@ go_tool "patch_knowledge" {
 }
 
 go_tool "generate_source_table" {
-  description = "Generate or replace the Sources table in the declared report Markdown artifact from canonical metadata in the validated knowledge artifacts. The only model-supplied argument is report_artifact_id; call this after writing or revising the report and before finalizing Research."
+  description = "Generate or replace the Sources table in the declared report Markdown artifact from canonical metadata in the validated knowledge artifacts. Report citations must use only quote IDs from quotes[].id and must be written in Markdown as [QUOTE_ID], never as knowledge[].id or backtick-wrapped text; do not supply URLs because this tool adds canonical URLs. The only model-supplied argument is report_artifact_id; call this after writing or revising the report and before finalizing Research."
 
   source = <<-GO
     import (

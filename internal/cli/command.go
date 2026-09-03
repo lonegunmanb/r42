@@ -377,7 +377,7 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 		},
 	}
 	command.Flags().IntVar(&parallelism, "parallelism", parallelism, "maximum concurrent research blocks")
-	command.Flags().DurationVar(&timeout, "timeout", time.Hour, "overall apply timeout")
+	command.Flags().DurationVar(&timeout, "timeout", 0, "optional overall apply timeout")
 	command.Flags().DurationVar(
 		&sessionStallTimeout,
 		"session-stall-timeout",

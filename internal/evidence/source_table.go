@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-const sourceQuoteIDPatternText = `[A-Za-z0-9][A-Za-z0-9_-]*-quote-[A-Za-z0-9][A-Za-z0-9_-]*`
+const sourceQuoteIDPatternText = `(?:[A-Za-z0-9][A-Za-z0-9_-]*-quote-[A-Za-z0-9][A-Za-z0-9_-]*|quote-[A-Za-z0-9][A-Za-z0-9_-]*)`
 
 var sourceCitationPattern = regexp.MustCompile(`\[(` + sourceQuoteIDPatternText + `)\](?:\([^\)\r\n]*\))?`)
 
@@ -56,17 +56,12 @@ func GenerateSourceTable(reportPath string, knowledgePaths []string) (int, error
 	text := string(report)
 	body, sourceStart, sourceEnd := markdownBody(text)
 	ids := citationIDs(body)
-	for _, id := range ids {
-		if _, exists := quotes[id]; !exists {
-			return 0, fmt.Errorf("quote ID %q has no canonical URL", id)
-		}
-	}
 	body = rewriteQuoteCitations(body, ids, quotes)
 	ids = citationIDs(body)
 	for _, id := range ids {
 		urls := quotes[id]
 		if len(urls) == 0 {
-			return 0, fmt.Errorf("quote ID %q has no canonical URL", id)
+			return 0, fmt.Errorf("quote ID %q could not be removed", id)
 		}
 	}
 	rows := make([]string, 0, len(ids)+4)

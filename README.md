@@ -205,8 +205,8 @@ model-session, or typed-tool execution paths. The protocol is specified in
 
 `r42 apply` is the convenience form that plans `<cwd>/.r42/config`, prints the
 plan as JSON, and immediately applies it. Source changes do not affect the
-active snapshot until `r42 init` is run again. The overall Apply timeout
-defaults to one hour and can be changed with `--timeout`. Each active Copilot
+active snapshot until `r42 init` is run again. The overall Apply timeout is
+unset unless specified with `--timeout`. Each active Copilot
 session also has a 15-minute inactivity watchdog, configurable with
 `--session-stall-timeout`. Every SDK event and typed-tool handler start or finish
 resets that one per-session deadline. If it expires, r42 aborts the stalled turn,

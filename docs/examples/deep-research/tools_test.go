@@ -61,6 +61,49 @@ func TestDeepResearchResearchSessionsUseExactCalculator(t *testing.T) {
 	assert.Contains(t, main, "All exact or derived numerical work must be calculated by calling ${starlark_tool.calculator.id}")
 }
 
+func TestDeepResearchPlanPromptUsesResearchDesignFramework(t *testing.T) {
+	t.Parallel()
+
+	configuration, err := os.ReadFile("main.r42.hcl")
+	require.NoError(t, err)
+	main := string(configuration)
+	normalized := strings.Join(strings.Fields(main), " ")
+	assert.Contains(t, normalized, "Your job is to design the research plan, not to answer the research topic.")
+	assert.Contains(t, normalized, "What could make the obvious interpretation wrong?")
+	assert.Contains(t, normalized, "At least one task should explicitly focus on counter-evidence, competing explanations, or falsification.")
+	assert.Contains(t, normalized, "Fact")
+	assert.Contains(t, normalized, "Inference")
+	assert.Contains(t, normalized, "Hypothesis")
+	assert.Contains(t, normalized, "Do not reinterpret these groups as three strictly sequential research phases.")
+	assert.Contains(t, normalized, "Every task must be complementary and minimally redundant.")
+	assert.Contains(t, normalized, "Do not finish with prose or a JSON code block; the accepted typed-tool call is the only valid completion.")
+}
+
+func TestDeepResearchSynthesisPromptDefinesQuoteCitationFormat(t *testing.T) {
+	t.Parallel()
+
+	configuration, err := os.ReadFile("main.r42.hcl")
+	require.NoError(t, err)
+	normalized := strings.Join(strings.Fields(string(configuration)), " ")
+	assert.Contains(t, normalized, "Use only quote IDs from `quotes[].id` as report citations,")
+	assert.Contains(t, normalized, "Write each Markdown citation exactly as `[QUOTE_ID]`;")
+	assert.Contains(t, normalized, "never `knowledge[].id` values.")
+	assert.Contains(t, normalized, "do not wrap quote IDs in backticks.")
+	assert.Contains(t, normalized, "Do not add or copy URLs;")
+	assert.Contains(t, normalized, "adds canonical URLs automatically.")
+}
+
+func TestGenerateSourceTableDescriptionDefinesQuoteCitationFormat(t *testing.T) {
+	t.Parallel()
+
+	description := goToolDescription(t, "generate_source_table")
+	assert.Contains(t, description, "quotes[].id")
+	assert.Contains(t, description, "[QUOTE_ID]")
+	assert.Contains(t, description, "knowledge[].id")
+	assert.Contains(t, description, "backtick-wrapped text")
+	assert.Contains(t, description, "URLs")
+}
+
 func TestDeepResearchClosedSynthesisBlocksSkipCollection(t *testing.T) {
 	t.Parallel()
 
