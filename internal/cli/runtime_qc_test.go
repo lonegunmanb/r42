@@ -142,6 +142,9 @@ research "static" "source" {
 	assert.Contains(t, opener.configs[3].SystemPrompt, "Brief provenance")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "Final QC is a convergent, narrow audit")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "must not reject a plausible analysis")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "strict and non-strict inequalities")
+	assert.Contains(t, opener.configs[3].SystemPrompt, ">25%` to `25%")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "material semantic mismatch between a claim and its cited quote")
 	assert.Contains(t, opener.configs[2].SystemPrompt, "Final QC reviews and repairs the candidate directly")
 	assert.NotContains(t, opener.configs[2].SystemPrompt, "return this block to Research")
 }
