@@ -18,9 +18,11 @@ type ToolPolicyRef struct {
 }
 
 type ResolvedTools struct {
-	Terminate        *ToolPolicyRef
-	TerminateSDKName string
-	QCVerdictSDKName string
+	Terminate         *ToolPolicyRef
+	TerminateSDKName  string
+	QCVerdictSDKName  string
+	QCIssueSDKName    string
+	QCCompleteSDKName string
 }
 
 func (c Config) ValidateResolved(tools ResolvedTools) error {
@@ -68,8 +70,17 @@ func (c Config) ValidateResolved(tools ResolvedTools) error {
 		if !slices.ContainsFunc(disallowed, isAskUserFilter) {
 			return errors.New("qc must disallow ask_user")
 		}
-		if err := validateMandatoryTool(c.QC.AllowedTools, disallowed, tools.QCVerdictSDKName); err != nil {
+		completeName := tools.QCCompleteSDKName
+		if strings.TrimSpace(completeName) == "" {
+			completeName = tools.QCVerdictSDKName
+		}
+		if err := validateMandatoryTool(c.QC.AllowedTools, disallowed, completeName); err != nil {
 			return err
+		}
+		if strings.TrimSpace(tools.QCIssueSDKName) != "" {
+			if err := validateMandatoryTool(c.QC.AllowedTools, disallowed, tools.QCIssueSDKName); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

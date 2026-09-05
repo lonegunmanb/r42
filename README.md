@@ -730,8 +730,8 @@ authorized directories, is enforced by every read operation.
 | `r42_list_artifacts` | Collection, Collection QC, Research, Final QC | List authorized artifacts and their IDs, paths, types, and descriptions. Call this when an ID is uncertain. |
 | `r42_list_artifact_files` | Collection, Collection QC, Research, Final QC | Enumerate regular files inside an authorized directory; use each returned child ID with a reader. |
 | `r42_read_artifact` | Collection, Collection QC, Research, Final QC | Read a bounded page by ID. Use `offset_bytes` and `next_offset_bytes` to continue when `truncated` is true. |
-| `r42_search_artifact` | Collection, Collection QC, Research, Final QC | Search one authorized artifact with a Go RE2 regular expression and return matched text plus a submit-ready `quote_ref` covering the requested context. |
-| `r42_search_artifacts` | Collection, Collection QC, Research, Final QC | Search all authorized readable artifacts, including imported artifacts and directory children; each match includes its artifact ID and submit-ready `quote_ref`. |
+| `r42_search_artifact` | Collection, Collection QC, Research, Final QC | Search one authorized artifact with a Go RE2 regular expression and return matched text plus a submit-ready `quote_ref`; omitted context defaults to three lines before and after the match. |
+| `r42_search_artifacts` | Collection, Collection QC, Research, Final QC | Search all authorized readable artifacts, including imported artifacts and directory children; each match includes its artifact ID and submit-ready `quote_ref` with three lines of context on each side by default. |
 | `r42_read_artifact_json_schema` | Collection, Collection QC, Research, Final QC | Infer the JSON shape of one complete JSON artifact. |
 | `r42_query_artifact_json` | Collection, Collection QC, Research, Final QC | Run a read-only jq query such as `.claims[0].id` against a JSON artifact. |
 | `r42_write_markdown` | Collection and Research | Write content to a declared file artifact using `artifact_id`; it does not accept a path or artifact name. |
@@ -740,7 +740,8 @@ authorized directories, is enforced by every read operation.
 | `r42_collection_checkpoint` | Collection | Submit newly registered evidence and one continue/stalled disposition for every active need to Collection QC. |
 | `r42_collection_qc_verdict` | Collection QC | Assess each active need as `sufficient` or `needs_more` with only remaining unsatisfied condition IDs. |
 | `r42_qc_expand_quote` | Final QC | Expand a trusted quote by exactly one line before and after for read-only semantic review; returns a new submit-ready `quote_ref`. |
-| `r42_qc_verdict` | Final QC, when configured | Return `pass` or `revise_research` with semantic QC issues. |
+| `r42_qc_update_issues` | Final QC, when configured | Register semantic issues (host assigns `FQ-*` IDs), resolve repaired IDs, or list active issues. |
+| `r42_qc_complete` | Final QC, when configured | Complete QC only when every host-tracked issue has been resolved; it accepts no issue payload. |
 
 Collection is the only open-world phase: it can acquire evidence through the
 configured collection tools and save/register it. Collection QC, Research, and
@@ -797,7 +798,7 @@ snapshots. Omitting `qc` completes the block after Research succeeds.
 | `skills` | No | Skills selected only for QC. |
 | `disabled_skills` | No | Skills disabled only for QC. |
 | `permission` | No | QC permission override; otherwise inherits the research permission. |
-| `max_qc_rounds` | No | Maximum number of QC evaluations, including the first evaluation. Defaults to `5`; at most `max_qc_rounds - 1` QC-triggered research revisions can occur. |
+| `max_qc_rounds` | No | Maximum number of Final-QC completion attempts, including rejected attempts with active issues. Defaults to `5`. |
 | `retry` | No | One retry block using the same fields as research. It is layered after the selected Final-QC provider policy and the research-level retry override. |
 
 `final_qc_strictness` defaults to `balanced`, permitting a reasonable one-step
@@ -835,12 +836,11 @@ below reach QC in this form:
 ```
 
 The map does not create three QC sessions or three independently executed
-checks. One Final QC session receives the whole map and assesses every entry
-before calling the mandatory `r42_qc_verdict` typed tool. It returns one of
-two decisions:
-
-- `pass`: no issues; complete the block.
-- `revise_research`: one or more issues; revise from existing snapshots.
+checks. One Final QC session receives the whole map and assesses every entry.
+It registers each semantic issue with `r42_qc_update_issues`, repairs the
+candidate directly with the QC patch tools, rereads the result, and resolves
+the host-assigned ID. It completes only by calling `r42_qc_complete`; the host
+rejects completion and returns every active issue until none remain.
 
 Final QC can never reopen Collection or adjudicate whether information needs
 have sufficient coverage. Collection QC owns that decision, and the complete
@@ -853,15 +853,11 @@ For example:
 
 ```json
 {
-  "decision": "revise_research",
-  "issues": [
-    {
-      "code": "value",
-      "message": "The report says 151.2, but the cited snapshot says 150.8.",
-      "path": "D:/project/r42/.r42/runs/run-.../blocks/.../report.md",
-      "repair_hint": "Replace the rate with 150.8 and preserve the snapshot URL."
-    }
-  ]
+  "action": "open",
+  "issues": [{
+    "code": "value",
+    "message": "The report says 151.2, but the cited snapshot says 150.8."
+  }]
 }
 ```
 
@@ -874,13 +870,12 @@ are optional.
 
 #### When Final QC finds issues
 
-r42 validates every non-pass verdict contains at least one issue and every
-issue has a non-empty `code` and `message`. `revise_research` sends those issues
-to the persistent closed Research session so an unsupported existing claim can
-be deleted or narrowed. Final QC cannot reject absent coverage, reopen
-Collection, or request additional evidence. If a non-pass decision arrives on
-the `max_qc_rounds` evaluation, r42 starts no unreviewable follow-up work and
-fails the block with `final qc rounds exhausted`.
+r42 validates every registered issue has a non-empty `code` and `message`, and
+the host assigns its ID. Final QC directly edits the existing candidate; it
+does not send work back to Research. Final QC cannot reject absent coverage,
+reopen Collection, or request additional evidence. `r42_qc_complete` fails
+until all registered issues are resolved, and `max_qc_rounds` limits those
+confirmation attempts.
 
 The following example asks closed Research to write an exchange-rate report and
 gives Final QC three explicit checks:
@@ -935,13 +930,12 @@ artifact's normalized path. With
 
 | QC evaluation | Candidate being checked | Result when QC rejects it |
 | --- | --- | --- |
-| 1 | Initial research result | Issues trigger research revision 1. |
-| 2 | Revision 1 | Issues trigger research revision 2. |
-| 3 | Revision 2 | The block fails; there is no revision 3. |
+| 1 | Initial research result | Active issues are returned for direct repair. |
+| 2 | Same candidate after repair | Active issues are returned for further repair. |
+| 3 | Same candidate after repair | The block fails if issues remain. |
 
-Thus the setting allows at most three QC evaluations and two QC-triggered
-research revisions. A pass during any evaluation completes the block
-immediately.
+Thus the setting bounds confirmation attempts; Final QC never starts a
+research revision. Completion succeeds as soon as the issue ledger is empty.
 
 ## Modules
 

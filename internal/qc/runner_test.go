@@ -487,6 +487,59 @@ func TestVerdictRecorderCompletionVersionOnlyAdvancesForNewOutcomes(t *testing.T
 	assert.Equal(t, uint64(2), recorder.CompletionVersion())
 }
 
+func TestFinalQCIssueLedgerAssignsAndResolvesHostOwnedIDs(t *testing.T) {
+	t.Parallel()
+
+	recorder := qc.NewVerdictRecorder()
+	opened, err := recorder.OpenFinalIssues([]corespec.Issue{{Code: "accuracy", Message: "wrong total"}})
+	require.NoError(t, err)
+	require.Len(t, opened, 1)
+	assert.Equal(t, "FQ-001", opened[0].ID)
+	assert.Equal(t, opened, recorder.FinalIssues())
+
+	require.NoError(t, recorder.ResolveFinalIssues([]string{"FQ-001"}))
+	assert.Empty(t, recorder.FinalIssues())
+	require.NoError(t, recorder.RecordFinalCompletion())
+}
+
+func TestFinalQCIssueLedgerRejectsUnknownResolutionAndIncompleteCompletion(t *testing.T) {
+	t.Parallel()
+
+	recorder := qc.NewVerdictRecorder()
+	_, err := recorder.OpenFinalIssues([]corespec.Issue{{Code: "accuracy", Message: "wrong total"}})
+	require.NoError(t, err)
+
+	err = recorder.RecordFinalCompletion()
+	require.ErrorContains(t, err, "unresolved Final-QC issues")
+	err = recorder.ResolveFinalIssues([]string{"FQ-999"})
+	require.ErrorContains(t, err, "unknown Final-QC issue ID")
+}
+
+func TestRunnerUsesCompletionProtocolAfterIssueRepair(t *testing.T) {
+	t.Parallel()
+
+	recorder := qc.NewVerdictRecorder()
+	session := &fakeSession{onSend: func(call int, _ string) error {
+		if call == 1 {
+			_, err := recorder.OpenFinalIssues([]corespec.Issue{{Code: "accuracy", Message: "wrong total"}})
+			return err
+		}
+		require.NoError(t, recorder.ResolveFinalIssues([]string{"FQ-001"}))
+		return recorder.RecordFinalCompletion()
+	}}
+	runner := qc.NewRunner(&fakeResearch{results: []researchruntime.Result{{}}}, session, recorder)
+	config := validConfig()
+	config.VerdictToolName = ""
+	config.IssueToolName = "r42_qc_update_issues"
+	config.CompleteToolName = "r42_qc_complete"
+
+	result, err := runner.Run(t.Context(), config)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Rounds)
+	assert.Len(t, session.prompts, 2)
+	assert.Contains(t, session.prompts[1], "FQ-001")
+}
+
 type fakeResearch struct {
 	results         []researchruntime.Result
 	configs         []researchruntime.Config

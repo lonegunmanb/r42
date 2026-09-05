@@ -760,8 +760,8 @@ func TestEvidenceToolsExposeArtifactPagingAndSearch(t *testing.T) {
 	assert.True(t, searchResponse.Output.Matches[0].SubmitReady)
 	resolved, ok := quotes.Resolve(searchResponse.Output.Matches[0].QuoteRef)
 	require.True(t, ok)
-	assert.Equal(t, "one target phrase three", resolved.ExactQuote)
-	assert.Equal(t, "lines 2-5", resolved.Locator)
+	assert.Equal(t, "- Source: local-record:42 one target phrase three", resolved.ExactQuote)
+	assert.Equal(t, "lines 1-5", resolved.Locator)
 	assert.Contains(t, result.TextResultForLLM, `"submit_ready":true`)
 
 	capture := toolByName(t, tools, "r42_capture_quote")
@@ -771,6 +771,47 @@ func TestEvidenceToolsExposeArtifactPagingAndSearch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, result.TextResultForLLM, `"exact_quote":"- Source: local-record:42 one target phrase three"`)
 	assert.Contains(t, result.TextResultForLLM, `"locator":"lines 1-5"`)
+}
+
+func TestEvidenceToolsCaptureQuoteUsesThreeLineDefaults(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	path := filepath.Join(workspace, "source.md")
+	require.NoError(t, os.WriteFile(path, []byte("before one\nbefore two\nbefore three\ntarget\nafter one\nafter two\nafter three\n"), 0o600))
+	registered, _, err := registry.RegisterEvidence(workspace, path, "", "Fixture evidence")
+	require.NoError(t, err)
+	quotes := evidence.NewQuoteRegistry()
+	tools, err := evidenceToolsWithArtifactRegistry(
+		workspace, nil, false, registry, []string{registered.ID}, nil, quotes,
+	)
+	require.NoError(t, err)
+
+	search := toolByName(t, tools, "r42_search_artifact")
+	searchResult, err := search.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"artifact_id": registered.ID, "pattern": "target", "max_matches": 1,
+	}})
+	require.NoError(t, err)
+	var response struct {
+		Accepted bool `json:"accepted"`
+		Output   struct {
+			Matches []struct {
+				QuoteRef string `json:"quote_ref"`
+			} `json:"matches"`
+		} `json:"output"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(searchResult.TextResultForLLM), &response))
+	require.True(t, response.Accepted)
+	require.Len(t, response.Output.Matches, 1)
+
+	capture := toolByName(t, tools, "r42_capture_quote")
+	captureResult, err := capture.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"quote_ref": response.Output.Matches[0].QuoteRef,
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, captureResult.TextResultForLLM, `"exact_quote":"before one before two before three target after one after two after three"`)
+	assert.Contains(t, captureResult.TextResultForLLM, `"locator":"lines 1-7"`)
 }
 
 func TestQCExpandQuoteToolReturnsFixedSubmitReadyExpansion(t *testing.T) {

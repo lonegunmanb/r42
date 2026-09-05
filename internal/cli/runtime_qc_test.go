@@ -47,9 +47,9 @@ research "static" "source" {
 	assert.Contains(t, toolNamesFromConfig(opener.configs[0]), "r42_read_information_needs")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[1]), "r42_collection_qc_verdict")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[1]), "r42_read_information_needs")
-	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_verdict")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_complete")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_update_issues")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_expand_quote")
-	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_open_issues")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_final_qc_calculator")
 	var calculator sdk.Tool
 	for _, tool := range opener.configs[3].Tools {
@@ -378,14 +378,14 @@ research "static" "source" {
 	assert.Contains(t, opener.qc.prompts[1], `"message":"add a citation"`)
 	var openIssuesTool sdk.Tool
 	for _, tool := range opener.qc.config.Tools {
-		if tool.Name == "r42_qc_open_issues" {
+		if tool.Name == "r42_qc_update_issues" {
 			openIssuesTool = tool
 		}
 	}
 	require.NotNil(t, openIssuesTool.Handler)
-	query, queryErr := openIssuesTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+	query, queryErr := openIssuesTool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"action": "list"}})
 	require.NoError(t, queryErr)
-	assert.Contains(t, query.TextResultForLLM, "issue-source")
+	assert.Contains(t, query.TextResultForLLM, "active_issues")
 	assert.Equal(t, 1, opener.research.closeCalls)
 	assert.Equal(t, 1, opener.qc.closeCalls)
 }
@@ -602,15 +602,22 @@ func (s *revisionQCSession) SendAndWait(_ context.Context, options sdk.MessageOp
 	call := s.sendCalls
 	s.prompts = append(s.prompts, options.Prompt)
 	s.mu.Unlock()
-	arguments := map[string]any{"decision": "pass"}
+	arguments := map[string]any{}
+	toolName := "r42_qc_complete"
 	if call == 1 {
-		arguments = map[string]any{
-			"decision": "revise_research",
-			"issues":   []any{map[string]any{"id": "issue-source", "code": "missing_source", "message": "add a citation"}},
+		toolName = "r42_qc_update_issues"
+		arguments = map[string]any{"action": "open", "issues": []any{map[string]any{"code": "missing_source", "message": "add a citation"}}}
+	} else {
+		for _, tool := range s.config.Tools {
+			if tool.Name == "r42_qc_update_issues" {
+				if _, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"action": "resolve", "issue_ids": []any{"FQ-001"}}}); err != nil {
+					return &sdk.SessionEvent{}, err
+				}
+			}
 		}
 	}
 	for _, tool := range s.config.Tools {
-		if tool.Name == "r42_qc_verdict" {
+		if tool.Name == toolName {
 			_, err := tool.Handler(sdk.ToolInvocation{Arguments: arguments})
 			return &sdk.SessionEvent{}, err
 		}
@@ -623,21 +630,26 @@ func (s *changingIssueQCSession) SendAndWait(context.Context, sdk.MessageOptions
 	s.sendCalls++
 	call := s.sendCalls
 	s.mu.Unlock()
-	arguments := map[string]any{"decision": "pass"}
+	arguments := map[string]any{}
+	toolName := "r42_qc_complete"
 	switch call {
 	case 1:
-		arguments = map[string]any{
-			"decision": "revise_research",
-			"issues":   []any{map[string]any{"id": "issue-citation", "code": "citation", "message": "add a citation"}},
-		}
+		toolName = "r42_qc_update_issues"
+		arguments = map[string]any{"action": "open", "issues": []any{map[string]any{"code": "citation", "message": "add a citation"}}}
 	case 2:
-		arguments = map[string]any{
-			"decision": "revise_research",
-			"issues":   []any{map[string]any{"id": "issue-new", "code": "accuracy", "message": "correct the changed total"}},
+		toolName = "r42_qc_update_issues"
+		arguments = map[string]any{"action": "open", "issues": []any{map[string]any{"code": "accuracy", "message": "correct the changed total"}}}
+	case 3:
+		for _, tool := range s.config.Tools {
+			if tool.Name == "r42_qc_update_issues" {
+				if _, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"action": "resolve", "issue_ids": []any{"FQ-001", "FQ-002"}}}); err != nil {
+					return &sdk.SessionEvent{}, err
+				}
+			}
 		}
 	}
 	for _, tool := range s.config.Tools {
-		if tool.Name == "r42_qc_verdict" {
+		if tool.Name == toolName {
 			_, err := tool.Handler(sdk.ToolInvocation{Arguments: arguments})
 			return &sdk.SessionEvent{}, err
 		}
@@ -658,8 +670,8 @@ func (s *qcSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.Sessi
 	s.sendCalls++
 	s.mu.Unlock()
 	for _, tool := range s.config.Tools {
-		if tool.Name == "r42_qc_verdict" {
-			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "pass"}})
+		if tool.Name == "r42_qc_complete" {
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
 			return &sdk.SessionEvent{}, err
 		}
 	}

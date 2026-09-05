@@ -1490,13 +1490,91 @@ func qcVerdictTool(address string, recorder *debuglog.Recorder, verdicts *qc.Ver
 	}
 }
 
-func qcOpenIssuesTool(verdicts *qc.VerdictRecorder) sdk.Tool {
+func qcUpdateIssuesTool(address string, recorder *debuglog.Recorder, verdicts *qc.VerdictRecorder) sdk.Tool {
+	type issueUpdate struct {
+		Action   string           `json:"action"`
+		Issues   []corespec.Issue `json:"issues,omitempty"`
+		IssueIDs []string         `json:"issue_ids,omitempty"`
+	}
 	return sdk.Tool{
-		Name:        "r42_qc_open_issues",
-		Description: "Read the current Final-QC issue baseline. Use the returned stable IDs when submitting r42_qc_verdict; this tool is read-only.",
+		Name:        "r42_qc_update_issues",
+		Description: "Record or resolve Final-QC semantic issues. Use action=open with issue details but no id; the host assigns stable FQ-* IDs. After repairing an issue, use action=resolve with its exact host ID. Use action=list to inspect active issues. This tool never changes the candidate artifact.",
+		Parameters: objectSchema(map[string]any{
+			"action": map[string]any{"type": "string", "enum": []string{"open", "resolve", "list"}},
+			"issues": map[string]any{"type": "array", "items": map[string]any{
+				"type": "object", "properties": map[string]any{
+					"code": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"},
+					"path": map[string]any{"type": "string"}, "repair_hint": map[string]any{"type": "string"},
+				}, "required": []string{"code", "message"}, "additionalProperties": false,
+			}},
+			"issue_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		}, []string{"action"}),
+		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			arguments, err := decodeArguments[issueUpdate](invocation.Arguments)
+			if err != nil {
+				return rejectedToolResult("invalid_qc_issue_update", err.Error())
+			}
+			var output any
+			switch arguments.Action {
+			case "open":
+				if len(arguments.Issues) == 0 {
+					return rejectedToolResult("invalid_qc_issue_update", "open requires at least one issue")
+				}
+				opened, openErr := verdicts.OpenFinalIssues(arguments.Issues)
+				if openErr != nil {
+					return rejectedToolResult("invalid_qc_issue_update", openErr.Error())
+				}
+				output = map[string]any{"opened": opened, "active_issues": verdicts.FinalIssues()}
+			case "resolve":
+				if len(arguments.IssueIDs) == 0 {
+					return rejectedToolResult("invalid_qc_issue_update", "resolve requires at least one issue ID")
+				}
+				if resolveErr := verdicts.ResolveFinalIssues(arguments.IssueIDs); resolveErr != nil {
+					return rejectedToolResult("invalid_qc_issue_update", resolveErr.Error())
+				}
+				output = map[string]any{"resolved_ids": arguments.IssueIDs, "active_issues": verdicts.FinalIssues()}
+			case "list":
+				output = map[string]any{"active_issues": verdicts.FinalIssues()}
+			default:
+				return rejectedToolResult("invalid_qc_issue_update", fmt.Sprintf("unsupported action %q", arguments.Action))
+			}
+			result, resultErr := acceptedToolResult(output)
+			if resultErr != nil {
+				return sdk.ToolResult{}, resultErr
+			}
+			if recorder != nil {
+				encoded, _ := json.Marshal(invocation.Arguments)
+				if recordErr := recorder.Record(debuglog.Event{Kind: debuglog.EventTool, BlockAddress: address, Session: debuglog.SessionFinalQC, ToolName: "r42_qc_update_issues", Arguments: encoded, Result: []byte(result.TextResultForLLM)}); recordErr != nil {
+					return sdk.ToolResult{}, recordErr
+				}
+			}
+			return result, nil
+		},
+	}
+}
+
+func qcCompleteTool(address string, recorder *debuglog.Recorder, verdicts *qc.VerdictRecorder) sdk.Tool {
+	return sdk.Tool{
+		Name:        "r42_qc_complete",
+		Description: "Finish Final QC after directly repairing the candidate. This tool has no issue payload: it succeeds only when every issue previously registered with r42_qc_update_issues has been explicitly resolved.",
 		Parameters:  objectSchema(map[string]any{}, nil),
-		Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
-			return acceptedToolResult(map[string]any{"issues": verdicts.FinalIssues()})
+		Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			if err := verdicts.RecordFinalCompletion(); err != nil {
+				issues := verdicts.FinalIssues()
+				issues = append([]corespec.Issue{{Code: "unresolved_qc_issues", Message: err.Error()}}, issues...)
+				return responseToolResult(corespec.ToolResponse[any]{Issues: issues})
+			}
+			result, err := acceptedToolResult(map[string]any{"active_issues": verdicts.FinalIssues()})
+			if err != nil {
+				return sdk.ToolResult{}, err
+			}
+			if recorder != nil {
+				arguments, _ := json.Marshal(invocation.Arguments)
+				if recordErr := recorder.Record(debuglog.Event{Kind: debuglog.EventTool, BlockAddress: address, Session: debuglog.SessionFinalQC, ToolName: "r42_qc_complete", Arguments: arguments, Result: []byte(result.TextResultForLLM)}); recordErr != nil {
+					return sdk.ToolResult{}, recordErr
+				}
+			}
+			return result, nil
 		},
 	}
 }

@@ -652,8 +652,8 @@ func handleDefaultWorkflowProtocol(config copilot.SessionConfig) (bool, error) {
 				}},
 			}})
 			return true, err
-		case "r42_qc_verdict":
-			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "pass"}})
+		case "r42_qc_complete":
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
 			return true, err
 		}
 	}
@@ -667,7 +667,7 @@ func workflowSessionKind(config copilot.SessionConfig) string {
 			return "collection"
 		case "r42_collection_qc_verdict":
 			return "collection_qc"
-		case "r42_qc_verdict":
+		case "r42_qc_complete":
 			return "final_qc"
 		}
 	}

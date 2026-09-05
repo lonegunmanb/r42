@@ -649,14 +649,17 @@ func (s *dynamicQCIssueSession) SendAndWait(_ context.Context, options sdk.Messa
 		s.opener.finalRounds[workspace]++
 		round := s.opener.finalRounds[workspace]
 		s.opener.mu.Unlock()
-		arguments := map[string]any{"decision": "pass"}
+		arguments := map[string]any{}
+		toolName := "r42_qc_complete"
 		if round == 1 {
-			arguments = map[string]any{
-				"decision": "revise_research",
-				"issues":   []any{map[string]any{"id": "issue-accuracy", "code": "accuracy", "message": "correct the task result"}},
+			toolName = "r42_qc_update_issues"
+			arguments = map[string]any{"action": "open", "issues": []any{map[string]any{"code": "accuracy", "message": "correct the task result"}}}
+		} else {
+			if err := callDynamicQCWorkflowTool(s.config, "r42_qc_update_issues", map[string]any{"action": "resolve", "issue_ids": []any{"FQ-001"}}); err != nil {
+				return &sdk.SessionEvent{}, err
 			}
 		}
-		return &sdk.SessionEvent{}, callDynamicQCWorkflowTool(s.config, "r42_qc_verdict", arguments)
+		return &sdk.SessionEvent{}, callDynamicQCWorkflowTool(s.config, toolName, arguments)
 	default:
 		if !strings.Contains(options.Prompt, "correct the task result") {
 			return &sdk.SessionEvent{}, nil

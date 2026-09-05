@@ -65,7 +65,7 @@ research "static" "source" {
 	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
 
 	require.NoError(t, err)
-	assert.Contains(t, opener.rejection, "unsupported final qc decision")
+	assert.Contains(t, opener.rejection, "unresolved Final-QC issues")
 	assert.Equal(t, 2, opener.finalSends)
 }
 
@@ -167,20 +167,20 @@ func (s *workflowScenarioSession) SendAndWait(_ context.Context, options sdk.Mes
 		return &sdk.SessionEvent{}, err
 	case "final_qc":
 		s.opener.finalQCRounds++
-		arguments := map[string]any{"decision": "pass"}
+		toolName := "r42_qc_complete"
+		arguments := map[string]any{}
 		if s.opener.finalQCRounds == 1 {
-			arguments = map[string]any{
-				"decision": "revise_research",
-				"issues": []any{
-					map[string]any{"id": "issue-coverage", "code": "coverage", "message": "coverage"},
-					map[string]any{"id": "issue-accuracy", "code": "accuracy", "message": "accuracy"},
-				},
+			toolName = "r42_qc_update_issues"
+			arguments = map[string]any{"action": "open", "issues": []any{
+				map[string]any{"code": "coverage", "message": "coverage"},
+				map[string]any{"code": "accuracy", "message": "accuracy"},
+			}}
+		} else {
+			if _, err := findTool(s.config.Tools, "r42_qc_update_issues").Handler(sdk.ToolInvocation{Arguments: map[string]any{"action": "resolve", "issue_ids": []any{"FQ-001", "FQ-002"}}}); err != nil {
+				return &sdk.SessionEvent{}, err
 			}
 		}
-		if s.opener.finalQCRounds == 2 {
-			arguments = map[string]any{"decision": "pass"}
-		}
-		_, err := findTool(s.config.Tools, "r42_qc_verdict").Handler(sdk.ToolInvocation{Arguments: arguments})
+		_, err := findTool(s.config.Tools, toolName).Handler(sdk.ToolInvocation{Arguments: arguments})
 		return &sdk.SessionEvent{}, err
 	default:
 		s.opener.researchRounds++
@@ -189,10 +189,6 @@ func (s *workflowScenarioSession) SendAndWait(_ context.Context, options sdk.Mes
 }
 
 func (*workflowScenarioSession) Close(context.Context) error { return nil }
-
-func decisionArguments(decision, code string) map[string]any {
-	return map[string]any{"decision": decision, "issues": []any{map[string]any{"id": "issue-" + code, "code": code, "message": code}}}
-}
 
 type reopenRejectionOpener struct {
 	mu         sync.Mutex
@@ -219,14 +215,20 @@ func (s *reopenRejectionSession) SendAndWait(context.Context, sdk.MessageOptions
 	s.opener.mu.Lock()
 	defer s.opener.mu.Unlock()
 	s.opener.finalSends++
-	arguments := map[string]any{"decision": "pass"}
+	arguments := map[string]any{}
 	if s.opener.finalSends == 1 {
-		arguments = decisionArguments("reopen_collection", "coverage")
+		_, err := findTool(s.config.Tools, "r42_qc_update_issues").Handler(sdk.ToolInvocation{Arguments: map[string]any{"action": "open", "issues": []any{map[string]any{"code": "coverage", "message": "coverage"}}}})
+		if err != nil {
+			return &sdk.SessionEvent{}, err
+		}
+		complete, completeErr := findTool(s.config.Tools, "r42_qc_complete").Handler(sdk.ToolInvocation{Arguments: arguments})
+		s.opener.rejection = complete.TextResultForLLM
+		return &sdk.SessionEvent{}, completeErr
 	}
-	result, err := findTool(s.config.Tools, "r42_qc_verdict").Handler(sdk.ToolInvocation{Arguments: arguments})
-	if s.opener.finalSends == 1 {
-		s.opener.rejection = result.TextResultForLLM
+	if _, err := findTool(s.config.Tools, "r42_qc_update_issues").Handler(sdk.ToolInvocation{Arguments: map[string]any{"action": "resolve", "issue_ids": []any{"FQ-001"}}}); err != nil {
+		return &sdk.SessionEvent{}, err
 	}
+	_, err := findTool(s.config.Tools, "r42_qc_complete").Handler(sdk.ToolInvocation{Arguments: arguments})
 	return &sdk.SessionEvent{}, err
 }
 

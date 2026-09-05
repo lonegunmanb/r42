@@ -81,6 +81,36 @@ func TestQCVerdictToolSchemaDescribesIssueFields(t *testing.T) {
 	}`, string(schema))
 }
 
+func TestQCIssueToolsRequireHostOwnedIssueIDsAndCompleteOnlyWhenResolved(t *testing.T) {
+	t.Parallel()
+
+	verdicts := qc.NewVerdictRecorder()
+	update := qcUpdateIssuesTool("research.static.test", nil, verdicts)
+	complete := qcCompleteTool("research.static.test", nil, verdicts)
+
+	result, err := update.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"action": "open",
+		"issues": []any{map[string]any{"code": "accuracy", "message": "wrong total"}},
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, "FQ-001")
+
+	result, err = complete.Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, "unresolved")
+	assert.Contains(t, result.TextResultForLLM, "FQ-001")
+
+	result, err = update.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+		"action": "resolve", "issue_ids": []any{"FQ-001"},
+	}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, "FQ-001")
+
+	result, err = complete.Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+	require.NoError(t, err)
+	assert.Contains(t, result.TextResultForLLM, `"accepted":true`)
+}
+
 func TestObjectSchemaRequiredFields(t *testing.T) {
 	t.Parallel()
 

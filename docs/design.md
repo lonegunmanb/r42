@@ -893,11 +893,10 @@ Collection --checkpoint--> Collection QC --sufficient--> Research
     ^                            |                           |
     |--------- needs_more -------|                           | candidate
                                                              v
-                                      complete <---pass--- Final QC
-                                                              |
-                                                              | revise_research
-                                                              v
-                                                             Research
+                                      complete <---complete--- Final QC
+                                                              ^
+                                                              | direct patch + resolve
+                                                              +----------------------
 ```
 
 `collection_only` has one phase and no QC transition:
@@ -913,11 +912,10 @@ Research --accepted completion-------------------------> complete
     |
     | candidate, when qc is configured
     v
-Final QC --pass----------------------------------------> complete
-    |
-    | revise_research
-    v
-Research
+Final QC --r42_qc_complete (ledger empty)------------------> complete
+    ^
+    | r42_qc_update_issues + direct patch + resolve
+    +--------------------------------------------------------
 ```
 
 The coordinator creates only the sessions reachable in the selected mode. A
@@ -1056,21 +1054,13 @@ contradictions, invented premises, misleading certainty, and unsupported
 precision. This setting defaults to `balanced` and is authoritative over later
 task prompts, candidate instructions, and custom criteria.
 
-Its mandatory `r42_qc_verdict` decision is one of:
-
-- `pass`, with no issues, completes the workflow;
-- `revise_research`, with one or more issues, requests another Final QC
-  confirmation after direct repairs.
-
 Final QC can never reopen Collection or hand work back to Research, and must
-not reject a candidate for missing coverage. After a material finding, it must
-patch the smallest exact artifact text, reread it, and submit a confirmation
-verdict. `max_qc_rounds` defaults to 5; a non-pass decision on the last review
-fails with the unresolved issues.
-
-The host exposes `r42_qc_open_issues` as a read-only lookup for the current
-stable issue baseline. If a revision verdict uses an unknown issue ID, the
-verdict is rejected immediately and the response identifies the current IDs.
+not reject a candidate for missing coverage. It registers semantic findings
+with `r42_qc_update_issues`; the host assigns stable `FQ-*` IDs. After directly
+patching and rereading the affected artifact, Final QC resolves that exact ID.
+The only completion signal is `r42_qc_complete`, which accepts no issue list and
+is rejected with every still-active issue until all registered findings are
+resolved. `max_qc_rounds` defaults to 5 and limits confirmation attempts.
 Closed Research can use `r42_patch_markdown` for one exact
 unique replacement outside the protected `Sources` section, while
 `r42_write_markdown` remains available for full rewrites.
@@ -1084,7 +1074,8 @@ workflows do not receive or depend on this deep-research-specific tool.
 Final QC inherits only effective provider/model/reasoning/retry/permission
 values. Its tools, skills, quotas, allowlist, and denylist are explicitly scoped
 to `qc`; custom typed tools remain an author trust boundary. Fixed r42 evidence
-readers are read-only, and the mandatory verdict tool cannot be filtered out.
+readers are read-only, and the mandatory issue and completion tools cannot be
+filtered out.
 
 ### SecJury composition
 

@@ -455,14 +455,17 @@ type qcScenarioSession struct {
 
 func (s *qcScenarioSession) SendAndWait(context.Context, sdk.MessageOptions) (*sdk.SessionEvent, error) {
 	s.sends++
-	arguments := map[string]any{"decision": "pass"}
+	arguments := map[string]any{}
+	toolName := "r42_qc_complete"
 	if s.sends == 1 {
-		arguments = map[string]any{
-			"decision": "revise_research",
-			"issues":   []any{map[string]any{"id": "issue-source", "code": "missing_source", "message": "add a citation"}},
+		toolName = "r42_qc_update_issues"
+		arguments = map[string]any{"action": "open", "issues": []any{map[string]any{"code": "missing_source", "message": "add a citation"}}}
+	} else {
+		if _, err := findTool(s.config.Tools, "r42_qc_update_issues").Handler(sdk.ToolInvocation{Arguments: map[string]any{"action": "resolve", "issue_ids": []any{"FQ-001"}}}); err != nil {
+			return &sdk.SessionEvent{}, err
 		}
 	}
-	_, err := findTool(s.config.Tools, "r42_qc_verdict").Handler(sdk.ToolInvocation{Arguments: arguments})
+	_, err := findTool(s.config.Tools, toolName).Handler(sdk.ToolInvocation{Arguments: arguments})
 	return &sdk.SessionEvent{}, err
 }
 
@@ -585,8 +588,8 @@ func handleWorkflowProtocol(config copilot.SessionConfig) (bool, error) {
 				}},
 			}})
 			return true, err
-		case "r42_qc_verdict":
-			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{"decision": "pass"}})
+		case "r42_qc_complete":
+			_, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
 			return true, err
 		}
 	}
@@ -600,7 +603,7 @@ func workflowSessionKind(config copilot.SessionConfig) string {
 			return "collection"
 		case "r42_collection_qc_verdict":
 			return "collection_qc"
-		case "r42_qc_verdict":
+		case "r42_qc_complete":
 			return "final_qc"
 		}
 	}

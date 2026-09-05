@@ -1123,7 +1123,7 @@ func evidenceToolsWithAccess(
 				"pattern":        map[string]any{"type": "string", "description": "Go RE2 regular expression applied after Unicode whitespace normalization"},
 				"case_sensitive": map[string]any{"type": "boolean", "default": false},
 				"max_matches":    map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
-				"context_lines":  map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 2},
+				"context_lines":  map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 3},
 			}, []string{"artifact_id", "pattern"}),
 			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
 				args, decodeErr := decodeArguments[artifactSearchArgs](invocation.Arguments)
@@ -1135,7 +1135,7 @@ func evidenceToolsWithAccess(
 				}
 				rawArguments, _ := invocation.Arguments.(map[string]any)
 				if _, supplied := rawArguments["context_lines"]; !supplied {
-					args.ContextLines = 2
+					args.ContextLines = 3
 				}
 				ids := slices.Clone(artifactIDs)
 				if additionalIDs != nil {
@@ -1173,7 +1173,7 @@ func evidenceToolsWithAccess(
 				"pattern":        map[string]any{"type": "string", "description": "Go RE2 regular expression applied after Unicode whitespace normalization"},
 				"case_sensitive": map[string]any{"type": "boolean", "default": false},
 				"max_matches":    map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "default": 10},
-				"context_lines":  map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 2},
+				"context_lines":  map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 3},
 			}, []string{"pattern"}),
 			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
 				args, decodeErr := decodeArguments[artifactSearchArgs](invocation.Arguments)
@@ -1185,7 +1185,7 @@ func evidenceToolsWithAccess(
 				}
 				rawArguments, _ := invocation.Arguments.(map[string]any)
 				if _, supplied := rawArguments["context_lines"]; !supplied {
-					args.ContextLines = 2
+					args.ContextLines = 3
 				}
 				records, listErr := listedArtifacts()
 				if listErr != nil {
@@ -1221,16 +1221,23 @@ func evidenceToolsWithAccess(
 			},
 		},
 		{
-			Name: "r42_capture_quote", Description: "Expand a trusted quote_ref returned by r42_search_artifact or r42_search_artifacts to include bounded surrounding lines. Returns a new submit-ready quote_ref and canonical quote fields; terminal tools only need the quote_ref.",
+			Name: "r42_capture_quote", Description: "Expand a trusted quote_ref returned by r42_search_artifact or r42_search_artifacts to include bounded surrounding lines. If omitted, before_lines and after_lines each default to 3. Returns a new submit-ready quote_ref and canonical quote fields; terminal tools only need the quote_ref.",
 			Parameters: objectSchema(map[string]any{
 				"quote_ref":    map[string]any{"type": "string", "description": "Trusted quote reference returned by an r42 artifact search tool"},
-				"before_lines": map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 0},
-				"after_lines":  map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 0},
+				"before_lines": map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 3},
+				"after_lines":  map[string]any{"type": "integer", "minimum": 0, "maximum": 20, "default": 3},
 			}, []string{"quote_ref"}),
 			Handler: func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
 				args, decodeErr := decodeArguments[quoteCaptureArgs](invocation.Arguments)
 				if decodeErr != nil {
 					return rejectedToolResult("invalid_arguments", decodeErr.Error())
+				}
+				rawArguments, _ := invocation.Arguments.(map[string]any)
+				if _, supplied := rawArguments["before_lines"]; !supplied {
+					args.BeforeLines = 3
+				}
+				if _, supplied := rawArguments["after_lines"]; !supplied {
+					args.AfterLines = 3
 				}
 				base, ok := quoteRegistry.Resolve(args.QuoteRef)
 				if !ok {
