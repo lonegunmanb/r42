@@ -17,9 +17,11 @@ type Session interface {
 
 // RunConfig controls one Collection acquisition round.
 type RunConfig struct {
-	InitialPrompt       string
-	MaxProtocolAttempts int
-	CheckpointToolName  string
+	InitialPrompt               string
+	MaxProtocolAttempts         int
+	CheckpointToolName          string
+	ActiveInformationNeedStates []ActiveInformationNeedState
+	CollectionToolNames         []string
 }
 
 // Runner obtains one mandatory checkpoint from a persistent Collection
@@ -67,8 +69,77 @@ func (r *Runner) Run(ctx context.Context, config RunConfig) (CheckpointOutput, e
 				config.MaxProtocolAttempts,
 			)
 		}
-		prompt = fmt.Sprintf("You must call the %q tool before this Collection round can finish.", config.CheckpointToolName)
+		prompt = checkpointRetryPrompt(config, attempt)
 	}
+}
+
+func checkpointRetryPrompt(config RunConfig, attempt int) string {
+	var builder strings.Builder
+	fmt.Fprintf(
+		&builder,
+		"Collection protocol retry %d: the previous response ended without an accepted %q checkpoint.\n",
+		attempt,
+		config.CheckpointToolName,
+	)
+	builder.WriteString("Before ending this round, resolve the following protocol requirements:\n")
+	if len(config.ActiveInformationNeedStates) == 0 {
+		fmt.Fprintf(
+			&builder,
+			"- Call %q before choosing a search direction. If it reports no frozen plan, "+
+				"call r42_set_information_needs once and then call %q again.\n",
+			ReadInformationNeedsToolName,
+			ReadInformationNeedsToolName,
+		)
+	} else {
+		builder.WriteString("- The following stop conditions are still unsatisfied; work only on these active needs:\n")
+		fmt.Fprintf(
+			&builder,
+			"  If the IDs or conditions are unclear after context compaction, call %q and use its canonical active states.\n",
+			ReadInformationNeedsToolName,
+		)
+		for _, state := range config.ActiveInformationNeedStates {
+			fmt.Fprintf(&builder, "  - %s: %s\n", state.InformationNeed.ID, state.InformationNeed.Question)
+			conditionByID := make(map[string]string, len(state.InformationNeed.StopConditions))
+			for _, condition := range state.InformationNeed.StopConditions {
+				conditionByID[condition.ID] = condition.Condition
+			}
+			for _, conditionID := range state.UnsatisfiedConditionIDs {
+				if condition := conditionByID[conditionID]; condition != "" {
+					fmt.Fprintf(&builder, "    - %s: %s\n", conditionID, condition)
+					continue
+				}
+				fmt.Fprintf(&builder, "    - %s\n", conditionID)
+			}
+		}
+	}
+	if len(config.CollectionToolNames) > 0 {
+		fmt.Fprintf(
+			&builder,
+			"- Make a genuine search or source-reading attempt with the relevant configured Collection tool(s): %s.\n",
+			strings.Join(config.CollectionToolNames, ", "),
+		)
+	} else {
+		builder.WriteString("- No configured Collection acquisition tool is available. Do not invent a tool; ")
+		builder.WriteString(
+			"call the checkpoint with search_disposition=stalled for each active need and explain the limitation " +
+				"in empty_reason.\n",
+		)
+	}
+	builder.WriteString(
+		"- Persist every newly acquired source before another acquisition call: use r42_save_artifact for " +
+			"new source content, " +
+			"or r42_register_artifact for an existing workspace/retained result.\n",
+	)
+	fmt.Fprintf(
+		&builder,
+		"- Then call %q exactly once with one disposition for every active need. "+
+			"Use search_disposition=continue only when a productive next search remains; after genuine effort "+
+			"finds no productive next action, "+
+			"use search_disposition=stalled and do not claim missing evidence.\n",
+		config.CheckpointToolName,
+	)
+	builder.WriteString("- If this round added no evidence artifacts, include a non-empty empty_reason in the checkpoint.")
+	return builder.String()
 }
 
 // CheckpointRecorder captures accepted checkpoint tool calls.

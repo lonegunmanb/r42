@@ -214,6 +214,28 @@ func TestCollectionAllowedToolsRequiresExplicitMCPAllowlistEntry(t *testing.T) {
 	)
 }
 
+func TestCollectionRetryToolNamesUseSDKNames(t *testing.T) {
+	t.Parallel()
+
+	quoteID := "mcp_tool_market__quote_12345678-1234-8234-9234-123456789abc"
+	registry := mcp.ToolRegistry{
+		quoteID: {ID: quoteID, Name: "quote", Server: mcp.Config{Name: "market"}},
+	}
+
+	names := collectionRetryToolNames(
+		[]string{"tool_external_search_12345678-1234-8234-9234-123456789abc"},
+		[]string{quoteID},
+		[]string{"powershell"},
+		registry,
+	)
+
+	assert.Equal(t, []string{
+		"tool_external_search_12345678-1234-8234-9234-123456789abc",
+		"mcp:market-quote",
+		"powershell",
+	}, names)
+}
+
 func TestCollectionBuiltInHooksEnforceCheckpointGate(t *testing.T) {
 	t.Parallel()
 

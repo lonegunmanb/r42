@@ -101,6 +101,34 @@ func TestRunnerCarriesOutcomesIntoNextCollectionPrompt(t *testing.T) {
 	assert.Contains(t, collector.prompts[1], "search_stalled")
 }
 
+func TestRunnerPassesActiveNeedsToNextCollectionRound(t *testing.T) {
+	t.Parallel()
+
+	state := workflow.New(workflow.Config{})
+	collector := &fakeCollector{}
+	active := collection.ActiveInformationNeedState{
+		InformationNeed: collection.InformationNeed{
+			ID:       "NEED-002",
+			Question: "active materiality question",
+			StopConditions: []collection.StopCondition{{
+				ID: "NEED-002-SC-001", Condition: "economic exposure",
+			}},
+		},
+		UnsatisfiedConditionIDs: []string{"NEED-002-SC-001"},
+	}
+	reviewer := &fakeCollectionReviewer{state: state, rounds: []collectionQCRound{
+		{assessments: needMoreAssessment(), activeStates: []collection.ActiveInformationNeedState{active}},
+		{assessments: sufficientAssessment()},
+	}}
+	runner := coordinator.NewRunner(state, collector, reviewer, &fakeResearcher{}, nil)
+
+	_, err := runner.Run(t.Context(), coordinator.Config{})
+
+	require.NoError(t, err)
+	require.Len(t, collector.configs, 2)
+	assert.Equal(t, []collection.ActiveInformationNeedState{active}, collector.configs[1].ActiveInformationNeedStates)
+}
+
 func TestRunnerInjectsOutcomesOnlyIntoResearch(t *testing.T) {
 	t.Parallel()
 
@@ -319,6 +347,7 @@ func sufficientAssessment() []collection.QCAssessment {
 type fakeCollector struct {
 	calls        int
 	prompts      []string
+	configs      []collection.RunConfig
 	checkContext func(context.Context)
 	checkpoint   collection.CheckpointOutput
 }
@@ -326,6 +355,7 @@ type fakeCollector struct {
 func (f *fakeCollector) Run(ctx context.Context, config collection.RunConfig) (collection.CheckpointOutput, error) {
 	f.calls++
 	f.prompts = append(f.prompts, config.InitialPrompt)
+	f.configs = append(f.configs, config)
 	if f.checkContext != nil {
 		f.checkContext(ctx)
 	}

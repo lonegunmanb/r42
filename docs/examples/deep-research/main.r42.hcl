@@ -320,6 +320,10 @@ research "dynamic" "parallel_deep_dive" {
         }
       }
       collection_tool_ids = local.pplx_tool_ids
+      collection_allowed_builtin_tools = var.use_pplx ? [] : [
+        "web_search",
+        "web_fetch",
+      ]
       tool_call_quota     = local.deep_dive_tool_call_quota
       disallowed_tools    = local.deep_dive_disallowed_tools
       permission          = "approve_all"
@@ -425,6 +429,10 @@ research "dynamic" "independent_serial_deep_dive" {
         }
       }
       collection_tool_ids = local.pplx_tool_ids
+      collection_allowed_builtin_tools = var.use_pplx ? [] : [
+        "web_search",
+        "web_fetch",
+      ]
       tool_call_quota     = local.deep_dive_tool_call_quota
       disallowed_tools    = local.deep_dive_disallowed_tools
       permission          = "approve_all"
@@ -566,6 +574,10 @@ research "dynamic" "final_serial_deep_dive" {
         }
       }
       collection_tool_ids = local.pplx_tool_ids
+      collection_allowed_builtin_tools = var.use_pplx ? [] : [
+        "web_search",
+        "web_fetch",
+      ]
       tool_call_quota     = local.deep_dive_tool_call_quota
       disallowed_tools    = local.deep_dive_disallowed_tools
       permission          = "approve_all"

@@ -15,6 +15,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/copilot"
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/evidence"
+	"github.com/lonegunmanb/r42/internal/mcp"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/provider"
 	"github.com/lonegunmanb/r42/internal/qc"
@@ -450,10 +451,18 @@ func (f *runtimeFactory) newResearchBlock(
 	if planned.Config.Prompt != nil {
 		initialPrompt = *planned.Config.Prompt
 	}
+	collectionToolNames := collectionRetryToolNames(
+		planned.Config.CollectionToolIDs,
+		planned.Config.CollectionMCPToolIDs,
+		planned.Config.CollectionAllowedBuiltinTools,
+		planned.MCPTools,
+	)
 	workflowConfig := coordinator.Config{
 		Collection: collection.RunConfig{
-			InitialPrompt: initialPrompt, MaxProtocolAttempts: planned.Config.MaxProtocolAttempts,
-			CheckpointToolName: collectionCheckpointToolName,
+			InitialPrompt:       initialPrompt,
+			MaxProtocolAttempts: planned.Config.MaxProtocolAttempts,
+			CheckpointToolName:  collectionCheckpointToolName,
+			CollectionToolNames: collectionToolNames,
 		},
 		CollectionQC: collectionqc.Config{
 			Task: collectionqc.Task{
@@ -872,6 +881,19 @@ func initialResearchPrompt(prompt *string) string {
 		return *prompt
 	}
 	return "Begin the configured research task."
+}
+
+func collectionRetryToolNames(
+	typedToolIDs []string,
+	mcpToolIDs []string,
+	allowedBuiltinTools []string,
+	mcpTools mcp.ToolRegistry,
+) []string {
+	result := make([]string, 0, len(typedToolIDs)+len(mcpToolIDs)+len(allowedBuiltinTools))
+	result = append(result, typedToolIDs...)
+	result = append(result, collectionMCPToolFilters(mcpToolIDs, mcpToolIDs, mcpTools)...)
+	result = append(result, allowedBuiltinTools...)
+	return result
 }
 
 func finalQCSystemPrompt(strictness string) string {

@@ -102,6 +102,7 @@ func (r *Runner) Run(ctx context.Context, config Config) (researchruntime.Result
 		switch r.state.Phase() {
 		case workflow.PhaseCollection:
 			collectionConfig := config.Collection
+			collectionConfig.ActiveInformationNeedStates = append([]collection.ActiveInformationNeedState(nil), collectionState...)
 			collectionConfig.InitialPrompt = collectionRoundPrompt(
 				collectionConfig.InitialPrompt,
 				collectionState,
