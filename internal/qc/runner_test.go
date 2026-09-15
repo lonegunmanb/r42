@@ -502,6 +502,31 @@ func TestFinalQCIssueLedgerAssignsAndResolvesHostOwnedIDs(t *testing.T) {
 	require.NoError(t, recorder.RecordFinalCompletion())
 }
 
+func TestFinalQCIssueLedgerRestoresHostOwnedIDs(t *testing.T) {
+	t.Parallel()
+
+	recorder := qc.NewVerdictRecorder()
+	restored := []corespec.Issue{{ID: "FQ-004", Code: "accuracy", Message: "wrong total"}}
+
+	require.NoError(t, recorder.RestoreFinalIssues(restored))
+	assert.Equal(t, restored, recorder.FinalIssues())
+	require.ErrorContains(t, recorder.RecordFinalCompletion(), "unresolved Final-QC issues")
+	opened, err := recorder.OpenFinalIssues([]corespec.Issue{{Code: "scope", Message: "missing caveat"}})
+	require.NoError(t, err)
+	assert.Equal(t, "FQ-005", opened[0].ID)
+}
+
+func TestFinalQCIssueLedgerRestoresFourDigitHostID(t *testing.T) {
+	t.Parallel()
+
+	recorder := qc.NewVerdictRecorder()
+	require.NoError(t, recorder.RestoreFinalIssues([]corespec.Issue{{ID: "FQ-1000", Code: "accuracy", Message: "wrong total"}}))
+
+	opened, err := recorder.OpenFinalIssues([]corespec.Issue{{Code: "scope", Message: "missing caveat"}})
+	require.NoError(t, err)
+	assert.Equal(t, "FQ-1001", opened[0].ID)
+}
+
 func TestFinalQCIssueLedgerRejectsUnknownResolutionAndIncompleteCompletion(t *testing.T) {
 	t.Parallel()
 

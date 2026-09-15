@@ -39,7 +39,7 @@ third-party fork or adapter.
 
 - Mutating a DAG after Plan.
 - Creating a module directory during Apply or planning a module dynamically.
-- Resuming an interrupted Apply or reusing successful blocks from an older run.
+- Reusing arbitrary successful DAG blocks from an older run.
 - Hashing skills, tools, programs, or external files into the Plan.
 - Sandboxing paths, child-process environments, or `..`/absolute path access.
 - Go plugins or Python inline tools.
@@ -85,8 +85,26 @@ artifact mutation, and nested-module execution. Apply never reparses module
 source.
 
 Any block failure or timeout triggers fail-fast cancellation of the entire DAG.
-An interrupted Apply cannot resume; another Apply creates a new run and starts
-from the DAG roots.
+`r42 apply --resume` finds the newest retained run with a versioned research
+unit checkpoint and plans the current configuration against that original run.
+An explicit saved plan continues to use its own original run directory.
+
+Recovery correctness is defined at the whole static research-block and
+materialized dynamic-task boundary. Before a unit opens its first session, r42
+atomically snapshots the artifact registry and every relevant workspace. After
+the last required phase succeeds, the host atomically publishes the unit's
+result, artifact state, and `completed` marker. A unit interrupted before that
+publication is `started`, never partially completed: resume restores its
+pre-unit snapshot, removes files and artifact registrations created by the
+attempt, opens fresh sessions, and runs it again from Collection with a fresh
+block timeout. A completed unit restores its saved result and is skipped.
+
+Copilot session IDs, workflow phases, collection rounds, and tool-call quotas
+are not recovery boundaries. Dynamic task lists are durably materialized once;
+resume reuses that list while current prompt, provider, tool, and timeout
+configuration controls the new execution attempt. Old phase/session checkpoint
+runs are not compatible with this protocol and are rejected by parameterless
+resume.
 
 ## 3. Blocks and Values
 
@@ -1440,6 +1458,11 @@ panel. Every `WindowSizeMsg` recomputes panel widths, viewport heights, and both
 scroll bounds, then requests a full redraw. A live resize below 50x12 replaces
 the layout with a terminal-size warning until enough space is restored.
 
+For a workflow node, the detail panel shows whether its whole research unit is
+committed and whether resume skipped it or rolled an unfinished attempt back.
+The TUI timeline and REPL emit matching unit checkpoint and recovery lines.
+These displays contain no artifact or session contents.
+
 The REPL renderer prints the initial expanded DAG and concise research activity,
 tool calls, and module `START`, `DONE`, or `FAILED` transitions. Nested module
 events use their canonical addresses. Both renderers strip terminal control
@@ -1481,8 +1504,9 @@ written by r42 to stdout. Negotiation must finish within 5 seconds. Malformed
 input, an unsupported handshake or schema version, EOF, timeout, or failure to
 flush `hello` or `ready` fails the command before Plan or Apply starts. After
 `ready`, stdin carries no progress commands and is otherwise ignored.
-Cancellation continues to use process signaling through the supervising worker;
-pause, resume, and checkpoint recovery are not supported.
+Cancellation continues to use process signaling through the supervising worker.
+Progress transport itself has no pause or recovery command; Apply recovery is
+the local checkpoint mechanism described in the execution model.
 
 Handshake version 1 is stable independently of event schema majors. r42
 advertises every event schema major it can encode, and accepts only a selected

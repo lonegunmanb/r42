@@ -268,6 +268,19 @@ func TestToolCallQuotaRollbackRestoresReservation(t *testing.T) {
 	require.NoError(t, quota.reserve("tool_lookup"))
 }
 
+func TestToolCallQuotaRestorePreservesSuccessfulCallsAcrossResume(t *testing.T) {
+	t.Parallel()
+
+	quota := newToolCallQuota(map[string]int{"tool_lookup": 2})
+	require.NoError(t, quota.reserve("tool_lookup"))
+	checkpoint := quota.Snapshot()
+	restored := newToolCallQuota(map[string]int{"tool_lookup": 2})
+	restored.Restore(checkpoint)
+
+	require.NoError(t, restored.reserve("tool_lookup"))
+	assert.ErrorContains(t, restored.reserve("tool_lookup"), "per-session call quota exhausted")
+}
+
 func TestToolCallQuotaConcurrentReservationsDoNotExceedLimit(t *testing.T) {
 	t.Parallel()
 

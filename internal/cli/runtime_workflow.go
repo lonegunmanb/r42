@@ -2,13 +2,18 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 
 	"github.com/lonegunmanb/golden"
 	artifactpkg "github.com/lonegunmanb/r42/internal/artifact"
+	"github.com/lonegunmanb/r42/internal/checkpoint"
 	"github.com/lonegunmanb/r42/internal/collection"
 	"github.com/lonegunmanb/r42/internal/collectionqc"
 	"github.com/lonegunmanb/r42/internal/coordinator"
@@ -37,6 +42,11 @@ const researchArtifactProtocol = "Evidence protocol: evidence crosses research-b
 	"and r42_search_artifacts to find text across all authorized artifacts. " +
 	"Read-only view, grep, head, and tail may inspect files by path. Do not use artifact paths as cross-block evidence references. " +
 	"Every citation carried into a downstream knowledge result must retain its artifact_id."
+
+type unitResult struct {
+	Value     *string           `json:"value,omitempty"`
+	Artifacts map[string]string `json:"artifacts"`
+}
 
 func toolUseArtifactIDs(uses []researchspec.ToolUse) []string {
 	ids := make([]string, 0)
@@ -212,15 +222,53 @@ func (f *runtimeFactory) newResearchBlock(
 
 	executionAddress := f.CanonicalAddress(address)
 	artifactsRegistry := f.ensureArtifactRegistry()
-	artifactIDs := make(map[string]string, len(planned.Config.Artifacts))
-	currentArtifactIDs := make([]string, 0, len(planned.Config.Artifacts))
-	for _, declared := range planned.Config.Artifacts {
-		record, declareErr := artifactsRegistry.Declare(workspace, declared)
-		if declareErr != nil {
-			return nil, declareErr
+	unit := checkpoint.NewUnit(unitCheckpointStore(f.run.Directory(), executionAddress))
+	if f.resume {
+		unitState, restoreErr := unit.Load()
+		switch {
+		case errors.Is(restoreErr, os.ErrNotExist):
+			// This block had not started when the previous process stopped.
+		case restoreErr != nil:
+			return nil, fmt.Errorf("load research unit checkpoint: %w", restoreErr)
+		case unitState.Status == checkpoint.UnitCompleted:
+			if _, restoreErr = unit.RestoreCompleted(artifactsRegistry); restoreErr != nil {
+				return nil, fmt.Errorf("restore completed research unit: %w", restoreErr)
+			}
+			var saved unitResult
+			if restoreErr = json.Unmarshal(unitState.Result, &saved); restoreErr != nil {
+				return nil, fmt.Errorf("decode completed research result: %w", restoreErr)
+			}
+			artifactIDs, currentArtifactIDs, declareErr := declareResearchArtifacts(artifactsRegistry, workspace, planned.Config.Artifacts)
+			if declareErr != nil {
+				return nil, declareErr
+			}
+			_ = f.recorder.Record(debuglog.Event{
+				Kind: debuglog.EventLifecycle, Action: "research.unit.restore", Status: debuglog.StatusCompleted,
+				BlockAddress: executionAddress, BlockType: "research",
+			})
+			_ = currentArtifactIDs
+			keepContext = true
+			return &researchApplyBlock{
+				BaseBlock: new(golden.BaseBlock), ctx: ctx, address: address,
+				config:  researchruntime.Config{Artifacts: planned.Config.Artifacts, ArtifactIDs: artifactIDs, TerminateToolName: pointerValue(planned.Config.TerminateToolID)},
+				publish: publish, cancel: blockCancel, completedResult: &researchruntime.Result{Value: saved.Value, Artifacts: saved.Artifacts}, recorder: f.recorder, checkpointAddress: executionAddress,
+			}, nil
+		default:
+			if _, restoreErr = unit.Rollback(artifactsRegistry); restoreErr != nil {
+				return nil, fmt.Errorf("roll back unfinished research unit: %w", restoreErr)
+			}
+			_ = f.recorder.Record(debuglog.Event{
+				Kind: debuglog.EventLifecycle, Action: "research.unit.rollback", Status: debuglog.StatusCompleted,
+				BlockAddress: executionAddress, BlockType: "research",
+			})
 		}
-		artifactIDs[declared.Name] = record.ID
-		currentArtifactIDs = append(currentArtifactIDs, record.ID)
+	}
+	if err := unit.Begin(artifactsRegistry, workspace); err != nil {
+		return nil, fmt.Errorf("begin research unit: %w", err)
+	}
+	artifactIDs, currentArtifactIDs, declareErr := declareResearchArtifacts(artifactsRegistry, workspace, planned.Config.Artifacts)
+	if declareErr != nil {
+		return nil, declareErr
 	}
 	if planned.Config.EffectivePhaseMode() == researchspec.PhaseModeResearchOnly {
 		block, err := f.newResearchOnlyBlock(
@@ -228,6 +276,7 @@ func (f *runtimeFactory) newResearchBlock(
 			artifactsRegistry, artifactIDs, currentArtifactIDs, blockCancel,
 		)
 		if err == nil {
+			attachResearchUnit(block, unit, workspace, artifactsRegistry, f.recorder, executionAddress)
 			keepContext = true
 		}
 		return block, err
@@ -238,6 +287,7 @@ func (f *runtimeFactory) newResearchBlock(
 			artifactsRegistry, artifactIDs, currentArtifactIDs, blockCancel,
 		)
 		if err == nil {
+			attachResearchUnit(block, unit, workspace, artifactsRegistry, f.recorder, executionAddress)
 			keepContext = true
 		}
 		return block, err
@@ -295,8 +345,10 @@ func (f *runtimeFactory) newResearchBlock(
 
 	// Collection is the only open-world phase and owns acquisition tools.
 	collectionQuota, collectionBuiltInQuota := splitToolCallQuota(planned.Config.Policy.ToolCallQuota)
+	collectionTypedQuotaState := newToolCallQuota(collectionQuota)
+	collectionBuiltInQuotaState := newToolCallQuota(collectionBuiltInQuota)
 	collectionTools, _, err := f.buildTools(ctx, executionAddress, debuglog.SessionCollection, workspace,
-		planned.Config.CollectionToolIDs, nil, researchruntime.NewTerminalRecorder(), newToolCallQuota(collectionQuota))
+		planned.Config.CollectionToolIDs, nil, researchruntime.NewTerminalRecorder(), collectionTypedQuotaState)
 	if err != nil {
 		return nil, err
 	}
@@ -332,7 +384,7 @@ func (f *runtimeFactory) newResearchBlock(
 		DisabledSkills: slices.Clone(planned.Config.CollectionDisabledSkills),
 		MCPServers:     slices.Clone(planned.MCPServers),
 		MCPResources:   collectionMCPResources(planned.Config.CollectionMCPResourceIDs, planned.MCPResources),
-		Hooks:          collectionBuiltInHooks(newToolCallQuota(collectionBuiltInQuota), collectionContext),
+		Hooks:          collectionBuiltInHooks(collectionBuiltInQuotaState, collectionContext),
 	})
 	if err != nil {
 		return nil, err
@@ -369,13 +421,15 @@ func (f *runtimeFactory) newResearchBlock(
 
 	// Research is closed-world synthesis over registered evidence artifacts.
 	researchTypedQuota, researchBuiltInQuota := splitToolCallQuota(planned.Config.Policy.ToolCallQuota)
+	researchTypedQuotaState := newToolCallQuota(researchTypedQuota)
+	researchBuiltInQuotaState := newToolCallQuota(researchBuiltInQuota)
 	terminal := researchruntime.NewTerminalRecorder()
 	var finalVerdicts *qc.VerdictRecorder
 	if planned.Config.QC != nil {
 		finalVerdicts = qc.NewVerdictRecorder()
 	}
 	researchTools, terminalType, err := f.buildTools(ctx, executionAddress, debuglog.SessionResearch, workspace,
-		planned.Config.Policy.ToolIDs, planned.Config.TerminateToolID, terminal, newToolCallQuota(researchTypedQuota))
+		planned.Config.Policy.ToolIDs, planned.Config.TerminateToolID, terminal, researchTypedQuotaState)
 	if err != nil {
 		return cleanupSetup(err)
 	}
@@ -426,7 +480,7 @@ func (f *runtimeFactory) newResearchBlock(
 			withoutMCPToolIDs(planned.Config.Policy.DisallowedTools), planned.Config.ResearchAllowedBuiltinTools,
 		),
 		SkillDirectories: slices.Clone(planned.Config.Policy.SkillDirectories), Skills: slices.Clone(planned.Config.Policy.Skills),
-		DisabledSkills: slices.Clone(planned.Config.Policy.DisabledSkills), Hooks: builtInToolCallQuotaHooks(newToolCallQuota(researchBuiltInQuota)),
+		DisabledSkills: slices.Clone(planned.Config.Policy.DisabledSkills), Hooks: builtInToolCallQuotaHooks(researchBuiltInQuotaState),
 	})
 	if err != nil {
 		return cleanupSetup(err)
@@ -501,8 +555,10 @@ func (f *runtimeFactory) newResearchBlock(
 			return cleanupSetup(effectiveErr)
 		}
 		finalTypedQuota, finalBuiltInQuota := splitToolCallQuota(effectiveFinalQC.ToolCallQuota)
+		finalTypedQuotaState := newToolCallQuota(finalTypedQuota)
+		finalBuiltInQuotaState := newToolCallQuota(finalBuiltInQuota)
 		finalTools, _, toolsErr := f.buildTools(ctx, executionAddress, debuglog.SessionFinalQC, workspace,
-			effectiveFinalQC.ToolIDs, nil, researchruntime.NewTerminalRecorder(), newToolCallQuota(finalTypedQuota))
+			effectiveFinalQC.ToolIDs, nil, researchruntime.NewTerminalRecorder(), finalTypedQuotaState)
 		if toolsErr != nil {
 			return cleanupSetup(toolsErr)
 		}
@@ -550,7 +606,7 @@ func (f *runtimeFactory) newResearchBlock(
 				planned.Config.FinalQCAllowedBuiltinTools,
 			),
 			SkillDirectories: slices.Clone(effectiveFinalQC.SkillDirectories), Skills: slices.Clone(effectiveFinalQC.Skills),
-			DisabledSkills: slices.Clone(effectiveFinalQC.DisabledSkills), Hooks: builtInToolCallQuotaHooks(newToolCallQuota(finalBuiltInQuota)),
+			DisabledSkills: slices.Clone(effectiveFinalQC.DisabledSkills), Hooks: builtInToolCallQuotaHooks(finalBuiltInQuotaState),
 		})
 		if openErr != nil {
 			return cleanupSetup(openErr)
@@ -583,10 +639,43 @@ func (f *runtimeFactory) newResearchBlock(
 			}
 			return result, nil
 		},
-		afterSuccess: func() {},
+		afterSuccess: func() {}, unit: unit, workspace: workspace, artifactRegistry: artifactsRegistry, recorder: f.recorder, checkpointAddress: executionAddress,
 	}
 	keepContext = true
 	return block, nil
+}
+
+func unitCheckpointStore(runDirectory, address string) string {
+	digest := sha256.Sum256([]byte(address))
+	return filepath.Join(runDirectory, "unit-checkpoints", fmt.Sprintf("%x", digest[:]))
+}
+
+func declareResearchArtifacts(
+	registry *artifactpkg.Registry,
+	workspace string,
+	artifacts []researchspec.Artifact,
+) (map[string]string, []string, error) {
+	ids := make(map[string]string, len(artifacts))
+	current := make([]string, 0, len(artifacts))
+	for _, declared := range artifacts {
+		record, err := registry.Declare(workspace, declared)
+		if err != nil {
+			return nil, nil, err
+		}
+		ids[declared.Name] = record.ID
+		current = append(current, record.ID)
+	}
+	return ids, current, nil
+}
+
+func attachResearchUnit(block golden.ApplyBlock, unit *checkpoint.Unit, workspace string, registry *artifactpkg.Registry, recorder *debuglog.Recorder, executionAddress string) {
+	if research, ok := block.(*researchApplyBlock); ok {
+		research.unit = unit
+		research.workspace = workspace
+		research.artifactRegistry = registry
+		research.recorder = recorder
+		research.checkpointAddress = executionAddress
+	}
 }
 
 // newCollectionOnlyBlock opens one open-world Collection-policy session without

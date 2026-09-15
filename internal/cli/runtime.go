@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/hclfuncs"
 	artifactpkg "github.com/lonegunmanb/r42/internal/artifact"
+	"github.com/lonegunmanb/r42/internal/checkpoint"
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
 	"github.com/lonegunmanb/r42/internal/config"
 	"github.com/lonegunmanb/r42/internal/copilot"
@@ -198,6 +200,9 @@ func (e *Engine) apply(
 		}
 		recorder.SetEventBus(debuglog.EventBusFromContext(ctx))
 	}
+	if _, err = plan.Save(filepath.Join(activeRun.Directory(), resumePlanFileName), planned); err != nil {
+		return nil, nil, fmt.Errorf("persist resume plan: %w", err)
+	}
 	started := time.Now()
 	if err = debuglog.Lifecycle(ctx, "apply", debuglog.StatusStarted, debuglog.Event{
 		Path: planned.Directory(), Count: len(planned.Nodes()),
@@ -215,12 +220,14 @@ func (e *Engine) apply(
 		results: make(map[string]cty.Value), run: activeRun, sessions: sessions, recorder: recorder,
 		state: new(runtimeState), tools: planned.Tools(), directory: planned.Directory(),
 		contextValues: planned.Context(), localExpressions: planned.LocalExpressions(),
-		sessionStallTimeout: effectiveSessionStallTimeout(options.SessionStallTimeout),
-		artifactRegistry:    artifactpkg.NewRegistry(),
-		quoteRegistry:       evidence.NewQuoteRegistry(),
-		starlarkRunner:      e.options.StarlarkRunner,
-		s3ServiceFactory:    e.options.S3ServiceFactory,
-		s3EnvLookup:         e.options.S3EnvLookup,
+		sessionStallTimeout:   effectiveSessionStallTimeout(options.SessionStallTimeout),
+		artifactRegistry:      artifactpkg.NewRegistry(),
+		sessionStoreDirectory: filepath.Join(activeRun.Directory(), "copilot"),
+		resume:                options.Resume,
+		quoteRegistry:         evidence.NewQuoteRegistry(),
+		starlarkRunner:        e.options.StarlarkRunner,
+		s3ServiceFactory:      e.options.S3ServiceFactory,
+		s3EnvLookup:           e.options.S3EnvLookup,
 	}
 	runner := executor.New(factory, nil)
 	outputs, applyErr := runner.Apply(ctx, planned, options.Parallelism)
@@ -289,23 +296,25 @@ func recordLifecycleCompletion(
 }
 
 type runtimeFactory struct {
-	mu                  sync.Mutex
-	results             map[string]cty.Value
-	run                 *run.Run
-	sessions            SessionOpener
-	recorder            *debuglog.Recorder
-	state               *runtimeState
-	prefix              string
-	tools               map[string]plan.ToolSpec
-	directory           string
-	contextValues       map[string]cty.Value
-	localExpressions    map[string]string
-	sessionStallTimeout time.Duration
-	artifactRegistry    *artifactpkg.Registry
-	quoteRegistry       *evidence.QuoteRegistry
-	starlarkRunner      starlarkRunner
-	s3ServiceFactory    internals3.ServiceFactory
-	s3EnvLookup         internals3.EnvLookup
+	mu                    sync.Mutex
+	results               map[string]cty.Value
+	run                   *run.Run
+	sessions              SessionOpener
+	recorder              *debuglog.Recorder
+	state                 *runtimeState
+	prefix                string
+	tools                 map[string]plan.ToolSpec
+	directory             string
+	contextValues         map[string]cty.Value
+	localExpressions      map[string]string
+	sessionStallTimeout   time.Duration
+	artifactRegistry      *artifactpkg.Registry
+	sessionStoreDirectory string
+	resume                bool
+	quoteRegistry         *evidence.QuoteRegistry
+	starlarkRunner        starlarkRunner
+	s3ServiceFactory      internals3.ServiceFactory
+	s3EnvLookup           internals3.EnvLookup
 }
 
 const (
@@ -471,6 +480,9 @@ func (f *runtimeFactory) openSession(
 	kind debuglog.SessionKind,
 	config copilot.SessionConfig,
 ) (Session, error) {
+	if config.SessionStoreDirectory == "" {
+		config.SessionStoreDirectory = f.sessionStoreDirectory
+	}
 	toolNames := make([]string, len(config.Tools))
 	for index, tool := range config.Tools {
 		toolNames[index] = tool.Name
@@ -515,11 +527,13 @@ func (f *runtimeFactory) newModuleBlock(
 		results: make(map[string]cty.Value), run: f.run, sessions: f.sessions,
 		recorder: f.recorder, state: f.state, prefix: executionAddress, tools: node.Module.Plan.Tools(),
 		directory: node.Module.Plan.Directory(), contextValues: node.Module.Plan.Context(),
-		localExpressions:    node.Module.Plan.LocalExpressions(),
-		sessionStallTimeout: f.sessionStallTimeout,
-		starlarkRunner:      f.starlarkRunner,
-		s3ServiceFactory:    f.s3ServiceFactory,
-		s3EnvLookup:         f.s3EnvLookup,
+		localExpressions:      node.Module.Plan.LocalExpressions(),
+		sessionStallTimeout:   f.sessionStallTimeout,
+		sessionStoreDirectory: f.sessionStoreDirectory,
+		resume:                f.resume,
+		starlarkRunner:        f.starlarkRunner,
+		s3ServiceFactory:      f.s3ServiceFactory,
+		s3EnvLookup:           f.s3EnvLookup,
 	}
 	return &moduleApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address,
@@ -1040,8 +1054,37 @@ type toolCallQuota struct {
 	used   map[string]int
 }
 
+type toolCallQuotaSnapshot struct {
+	Used map[string]int `json:"used"`
+}
+
 func newToolCallQuota(limits map[string]int) *toolCallQuota {
 	return &toolCallQuota{limits: maps.Clone(limits), used: make(map[string]int)}
+}
+
+func (q *toolCallQuota) Snapshot() toolCallQuotaSnapshot {
+	if q == nil {
+		return toolCallQuotaSnapshot{}
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return toolCallQuotaSnapshot{Used: maps.Clone(q.used)}
+}
+
+func (q *toolCallQuota) Restore(snapshot toolCallQuotaSnapshot) {
+	if q == nil {
+		return
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for name := range q.used {
+		delete(q.used, name)
+	}
+	for name, used := range snapshot.Used {
+		if used > 0 {
+			q.used[name] = used
+		}
+	}
 }
 
 func (q *toolCallQuota) reserve(toolName string) error {
@@ -1581,19 +1624,25 @@ func qcCompleteTool(address string, recorder *debuglog.Recorder, verdicts *qc.Ve
 
 type researchApplyBlock struct {
 	*golden.BaseBlock
-	ctx              context.Context
-	address          string
-	session          Session
-	runner           *researchruntime.Runner
-	qcSession        Session
-	qcRunner         *qc.Runner
-	qcConfig         qc.Config
-	config           researchruntime.Config
-	publish          func(string, cty.Value)
-	cancel           context.CancelFunc
-	workflowRun      func(context.Context) (researchruntime.Result, error)
-	workflowSessions []Session
-	afterSuccess     func()
+	ctx               context.Context
+	address           string
+	session           Session
+	runner            *researchruntime.Runner
+	qcSession         Session
+	qcRunner          *qc.Runner
+	qcConfig          qc.Config
+	config            researchruntime.Config
+	publish           func(string, cty.Value)
+	cancel            context.CancelFunc
+	workflowRun       func(context.Context) (researchruntime.Result, error)
+	workflowSessions  []Session
+	afterSuccess      func()
+	unit              *checkpoint.Unit
+	workspace         string
+	completedResult   *researchruntime.Result
+	artifactRegistry  *artifactpkg.Registry
+	recorder          *debuglog.Recorder
+	checkpointAddress string
 }
 
 func (*researchApplyBlock) Type() string            { return "static" }
@@ -1606,6 +1655,8 @@ func (b *researchApplyBlock) Apply() error {
 	var result researchruntime.Result
 	var err error
 	switch {
+	case b.completedResult != nil:
+		result = *b.completedResult
 	case b.workflowRun != nil:
 		result, err = b.workflowRun(b.ctx)
 	case b.qcRunner == nil:
@@ -1620,6 +1671,21 @@ func (b *researchApplyBlock) Apply() error {
 	}
 	if b.afterSuccess != nil {
 		b.afterSuccess()
+	}
+	if b.unit != nil && b.completedResult == nil {
+		encoded, marshalErr := json.Marshal(unitResult{Value: result.Value, Artifacts: result.Artifacts})
+		if marshalErr != nil {
+			return fmt.Errorf("encode completed research result: %w", marshalErr)
+		}
+		if commitErr := b.unit.Complete(b.artifactRegistry, b.workspace, encoded); commitErr != nil {
+			return fmt.Errorf("commit completed research unit: %w", commitErr)
+		}
+		if b.recorder != nil {
+			_ = b.recorder.Record(debuglog.Event{
+				Kind: debuglog.EventLifecycle, Action: "research.unit.commit", Status: debuglog.StatusCompleted,
+				BlockAddress: b.checkpointAddress, BlockType: "research",
+			})
+		}
 	}
 	value := map[string]cty.Value{
 		"artifact": researchspec.ArtifactsValueWithIDs(b.config.Artifacts, result.Artifacts, b.config.ArtifactIDs),
@@ -1649,6 +1715,9 @@ func (b *researchApplyBlock) Cleanup(ctx context.Context) error {
 	if b.qcSession != nil {
 		qcErr = b.qcSession.Close(ctx)
 	}
+	if b.session == nil {
+		return qcErr
+	}
 	return errors.Join(qcErr, b.session.Close(ctx))
 }
 
@@ -1667,6 +1736,18 @@ type recordingSession struct {
 	toolName           map[string]string
 	lastEvent          string
 	tainted            bool
+}
+
+// ID exposes the underlying Copilot session identity to the checkpoint host.
+func (s *recordingSession) ID() string {
+	if s == nil {
+		return ""
+	}
+	identified, ok := s.Session.(interface{ ID() string })
+	if !ok {
+		return ""
+	}
+	return identified.ID()
 }
 
 type recoverableSession interface {
@@ -2630,9 +2711,10 @@ func objectValue(values map[string]cty.Value) cty.Value {
 }
 
 type officialSessionOpener struct {
-	mu      sync.Mutex
-	client  *sdk.Client
-	factory *copilot.Factory
+	mu            sync.Mutex
+	client        *sdk.Client
+	factory       *copilot.Factory
+	baseDirectory string
 }
 
 type stoppableCopilotClient interface {
@@ -2647,8 +2729,12 @@ func newOfficialSessionOpener() *officialSessionOpener {
 func (o *officialSessionOpener) Open(ctx context.Context, config copilot.SessionConfig) (Session, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if o.baseDirectory != "" && config.SessionStoreDirectory != "" && o.baseDirectory != config.SessionStoreDirectory {
+		return nil, fmt.Errorf("copilot session store %q does not match active run store %q", config.SessionStoreDirectory, o.baseDirectory)
+	}
 	if o.client == nil {
-		o.client = sdk.NewClient(nil)
+		o.baseDirectory = config.SessionStoreDirectory
+		o.client = sdk.NewClient(&sdk.ClientOptions{BaseDirectory: o.baseDirectory})
 		if err := o.client.Start(ctx); err != nil {
 			o.client = nil
 			return nil, fmt.Errorf("start copilot client: %w", err)
@@ -2671,6 +2757,7 @@ func (o *officialSessionOpener) Close() error {
 	client := o.client
 	o.client = nil
 	o.factory = nil
+	o.baseDirectory = ""
 	o.mu.Unlock()
 	return stopCopilotClient(client, sessionRecoveryTimeout)
 }

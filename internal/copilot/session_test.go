@@ -37,18 +37,19 @@ func TestFactoryOpenMaterializesProviderAndAssemblesSession(t *testing.T) {
 			Headers:   providerHeaders(map[string]string{"X-R42": "test"}),
 			APIKeyRef: &apiKeyRef,
 		},
-		Retry:            retryPolicy(t, 2, 3),
-		Model:            "gpt-5.6-sol",
-		Profile:          "gpt-5.4",
-		ReasoningEffort:  "max",
-		SystemPrompt:     "r42 protocol\nauthor instructions",
-		WorkingDirectory: "D:/run/research.market",
-		Tools:            []sdk.Tool{tool},
-		AvailableTools:   []string{"custom:go_tool_finish", "builtin:view"},
-		ExcludedTools:    []string{"builtin:ask_user"},
-		SkillDirectories: []string{"D:/skills"},
-		Skills:           []string{"source-evaluation"},
-		DisabledSkills:   []string{"unsafe-skill"},
+		Retry:                 retryPolicy(t, 2, 3),
+		Model:                 "gpt-5.6-sol",
+		Profile:               "gpt-5.4",
+		ReasoningEffort:       "max",
+		SystemPrompt:          "r42 protocol\nauthor instructions",
+		WorkingDirectory:      "D:/run/research.market",
+		Tools:                 []sdk.Tool{tool},
+		AvailableTools:        []string{"custom:go_tool_finish", "builtin:view"},
+		ExcludedTools:         []string{"builtin:ask_user"},
+		SkillDirectories:      []string{"D:/skills"},
+		Skills:                []string{"source-evaluation"},
+		DisabledSkills:        []string{"unsafe-skill"},
+		SessionStoreDirectory: "D:/run/copilot",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, session)
@@ -67,6 +68,7 @@ func TestFactoryOpenMaterializesProviderAndAssemblesSession(t *testing.T) {
 	require.NotNil(t, config.LargeOutput.Enabled)
 	assert.False(t, *config.LargeOutput.Enabled)
 	assert.Equal(t, "D:/run/research.market", config.WorkingDirectory)
+	assert.Equal(t, "D:/run/copilot", config.ConfigDirectory)
 	require.NotNil(t, config.SystemMessage)
 	assert.Equal(t, "append", config.SystemMessage.Mode)
 	assert.Equal(t, "r42 protocol\nauthor instructions", config.SystemMessage.Content)
@@ -109,6 +111,34 @@ func TestFactoryOpenSupportsDefaultProviderAndNoSelectedSkills(t *testing.T) {
 	assert.Nil(t, client.configs[0].Provider)
 	assert.Empty(t, client.configs[0].CustomAgents)
 	assert.Empty(t, client.configs[0].Agent)
+}
+
+func TestSessionIDMatchesCreatedSDKSessionID(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+	session, err := factory.Open(t.Context(), SessionConfig{Retry: retryPolicy(t, 0, 0)})
+
+	require.NoError(t, err)
+	assert.Equal(t, client.configs[0].SessionID, session.ID())
+}
+
+func TestFactoryOpenResumesConfiguredCheckpointSession(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+	session, err := factory.Open(t.Context(), SessionConfig{
+		Retry: retryPolicy(t, 0, 0), ResumeSessionID: "session-from-checkpoint", SessionStoreDirectory: "D:/run/copilot",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, "session-from-checkpoint", session.ID())
+	assert.Equal(t, []string{"session-from-checkpoint"}, client.resumeIDs)
+	require.Len(t, client.resumeConfigs, 1)
+	assert.Equal(t, "D:/run/copilot", client.resumeConfigs[0].ConfigDirectory)
+	assert.Empty(t, client.configs)
 }
 
 func TestFactoryOpenForwardsSessionHooks(t *testing.T) {
@@ -260,6 +290,27 @@ func TestFactoryOpenNormalizesNilToolsForResourceOnlyMCPServer(t *testing.T) {
 	require.True(t, ok)
 	assert.NotNil(t, server.Tools)
 	assert.Empty(t, server.Tools)
+}
+
+func TestFactoryOpenStartsFreshSessionWhenCheckpointSessionIsMissing(t *testing.T) {
+	t.Parallel()
+
+	client := &fakeClient{
+		session:      &fakeSession{},
+		resumeErrors: []error{errors.New("JSON-RPC Error -32603: Session not found: stale-session")},
+	}
+	factory := newFactory(client, nil, noDelay, fixedRandom)
+
+	session, err := factory.Open(t.Context(), SessionConfig{
+		ResumeSessionID: "stale-session",
+		Retry:           retryPolicy(t, 0, 0),
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, session)
+	assert.Equal(t, []string{"stale-session"}, client.resumeIDs)
+	assert.Len(t, client.configs, 1)
+	assert.NotEqual(t, "stale-session", client.configs[0].SessionID)
 }
 
 func TestFactoryOpenMapsNativeMCPServers(t *testing.T) {

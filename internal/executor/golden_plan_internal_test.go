@@ -109,6 +109,30 @@ output "summary" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchConfigResumeUsesLatestCheckpointRun(t *testing.T) {
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+research "static" "source" {
+  model = "test-model"
+  system_prompt = "Collect evidence."
+}
+`), 0o600))
+	manager := runpkg.NewManager(directory)
+	resumed, err := manager.Create()
+	require.NoError(t, err)
+	checkpoint := filepath.Join(resumed.Directory(), "workflow-checkpoints", "workflow", "checkpoints", "latest")
+	require.NoError(t, os.MkdirAll(filepath.Dir(checkpoint), 0o700))
+	require.NoError(t, os.WriteFile(checkpoint, []byte("checkpoint-test\n"), 0o600))
+
+	config, err := NewResearchConfig(directory, ResearchConfigOptions{Context: t.Context(), Resume: true})
+
+	require.NoError(t, err)
+	want, err := filepath.EvalSymlinks(resumed.Directory())
+	require.NoError(t, err)
+	assert.Equal(t, want, config.Run().Directory())
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
 func TestResearchConfigPreservesHeredocLocalExpression(t *testing.T) {
 	directory := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`

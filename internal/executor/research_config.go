@@ -33,6 +33,7 @@ type ResearchConfigOptions struct {
 	Variables            []golden.CliFlagAssignedVariables
 	RunDirectory         string
 	ReservedRunDirectory string
+	Resume               bool
 	ModuleDirectory      string
 	Parallelism          int
 	SessionStallTimeout  time.Duration
@@ -71,9 +72,12 @@ func NewResearchConfig(directory string, options ResearchConfigOptions) (*Resear
 		runRoot = absolute
 	}
 	var reserved *run.Run
-	if options.ReservedRunDirectory != "" {
+	switch {
+	case options.ReservedRunDirectory != "":
 		reserved, err = run.Open(options.ReservedRunDirectory)
-	} else {
+	case options.Resume:
+		reserved, err = run.NewManager(runRoot).LatestCheckpointRun()
+	default:
 		reserved, err = run.NewManager(runRoot).Reserve()
 	}
 	if err != nil {

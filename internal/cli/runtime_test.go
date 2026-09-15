@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/copilot"
+	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/executor"
 	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/plan"
@@ -270,13 +272,77 @@ research "static" "source" {
 	planned, err = plan.Unmarshal(encoded)
 	require.NoError(t, err)
 
-	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1, Debug: true})
 
 	require.NoError(t, err)
 	require.Len(t, opener.configs, 3)
 	assert.NotNil(t, opener.configs[0].AvailableTools)
 	assert.Contains(t, opener.configs[0].AvailableTools, "r42_read_information_needs")
 	assert.NotContains(t, opener.configs[0].AvailableTools, "mcp:mcp_server.market_data-get_quote")
+}
+
+func TestProductionRuntimeResumeRestartsUnfinishedResearchUnit(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+research "static" "source" {
+  model = "test-model"
+  system_prompt = "Collect evidence."
+}
+
+`), 0o600))
+	initialOpener := &resumeWorkflowOpener{failResearch: true}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: initialOpener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+	require.ErrorContains(t, err, "forced research failure")
+	assert.Equal(t, 1, initialOpener.calls("collection"))
+	assert.Equal(t, 1, initialOpener.calls("collection_qc"))
+	assert.Equal(t, 1, initialOpener.calls("research"))
+
+	resumedOpener := &resumeWorkflowOpener{}
+	resumedRuntime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: resumedOpener})
+	_, err = applyRuntime(resumedRuntime, t.Context(), planned, executor.ResearchConfigOptions{
+		Parallelism: 1, Resume: true, Debug: true,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, resumedOpener.calls("collection"))
+	assert.Equal(t, 1, resumedOpener.calls("collection_qc"))
+	assert.Equal(t, 1, resumedOpener.calls("research"))
+	events, readErr := os.ReadFile(filepath.Join(planned.RunDirectory(), debuglog.EventsFileName))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(events), `"action":"research.unit.rollback"`)
+}
+
+func TestProductionRuntimeResumeSkipsCompletedResearchUnit(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+research "static" "source" {
+  model = "test-model"
+  system_prompt = "Collect evidence."
+}
+`), 0o600))
+	initialOpener := &resumeWorkflowOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: initialOpener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+	require.NoError(t, err)
+
+	resumedOpener := &resumeWorkflowOpener{}
+	resumedRuntime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: resumedOpener})
+	_, err = applyRuntime(resumedRuntime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1, Resume: true})
+
+	require.NoError(t, err)
+	assert.Zero(t, resumedOpener.calls("collection"))
+	assert.Zero(t, resumedOpener.calls("collection_qc"))
+	assert.Zero(t, resumedOpener.calls("research"))
 }
 
 func TestProductionRuntimeExecutesTerminalGoTool(t *testing.T) {
@@ -597,6 +663,47 @@ func (s *fakeSession) Close(context.Context) error {
 	s.mu.Unlock()
 	return s.closeErr
 }
+
+type resumeWorkflowOpener struct {
+	mu           sync.Mutex
+	phaseCalls   map[string]int
+	failResearch bool
+}
+
+func (o *resumeWorkflowOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
+	return &resumeWorkflowSession{config: config, opener: o}, nil
+}
+
+func (o *resumeWorkflowOpener) calls(phase string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.phaseCalls[phase]
+}
+
+type resumeWorkflowSession struct {
+	config copilot.SessionConfig
+	opener *resumeWorkflowOpener
+}
+
+func (s *resumeWorkflowSession) SendAndWait(_ context.Context, _ sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	phase := workflowSessionKind(s.config)
+	s.opener.mu.Lock()
+	if s.opener.phaseCalls == nil {
+		s.opener.phaseCalls = make(map[string]int)
+	}
+	s.opener.phaseCalls[phase]++
+	failResearch := s.opener.failResearch && phase == "research"
+	s.opener.mu.Unlock()
+	if failResearch {
+		return nil, errors.New("forced research failure")
+	}
+	if handled, err := handleDefaultWorkflowProtocol(s.config); handled {
+		return &sdk.SessionEvent{}, err
+	}
+	return &sdk.SessionEvent{}, nil
+}
+
+func (*resumeWorkflowSession) Close(context.Context) error { return nil }
 
 type toolCallingOpener struct{ calledTool string }
 

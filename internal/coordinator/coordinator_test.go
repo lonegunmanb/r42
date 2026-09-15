@@ -71,6 +71,46 @@ func TestRunnerPassesWithoutFinalQC(t *testing.T) {
 	assert.Equal(t, "candidate-1", *result.Value)
 }
 
+func TestRunnerCommitsCheckpointOnlyAfterSuccessfulPhaseHandoff(t *testing.T) {
+	t.Parallel()
+
+	state := workflow.New(workflow.Config{})
+	collector := &fakeCollector{}
+	reviewer := &fakeCollectionReviewer{state: state, rounds: []collectionQCRound{{assessments: sufficientAssessment()}}}
+	writer := &fakeCheckpointWriter{}
+	runner := coordinator.NewRunner(state, collector, reviewer, &fakeResearcher{}, nil)
+
+	_, err := runner.Run(t.Context(), coordinator.Config{CheckpointWriter: writer})
+
+	require.NoError(t, err)
+	require.Len(t, writer.checkpoints, 3)
+	assert.Equal(t, workflow.PhaseCollectionQC, writer.checkpoints[0].NextPhase)
+	assert.Equal(t, workflow.PhaseResearch, writer.checkpoints[1].NextPhase)
+	assert.Equal(t, workflow.PhaseComplete, writer.checkpoints[2].NextPhase)
+}
+
+func TestRunnerCheckpointRetainsOpenFinalQCIssuesForNextReview(t *testing.T) {
+	t.Parallel()
+
+	state := workflow.New(workflow.Config{})
+	collector := &fakeCollector{}
+	reviewer := &fakeCollectionReviewer{state: state, rounds: []collectionQCRound{{assessments: sufficientAssessment()}}}
+	writer := &fakeCheckpointWriter{}
+	finalReviewer := &fakeFinalReviewer{verdicts: []qc.Verdict{
+		{Decision: qc.DecisionReviseResearch, Issues: issues("accuracy")},
+		{Decision: qc.DecisionPass},
+	}}
+	runner := coordinator.NewRunner(state, collector, reviewer, &fakeResearcher{}, finalReviewer)
+
+	_, err := runner.Run(t.Context(), coordinator.Config{
+		FinalQCEnabled: true, MaxFinalQCRounds: 2, CheckpointWriter: writer,
+	})
+
+	require.NoError(t, err)
+	require.Len(t, writer.checkpoints, 5)
+	assert.Equal(t, issues("accuracy"), writer.checkpoints[3].FinalQCOpenIssues)
+}
+
 func TestRunnerCarriesOutcomesIntoNextCollectionPrompt(t *testing.T) {
 	t.Parallel()
 
@@ -350,6 +390,15 @@ type fakeCollector struct {
 	configs      []collection.RunConfig
 	checkContext func(context.Context)
 	checkpoint   collection.CheckpointOutput
+}
+
+type fakeCheckpointWriter struct {
+	checkpoints []coordinator.Checkpoint
+}
+
+func (w *fakeCheckpointWriter) Commit(_ context.Context, checkpoint coordinator.Checkpoint) error {
+	w.checkpoints = append(w.checkpoints, checkpoint)
+	return nil
 }
 
 func (f *fakeCollector) Run(ctx context.Context, config collection.RunConfig) (collection.CheckpointOutput, error) {

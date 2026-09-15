@@ -87,6 +87,28 @@ func TestTUIModelShowsOnlyCreatedSinglePhaseSessions(t *testing.T) {
 	}
 }
 
+func TestTUIModelShowsCheckpointRecoveryInDetail(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{{Address: "research.static.collect", Kind: "research"}}, nil, nil, nil)
+	require.NoError(t, err)
+	projector := ui.NewProjector(planned)
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "workflow.checkpoint", Status: debuglog.StatusCompleted,
+		BlockAddress: "research.static.collect", Session: debuglog.SessionResearch,
+	})
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "workflow.checkpoint.restore", Status: debuglog.StatusCompleted,
+		BlockAddress: "research.static.collect", Session: debuglog.SessionResearch,
+	})
+	model := resizeTUI(t, ui.NewTUIModel(projector, nil), 140, 32)
+	model = updateTUI(t, model, tea.KeyMsg{Type: tea.KeyRight})
+
+	view := model.View()
+	assert.Contains(t, view, "Checkpoint: safe; next phase research")
+	assert.Contains(t, view, "Recovery: resumed from checkpoint")
+}
+
 func TestTUIModelAdjustsResearchTotalForMaterializedDynamicTasks(t *testing.T) {
 	t.Parallel()
 	runDirectory := testRunDirectory(t, "run-42")

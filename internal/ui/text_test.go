@@ -27,6 +27,37 @@ func TestTextRendererShowsWorkflowPhaseTransition(t *testing.T) {
 	assert.Contains(t, output.String(), "[collection] PHASE round=2 decision=needs_more")
 }
 
+func TestTextRendererShowsCheckpointRecovery(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{{Address: "research.static.collect", Kind: "research"}}, nil, nil, nil)
+	require.NoError(t, err)
+	var output bytes.Buffer
+	renderer := ui.NewTextRenderer(&output, ui.NewProjector(planned))
+
+	renderer.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "workflow.checkpoint.restore", Status: debuglog.StatusCompleted,
+		BlockAddress: "research.static.collect", Session: debuglog.SessionResearch,
+	})
+
+	assert.Contains(t, output.String(), "[research] RESUMED from checkpoint; continuing research")
+}
+
+func TestTextRendererShowsResearchUnitRecovery(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{{Address: "research.static.collect", Kind: "research"}}, nil, nil, nil)
+	require.NoError(t, err)
+	var output bytes.Buffer
+	renderer := ui.NewTextRenderer(&output, ui.NewProjector(planned))
+
+	renderer.Observe(debuglog.Event{Kind: debuglog.EventLifecycle, Action: "research.unit.rollback", Status: debuglog.StatusCompleted, BlockAddress: "research.static.collect"})
+	renderer.Observe(debuglog.Event{Kind: debuglog.EventLifecycle, Action: "research.unit.restore", Status: debuglog.StatusCompleted, BlockAddress: "research.static.collect"})
+
+	assert.Contains(t, output.String(), "RESUMED unfinished unit rolled back and restarted")
+	assert.Contains(t, output.String(), "RESUMED completed unit skipped")
+}
+
 func TestTextRendererShowsOnlyCreatedSinglePhaseSessions(t *testing.T) {
 	t.Parallel()
 

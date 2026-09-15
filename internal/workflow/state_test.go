@@ -46,6 +46,17 @@ func TestStateMachineValidTransitions(t *testing.T) {
 	}
 }
 
+func TestStateRestoreAcceptsInitialCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	restored := New(Config{})
+
+	require.NoError(t, restored.Restore(Snapshot{}))
+	assert.Empty(t, restored.Phase())
+	require.NoError(t, restored.Begin())
+	assert.Equal(t, PhaseCollection, restored.Phase())
+}
+
 func TestStateMachineForbiddenTransitions(t *testing.T) {
 	t.Parallel()
 
@@ -397,6 +408,27 @@ func TestInformationNeedOutcomesRoundTrip(t *testing.T) {
 
 	state.SetInformationNeedOutcomes([]byte(`[{"information_need_id":"NEED-002"}]`))
 	assert.JSONEq(t, `[{"information_need_id":"NEED-002"}]`, string(state.InformationNeedOutcomes()))
+}
+
+func TestStateRestoreResumesCheckpointedPhaseAndCollectionBudget(t *testing.T) {
+	t.Parallel()
+
+	state := New(Config{BatchSize: 1})
+	require.NoError(t, state.Begin())
+	require.NoError(t, state.RegisterEvidenceArtifact())
+	require.NoError(t, state.Checkpoint())
+	require.NoError(t, state.Advance(EventCollectionCheckpoint))
+	require.NoError(t, state.Advance(EventNeedsMore))
+	state.SetInformationNeedOutcomes([]byte(`[{"id":"need-1"}]`))
+	checkpoint := state.Snapshot()
+
+	restored := New(Config{BatchSize: 1})
+	require.NoError(t, restored.Restore(checkpoint))
+
+	assert.Equal(t, PhaseCollection, restored.Phase())
+	assert.Equal(t, 2, restored.CollectionRoundsUsed())
+	assert.Equal(t, 1, restored.Cursor())
+	assert.JSONEq(t, `[{"id":"need-1"}]`, string(restored.InformationNeedOutcomes()))
 }
 
 func intPointer(value int) *int { return &value }

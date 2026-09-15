@@ -354,6 +354,43 @@ func (f *fakeRuntime) config(
 	return executor.NewResearchConfigFromPlan(planned, options)
 }
 
+func TestCommandApplyResumeUsesSavedPlanRunDirectory(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	runDirectory := filepath.Join(t.TempDir(), "run-original")
+	planned, err := plan.NewForRun(directory, runDirectory, nil, map[string]plan.OutputSpec{
+		"answer": {Value: cty.StringVal("42")},
+	}, nil, nil)
+	require.NoError(t, err)
+	planPath := filepath.Join(t.TempDir(), "saved.r42plan")
+	_, err = plan.Save(planPath, planned)
+	require.NoError(t, err)
+	runtime := &fakeRuntime{outputs: map[string]cty.Value{"answer": cty.StringVal("42")}}
+
+	_, _, err = execute(t, runtime, "apply", "--resume", planPath)
+
+	require.NoError(t, err)
+	assert.True(t, runtime.configOptions.Resume)
+}
+
+func TestCommandApplyResumeRejectsSavedPlanWithoutOriginalRunDirectory(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals(t.TempDir(), nil, map[string]plan.OutputSpec{
+		"answer": {Value: cty.StringVal("42")},
+	}, nil, nil)
+	require.NoError(t, err)
+	planPath := filepath.Join(t.TempDir(), "saved.r42plan")
+	_, err = plan.Save(planPath, planned)
+	require.NoError(t, err)
+	runtime := &fakeRuntime{outputs: map[string]cty.Value{"answer": cty.StringVal("42")}}
+
+	_, _, err = execute(t, runtime, "apply", "--resume", planPath)
+
+	require.ErrorContains(t, err, "does not identify an original run directory")
+}
+
 func TestCommandPlanSavesOptionalOutputAndSeparatesPermissionWarning(t *testing.T) {
 	t.Parallel()
 

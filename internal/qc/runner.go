@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -257,6 +258,51 @@ type VerdictRecorder struct {
 
 func NewVerdictRecorder() *VerdictRecorder {
 	return &VerdictRecorder{finalIssues: make(map[string]corespec.Issue), finalIssueHistory: make(map[string]corespec.Issue)}
+}
+
+// RestoreFinalIssues restores the host-owned Final-QC issue ledger captured at
+// a workflow handoff. IDs remain stable so a resumed session cannot complete
+// while issues accepted before the handoff are unresolved.
+func (r *VerdictRecorder) RestoreFinalIssues(issues []corespec.Issue) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	active := make(map[string]corespec.Issue, len(issues))
+	history := make(map[string]corespec.Issue, len(issues))
+	next := 0
+	for index, issue := range issues {
+		if err := issue.Validate(); err != nil {
+			return fmt.Errorf("restored issue %d: %w", index, err)
+		}
+		sequence, err := finalIssueSequence(issue.ID)
+		if err != nil {
+			return fmt.Errorf("restored issue %d: %w", index, err)
+		}
+		if _, duplicate := active[issue.ID]; duplicate {
+			return fmt.Errorf("restored issue %d: duplicate issue ID %q", index, issue.ID)
+		}
+		active[issue.ID] = issue
+		history[issue.ID] = issue
+		next = max(next, sequence)
+	}
+	r.finalIssues = active
+	r.finalIssueHistory = history
+	r.nextFinalIssueID = next
+	r.finalReviewed = len(issues) > 0
+	r.completionPending = false
+	r.completionAttempts = 0
+	return nil
+}
+
+func finalIssueSequence(id string) (int, error) {
+	value, found := strings.CutPrefix(strings.TrimSpace(id), "FQ-")
+	if !found || value == "" {
+		return 0, fmt.Errorf("issue ID %q is not host-generated", id)
+	}
+	sequence, err := strconv.Atoi(value)
+	if err != nil || sequence <= 0 {
+		return 0, fmt.Errorf("issue ID %q is not host-generated", id)
+	}
+	return sequence, nil
 }
 
 // OpenFinalIssues records semantic findings and assigns IDs owned by the host.

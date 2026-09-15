@@ -97,6 +97,26 @@ func (r *TextRenderer) Observe(event debuglog.Event) {
 		_, _ = fmt.Fprintf(r.writer, "%s[%s] PHASE round=%d%s\n", prefix, phase, round, decision)
 		return
 	}
+	if event.Action == "workflow.checkpoint" {
+		_, _ = fmt.Fprintf(r.writer, "%s[%s] CHECKPOINT %s\n", prefix, phase, checkpointText(event.Session))
+		return
+	}
+	if event.Action == "workflow.checkpoint.restore" {
+		_, _ = fmt.Fprintf(r.writer, "%s[%s] RESUMED from checkpoint; %s\n", prefix, phase, checkpointContinuation(event.Session))
+		return
+	}
+	if event.Action == "research.unit.commit" {
+		_, _ = fmt.Fprintf(r.writer, "%s[%s] CHECKPOINT unit committed\n", prefix, phase)
+		return
+	}
+	if event.Action == "research.unit.restore" {
+		_, _ = fmt.Fprintf(r.writer, "%s[%s] RESUMED completed unit skipped\n", prefix, phase)
+		return
+	}
+	if event.Action == "research.unit.rollback" {
+		_, _ = fmt.Fprintf(r.writer, "%s[%s] RESUMED unfinished unit rolled back and restarted\n", prefix, phase)
+		return
+	}
 	switch event.Action {
 	case "assistant.reasoning", "assistant.reasoning_delta":
 		if r.announced[event.BlockAddress] != ActivityThinking {
@@ -112,6 +132,20 @@ func (r *TextRenderer) Observe(event debuglog.Event) {
 		_, _ = fmt.Fprintf(r.writer, "%s[%s] TOOL %s\n", prefix, phase, terminalText(event.ToolName))
 		r.announced[event.BlockAddress] = ActivityTool
 	}
+}
+
+func checkpointText(phase debuglog.SessionKind) string {
+	if phase == "" {
+		return "safe; workflow complete"
+	}
+	return "safe; next phase " + terminalText(string(phase))
+}
+
+func checkpointContinuation(phase debuglog.SessionKind) string {
+	if phase == "" {
+		return "workflow complete"
+	}
+	return "continuing " + terminalText(string(phase))
 }
 
 func (r *TextRenderer) researchOrdinal(address string) (int, int) {

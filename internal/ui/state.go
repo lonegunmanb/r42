@@ -38,22 +38,25 @@ type ResearchCounts struct {
 }
 
 type Node struct {
-	Address      string
-	Kind         string
-	ResearchTask bool
-	Parent       string
-	Dependencies []string
-	Status       Status
-	Phase        debuglog.SessionKind
-	Activity     Activity
-	Round        int
-	Content      string
-	ToolName     string
-	Usage        debuglog.Usage
-	LastSequence uint64
-	contentID    string
-	contentKind  string
-	contentPhase debuglog.SessionKind
+	Address               string
+	Kind                  string
+	ResearchTask          bool
+	Parent                string
+	Dependencies          []string
+	Status                Status
+	Phase                 debuglog.SessionKind
+	Activity              Activity
+	Round                 int
+	Content               string
+	ToolName              string
+	Usage                 debuglog.Usage
+	LastSequence          uint64
+	Checkpointed          bool
+	CheckpointPhase       debuglog.SessionKind
+	ResumedFromCheckpoint bool
+	contentID             string
+	contentKind           string
+	contentPhase          debuglog.SessionKind
 }
 
 type TimelineEntry struct {
@@ -155,6 +158,18 @@ func (p *Projector) Observe(event debuglog.Event) {
 	node.LastSequence = event.Sequence
 	content := terminalText(event.Content)
 	toolName := terminalText(event.ToolName)
+	switch event.Action {
+	case "workflow.checkpoint":
+		content = "checkpoint " + checkpointText(event.Session)
+	case "workflow.checkpoint.restore":
+		content = "resumed from checkpoint; " + checkpointContinuation(event.Session)
+	case "research.unit.commit":
+		content = "unit committed"
+	case "research.unit.restore":
+		content = "resumed; completed unit skipped"
+	case "research.unit.rollback":
+		content = "resumed; unfinished unit rolled back and restarted"
+	}
 	if event.Action == "block.apply" {
 		switch event.Status {
 		case debuglog.StatusStarted:
@@ -176,6 +191,20 @@ func (p *Projector) Observe(event debuglog.Event) {
 	node.Phase = event.Session
 	if event.Action == "workflow.phase" {
 		node.Round = event.Round
+	}
+	switch event.Action {
+	case "workflow.checkpoint":
+		node.Checkpointed = true
+		node.CheckpointPhase = event.Session
+	case "workflow.checkpoint.restore":
+		node.Checkpointed = true
+		node.CheckpointPhase = event.Session
+		node.ResumedFromCheckpoint = true
+	case "research.unit.commit":
+		node.Checkpointed = true
+	case "research.unit.restore", "research.unit.rollback":
+		node.Checkpointed = true
+		node.ResumedFromCheckpoint = true
 	}
 	switch event.Action {
 	case "assistant.reasoning", "assistant.reasoning_delta":

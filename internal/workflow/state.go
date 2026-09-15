@@ -68,6 +68,19 @@ type State struct {
 	informationNeedOutcomes []byte
 }
 
+// Snapshot is the complete mutable workflow state at a safe handoff. The
+// immutable configuration remains owned by the newly constructed State so
+// resume can validate it against the current saved plan before Restore.
+type Snapshot struct {
+	Phase                   Phase  `json:"phase"`
+	Begun                   bool   `json:"begun"`
+	CollectionRoundsUsed    int    `json:"collection_rounds_used"`
+	Cursor                  int    `json:"cursor"`
+	UnreviewedCount         int    `json:"unreviewed_count"`
+	CheckpointPending       bool   `json:"checkpoint_pending"`
+	InformationNeedOutcomes []byte `json:"information_need_outcomes,omitempty"`
+}
+
 // New creates an unbegun workflow state.
 func New(config Config) *State {
 	if config.BatchSize == 0 {
@@ -78,6 +91,80 @@ func New(config Config) *State {
 		config.MaxCollectionRounds = &maximum
 	}
 	return &State{config: config}
+}
+
+// Snapshot returns a deep copy of the currently recoverable workflow cursor.
+func (s *State) Snapshot() Snapshot {
+	if s == nil {
+		return Snapshot{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return Snapshot{
+		Phase: s.phase, Begun: s.begun, CollectionRoundsUsed: s.collectionRoundsUsed,
+		Cursor: s.cursor, UnreviewedCount: s.unreviewedCount, CheckpointPending: s.checkpointPending,
+		InformationNeedOutcomes: append([]byte(nil), s.informationNeedOutcomes...),
+	}
+}
+
+// Restore replaces the mutable workflow cursor with a checkpoint created from
+// a compatible State configuration.
+func (s *State) Restore(snapshot Snapshot) error {
+	if s == nil {
+		return errors.New("workflow state is required")
+	}
+	if !snapshot.Begun {
+		if snapshot.Phase != "" || snapshot.CollectionRoundsUsed != 0 || snapshot.Cursor != 0 || snapshot.UnreviewedCount != 0 || snapshot.CheckpointPending || len(snapshot.InformationNeedOutcomes) != 0 {
+			return errors.New("checkpoint workflow state has not begun")
+		}
+		s.mu.Lock()
+		s.phase = ""
+		s.begun = false
+		s.collectionRoundsUsed = 0
+		s.cursor = 0
+		s.unreviewedCount = 0
+		s.checkpointPending = false
+		s.informationNeedOutcomes = nil
+		s.mu.Unlock()
+		return nil
+	}
+	if !validPhase(snapshot.Phase) {
+		return fmt.Errorf("checkpoint workflow phase %q is invalid", snapshot.Phase)
+	}
+	if snapshot.CollectionRoundsUsed <= 0 {
+		return errors.New("checkpoint collection rounds used must be positive")
+	}
+	if s.config.MaxCollectionRounds == nil || *s.config.MaxCollectionRounds <= 0 {
+		return errors.New("max collection rounds must be positive")
+	}
+	if snapshot.CollectionRoundsUsed > *s.config.MaxCollectionRounds {
+		return fmt.Errorf("checkpoint collection rounds %d exceeds configured maximum %d", snapshot.CollectionRoundsUsed, *s.config.MaxCollectionRounds)
+	}
+	if snapshot.Cursor < 0 || snapshot.Cursor > snapshot.CollectionRoundsUsed {
+		return errors.New("checkpoint workflow cursor is invalid")
+	}
+	if snapshot.UnreviewedCount < 0 {
+		return errors.New("checkpoint unreviewed evidence count is invalid")
+	}
+	s.mu.Lock()
+	s.phase = snapshot.Phase
+	s.begun = true
+	s.collectionRoundsUsed = snapshot.CollectionRoundsUsed
+	s.cursor = snapshot.Cursor
+	s.unreviewedCount = snapshot.UnreviewedCount
+	s.checkpointPending = snapshot.CheckpointPending
+	s.informationNeedOutcomes = append([]byte(nil), snapshot.InformationNeedOutcomes...)
+	s.mu.Unlock()
+	return nil
+}
+
+func validPhase(phase Phase) bool {
+	switch phase {
+	case PhaseCollection, PhaseCollectionQC, PhaseResearch, PhaseFinalQC, PhaseComplete:
+		return true
+	default:
+		return false
+	}
 }
 
 // TransitionError describes a forbidden phase transition. It is deterministic

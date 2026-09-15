@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -52,8 +53,114 @@ type QuoteRegistry struct {
 	byRange map[string]string
 }
 
+// QuoteSnapshot is the trusted quote-reference state needed by a later
+// workflow phase. It contains no artifact contents; those are checkpointed by
+// the artifact registry separately.
+type QuoteSnapshot struct {
+	Records []QuoteSnapshotRecord `json:"records"`
+}
+
+// QuoteSnapshotRecord is the serializable host-owned portion of one quote.
+type QuoteSnapshotRecord struct {
+	Ref             string `json:"quote_ref"`
+	SubmitReady     bool   `json:"submit_ready"`
+	ArtifactID      string `json:"artifact_id"`
+	ArtifactDigest  string `json:"artifact_digest"`
+	SourceTitle     string `json:"source_title"`
+	URL             string `json:"url"`
+	Locator         string `json:"locator"`
+	ExactQuote      string `json:"exact_quote"`
+	StartLine       int    `json:"start_line"`
+	EndLine         int    `json:"end_line"`
+	NormalizedStart int    `json:"normalized_start"`
+	NormalizedEnd   int    `json:"normalized_end"`
+}
+
 func NewQuoteRegistry() *QuoteRegistry {
 	return &QuoteRegistry{byRef: make(map[string]QuoteRecord), byRange: make(map[string]string)}
+}
+
+// Snapshot returns a deterministic copy of all quote references captured so
+// far. It is safe to persist at a workflow handoff.
+func (r *QuoteRegistry) Snapshot() QuoteSnapshot {
+	if r == nil {
+		return QuoteSnapshot{}
+	}
+	r.mu.RLock()
+	records := make([]QuoteSnapshotRecord, 0, len(r.byRef))
+	for _, quote := range r.byRef {
+		records = append(records, quoteSnapshotRecord(quote))
+	}
+	r.mu.RUnlock()
+	slices.SortFunc(records, func(left, right QuoteSnapshotRecord) int { return strings.Compare(left.Ref, right.Ref) })
+	return QuoteSnapshot{Records: records}
+}
+
+// Restore replaces quote references from a checkpoint. References are
+// re-derived from their immutable range identity to reject corrupted payloads.
+func (r *QuoteRegistry) Restore(snapshot QuoteSnapshot) error {
+	if r == nil {
+		return errors.New("quote registry is required")
+	}
+	byRef, byRange, err := quoteSnapshotMaps(snapshot)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.byRef = byRef
+	r.byRange = byRange
+	r.mu.Unlock()
+	return nil
+}
+
+// Merge adds quote references captured by another workflow checkpoint without
+// discarding refs already restored for sibling workflows.
+func (r *QuoteRegistry) Merge(snapshot QuoteSnapshot) error {
+	if r == nil {
+		return errors.New("quote registry is required")
+	}
+	byRef, _, err := quoteSnapshotMaps(snapshot)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for ref, quote := range byRef {
+		if existing, exists := r.byRef[ref]; exists {
+			if existing != quote {
+				return fmt.Errorf("quote checkpoint conflicts with reference %q", ref)
+			}
+			continue
+		}
+		key := quoteRangeKey(quote)
+		if existingRef, exists := r.byRange[key]; exists && existingRef != ref {
+			return fmt.Errorf("quote checkpoint conflicts with captured range")
+		}
+		r.byRef[ref] = quote
+		r.byRange[key] = ref
+	}
+	return nil
+}
+
+func quoteSnapshotMaps(snapshot QuoteSnapshot) (map[string]QuoteRecord, map[string]string, error) {
+	byRef := make(map[string]QuoteRecord, len(snapshot.Records))
+	byRange := make(map[string]string, len(snapshot.Records))
+	for index, saved := range snapshot.Records {
+		quote, err := quoteFromSnapshotRecord(saved)
+		if err != nil {
+			return nil, nil, fmt.Errorf("restore quote %d: %w", index, err)
+		}
+		key := quoteRangeKey(quote)
+		if _, exists := byRef[quote.Ref]; exists {
+			return nil, nil, fmt.Errorf("restore quote %d: duplicate quote reference %q", index, quote.Ref)
+		}
+		if _, exists := byRange[key]; exists {
+			return nil, nil, fmt.Errorf("restore quote %d: duplicate quote range", index)
+		}
+		byRef[quote.Ref] = quote
+		byRange[key] = quote.Ref
+	}
+	return byRef, byRange, nil
 }
 
 func (r *QuoteRegistry) CaptureMatch(registry *artifactpkg.Registry, artifactID string, match ArtifactSearchMatch) (QuoteRecord, error) {
@@ -157,7 +264,7 @@ func (r *QuoteRegistry) Resolve(ref string) (QuoteRecord, bool) {
 }
 
 func (r *QuoteRegistry) store(record QuoteRecord) QuoteRecord {
-	key := fmt.Sprintf("%s\x00%s\x00%d\x00%d", record.ArtifactID, record.ArtifactDigest, record.normalizedStart, record.normalizedEnd)
+	key := quoteRangeKey(record)
 	sum := sha256.Sum256([]byte(key))
 	ref := fmt.Sprintf("quote-ref-%x", sum[:16])
 	r.mu.Lock()
@@ -169,6 +276,38 @@ func (r *QuoteRegistry) store(record QuoteRecord) QuoteRecord {
 	r.byRef[ref] = record
 	r.byRange[key] = ref
 	return record
+}
+
+func quoteSnapshotRecord(quote QuoteRecord) QuoteSnapshotRecord {
+	return QuoteSnapshotRecord{
+		Ref: quote.Ref, SubmitReady: quote.SubmitReady, ArtifactID: quote.ArtifactID, ArtifactDigest: quote.ArtifactDigest,
+		SourceTitle: quote.SourceTitle, URL: quote.URL, Locator: quote.Locator, ExactQuote: quote.ExactQuote,
+		StartLine: quote.startLine, EndLine: quote.endLine, NormalizedStart: quote.normalizedStart, NormalizedEnd: quote.normalizedEnd,
+	}
+}
+
+func quoteFromSnapshotRecord(saved QuoteSnapshotRecord) (QuoteRecord, error) {
+	if !saved.SubmitReady || strings.TrimSpace(saved.ArtifactID) == "" || strings.TrimSpace(saved.ArtifactDigest) == "" ||
+		strings.TrimSpace(saved.ExactQuote) == "" || saved.StartLine <= 0 || saved.EndLine < saved.StartLine ||
+		saved.NormalizedStart < 0 || saved.NormalizedEnd <= saved.NormalizedStart {
+		return QuoteRecord{}, errors.New("invalid quote snapshot")
+	}
+	quote := QuoteRecord{
+		Ref: saved.Ref, SubmitReady: saved.SubmitReady, ArtifactID: saved.ArtifactID, ArtifactDigest: saved.ArtifactDigest,
+		SourceTitle: saved.SourceTitle, URL: saved.URL, Locator: saved.Locator, ExactQuote: saved.ExactQuote,
+		startLine: saved.StartLine, endLine: saved.EndLine, normalizedStart: saved.NormalizedStart, normalizedEnd: saved.NormalizedEnd,
+	}
+	key := quoteRangeKey(quote)
+	sum := sha256.Sum256([]byte(key))
+	expected := fmt.Sprintf("quote-ref-%x", sum[:16])
+	if quote.Ref != expected {
+		return QuoteRecord{}, fmt.Errorf("quote reference integrity check failed for %q", quote.Ref)
+	}
+	return quote, nil
+}
+
+func quoteRangeKey(record QuoteRecord) string {
+	return fmt.Sprintf("%s\x00%s\x00%d\x00%d", record.ArtifactID, record.ArtifactDigest, record.normalizedStart, record.normalizedEnd)
 }
 
 func lineLocator(start, end int) string {

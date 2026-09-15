@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,8 +18,10 @@ import (
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/debuglog"
 	"github.com/lonegunmanb/r42/internal/executor"
+	modulespec "github.com/lonegunmanb/r42/internal/module/spec"
 	"github.com/lonegunmanb/r42/internal/plan"
 	"github.com/lonegunmanb/r42/internal/progress"
+	runpkg "github.com/lonegunmanb/r42/internal/run"
 	runui "github.com/lonegunmanb/r42/internal/ui"
 	"github.com/lonegunmanb/r42/internal/variableschema"
 	"github.com/spf13/cobra"
@@ -31,7 +35,8 @@ const (
 	defaultSessionStallTimeout = 15 * time.Minute
 	// maxApplyTimeout keeps a deadline visible to SDKs that otherwise install
 	// their own short default while remaining effectively unlimited to users.
-	maxApplyTimeout = time.Duration(1<<63 - 1)
+	maxApplyTimeout    = time.Duration(1<<63 - 1)
+	resumePlanFileName = "saved-plan.r42plan"
 )
 
 type Runtime interface {
@@ -227,12 +232,13 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 	var debug bool
 	var variables []string
 	var variableFiles []string
+	var resume bool
 	uiMode := string(runui.ModeAuto)
 	command := &cobra.Command{
 		Use:   "apply [PLAN]",
 		Short: "Apply the initialized configuration or a saved plan",
 		Args:  usageArgs(cobra.MaximumNArgs(1)),
-		PreRunE: func(command *cobra.Command, _ []string) error {
+		PreRunE: func(command *cobra.Command, args []string) error {
 			if parallelism <= 0 {
 				return &usageError{err: fmt.Errorf("parallelism must be positive")}
 			}
@@ -283,12 +289,28 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 				Context: ctx, Variables: goldenVariables(variables, variableFiles),
 				RunDirectory: ".", ModuleDirectory: modulesDirectory,
 				Parallelism: parallelism, SessionStallTimeout: sessionStallTimeout, Debug: debug,
+				Resume: resume,
 			}
 			displayPath := directory
 			var config *executor.ResearchConfig
-			if len(args) == 0 {
+			var originalPlan *plan.Plan
+			switch {
+			case resume && len(args) == 0:
+				resumedRun, findErr := runpkg.NewManager(projectRootFromConfigDirectory(directory)).LatestCheckpointRun()
+				if findErr == nil {
+					originalPlan, err = plan.Load(filepath.Join(resumedRun.Directory(), resumePlanFileName))
+					if err != nil {
+						err = fmt.Errorf("load original resume plan: %w", err)
+						break
+					}
+					options.ReservedRunDirectory = resumedRun.Directory()
+					config, err = planConfig(runtime, directory, options)
+				} else {
+					err = findErr
+				}
+			case len(args) == 0:
 				config, err = planConfig(runtime, directory, options)
-			} else {
+			default:
 				displayPath = args[0]
 				config, err = loadSavedPlan(runtime, args[0], options)
 			}
@@ -298,6 +320,11 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 			planned := config.Plan()
 			if planned == nil {
 				return errors.Join(fmt.Errorf("research config has no plan"), closeCommandDebug(command, debugState))
+			}
+			if originalPlan != nil {
+				if err = validateResumeCompatibility(planned.SavedPlan(), originalPlan); err != nil {
+					return errors.Join(fmt.Errorf("resume plan compatibility: %w", err), closeCommandDebug(command, debugState))
+				}
 			}
 			ctx, _, _, err = debugState.ensure(ctx, options.RunDirectory)
 			if err != nil {
@@ -395,7 +422,12 @@ func newApplyCommand(runtime Runtime) *cobra.Command {
 	command.Flags().StringArrayVar(&variables, "var", nil, "set a Golden input variable (name=value)")
 	command.Flags().StringArrayVar(&variableFiles, "var-file", nil, "load Golden input variables from a file")
 	command.Flags().StringVar(&uiMode, "ui", uiMode, "run progress UI: auto, tui, repl, or jsonl")
+	command.Flags().BoolVar(&resume, "resume", false, "resume checkpoints from the saved plan or current project's latest run")
 	return command
+}
+
+func projectRootFromConfigDirectory(configDirectory string) string {
+	return filepath.Dir(filepath.Dir(configDirectory))
 }
 
 func newOutputCommand(runtime Runtime) *cobra.Command {
@@ -516,11 +548,69 @@ func loadSavedPlan(
 	if err != nil {
 		return nil, fmt.Errorf("load plan %q: %w", target, err)
 	}
+	if options.Resume && strings.TrimSpace(planned.RunDirectory()) == "" {
+		return nil, fmt.Errorf("resume plan %q does not identify an original run directory", target)
+	}
 	config, err := runtime.ConfigFromPlan(planned, options)
 	if err != nil {
 		return nil, fmt.Errorf("configure plan %q: %w", target, err)
 	}
 	return config, nil
+}
+
+func validateResumeCompatibility(current, original *plan.Plan) error {
+	if current == nil || original == nil {
+		return errors.New("resume plan is required")
+	}
+	return validateResumePlanNodes(current.Nodes(), original.Nodes())
+}
+
+func validateResumePlanNodes(current, original []plan.NodeSpec) error {
+	oldByAddress := make(map[string]plan.NodeSpec, len(original))
+	for _, node := range original {
+		oldByAddress[node.Address] = node
+	}
+	if len(current) != len(oldByAddress) {
+		return errors.New("block set changed")
+	}
+	for _, node := range current {
+		old, found := oldByAddress[node.Address]
+		if !found {
+			return fmt.Errorf("block %q was added", node.Address)
+		}
+		if node.Kind != old.Kind {
+			return fmt.Errorf("block %q kind changed", node.Address)
+		}
+		if !slices.Equal(node.Dependencies, old.Dependencies) {
+			return fmt.Errorf("block %q dependencies changed", node.Address)
+		}
+		if (node.Module == nil) != (old.Module == nil) {
+			return fmt.Errorf("module block %q structure changed", node.Address)
+		}
+		if node.Module != nil {
+			if err := validateResumePlanNodes(node.Module.Plan.Nodes(), old.Module.Plan.Nodes()); err != nil {
+				return fmt.Errorf("module %q: %w", node.Address, err)
+			}
+		}
+	}
+	for _, node := range current {
+		if node.Kind != "research" || strings.HasPrefix(node.Address, "research.dynamic.") {
+			continue
+		}
+		old := oldByAddress[node.Address]
+		currentResearch, err := modulespec.DecodeResearchPlan(node.Config)
+		if err != nil {
+			return fmt.Errorf("decode current research block %q: %w", node.Address, err)
+		}
+		originalResearch, err := modulespec.DecodeResearchPlan(old.Config)
+		if err != nil {
+			return fmt.Errorf("decode original research block %q: %w", node.Address, err)
+		}
+		if !reflect.DeepEqual(currentResearch.Config.Artifacts, originalResearch.Config.Artifacts) {
+			return fmt.Errorf("research block %q artifact schema changed", node.Address)
+		}
+	}
+	return nil
 }
 
 func planConfig(

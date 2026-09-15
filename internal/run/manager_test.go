@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	runpkg "github.com/lonegunmanb/r42/internal/run"
 	"github.com/stretchr/testify/assert"
@@ -49,6 +50,45 @@ func TestManagerReservesRunAndBlockWorkspaceWithoutCreatingDirectories(t *testin
 	assert.True(t, filepath.IsAbs(filepath.FromSlash(workspace)))
 	assert.NotContains(t, workspace, `\`)
 	assert.NoDirExists(t, filepath.Join(project, ".r42"))
+}
+
+func TestManagerFindsMostRecentRunWithCommittedCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	project := t.TempDir()
+	manager := runpkg.NewManager(project)
+	first, err := manager.Create()
+	require.NoError(t, err)
+	second, err := manager.Create()
+	require.NoError(t, err)
+	for _, created := range []*runpkg.Run{first, second} {
+		checkpoint := filepath.Join(created.Directory(), "unit-checkpoints", "unit", "checkpoints", "latest")
+		require.NoError(t, os.MkdirAll(filepath.Dir(checkpoint), 0o700))
+		require.NoError(t, os.WriteFile(checkpoint, []byte("checkpoint-test\n"), 0o600))
+	}
+	newer := time.Now().Add(time.Second)
+	require.NoError(t, os.Chtimes(filepath.Join(second.Directory(), "unit-checkpoints", "unit", "checkpoints", "latest"), newer, newer))
+
+	resumed, err := manager.LatestCheckpointRun()
+
+	require.NoError(t, err)
+	assert.Equal(t, second.Directory(), resumed.Directory())
+}
+
+func TestManagerFindsRunWithDynamicMaterializationCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	project := t.TempDir()
+	created, err := runpkg.NewManager(project).Create()
+	require.NoError(t, err)
+	checkpoint := filepath.Join(created.Directory(), "dynamic-checkpoints", "tasks", "checkpoints", "latest")
+	require.NoError(t, os.MkdirAll(filepath.Dir(checkpoint), 0o700))
+	require.NoError(t, os.WriteFile(checkpoint, []byte("checkpoint-test\n"), 0o600))
+
+	resumed, err := runpkg.NewManager(project).LatestCheckpointRun()
+
+	require.NoError(t, err)
+	assert.Equal(t, created.Directory(), resumed.Directory())
 }
 
 func TestRunCreatesCollisionFreeBlockWorkspaces(t *testing.T) {

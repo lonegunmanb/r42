@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 type Manager struct {
@@ -50,6 +51,54 @@ func (m *Manager) Reserve() (*Run, error) {
 	}
 	id := "run-" + hex.EncodeToString(random)
 	return &Run{id: id, directory: filepath.Join(projectDirectory, ".r42", "runs", id)}, nil
+}
+
+// LatestCheckpointRun returns the most recently committed research-unit
+// checkpoint in this project's retained runs.
+func (m *Manager) LatestCheckpointRun() (*Run, error) {
+	projectDirectory, err := filepath.Abs(m.projectDirectory)
+	if err != nil {
+		return nil, fmt.Errorf("resolving project directory: %w", err)
+	}
+	runsDirectory := filepath.Join(projectDirectory, ".r42", "runs")
+	entries, err := os.ReadDir(runsDirectory)
+	if err != nil {
+		return nil, fmt.Errorf("read retained runs: %w", err)
+	}
+	var selected string
+	var selectedAt time.Time
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		runDirectory := filepath.Join(runsDirectory, entry.Name())
+		for _, checkpointRoot := range []string{"unit-checkpoints", "dynamic-checkpoints"} {
+			err = filepath.WalkDir(filepath.Join(runDirectory, checkpointRoot), func(path string, item fs.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				if item.IsDir() || item.Name() != "latest" || filepath.Base(filepath.Dir(path)) != "checkpoints" {
+					return nil
+				}
+				info, infoErr := item.Info()
+				if infoErr != nil {
+					return infoErr
+				}
+				if selected == "" || info.ModTime().After(selectedAt) {
+					selected = runDirectory
+					selectedAt = info.ModTime()
+				}
+				return nil
+			})
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return nil, fmt.Errorf("scan run checkpoints: %w", err)
+			}
+		}
+	}
+	if selected == "" {
+		return nil, errors.New("no committed checkpoint found in retained runs")
+	}
+	return Open(selected)
 }
 
 func Open(directory string) (*Run, error) {

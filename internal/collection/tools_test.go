@@ -589,3 +589,29 @@ func TestRegisterHandlerInfrastructureErrors(t *testing.T) {
 		assert.ErrorContains(t, err, "tool call id")
 	})
 }
+
+func TestContextRestoreReinstatesFrozenCollectionProtocolState(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	context := NewContext(workspace, 2, nil)
+	require.NoError(t, context.State.Begin())
+	need := InformationNeed{ID: "NEED-001", Question: "What changed?", StopConditions: []StopCondition{{ID: "NEED-001-SC-001", Condition: "a source"}}}
+	outcome := InformationNeedOutcome{InformationNeedID: need.ID, Question: need.Question, StopConditions: need.StopConditions, Resolution: NeedResolutionSatisfied}
+	context.evidence = []string{"artifact-evidence"}
+	context.reviewed["artifact-evidence"] = struct{}{}
+	context.checkpointed["artifact-evidence"] = struct{}{}
+	context.informationNeeds = []InformationNeed{need}
+	context.needStates = []informationNeedState{{need: need, previousUnsatisfied: map[string]struct{}{}, assessed: true, outcome: &outcome}}
+	context.checkpointAccepted = true
+	checkpoint := context.Snapshot()
+
+	restored := NewContext(workspace, 2, nil)
+	require.NoError(t, restored.Restore(checkpoint))
+
+	assert.Equal(t, []string{"artifact-evidence"}, restored.EvidenceArtifactIDs())
+	assert.Equal(t, []string{"artifact-evidence"}, restored.ReviewedEvidenceArtifactIDs())
+	assert.Equal(t, []InformationNeed{need}, restored.InformationNeeds())
+	assert.Equal(t, []InformationNeedOutcome{outcome}, restored.InformationNeedOutcomes())
+	assert.True(t, restored.checkpointAccepted)
+}

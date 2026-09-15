@@ -4,9 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -62,6 +64,25 @@ type Registry struct {
 	retainedEvidence map[string]string
 }
 
+// Snapshot is the serializable run-scoped artifact registry state at a safe
+// checkpoint. It deliberately preserves opaque IDs rather than rebuilding
+// them from paths during recovery.
+type Snapshot struct {
+	Entries          []SnapshotEntry   `json:"entries"`
+	Retained         map[string]string `json:"retained,omitempty"`
+	RetainedEvidence map[string]string `json:"retained_evidence,omitempty"`
+}
+
+// SnapshotEntry contains the private registry indexes needed to restore one
+// artifact capability without exposing the Registry implementation itself.
+type SnapshotEntry struct {
+	Record        Record    `json:"record"`
+	Workspace     string    `json:"workspace"`
+	DirectoryRoot string    `json:"directory_root,omitempty"`
+	RelativePath  string    `json:"relative_path,omitempty"`
+	Purposes      []Purpose `json:"purposes"`
+}
+
 func NewRegistry() *Registry {
 	return &Registry{
 		entries:          make(map[string]entry),
@@ -70,6 +91,186 @@ func NewRegistry() *Registry {
 		retained:         make(map[string]string),
 		retainedEvidence: make(map[string]string),
 	}
+}
+
+// Snapshot returns a deep copy of all registry state that is meaningful at a
+// checkpoint. File contents are captured separately by the checkpoint store.
+func (r *Registry) Snapshot() Snapshot {
+	if r == nil {
+		return Snapshot{}
+	}
+	r.mu.RLock()
+	entries := make([]SnapshotEntry, 0, len(r.order))
+	for _, id := range r.order {
+		item, ok := r.entries[id]
+		if !ok {
+			continue
+		}
+		purposes := make([]Purpose, 0, len(item.purposes))
+		for purpose := range item.purposes {
+			purposes = append(purposes, purpose)
+		}
+		slices.Sort(purposes)
+		entries = append(entries, SnapshotEntry{
+			Record: item.Record, Workspace: item.workspace, DirectoryRoot: item.directoryRoot,
+			RelativePath: item.relativePath, Purposes: purposes,
+		})
+	}
+	r.mu.RUnlock()
+	r.retainedMu.Lock()
+	defer r.retainedMu.Unlock()
+	return Snapshot{
+		Entries: entries, Retained: maps.Clone(r.retained), RetainedEvidence: maps.Clone(r.retainedEvidence),
+	}
+}
+
+// SnapshotWorkspace returns checkpoint state owned by one workflow workspace.
+// Imported artifacts stay owned by their source workflow checkpoint.
+func (r *Registry) SnapshotWorkspace(workspace string) Snapshot {
+	snapshot := r.Snapshot()
+	cleaned := filepath.Clean(workspace)
+	snapshot.Entries = slices.DeleteFunc(snapshot.Entries, func(item SnapshotEntry) bool {
+		return filepath.Clean(item.Workspace) != cleaned
+	})
+	return snapshot
+}
+
+// Restore replaces registry state with a previously captured checkpoint.
+// Callers restore artifact files before allowing a resumed phase to use this
+// registry.
+func (r *Registry) Restore(snapshot Snapshot) error {
+	if r == nil {
+		return errors.New("artifact registry is required")
+	}
+	entries := make(map[string]entry, len(snapshot.Entries))
+	order := make([]string, 0, len(snapshot.Entries))
+	paths := make(map[string]string, len(snapshot.Entries))
+	children := make(map[string]string)
+	for _, saved := range snapshot.Entries {
+		if strings.TrimSpace(saved.Record.ID) == "" {
+			return errors.New("artifact snapshot entry id is required")
+		}
+		if _, exists := entries[saved.Record.ID]; exists {
+			return fmt.Errorf("artifact snapshot contains duplicate id %q", saved.Record.ID)
+		}
+		purposes := make(map[Purpose]struct{}, len(saved.Purposes))
+		for _, purpose := range saved.Purposes {
+			purposes[purpose] = struct{}{}
+		}
+		if len(purposes) == 0 {
+			purposes[saved.Record.Purpose] = struct{}{}
+		}
+		item := entry{Record: saved.Record, workspace: saved.Workspace, directoryRoot: saved.DirectoryRoot, relativePath: saved.RelativePath, purposes: purposes}
+		entries[saved.Record.ID] = item
+		order = append(order, saved.Record.ID)
+		paths[artifactPathKey(item.workspace, item.Path)] = item.ID
+		if item.directoryRoot != "" && item.relativePath != "" {
+			children[artifactPathKey(item.workspace, item.directoryRoot)+"\x00"+filepath.Clean(item.relativePath)] = item.ID
+		}
+	}
+	r.mu.Lock()
+	r.entries = entries
+	r.order = order
+	r.paths = paths
+	r.children = children
+	r.mu.Unlock()
+	r.retainedMu.Lock()
+	r.retained = maps.Clone(snapshot.Retained)
+	r.retainedEvidence = maps.Clone(snapshot.RetainedEvidence)
+	r.retainedMu.Unlock()
+	return nil
+}
+
+// RestoreWorkspace replaces only artifact records owned by workspace. It
+// preserves other dynamic tasks that may have completed independently.
+func (r *Registry) RestoreWorkspace(workspace string, snapshot Snapshot) error {
+	if r == nil {
+		return errors.New("artifact registry is required")
+	}
+	cleaned := filepath.Clean(workspace)
+	for _, entry := range snapshot.Entries {
+		if filepath.Clean(entry.Workspace) != cleaned {
+			return fmt.Errorf("artifact workspace snapshot contains foreign artifact %q", entry.Record.ID)
+		}
+	}
+	current := r.Snapshot()
+	current.Entries = slices.DeleteFunc(current.Entries, func(entry SnapshotEntry) bool {
+		return filepath.Clean(entry.Workspace) == cleaned
+	})
+	current.Entries = append(current.Entries, snapshot.Entries...)
+	return r.Restore(current)
+}
+
+// Merge adds checkpoint state for one workflow to this run-wide registry.
+// Resume constructs independent workflow blocks from separate checkpoints, so
+// replacing the whole registry would discard artifacts restored by siblings.
+func (r *Registry) Merge(snapshot Snapshot) error {
+	if r == nil {
+		return errors.New("artifact registry is required")
+	}
+	staged := NewRegistry()
+	if err := staged.Restore(snapshot); err != nil {
+		return err
+	}
+	staged.mu.RLock()
+	defer staged.mu.RUnlock()
+	r.mu.Lock()
+	for _, id := range staged.order {
+		item := staged.entries[id]
+		if existing, exists := r.entries[id]; exists {
+			if existing.Record != item.Record || existing.workspace != item.workspace || existing.directoryRoot != item.directoryRoot || existing.relativePath != item.relativePath || !samePurposes(existing.purposes, item.purposes) {
+				r.mu.Unlock()
+				return fmt.Errorf("artifact checkpoint conflicts with existing id %q", id)
+			}
+			continue
+		}
+		pathKey := artifactPathKey(item.workspace, item.Path)
+		if existingID, exists := r.paths[pathKey]; exists && existingID != id {
+			r.mu.Unlock()
+			return fmt.Errorf("artifact checkpoint conflicts with existing path %q", item.Path)
+		}
+		r.entries[id] = item
+		r.order = append(r.order, id)
+		r.paths[pathKey] = id
+		if item.directoryRoot != "" && item.relativePath != "" {
+			childKey := artifactPathKey(item.workspace, item.directoryRoot) + "\x00" + filepath.Clean(item.relativePath)
+			if existingID, exists := r.children[childKey]; exists && existingID != id {
+				r.mu.Unlock()
+				return fmt.Errorf("artifact checkpoint conflicts with existing child path %q", item.relativePath)
+			}
+			r.children[childKey] = id
+		}
+	}
+	r.mu.Unlock()
+	staged.retainedMu.Lock()
+	defer staged.retainedMu.Unlock()
+	r.retainedMu.Lock()
+	defer r.retainedMu.Unlock()
+	for id, result := range staged.retained {
+		if existing, exists := r.retained[id]; exists && existing != result {
+			return fmt.Errorf("artifact checkpoint conflicts with retained result %q", id)
+		}
+		r.retained[id] = result
+	}
+	for id, artifactID := range staged.retainedEvidence {
+		if existing, exists := r.retainedEvidence[id]; exists && existing != artifactID {
+			return fmt.Errorf("artifact checkpoint conflicts with retained evidence %q", id)
+		}
+		r.retainedEvidence[id] = artifactID
+	}
+	return nil
+}
+
+func samePurposes(left, right map[Purpose]struct{}) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for purpose := range left {
+		if _, found := right[purpose]; !found {
+			return false
+		}
+	}
+	return true
 }
 
 // Declare allocates an opaque ID for a configured research artifact.

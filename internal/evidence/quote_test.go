@@ -48,6 +48,64 @@ func TestQuoteRegistryCapturesAndExpandsSearchMatch(t *testing.T) {
 	assert.Equal(t, "lines 4-5", clamped.Locator)
 }
 
+func TestQuoteRegistryRestoresCapturedQuoteReferences(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "source.md")
+	require.NoError(t, os.WriteFile(path, []byte("first\nsecond target\nthird\n"), 0o600))
+	artifacts := artifactpkg.NewRegistry()
+	registered, _, err := artifacts.RegisterEvidence(workspace, path, "https://example.test/source", "Source title")
+	require.NoError(t, err)
+	result, err := SearchArtifact(artifacts, registered.ID, "target", true, 1, 0)
+	require.NoError(t, err)
+	quotes := NewQuoteRegistry()
+	captured, err := quotes.CaptureMatch(artifacts, registered.ID, result.Matches[0])
+	require.NoError(t, err)
+
+	restored := NewQuoteRegistry()
+	require.NoError(t, restored.Restore(quotes.Snapshot()))
+	resolved, ok := restored.Resolve(captured.Ref)
+	require.True(t, ok)
+	assert.Equal(t, captured, resolved)
+	expanded, err := restored.Expand(artifacts, captured.Ref, 1, 1)
+	require.NoError(t, err)
+	assert.Equal(t, "first second target third", expanded.ExactQuote)
+}
+
+func TestQuoteRegistryMergePreservesSiblingWorkflowReferences(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	pathA := filepath.Join(workspace, "a.md")
+	pathB := filepath.Join(workspace, "b.md")
+	require.NoError(t, os.WriteFile(pathA, []byte("alpha target\n"), 0o600))
+	require.NoError(t, os.WriteFile(pathB, []byte("beta target\n"), 0o600))
+	artifacts := artifactpkg.NewRegistry()
+	artifactA, _, err := artifacts.RegisterEvidence(workspace, pathA, "", "A")
+	require.NoError(t, err)
+	artifactB, _, err := artifacts.RegisterEvidence(workspace, pathB, "", "B")
+	require.NoError(t, err)
+	matchA, err := SearchArtifact(artifacts, artifactA.ID, "target", true, 1, 0)
+	require.NoError(t, err)
+	matchB, err := SearchArtifact(artifacts, artifactB.ID, "target", true, 1, 0)
+	require.NoError(t, err)
+	quotesA := NewQuoteRegistry()
+	quoteA, err := quotesA.CaptureMatch(artifacts, artifactA.ID, matchA.Matches[0])
+	require.NoError(t, err)
+	quotesB := NewQuoteRegistry()
+	quoteB, err := quotesB.CaptureMatch(artifacts, artifactB.ID, matchB.Matches[0])
+	require.NoError(t, err)
+
+	resumed := NewQuoteRegistry()
+	require.NoError(t, resumed.Restore(quotesA.Snapshot()))
+	require.NoError(t, resumed.Merge(quotesB.Snapshot()))
+	_, ok := resumed.Resolve(quoteA.Ref)
+	assert.True(t, ok)
+	_, ok = resumed.Resolve(quoteB.Ref)
+	assert.True(t, ok)
+}
+
 func TestQuoteRegistryCaptureMatchWithContextCreatesSubmitReadyCandidate(t *testing.T) {
 	t.Parallel()
 

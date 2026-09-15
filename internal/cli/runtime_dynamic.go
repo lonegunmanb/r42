@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -16,6 +18,7 @@ import (
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/hclfuncs"
+	"github.com/lonegunmanb/r42/internal/checkpoint"
 	r42concurrency "github.com/lonegunmanb/r42/internal/concurrency"
 	"github.com/lonegunmanb/r42/internal/config"
 	"github.com/lonegunmanb/r42/internal/debuglog"
@@ -24,8 +27,86 @@ import (
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/function"
+	ctyjson "github.com/zclconf/go-cty/cty/json"
 	"golang.org/x/sync/errgroup"
 )
+
+type dynamicTasksSnapshot struct {
+	Version int             `json:"version"`
+	Type    json.RawMessage `json:"type"`
+	Value   json.RawMessage `json:"value"`
+}
+
+const dynamicTasksCheckpointVersion = 1
+
+func saveDynamicTasks(store *checkpoint.Store, tasks cty.Value) error {
+	if store == nil {
+		return fmt.Errorf("dynamic checkpoint store is required")
+	}
+	typeBytes, err := ctyjson.MarshalType(tasks.Type())
+	if err != nil {
+		return fmt.Errorf("encode dynamic task type: %w", err)
+	}
+	valueBytes, err := ctyjson.Marshal(tasks, tasks.Type())
+	if err != nil {
+		return fmt.Errorf("encode dynamic task value: %w", err)
+	}
+	payload, err := json.Marshal(dynamicTasksSnapshot{Version: dynamicTasksCheckpointVersion, Type: typeBytes, Value: valueBytes})
+	if err != nil {
+		return fmt.Errorf("encode dynamic tasks: %w", err)
+	}
+	return store.Commit(checkpoint.State{Payload: payload})
+}
+
+func loadDynamicTasks(store *checkpoint.Store) (cty.Value, error) {
+	if store == nil {
+		return cty.NilVal, fmt.Errorf("dynamic checkpoint store is required")
+	}
+	saved, err := store.Load()
+	if err != nil {
+		return cty.NilVal, err
+	}
+	var snapshot dynamicTasksSnapshot
+	if err = json.Unmarshal(saved.Payload, &snapshot); err != nil {
+		return cty.NilVal, fmt.Errorf("decode dynamic tasks: %w", err)
+	}
+	if snapshot.Version != dynamicTasksCheckpointVersion {
+		return cty.NilVal, fmt.Errorf("unsupported dynamic tasks checkpoint version %d", snapshot.Version)
+	}
+	taskType, err := ctyjson.UnmarshalType(snapshot.Type)
+	if err != nil {
+		return cty.NilVal, fmt.Errorf("decode dynamic task type: %w", err)
+	}
+	tasks, err := ctyjson.Unmarshal(snapshot.Value, taskType)
+	if err != nil {
+		return cty.NilVal, fmt.Errorf("decode dynamic task value: %w", err)
+	}
+	return tasks, nil
+}
+
+func loadOrEvaluateDynamicTasks(
+	store *checkpoint.Store,
+	resume bool,
+	evaluate func() (cty.Value, error),
+) (cty.Value, error) {
+	if resume {
+		tasks, err := loadDynamicTasks(store)
+		if err == nil {
+			return tasks, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return cty.NilVal, err
+		}
+	}
+	tasks, err := evaluate()
+	if err != nil {
+		return cty.NilVal, err
+	}
+	if err = saveDynamicTasks(store, tasks); err != nil {
+		return cty.NilVal, err
+	}
+	return tasks, nil
+}
 
 func (f *runtimeFactory) newDynamicResearchBlock(
 	ctx context.Context,
@@ -36,9 +117,12 @@ func (f *runtimeFactory) newDynamicResearchBlock(
 	if err != nil {
 		return nil, err
 	}
-	tasks, err := f.evaluateDynamicTasks(node.Address, planned.Expression)
+	store := dynamicTasksStore(f.run.Directory(), f.CanonicalAddress(node.Address))
+	tasks, err := loadOrEvaluateDynamicTasks(store, f.resume, func() (cty.Value, error) {
+		return f.evaluateDynamicTasks(node.Address, planned.Expression)
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("materialize dynamic research tasks: %w", err)
 	}
 	configs, taskValues, err := researchspec.DecodeDynamicTasks(tasks)
 	if err != nil {
@@ -63,6 +147,11 @@ func (f *runtimeFactory) newDynamicResearchBlock(
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address,
 		factory: f, scope: scope, plans: resolved, tasks: taskValues, serial: planned.Serial,
 	}, nil
+}
+
+func dynamicTasksStore(runDirectory, address string) *checkpoint.Store {
+	digest := sha256.Sum256([]byte(address))
+	return checkpoint.NewStore(filepath.Join(runDirectory, "dynamic-checkpoints", fmt.Sprintf("%x", digest[:])))
 }
 
 func (f *runtimeFactory) evaluateDynamicTasks(address, source string) (cty.Value, error) {

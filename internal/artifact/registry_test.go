@@ -33,6 +33,73 @@ func TestRegistryDeclaresAndReadsExistingArtifactByOpaqueID(t *testing.T) {
 	assert.Equal(t, 15, page.NextOffsetBytes)
 }
 
+func TestRegistryRestoreReinstatesOpaqueIDsAndDiscardsUncommittedEntries(t *testing.T) {
+	t.Parallel()
+
+	workspace := t.TempDir()
+	claimsPath := filepath.Join(workspace, "claims.md")
+	require.NoError(t, os.WriteFile(claimsPath, []byte("checkpoint claims"), 0o600))
+	registry := artifactpkg.NewRegistry()
+	claims, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "claims", Type: researchspec.ArtifactTypeFile, Path: "claims.md", Description: "Claims",
+	})
+	require.NoError(t, err)
+	checkpoint := registry.Snapshot()
+
+	dirtyPath := filepath.Join(workspace, "dirty.md")
+	require.NoError(t, os.WriteFile(dirtyPath, []byte("uncommitted"), 0o600))
+	dirty, err := registry.Declare(workspace, researchspec.Artifact{
+		Name: "dirty", Type: researchspec.ArtifactTypeFile, Path: "dirty.md", Description: "Dirty",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, registry.Restore(checkpoint))
+	restored, err := registry.Record(claims.ID)
+	require.NoError(t, err)
+	assert.Equal(t, claims, restored)
+	_, err = registry.Record(dirty.ID)
+	assert.ErrorContains(t, err, "unknown artifact")
+}
+
+func TestRegistryMergeCheckpointPreservesOtherWorkflowArtifacts(t *testing.T) {
+	t.Parallel()
+
+	workspaceA := t.TempDir()
+	workspaceB := t.TempDir()
+	registryA := artifactpkg.NewRegistry()
+	registryB := artifactpkg.NewRegistry()
+	artifactA, err := registryA.Declare(workspaceA, researchspec.Artifact{Name: "a", Type: researchspec.ArtifactTypeFile, Path: "a.md", Description: "A"})
+	require.NoError(t, err)
+	artifactB, err := registryB.Declare(workspaceB, researchspec.Artifact{Name: "b", Type: researchspec.ArtifactTypeFile, Path: "b.md", Description: "B"})
+	require.NoError(t, err)
+
+	resumed := artifactpkg.NewRegistry()
+	require.NoError(t, resumed.Restore(registryA.Snapshot()))
+	require.NoError(t, resumed.Merge(registryB.Snapshot()))
+	_, err = resumed.Record(artifactA.ID)
+	require.NoError(t, err)
+	_, err = resumed.Record(artifactB.ID)
+	require.NoError(t, err)
+}
+
+func TestRegistrySnapshotWorkspaceExcludesOtherWorkflowArtifacts(t *testing.T) {
+	t.Parallel()
+
+	workspaceA := t.TempDir()
+	workspaceB := t.TempDir()
+	registry := artifactpkg.NewRegistry()
+	artifactA, err := registry.Declare(workspaceA, researchspec.Artifact{Name: "a", Type: researchspec.ArtifactTypeFile, Path: "a.md", Description: "A"})
+	require.NoError(t, err)
+	artifactB, err := registry.Declare(workspaceB, researchspec.Artifact{Name: "b", Type: researchspec.ArtifactTypeFile, Path: "b.md", Description: "B"})
+	require.NoError(t, err)
+
+	snapshot := registry.SnapshotWorkspace(workspaceB)
+
+	require.Len(t, snapshot.Entries, 1)
+	assert.Equal(t, artifactB.ID, snapshot.Entries[0].Record.ID)
+	assert.NotEqual(t, artifactA.ID, snapshot.Entries[0].Record.ID)
+}
+
 func TestRegistryRegisterEvidenceRecordsSourceAndPurpose(t *testing.T) {
 	t.Parallel()
 

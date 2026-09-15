@@ -301,6 +301,51 @@ func TestProjectorTracksWorkflowRoundInNodeAndTimeline(t *testing.T) {
 	assert.Equal(t, 1, snapshot.Timeline[0].Round)
 }
 
+func TestProjectorTracksCheckpointRecoveryForNodeDetail(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{
+		{Address: "research.static.market", Kind: "research"},
+	}, nil, nil, nil)
+	require.NoError(t, err)
+	projector := ui.NewProjector(planned)
+
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "workflow.checkpoint", Status: debuglog.StatusCompleted,
+		BlockAddress: "research.static.market", Session: debuglog.SessionResearch,
+	})
+	projector.Observe(debuglog.Event{
+		Kind: debuglog.EventLifecycle, Action: "workflow.checkpoint.restore", Status: debuglog.StatusCompleted,
+		BlockAddress: "research.static.market", Session: debuglog.SessionResearch,
+	})
+
+	snapshot := projector.Snapshot()
+	node := snapshot.MustNode("research.static.market")
+	assert.Equal(t, debuglog.SessionResearch, node.CheckpointPhase)
+	assert.True(t, node.ResumedFromCheckpoint)
+	require.Len(t, snapshot.Timeline, 2)
+	assert.Equal(t, "checkpoint safe; next phase research", snapshot.Timeline[0].Content)
+	assert.Equal(t, "resumed from checkpoint; continuing research", snapshot.Timeline[1].Content)
+}
+
+func TestProjectorTracksResearchUnitRecovery(t *testing.T) {
+	t.Parallel()
+
+	planned, err := plan.NewWithContextAndLocals("root", []plan.NodeSpec{{Address: "research.static.market", Kind: "research"}}, nil, nil, nil)
+	require.NoError(t, err)
+	projector := ui.NewProjector(planned)
+	projector.Observe(debuglog.Event{Kind: debuglog.EventLifecycle, Action: "research.unit.commit", Status: debuglog.StatusCompleted, BlockAddress: "research.static.market"})
+	projector.Observe(debuglog.Event{Kind: debuglog.EventLifecycle, Action: "research.unit.restore", Status: debuglog.StatusCompleted, BlockAddress: "research.static.market"})
+
+	snapshot := projector.Snapshot()
+	node := snapshot.MustNode("research.static.market")
+	assert.True(t, node.Checkpointed)
+	assert.True(t, node.ResumedFromCheckpoint)
+	require.Len(t, snapshot.Timeline, 2)
+	assert.Equal(t, "unit committed", snapshot.Timeline[0].Content)
+	assert.Equal(t, "resumed; completed unit skipped", snapshot.Timeline[1].Content)
+}
+
 func TestRenderDAGSanitizesPlanAddresses(t *testing.T) {
 	t.Parallel()
 

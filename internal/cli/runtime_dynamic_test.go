@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	sdk "github.com/github/copilot-sdk/go"
+	"github.com/lonegunmanb/r42/internal/checkpoint"
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/copilot"
 	"github.com/lonegunmanb/r42/internal/executor"
@@ -81,6 +83,86 @@ output "followup_results" {
 		cty.StringVal("beta"),
 	})))
 	assert.ElementsMatch(t, []string{"alpha", "beta"}, opener.Prompts())
+
+	resumedOpener := &dynamicTestOpener{topics: []string{"changed"}}
+	resumedRuntime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: resumedOpener})
+	resumed, resumeErr := applyRuntime(resumedRuntime, ctx, planned, executor.ResearchConfigOptions{Parallelism: 1, Resume: true})
+
+	require.NoError(t, resumeErr)
+	assert.True(t, resumed.Outputs["followup_results"].RawEquals(cty.TupleVal([]cty.Value{
+		cty.StringVal("alpha"),
+		cty.StringVal("beta"),
+	})))
+	assert.Empty(t, resumedOpener.Prompts())
+}
+
+func TestProductionRuntimeResumeKeepsMaterializedDynamicTasksAndRestartsUnfinishedPhase(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+go_tool "finish" {
+  description = "Return topics for follow-up research."
+  source = <<-GO
+    import "context"
+    type Input struct { Summary string }
+    type Output string
+    func Invoke(ctx context.Context, input Input) (ToolResponse[Output], error) {
+      _ = ctx
+      output := Output(input.Summary)
+      return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+    }
+  GO
+}
+
+research "static" "seed" {
+  model             = "test-model"
+  system_prompt     = "Generate follow-up topics."
+  terminate_tool_id = go_tool.finish.id
+}
+
+research "dynamic" "followups" {
+  tasks = [
+    for topic in jsondecode(research.static.seed.result) : {
+      model             = "test-model"
+      system_prompt     = "Research the assigned topic."
+      prompt            = topic
+      terminate_tool_id = go_tool.finish.id
+      artifact          = {}
+      retry             = null
+      qc                = null
+    }
+  ]
+}
+`), 0o600))
+
+	initialOpener := &dynamicTestOpener{topics: []string{"alpha"}, failPrompt: "alpha"}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: initialOpener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+	require.ErrorContains(t, err, "forced task failure")
+	assert.Equal(t, 2, initialOpener.calls("research"))
+
+	dynamicAddress := "research.dynamic.followups.tasks[0]"
+	digest := sha256.Sum256([]byte(dynamicAddress))
+	unit := checkpoint.NewUnit(filepath.Join(planned.RunDirectory(), "unit-checkpoints", fmt.Sprintf("%x", digest[:])))
+	saved, err := unit.Load()
+	require.NoError(t, err)
+	assert.Equal(t, checkpoint.UnitStarted, saved.Status)
+
+	resumedOpener := &dynamicTestOpener{topics: []string{"beta"}}
+	resumedRuntime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: resumedOpener})
+	_, err = applyRuntime(resumedRuntime, t.Context(), planned, executor.ResearchConfigOptions{
+		Parallelism: 1, Resume: true,
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, resumedOpener.calls("collection"))
+	assert.Equal(t, 1, resumedOpener.calls("collection_qc"))
+	assert.Equal(t, 1, resumedOpener.calls("research"))
+	assert.Equal(t, []string{"alpha"}, resumedOpener.Prompts())
 }
 
 func TestProductionRuntimeResolvesStaticPromptAfterDynamicResearch(t *testing.T) {
@@ -528,6 +610,7 @@ type dynamicTestOpener struct {
 	topics      []string
 	prompts     []string
 	configs     []copilot.SessionConfig
+	phaseCalls  map[string]int
 	failPrompt  string
 	started     chan string
 	blockPrompt string
@@ -553,12 +636,24 @@ func (o *dynamicTestOpener) Prompts() []string {
 	return append([]string(nil), o.prompts...)
 }
 
+func (o *dynamicTestOpener) calls(phase string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.phaseCalls[phase]
+}
+
 type dynamicTestSession struct {
 	config copilot.SessionConfig
 	opener *dynamicTestOpener
 }
 
 func (s *dynamicTestSession) SendAndWait(_ context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	s.opener.mu.Lock()
+	if s.opener.phaseCalls == nil {
+		s.opener.phaseCalls = make(map[string]int)
+	}
+	s.opener.phaseCalls[workflowSessionKind(s.config)]++
+	s.opener.mu.Unlock()
 	if handled, err := handleDefaultWorkflowProtocol(s.config); handled {
 		return &sdk.SessionEvent{}, err
 	}

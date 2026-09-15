@@ -115,7 +115,9 @@ than a second temporary event model.
 
 - TCP listeners, network authentication, TLS, acknowledgements, replay, or event
   retransmission.
-- Pause, resume, persisted checkpoints, or restarting an interrupted Apply.
+- Progress-protocol pause/resume commands, replay, or restarting an interrupted
+  Apply through the progress transport. Workflow checkpoint recovery is local
+  to `r42 apply --resume` and does not extend this protocol.
 - Browser/backend APIs, database selection, deployment topology, and retention
   beyond the agreed 200-entry browser window.
 - Report discovery, final-report fields in terminal events, and S3 upload.

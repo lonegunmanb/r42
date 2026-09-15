@@ -43,6 +43,35 @@ type Context struct {
 	lastRoundHadArtifacts bool
 }
 
+// Snapshot contains the Collection protocol state needed to restart at a
+// workflow handoff. It excludes active tool calls because a safe checkpoint is
+// only committed after the originating session turn has completed.
+type Snapshot struct {
+	Workspace             string                         `json:"workspace"`
+	State                 workflow.Snapshot              `json:"state"`
+	Evidence              []string                       `json:"evidence"`
+	Reviewed              []string                       `json:"reviewed"`
+	Checkpointed          []string                       `json:"checkpointed"`
+	Targets               []ArtifactTargetSnapshot       `json:"targets"`
+	InformationNeeds      []InformationNeed              `json:"information_needs"`
+	NeedStates            []InformationNeedStateSnapshot `json:"need_states"`
+	CheckpointAccepted    bool                           `json:"checkpoint_accepted"`
+	LastRoundHadArtifacts bool                           `json:"last_round_had_artifacts"`
+}
+
+type ArtifactTargetSnapshot struct {
+	Path      string `json:"path"`
+	Directory bool   `json:"directory"`
+}
+
+type InformationNeedStateSnapshot struct {
+	Need                InformationNeed         `json:"need"`
+	PreviousUnsatisfied []string                `json:"previous_unsatisfied"`
+	Assessed            bool                    `json:"assessed"`
+	StallStreak         int                     `json:"stall_streak"`
+	Outcome             *InformationNeedOutcome `json:"outcome,omitempty"`
+}
+
 type informationNeedState struct {
 	need                InformationNeed
 	previousUnsatisfied map[string]struct{}
@@ -84,6 +113,105 @@ func NewContextWithArtifactRegistry(
 		reviewed:     make(map[string]struct{}),
 		checkpointed: make(map[string]struct{}),
 	}
+}
+
+// Snapshot returns a deep copy of the completed Collection protocol state.
+func (c *Context) Snapshot() Snapshot {
+	if c == nil {
+		return Snapshot{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	result := Snapshot{
+		Workspace: c.Workspace, State: c.State.Snapshot(), Evidence: append([]string(nil), c.evidence...),
+		InformationNeeds: cloneInformationNeeds(c.informationNeeds), CheckpointAccepted: c.checkpointAccepted,
+		LastRoundHadArtifacts: c.lastRoundHadArtifacts,
+	}
+	for id := range c.reviewed {
+		result.Reviewed = append(result.Reviewed, id)
+	}
+	for id := range c.checkpointed {
+		result.Checkpointed = append(result.Checkpointed, id)
+	}
+	sort.Strings(result.Reviewed)
+	sort.Strings(result.Checkpointed)
+	result.Targets = make([]ArtifactTargetSnapshot, len(c.targets))
+	for index, target := range c.targets {
+		result.Targets[index] = ArtifactTargetSnapshot{Path: target.path, Directory: target.directory}
+	}
+	result.NeedStates = make([]InformationNeedStateSnapshot, len(c.needStates))
+	for index, state := range c.needStates {
+		ids := make([]string, 0, len(state.previousUnsatisfied))
+		for id := range state.previousUnsatisfied {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		saved := InformationNeedStateSnapshot{
+			Need: cloneInformationNeeds([]InformationNeed{state.need})[0], PreviousUnsatisfied: ids,
+			Assessed: state.assessed, StallStreak: state.stallStreak,
+		}
+		if state.outcome != nil {
+			outcome := cloneInformationNeedOutcome(*state.outcome)
+			saved.Outcome = &outcome
+		}
+		result.NeedStates[index] = saved
+	}
+	return result
+}
+
+// Restore replaces this context with a safe checkpoint created for the same
+// workspace. The caller restores the artifact registry before exposing tools.
+func (c *Context) Restore(snapshot Snapshot) error {
+	if c == nil {
+		return errors.New("collection context is required")
+	}
+	if filepath.Clean(snapshot.Workspace) != filepath.Clean(c.Workspace) {
+		return fmt.Errorf("checkpoint collection workspace %q does not match %q", snapshot.Workspace, c.Workspace)
+	}
+	if err := c.State.Restore(snapshot.State); err != nil {
+		return fmt.Errorf("restore collection workflow state: %w", err)
+	}
+	c.mu.Lock()
+	c.evidence = append([]string(nil), snapshot.Evidence...)
+	c.reviewed = stringSet(snapshot.Reviewed)
+	c.checkpointed = stringSet(snapshot.Checkpointed)
+	c.targets = make([]artifactTarget, len(snapshot.Targets))
+	for index, target := range snapshot.Targets {
+		c.targets[index] = artifactTarget{path: target.Path, directory: target.Directory}
+	}
+	c.informationNeeds = cloneInformationNeeds(snapshot.InformationNeeds)
+	c.needStates = make([]informationNeedState, len(snapshot.NeedStates))
+	for index, saved := range snapshot.NeedStates {
+		previous := stringSet(saved.PreviousUnsatisfied)
+		state := informationNeedState{
+			need: cloneInformationNeeds([]InformationNeed{saved.Need})[0], previousUnsatisfied: previous,
+			assessed: saved.Assessed, stallStreak: saved.StallStreak,
+		}
+		if saved.Outcome != nil {
+			outcome := cloneInformationNeedOutcome(*saved.Outcome)
+			state.outcome = &outcome
+		}
+		c.needStates[index] = state
+	}
+	c.activeToolCalls = 0
+	c.checkpointAccepted = snapshot.CheckpointAccepted
+	c.lastRoundHadArtifacts = snapshot.LastRoundHadArtifacts
+	c.mu.Unlock()
+	return nil
+}
+
+func stringSet(values []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		result[value] = struct{}{}
+	}
+	return result
+}
+
+func cloneInformationNeedOutcome(source InformationNeedOutcome) InformationNeedOutcome {
+	result := source
+	result.StopConditions = append([]StopCondition(nil), source.StopConditions...)
+	return result
 }
 
 // MarkEvidenceReviewed records temporary Collection-QC protocol state.

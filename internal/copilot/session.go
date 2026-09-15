@@ -7,6 +7,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,22 +20,24 @@ import (
 const researchAgentName = "r42_research"
 
 type SessionConfig struct {
-	Provider         *provider.Config
-	Retry            provider.RetryPolicy
-	Model            string
-	Profile          string
-	ReasoningEffort  string
-	SystemPrompt     string
-	WorkingDirectory string
-	Tools            []sdk.Tool
-	AvailableTools   []string
-	ExcludedTools    []string
-	SkillDirectories []string
-	Skills           []string
-	DisabledSkills   []string
-	Hooks            *sdk.SessionHooks
-	MCPServers       []mcp.Config
-	MCPResources     []mcp.Resource
+	Provider              *provider.Config
+	Retry                 provider.RetryPolicy
+	Model                 string
+	Profile               string
+	ReasoningEffort       string
+	SystemPrompt          string
+	WorkingDirectory      string
+	Tools                 []sdk.Tool
+	AvailableTools        []string
+	ExcludedTools         []string
+	SkillDirectories      []string
+	Skills                []string
+	DisabledSkills        []string
+	Hooks                 *sdk.SessionHooks
+	MCPServers            []mcp.Config
+	MCPResources          []mcp.Resource
+	ResumeSessionID       string
+	SessionStoreDirectory string
 }
 
 type Factory struct {
@@ -63,6 +66,21 @@ func (f *Factory) Open(ctx context.Context, config SessionConfig) (*Session, err
 		return nil, err
 	}
 
+	if config.ResumeSessionID != "" {
+		session, resumeErr := f.resume(ctx, config.ResumeSessionID, resumeSessionConfig(sdkConfig), config.Retry)
+		if resumeErr == nil {
+			bindMCPResourceReader(resourceHolder, session)
+			return &Session{
+				sdk: session, factory: f, sessionID: config.ResumeSessionID, resumeConfig: resumeSessionConfig(sdkConfig),
+				retry: config.Retry, delay: f.delay, random: f.random, mcpResources: resourceHolder,
+			}, nil
+		}
+		if !strings.Contains(resumeErr.Error(), "Session not found") {
+			return nil, resumeErr
+		}
+		// The checkpoint may predate the SDK session event log. Start a fresh
+		// session and replay the unfinished workflow phase from its checkpoint.
+	}
 	var session sdkSession
 	for attempt := 0; ; attempt++ {
 		session, err = f.client.CreateSession(ctx, sdkConfig)
@@ -142,6 +160,7 @@ func (f *Factory) sessionConfig(config SessionConfig) (*sdk.SessionConfig, *mcpR
 		ReasoningEffort:        config.ReasoningEffort,
 		SystemMessage:          &sdk.SystemMessageConfig{Mode: "append", Content: config.SystemPrompt},
 		WorkingDirectory:       config.WorkingDirectory,
+		ConfigDirectory:        config.SessionStoreDirectory,
 		Streaming:              sdk.Bool(true),
 		Provider:               providerConfig,
 		Tools:                  tools,
@@ -183,6 +202,7 @@ func resumeSessionConfig(config *sdk.SessionConfig) *sdk.ResumeSessionConfig {
 		Hooks:                  config.Hooks,
 		MCPServers:             cloneMCPServers(config.MCPServers),
 		WorkingDirectory:       config.WorkingDirectory,
+		ConfigDirectory:        config.ConfigDirectory,
 		EnableSkills:           config.EnableSkills,
 		Streaming:              config.Streaming,
 		CustomAgents:           slices.Clone(config.CustomAgents),
@@ -311,6 +331,14 @@ type Session struct {
 	delay        func(context.Context, time.Duration) error
 	random       func() float64
 	mcpResources *mcpResourceReaderHolder
+}
+
+// ID returns the SDK session identity used by checkpoint recovery.
+func (s *Session) ID() string {
+	if s == nil {
+		return ""
+	}
+	return s.sessionID
 }
 
 func (s *Session) SendAndWait(ctx context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {

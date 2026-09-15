@@ -573,6 +573,16 @@ func (m TUIModel) detailContent() string {
 	if node.ToolName != "" {
 		lines = append(lines, "Tool: "+node.ToolName)
 	}
+	if node.Checkpointed {
+		checkpoint := "Checkpoint: unit committed"
+		if node.CheckpointPhase != "" {
+			checkpoint = "Checkpoint: safe; next phase " + string(node.CheckpointPhase)
+		}
+		lines = append(lines, checkpoint)
+	}
+	if node.ResumedFromCheckpoint {
+		lines = append(lines, "Recovery: resumed from checkpoint")
+	}
 	if node.Content != "" {
 		lines = append(lines, "", "Current content:", node.Content)
 	}
