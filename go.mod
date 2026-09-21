@@ -1,18 +1,18 @@
 module github.com/lonegunmanb/r42
 
-go 1.25.0
+go 1.26.8
 
 require (
-	github.com/aws/aws-sdk-go v1.55.5
-	github.com/bmatcuk/doublestar v1.1.5
+	github.com/aws/aws-sdk-go v1.55.8
+	github.com/bmatcuk/doublestar v1.3.4
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/charmbracelet/x/term v0.2.2
-	github.com/github/copilot-sdk/go v1.0.11
+	github.com/github/copilot-sdk/go v1.0.14
 	github.com/google/uuid v1.6.0
-	github.com/hashicorp/go-getter/v2 v2.2.3
-	github.com/hashicorp/hcl/v2 v2.24.0
+	github.com/hashicorp/go-getter/v2 v2.2.4
+	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/itchyny/gojq v0.12.19
 	github.com/lonegunmanb/go-defaults v1.4.0
 	github.com/lonegunmanb/golden v0.0.0-20260826150314-f8b425079d51
@@ -22,8 +22,8 @@ require (
 	github.com/zclconf/go-cty v1.19.0
 	go.starlark.net v0.0.0-20260708150628-5395d018f003
 	go.uber.org/goleak v1.3.0
-	golang.org/x/sync v0.22.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sync v0.23.0
+	golang.org/x/sys v0.48.0
 )
 
 require (
