@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/github/copilot-sdk/go"
 	"github.com/lonegunmanb/r42/internal/cli"
@@ -199,8 +200,8 @@ research "static" "juror" {
 	assert.Len(t, opener.research.prompts, 1)
 	assert.Equal(t, 1, opener.research.closeCalls)
 	assert.Equal(t, 1, opener.qc.closeCalls)
-	assert.Contains(t, toolNamesFromConfig(opener.qc.config), "r42_final_qc_calculator")
-	assert.Contains(t, opener.qc.config.SystemPrompt, "r42_final_qc_calculator")
+	assert.Contains(t, toolNamesFromConfig(opener.qc.config), "r42_starlark")
+	assert.Contains(t, opener.qc.config.SystemPrompt, "r42_starlark")
 	assert.Zero(t, opener.collection.sendCalls)
 	assert.Zero(t, opener.collectionQC.sendCalls)
 	assert.Equal(t, []string{"research", "final_qc"}, workflowDebugSessionOpens(t, directory))
@@ -407,11 +408,6 @@ func TestProductionRuntimeCollectionOnlyRepairsStarlarkStepLimit(t *testing.T) {
 
 	directory := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
-starlark_tool "calculator" {
-  description = "Calculate values."
-  max_steps   = 100
-}
-
 go_tool "submit" {
   description = "Submit the completed DCF."
   source = <<-GO
@@ -427,10 +423,20 @@ go_tool "submit" {
 }
 
 research "static" "builder" {
-  phase_mode          = "collection_only"
-  model               = "test-model"
-  system_prompt       = "Build a DCF."
-  collection_tool_ids = [starlark_tool.calculator.id]
+  phase_mode    = "collection_only"
+  model         = "test-model"
+  system_prompt = "Build a DCF."
+
+  starlark {
+	description      = "Calculate values."
+	max_steps        = 100
+	timeout          = "6s"
+	max_source_bytes = 101
+	max_data_bytes   = 102
+	max_result_bytes = 103
+	max_stdout_bytes = 104
+	memory_limit     = 105
+  }
 
   tool_use "submit" {
     tool_id   = go_tool.submit.id
@@ -455,7 +461,14 @@ research "static" "builder" {
 	assert.Contains(t, opener.session.starlarkResponses[0], `"accepted":false`)
 	assert.Contains(t, opener.session.starlarkResponses[0], `"code":"starlark_step_limit"`)
 	assert.Contains(t, opener.session.starlarkResponses[1], `"accepted":true`)
-	assert.Len(t, runner.requests, 2)
+	require.Len(t, runner.requests, 2)
+	assert.Equal(t, 100, runner.requests[0].Config.MaxSteps)
+	assert.Equal(t, int64(6*time.Second), runner.requests[0].TimeoutNanos)
+	assert.Equal(t, 101, runner.requests[0].Config.MaxSourceBytes)
+	assert.Equal(t, 102, runner.requests[0].Config.MaxDataBytes)
+	assert.Equal(t, 103, runner.requests[0].Config.MaxResultBytes)
+	assert.Equal(t, 104, runner.requests[0].Config.MaxStdoutBytes)
+	assert.Equal(t, int64(105), runner.requests[0].MemoryLimit)
 }
 
 func workflowDebugSessionOpens(t *testing.T, directory string) []string {

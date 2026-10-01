@@ -197,6 +197,7 @@ func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
 	retryBlocks := nestedBlocks(block, "retry")
 	qcBlocks := nestedBlocks(block, "qc")
 	collectionQCBlocks := nestedBlocks(block, "collection_qc")
+	starlarkBlocks := nestedBlocks(block, "starlark")
 	if len(retryBlocks) > 1 {
 		return "", fmt.Errorf("research supports at most one retry block")
 	}
@@ -206,9 +207,12 @@ func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
 	if len(collectionQCBlocks) > 1 {
 		return "", fmt.Errorf("research supports at most one collection_qc block")
 	}
+	if len(starlarkBlocks) > 1 {
+		return "", fmt.Errorf("research supports at most one starlark block")
+	}
 	for _, nested := range block.NestedBlocks() {
 		if nested.Type == "retry" || nested.Type == "artifact" || nested.Type == "import_artifact" || nested.Type == "qc" ||
-			nested.Type == "collection_qc" || nested.Type == "tool_use" || golden.MetaNestedBlockNames.Contains(nested.Type) {
+			nested.Type == "collection_qc" || nested.Type == "starlark" || nested.Type == "tool_use" || golden.MetaNestedBlockNames.Contains(nested.Type) {
 			continue
 		}
 		return "", fmt.Errorf("unsupported block type %q in research block", nested.Type)
@@ -277,6 +281,12 @@ func staticResearchTaskExpression(block *golden.HclBlock) (string, error) {
 		if err := writeCollectionQCObject(&result, collectionQCBlocks[0]); err != nil {
 			return "", err
 		}
+	}
+	result.WriteString("starlark = ")
+	if len(starlarkBlocks) == 0 {
+		result.WriteString("null\n")
+	} else {
+		writeObject(&result, starlarkBlocks[0], nil)
 	}
 	result.WriteString("}\n")
 	return result.String(), nil
@@ -428,6 +438,7 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 		"collection_batch_size":               cty.NumberIntVal(DefaultCollectionBatchSize),
 		"max_collection_rounds":               cty.NullVal(cty.Number),
 		"collection_qc":                       cty.EmptyTupleVal,
+		"starlark":                            cty.EmptyTupleVal,
 	}
 	if task.IsKnown() && task.Type().IsObjectType() {
 		for name, value := range task.AsValueMap() {
@@ -438,7 +449,7 @@ func deferredStaticResearchValues(task cty.Value) map[string]cty.Value {
 				// Imports authorize runtime access but are not an output value.
 			case "tool_use":
 				values["tool_use"] = toolUseListValue(value)
-			case "retry", "qc", "collection_qc":
+			case "retry", "qc", "collection_qc", "starlark":
 				if !value.IsNull() {
 					values[name] = cty.TupleVal([]cty.Value{value})
 				}

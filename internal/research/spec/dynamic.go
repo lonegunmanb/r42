@@ -1,9 +1,11 @@
 package spec
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"math/big"
+	"slices"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/lonegunmanb/golden"
@@ -276,6 +278,9 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 	if block.CollectionQCBlocks, err = dynamicCollectionQCBlocks(unmarked); err != nil {
 		return Config{}, err
 	}
+	if block.StarlarkBlocks, err = dynamicStarlarkBlocks(unmarked); err != nil {
+		return Config{}, err
+	}
 	config, err := block.toConfig()
 	if err != nil {
 		return Config{}, err
@@ -288,6 +293,53 @@ func DecodeDynamicTask(value cty.Value) (Config, error) {
 		return Config{}, err
 	}
 	return config, nil
+}
+
+func dynamicStarlarkBlocks(object cty.Value) ([]StarlarkBlock, error) {
+	value, ok := dynamicAttribute(object, "starlark")
+	if !ok || value.IsNull() {
+		return nil, nil
+	}
+	unmarked, _ := value.UnmarkDeep()
+	if !unmarked.Type().IsObjectType() && !unmarked.Type().IsMapType() {
+		return nil, errors.New("starlark must be an object")
+	}
+	allowed := map[string]struct{}{
+		"description": {}, "max_steps": {}, "timeout": {}, "max_source_bytes": {},
+		"max_data_bytes": {}, "max_result_bytes": {}, "max_stdout_bytes": {}, "memory_limit": {},
+	}
+	for _, name := range slices.Sorted(maps.Keys(unmarked.AsValueMap())) {
+		if _, ok := allowed[name]; !ok {
+			return nil, fmt.Errorf("starlark contains unsupported attribute %q", name)
+		}
+	}
+	block := StarlarkBlock{}
+	var err error
+	if block.Description, err = dynamicOptionalString(unmarked, "description"); err != nil {
+		return nil, err
+	}
+	if block.MaxSteps, err = dynamicOptionalInt(unmarked, "max_steps"); err != nil {
+		return nil, err
+	}
+	if block.Timeout, err = dynamicOptionalString(unmarked, "timeout"); err != nil {
+		return nil, err
+	}
+	if block.MaxSourceBytes, err = dynamicOptionalInt(unmarked, "max_source_bytes"); err != nil {
+		return nil, err
+	}
+	if block.MaxDataBytes, err = dynamicOptionalInt(unmarked, "max_data_bytes"); err != nil {
+		return nil, err
+	}
+	if block.MaxResultBytes, err = dynamicOptionalInt(unmarked, "max_result_bytes"); err != nil {
+		return nil, err
+	}
+	if block.MaxStdoutBytes, err = dynamicOptionalInt(unmarked, "max_stdout_bytes"); err != nil {
+		return nil, err
+	}
+	if block.MemoryLimit, err = dynamicOptionalInt(unmarked, "memory_limit"); err != nil {
+		return nil, err
+	}
+	return []StarlarkBlock{block}, nil
 }
 
 func dynamicToolUseBlocks(object cty.Value) ([]ToolUseBlock, error) {

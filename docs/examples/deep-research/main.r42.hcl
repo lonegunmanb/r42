@@ -2,12 +2,6 @@ module "pplx_tools" {
   source = "./modules/pplx_tools"
 }
 
-starlark_tool "calculator" {
-  description = "Perform isolated, resource-bounded numerical calculations for deep research. Use this tool for every exact or derived numeric result."
-  max_steps   = 1000000
-  timeout     = "5s"
-}
-
 locals {
   supplied_research_tasks = [
     for index, question in coalesce(var.research_plan, []) : {
@@ -73,7 +67,7 @@ locals {
   offline_disallowed_tools = ["web_search", "web_fetch"]
 
   calculator_guidance = <<-PROMPT
-    All exact or derived numerical work must be calculated by calling ${starlark_tool.calculator.id}. Pass raw inputs through data_json and use result_json. Do not perform arithmetic, ratios, percentages, unit conversions, averages, ranges, interpolation, or other derived numerical calculations mentally or outside the calculator. If calculation is not needed, do not call it.
+    All exact or derived numerical work must be calculated by calling r42_starlark. Pass raw inputs through data_json and use result_json. Do not perform arithmetic, ratios, percentages, unit conversions, averages, ranges, interpolation, or other derived numerical calculations mentally or outside the calculator. If calculation is not needed, do not call it.
   PROMPT
 
   plan_design_guidance = <<-PROMPT
@@ -238,7 +232,7 @@ research "static" "plan" {
     }
   }
   tool_use "calculate" {
-    tool_id = starlark_tool.calculator.id
+    tool_id = "r42_starlark"
     input_from_agent = {
       code = {
         desc    = "A Starlark program for exact or derived numerical calculations needed by the planning session."
@@ -296,7 +290,7 @@ research "dynamic" "parallel_deep_dive" {
       PROMPT
       tool_use = {
         calculate = {
-          tool_id = starlark_tool.calculator.id
+          tool_id = "r42_starlark"
           input_from_agent = {
             code = {
               desc    = "A Starlark program for exact or derived numerical calculations in this research task."
@@ -354,8 +348,7 @@ research "dynamic" "parallel_deep_dive" {
         model_provider   = model_provider.qc
         reasoning_effort = var.reasoning_effort
         permission       = "approve_all"
-        tool_ids         = [starlark_tool.calculator.id]
-        tool_call_quota  = { (starlark_tool.calculator.id) = 20 }
+        tool_call_quota  = { r42_starlark = 20 }
       }
     }
   ]
@@ -405,7 +398,7 @@ research "dynamic" "independent_serial_deep_dive" {
       PROMPT
       tool_use = {
         calculate = {
-          tool_id = starlark_tool.calculator.id
+          tool_id = "r42_starlark"
           input_from_agent = {
             code = {
               desc    = "A Starlark program for exact or derived numerical calculations in this research task."
@@ -463,8 +456,7 @@ research "dynamic" "independent_serial_deep_dive" {
         model_provider   = model_provider.qc
         reasoning_effort = var.reasoning_effort
         permission       = "approve_all"
-        tool_ids         = [starlark_tool.calculator.id]
-        tool_call_quota  = { (starlark_tool.calculator.id) = 20 }
+        tool_call_quota  = { r42_starlark = 20 }
       }
     }
   ]
@@ -541,7 +533,7 @@ research "dynamic" "final_serial_deep_dive" {
       PROMPT
       tool_use = {
         calculate = {
-          tool_id = starlark_tool.calculator.id
+          tool_id = "r42_starlark"
           input_from_agent = {
             code = {
               desc    = "A Starlark program for exact or derived numerical calculations in this research task."
@@ -608,8 +600,7 @@ research "dynamic" "final_serial_deep_dive" {
         model_provider   = model_provider.qc
         reasoning_effort = var.reasoning_effort
         permission       = "approve_all"
-        tool_ids         = [starlark_tool.calculator.id]
-        tool_call_quota  = { (starlark_tool.calculator.id) = 20 }
+        tool_call_quota  = { r42_starlark = 20 }
       }
     }
   ]
@@ -714,7 +705,7 @@ research "static" "resolve_conflicts" {
     }
   }
   tool_use "calculate" {
-    tool_id = starlark_tool.calculator.id
+    tool_id = "r42_starlark"
     input_from_agent = {
       code = {
         desc    = "A Starlark program for exact or derived numerical calculations needed for conflict analysis."
@@ -747,8 +738,7 @@ research "static" "resolve_conflicts" {
     model_provider   = model_provider.qc
     reasoning_effort = var.reasoning_effort
     permission       = "approve_all"
-    tool_ids         = [starlark_tool.calculator.id]
-    tool_call_quota  = { (starlark_tool.calculator.id) = 20 }
+    tool_call_quota  = { r42_starlark = 20 }
   }
 }
 
@@ -869,7 +859,7 @@ research "static" "synthesize" {
     }
   }
   tool_use "calculate" {
-    tool_id = starlark_tool.calculator.id
+    tool_id = "r42_starlark"
     input_from_agent = {
       code = {
         desc    = "A Starlark program for exact or derived numerical calculations used in the synthesis."
@@ -904,9 +894,9 @@ research "static" "synthesize" {
     reasoning_effort = var.reasoning_effort
     disallowed_tools = ["bash", "powershell", "edit", "task", "ask_user", "web_search", "web_fetch"]
     permission       = "approve_all"
-    tool_ids          = [starlark_tool.calculator.id, external_tool.audit_synthesis.id, go_tool.generate_source_table.id]
+    tool_ids          = [external_tool.audit_synthesis.id, go_tool.generate_source_table.id]
     tool_call_quota = {
-      (starlark_tool.calculator.id) = 20
+      r42_starlark                       = 20
       (external_tool.audit_synthesis.id) = 10
       (go_tool.generate_source_table.id) = 10
     }

@@ -645,49 +645,62 @@ research "static" "consumer" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
-func TestStarlarkToolSurvivesModuleExportAndPlanRoundTrip(t *testing.T) {
+func TestSavedResearchConfigPreservesStarlarkSettings(t *testing.T) {
 	registerSchemas()
-	root := t.TempDir()
-	child := filepath.Join(root, "child")
-	require.NoError(t, os.Mkdir(child, 0o755))
-	writeR42(t, child, "main.r42.hcl", `
-starlark_tool "calculator" {
-  description      = "Calculate values."
-  max_steps        = 42
-  timeout          = "6s"
-  max_source_bytes = 99
-}
-
-output "calculator_id" { value = starlark_tool.calculator.id }
-`)
-	writeR42(t, root, "main.r42.hcl", `
-module "child" { source = "./child" }
-
-research "static" "consumer" {
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+research "static" "calculator" {
   model         = "test-model"
-  system_prompt = "Use the calculator."
-  tool_ids      = [module.child.calculator_id]
+  system_prompt = "Calculate values."
+
+  starlark {
+    description      = "Calculate audited values."
+    max_steps        = 42
+    timeout          = "6s"
+    max_source_bytes = 99
+    max_data_bytes   = 100
+    max_result_bytes = 101
+    max_stdout_bytes = 102
+    memory_limit     = 103
+  }
 }
 `)
 
-	planned, err := planSource(root, executor.ResearchConfigOptions{})
+	planned, err := planSource(directory, executor.ResearchConfigOptions{})
 	require.NoError(t, err)
 	encoded, err := internalplan.Marshal(planned.Saved)
 	require.NoError(t, err)
 	roundTripped, err := internalplan.Unmarshal(encoded)
 	require.NoError(t, err)
 
-	tools := roundTripped.Tools()
-	require.Len(t, tools, 1)
-	for _, definition := range tools {
-		assert.Equal(t, "starlark", definition.Kind)
-		assert.Equal(t, "module.child.starlark_tool.calculator", definition.Address)
-		require.NotNil(t, definition.Starlark)
-		assert.Equal(t, 42, definition.Starlark.MaxSteps)
-		assert.Equal(t, int64(6*time.Second), definition.Starlark.TimeoutNanos)
-		assert.Equal(t, 99, definition.Starlark.MaxSourceBytes)
-		assert.Contains(t, definition.Description, "https://pkg.go.dev/go.starlark.net/starlark")
-	}
+	nodes := roundTripped.Nodes()
+	require.Len(t, nodes, 1)
+	restored, err := modulespec.DecodeResearchPlan(nodes[0].Config)
+	require.NoError(t, err)
+	assert.Equal(t, "Calculate audited values.", restored.Config.Starlark.Description)
+	assert.Equal(t, 42, restored.Config.Starlark.MaxSteps)
+	assert.Equal(t, 6*time.Second, restored.Config.Starlark.Timeout)
+	assert.Equal(t, 99, restored.Config.Starlark.MaxSourceBytes)
+	assert.Equal(t, 100, restored.Config.Starlark.MaxDataBytes)
+	assert.Equal(t, 101, restored.Config.Starlark.MaxResultBytes)
+	assert.Equal(t, 102, restored.Config.Starlark.MaxStdoutBytes)
+	assert.Equal(t, 103, restored.Config.Starlark.MemoryLimit)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestRootStarlarkToolBlockIsRejected(t *testing.T) {
+	registerSchemas()
+	directory := t.TempDir()
+	writeR42(t, directory, "main.r42.hcl", `
+starlark_tool "calculator" {
+  description = "legacy"
+}
+`)
+
+	_, err := planSource(directory, executor.ResearchConfigOptions{})
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "unregistered starlark_tool: calculator")
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
@@ -1023,13 +1036,11 @@ func TestStarlarkToolUseRequiresFixedStringInputs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			directory := t.TempDir()
 			writeR42(t, directory, "main.r42.hcl", `
-starlark_tool "calculator" { description = "Calculate values." }
-
 research "static" "source" {
   model         = "test-model"
   system_prompt = "Calculate."
   tool_use "calculate" {
-    tool_id = starlark_tool.calculator.id
+    tool_id = "r42_starlark"
     `+tt.input+`
   }
 }

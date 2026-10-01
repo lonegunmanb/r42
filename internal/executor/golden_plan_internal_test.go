@@ -120,7 +120,7 @@ research "static" "source" {
 	manager := runpkg.NewManager(directory)
 	resumed, err := manager.Create()
 	require.NoError(t, err)
-	checkpoint := filepath.Join(resumed.Directory(), "workflow-checkpoints", "workflow", "checkpoints", "latest")
+	checkpoint := filepath.Join(resumed.Directory(), "unit-checkpoints", "workflow", "checkpoints", "latest")
 	require.NoError(t, os.MkdirAll(filepath.Dir(checkpoint), 0o700))
 	require.NoError(t, os.WriteFile(checkpoint, []byte("checkpoint-test\n"), 0o600))
 

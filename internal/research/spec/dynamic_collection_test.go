@@ -2,6 +2,7 @@ package spec_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/lonegunmanb/golden"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
@@ -114,6 +115,81 @@ func TestDecodeDynamicTaskCollectionDefaults(t *testing.T) {
 	assert.Nil(t, config.CollectionQC)
 	assert.Equal(t, researchspec.PhaseModeFull, config.EffectivePhaseMode())
 	assert.Equal(t, researchspec.FinalQCStrictnessBalanced, config.FinalQCStrictness)
+	assert.Equal(t, 1_000_000, config.Starlark.MaxSteps)
+	assert.Equal(t, 5*time.Second, config.Starlark.Timeout)
+}
+
+func TestDecodeDynamicTaskDecodesStarlarkOverrides(t *testing.T) {
+	t.Parallel()
+
+	task := cty.ObjectVal(map[string]cty.Value{
+		"model":         cty.StringVal("wire-model"),
+		"system_prompt": cty.StringVal("Calculate."),
+		"starlark": cty.ObjectVal(map[string]cty.Value{
+			"description":      cty.StringVal("Calculate audited values."),
+			"max_steps":        cty.NumberIntVal(42),
+			"timeout":          cty.StringVal("6s"),
+			"max_source_bytes": cty.NumberIntVal(99),
+			"max_data_bytes":   cty.NumberIntVal(100),
+			"max_result_bytes": cty.NumberIntVal(101),
+			"max_stdout_bytes": cty.NumberIntVal(102),
+			"memory_limit":     cty.NumberIntVal(103),
+		}),
+		"artifact": cty.EmptyObjectVal,
+		"retry":    cty.NullVal(cty.DynamicPseudoType),
+		"qc":       cty.NullVal(cty.DynamicPseudoType),
+	})
+
+	config, err := researchspec.DecodeDynamicTask(task)
+
+	require.NoError(t, err)
+	assert.Equal(t, "Calculate audited values.", config.Starlark.Description)
+	assert.Equal(t, 42, config.Starlark.MaxSteps)
+	assert.Equal(t, 6*time.Second, config.Starlark.Timeout)
+	assert.Equal(t, 99, config.Starlark.MaxSourceBytes)
+	assert.Equal(t, 100, config.Starlark.MaxDataBytes)
+	assert.Equal(t, 101, config.Starlark.MaxResultBytes)
+	assert.Equal(t, 102, config.Starlark.MaxStdoutBytes)
+	assert.Equal(t, 103, config.Starlark.MemoryLimit)
+}
+
+func TestDecodeDynamicTaskRejectsInvalidStarlark(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		starlark      cty.Value
+		expectedError string
+	}{
+		{
+			name:          "not an object",
+			starlark:      cty.StringVal("invalid"),
+			expectedError: "starlark must be an object",
+		},
+		{
+			name: "unknown field",
+			starlark: cty.ObjectVal(map[string]cty.Value{
+				"unknown": cty.StringVal("invalid"),
+			}),
+			expectedError: `starlark contains unsupported attribute "unknown"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := researchspec.DecodeDynamicTask(cty.ObjectVal(map[string]cty.Value{
+				"model":         cty.StringVal("wire-model"),
+				"system_prompt": cty.StringVal("Calculate."),
+				"starlark":      tt.starlark,
+				"artifact":      cty.EmptyObjectVal,
+				"retry":         cty.NullVal(cty.DynamicPseudoType),
+				"qc":            cty.NullVal(cty.DynamicPseudoType),
+			}))
+
+			require.EqualError(t, err, tt.expectedError)
+		})
+	}
 }
 
 func TestDecodeDynamicTaskDecodesPhaseModes(t *testing.T) {

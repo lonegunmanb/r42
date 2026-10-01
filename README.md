@@ -504,7 +504,7 @@ that depend on its successful completion are not run.
 | `collection_mcp_tool_ids` | No | IDs from `mcp_server.<name>.tool_ids`, attached only to Collection. MCP tools cannot be used by QC, Research, `tool_use`, `terminate_tool_id`, or `tool_call_quota`. |
 | `collection_mcp_resource_ids` | No | IDs from `mcp_server.<name>.resource_ids`, attached only to Collection. Selecting one automatically mounts the restricted `r42_read_mcp_resource` typed tool. |
 | `tool_ids` | No | IDs of typed tools available only to the closed Research synthesis session. |
-| `tool_call_quota` | No | `map(number)` of non-negative per-session call limits. It may name configured Collection or Research typed tools, the terminate tool, or Copilot built-ins. Collection and Research keep separate counters. |
+| `tool_call_quota` | No | `map(number)` of non-negative per-session call limits. It may name configured Collection or Research typed tools, the terminate tool, `r42_starlark`, or Copilot built-ins. Collection and Research keep separate counters. |
 | `terminate_tool_id` | No | Typed tool that must return an accepted response before the stage can finish. Its output must be string-compatible and becomes `research.static.<name>.result`. Without it, a normal assistant completion ends the stage. |
 | `allowed_tools` | No | Tool allowlist shared by Collection and Research. Use SDK names for ordinary tools and `mcp_server.<name>.tool_ids[...]` for MCP tools. Mandatory r42 protocol tools are always added. |
 | `disallowed_tools` | No | Tool denylist shared by Collection and Research. MCP IDs selected for Collection are translated to SDK MCP filter names. Research additionally blocks obvious network, shell, write/edit, glob, task, and user-input built-ins; read-only `view`, `grep`, `head`, and `tail` remain available. |
@@ -519,6 +519,7 @@ that depend on its successful completion are not run.
 | `permission` | No | Tool permission policy. The current supported value and default is `approve_all`, which approves each otherwise valid tool request. |
 | `max_protocol_attempts` | No | Maximum repair budget for rejected terminal calls or completed turns that omit the required terminal call. Defaults to `10`; a new QC revision round resets the budget. |
 | `timeout` | No | Per-block deadline expressed as a Go duration such as `30m` or `2h`. It is bounded by the CLI and ancestor-module deadlines. |
+| `starlark` | No | Zero-or-one nested block overriding the built-in `r42_starlark` description and resource limits. Omission uses bounded defaults. |
 
 Ordinary tool filters use SDK names. A typed tool's read-only `.id` is also its
 SDK name, so the same ID can appear in `collection_tool_ids` or `tool_ids` and
@@ -791,7 +792,7 @@ snapshots. Omitting `qc` completes the block after Research succeeds.
 | `model` | No | QC model override; otherwise inherits the research model. |
 | `reasoning_effort` | No | QC reasoning override; otherwise inherits the research value. |
 | `tool_ids` | No | Typed tools available only to QC. Research tools are not inherited. |
-| `tool_call_quota` | No | QC-only `map(number)` of non-negative call limits. Typed-tool ID keys must also appear in this QC block's `tool_ids`; ordinary keys limit Copilot built-in tools. |
+| `tool_call_quota` | No | QC-only `map(number)` of non-negative call limits. Declared typed-tool ID keys must also appear in this QC block's `tool_ids`; `r42_starlark` overrides the built-in calculator quota, and ordinary keys limit Copilot built-in tools. |
 | `allowed_tools` | No | QC SDK tool allowlist. The research allowlist is not inherited. |
 | `disallowed_tools` | No | Additional Final-QC denylist. Final QC always blocks obvious network, shell, write/edit, glob, task, and user-input built-ins; read-only `view`, `grep`, `head`, and `tail` remain available. |
 | `skill_directories` | No | Skill roots available only to QC; research skill roots are not inherited. |
@@ -1038,8 +1039,8 @@ modules distinct for both native MCP tools and resources, even when their
 endpoints happen to be identical.
 
 Each selected tool has a deterministic `mcp_tool_<server>__<tool>_<uuid>` ID.
-These IDs are deliberately distinct from `go_tool`, `external_tool`, and
-`starlark_tool` IDs. They select connected tools through
+These IDs are deliberately distinct from `go_tool` and `external_tool` IDs.
+They select connected tools through
 `collection_mcp_tool_ids` and may also appear in tool filters.
 
 `collection_mcp_tool_ids` controls which MCP tools are connected to Collection.
@@ -1059,14 +1060,15 @@ the MCP `contents` array, preserving text/blob and MIME metadata.
 
 ## Typed tools
 
-r42 supports two kinds of typed tool: `go_tool` and `external_tool`. Both expose
-a JSON Schema to the model, receive validated structured arguments, and return a
-common `ToolResponse` envelope. A rejected call contains actionable issues and
-is returned to the session for repair; a process, I/O, cancellation, or protocol
-failure fails the block instead of being disguised as a model mistake.
+r42 supports declared `go_tool` and `external_tool` typed tools, plus the
+built-in `r42_starlark` calculator owned by every research block or dynamic
+task. All expose a JSON Schema to the model and return repairable structured
+failures. A process, I/O, cancellation, or protocol failure fails the block
+instead of being disguised as a model mistake.
 
-Every typed tool has a deterministic read-only `id` derived from its canonical
-block address. Collection selects acquisition tools through
+Every declared typed tool has a deterministic read-only `id` derived from its
+canonical block address. The built-in calculator uses the fixed ID
+`r42_starlark`. Collection selects acquisition tools through
 `collection_tool_ids`; closed Research and Final QC select their trusted tools
 through `tool_ids`. Research can require an accepted call to one tool before
 completion by setting `terminate_tool_id`:
@@ -1076,6 +1078,50 @@ collection_tool_ids = [external_tool.search.id]
 tool_ids = [go_tool.build_report.id]
 terminate_tool_id = go_tool.submit_report.id
 ```
+
+### Built-in `r42_starlark`
+
+`r42_starlark` is automatically available in Collection, closed Research, and
+Final QC. Collection QC does not receive it. It is not a root block and must not
+appear in `collection_tool_ids`, `tool_ids`, or Final-QC `tool_ids`.
+
+Each static research block may contain at most one optional `starlark` block.
+Omitting it uses the shown defaults:
+
+```hcl
+research "static" "report" {
+  model         = "gpt-5.6-sol"
+  system_prompt = "Calculate and write the report."
+
+  starlark {
+    description      = "Execute isolated numerical Starlark programs."
+    max_steps        = 1000000
+    timeout          = "5s"
+    max_source_bytes = 65536
+    max_data_bytes   = 1048576
+    max_result_bytes = 1048576
+    max_stdout_bytes = 16384
+    memory_limit     = 134217728
+  }
+}
+```
+
+A dynamic task uses the same fields in its `starlark` object. The fixed tool
+input contains string fields `code` and `data_json`; the program must assign a
+JSON-compatible top-level `result`. The tool returns canonical `result_json`,
+captured `stdout`, and execution steps. Every call runs in a fresh isolated
+worker without filesystem, environment, network, subprocess, clock, randomness,
+or module-loading access.
+
+The default per-session quota is 20 accepted calls. Override or disable it in
+the relevant research or Final-QC quota map:
+
+```hcl
+tool_call_quota = { r42_starlark = 40 }
+```
+
+`tool_use` may bind host-owned or agent-owned calculator arguments with
+`tool_id = "r42_starlark"`. The built-in calculator cannot terminate research.
 
 ### `tool_use`
 

@@ -26,6 +26,26 @@ const (
 	defaultMaxStdoutBytes = 16_384
 )
 
+// UsageContract documents the fixed language and isolation contract exposed to models.
+const UsageContract = `
+
+Write Starlark, a deterministic Python-like language. Define top-level result
+as a JSON-compatible value. Available host values: data, math, stats, matrix,
+and fail. No import, load, filesystem, network, process, clock, or randomness
+is available.
+
+Exact implementation specification:
+https://github.com/google/starlark-go/blob/master/doc/spec.md
+
+Getting started and examples:
+https://github.com/google/starlark-go
+
+Go API reference:
+https://pkg.go.dev/go.starlark.net/starlark
+
+Secondary language introduction (may include Bazel-specific behavior):
+https://bazel.build/rules/language`
+
 // Config bounds a single evaluator invocation.
 type Config struct {
 	MaxSteps       int `json:"max_steps"`
@@ -35,7 +55,7 @@ type Config struct {
 	MaxStdoutBytes int `json:"max_stdout_bytes"`
 }
 
-// DefaultConfig returns the resource defaults declared by starlark_tool.
+// DefaultConfig returns the evaluator's built-in resource defaults.
 func DefaultConfig() Config {
 	return Config{
 		MaxSteps: defaultMaxSteps, MaxSourceBytes: defaultMaxSourceBytes,

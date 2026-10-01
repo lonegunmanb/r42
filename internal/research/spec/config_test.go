@@ -1,6 +1,7 @@
 package spec_test
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -15,6 +16,23 @@ func TestDefaultMaxQCRoundsIsFive(t *testing.T) {
 	t.Parallel()
 
 	assert.Equal(t, 5, researchspec.DefaultMaxQCRounds)
+}
+
+func TestStarlarkConfigUsesStableJSONFieldNames(t *testing.T) {
+	t.Parallel()
+
+	encoded, err := json.Marshal(researchspec.DefaultStarlarkConfig())
+	require.NoError(t, err)
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &fields))
+
+	require.Len(t, fields, 8)
+	for _, name := range []string{
+		"description", "max_steps", "timeout", "max_source_bytes", "max_data_bytes",
+		"max_result_bytes", "max_stdout_bytes", "memory_limit",
+	} {
+		assert.Contains(t, fields, name)
+	}
 }
 
 func TestConfigValidateRequiredFields(t *testing.T) {

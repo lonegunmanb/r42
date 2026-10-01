@@ -216,12 +216,6 @@ module "pplx_tools" {
   source = "./modules/pplx_tools"
 }
 
-starlark_tool "calculator" {
-  description = "Perform isolated numerical calculations for the DCF model. Use this tool for every derived numeric result."
-  max_steps   = 1000000
-  timeout     = "5s"
-}
-
 research "static" "build_dcf" {
   phase_mode       = "collection_only"
   model_provider   = model_provider.primary
@@ -239,7 +233,7 @@ research "static" "build_dcf" {
 
     Before substantive modeling, call ${go_tool.update_dcf_progress.id} with a concise, company-specific ordered DCF execution plan whose steps all have status pending. Work through one step at a time. Before changing a step to completed, call ${go_tool.update_dcf_progress.id} with the complete current plan and record exact values, units, periods, source IDs, URLs, artifact references or precise locators, formulas, derivations, assumptions, and unresolved questions in that step. After any interruption or context compaction, read ${artifact("progress").path} before continuing. Do not repeat completed work unless its recorded evidence is missing or contradicted, and document the reason before revisiting it. Call ${go_tool.update_dcf_progress.id} once more with every step completed before submitting the model.
 
-    All derived numeric values must be calculated by calling ${starlark_tool.calculator.id}. Write a Starlark program for the data available at that moment, pass raw inputs through data_json, and use its result_json in the model and progress record. Do not perform arithmetic, discounting, interpolation, averaging, tax, cash-flow, terminal-value, equity-bridge, per-share, implied-return, or sensitivity calculations mentally or outside the calculator. Raw source retrieval and extraction are not derived numeric work. If the calculator rejects a program, inspect the returned issue, correct the program or inputs, and retry in this same session.
+    All derived numeric values must be calculated by calling r42_starlark. Write a Starlark program for the data available at that moment, pass raw inputs through data_json, and use its result_json in the model and progress record. Do not perform arithmetic, discounting, interpolation, averaging, tax, cash-flow, terminal-value, equity-bridge, per-share, implied-return, or sensitivity calculations mentally or outside the calculator. Raw source retrieval and extraction are not derived numeric work. If the calculator rejects a program, inspect the returned issue, correct the program or inputs, and retry in this same session.
 
     The JSON must have exactly two top-level fields: model and sources.
     The model object must use schema_version "dcf-model.v2" and exactly these fields:
@@ -303,7 +297,7 @@ research "static" "build_dcf" {
   }
 
   tool_use "calculate" {
-    tool_id = starlark_tool.calculator.id
+    tool_id = "r42_starlark"
     input_from_agent = {
       code = {
         desc    = "A Starlark program that calculates the current derived DCF values."
@@ -419,11 +413,11 @@ research "static" "audit_dcf" {
     - operating-driver stress tests: challenge recovery timing, revenue and margins, reinvestment, tax realization, terminal assumptions, cash runway, and dilution rather than relying only on a WACC/terminal-growth grid.
 
     A separate reverse-dcf.v1 artifact is mandatory. Do not change the evidence-supported base case merely to match the market price. Reverse DCF is a diagnostic of what the market price requires, not evidence that those expectations will occur.
-    Use the same audited diluted shares, net debt, PV of explicit cash flows, WACC, terminal growth, and terminal discount period as the canonical model. With ${starlark_tool.calculator.id}, calculate market capitalization, market-implied enterprise value, the gap from base-model enterprise value, implied terminal FCF, implied final-year FCF, and implied FCF as a percentage of modeled final-year revenue. Then calculate at least three sustainable FCF-margin scenarios and the revenue scale each scenario requires relative to modeled final-year revenue.
+    Use the same audited diluted shares, net debt, PV of explicit cash flows, WACC, terminal growth, and terminal discount period as the canonical model. With r42_starlark, calculate market capitalization, market-implied enterprise value, the gap from base-model enterprise value, implied terminal FCF, implied final-year FCF, and implied FCF as a percentage of modeled final-year revenue. Then calculate at least three sustainable FCF-margin scenarios and the revenue scale each scenario requires relative to modeled final-year revenue.
     Investigate the optionality gap using point-in-time public sources. Separate candidate products, pipelines, capacity, or other drivers supported by sources from the commercial scale, margins, timing, financing, dilution, approvals, or market size that remain unproven. A source showing that a product exists or that a stock price moved does not prove it can fill the valuation gap.
     Call ${go_tool.submit_reverse_dcf.id} before submitting the canonical model. Its accepted artifact must state the market-implied enterprise value, implied terminal FCF, sustainable FCF-margin scenarios, and optionality gap in plain language.
 
-    All derived numeric values must be calculated by calling ${starlark_tool.calculator.id}. Pass raw inputs through data_json and use result_json. Do not perform arithmetic, discounting, interpolation, averaging, tax, cash-flow, terminal-value, equity-bridge, per-share, implied-return, reverse-DCF, scenario, or sensitivity calculations mentally or outside the calculator. Recalculate every dependent value after a repaired input. If the calculator rejects a program, inspect the returned issue, correct the program or inputs, and retry.
+    All derived numeric values must be calculated by calling r42_starlark. Pass raw inputs through data_json and use result_json. Do not perform arithmetic, discounting, interpolation, averaging, tax, cash-flow, terminal-value, equity-bridge, per-share, implied-return, reverse-DCF, scenario, or sensitivity calculations mentally or outside the calculator. Recalculate every dependent value after a repaired input. If the calculator rejects a program, inspect the returned issue, correct the program or inputs, and retry.
 
     Preserve the exact candidate output contract: one object with exactly model and sources at the top level; model schema_version "dcf-model.v2" with exactly schema_version, company, valuation_date, assumptions, historical, projections, valuation, sensitivity; 3-5 historical periods; 5-10 projection periods; and an odd square WACC/terminal-growth sensitivity grid with the base case at its center. Every material raw input must be traceable to a stable source record. Never fabricate unavailable facts. When estimation is permitted, label the assumption explicitly and make its rationale auditable.
 
@@ -485,7 +479,7 @@ research "static" "audit_dcf" {
   }
 
   tool_use "calculate" {
-    tool_id = starlark_tool.calculator.id
+    tool_id = "r42_starlark"
     input_from_agent = {
       code = {
         desc    = "A Starlark program that audits or recalculates the current DCF values."

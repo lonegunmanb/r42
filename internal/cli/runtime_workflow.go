@@ -345,6 +345,7 @@ func (f *runtimeFactory) newResearchBlock(
 
 	// Collection is the only open-world phase and owns acquisition tools.
 	collectionQuota, collectionBuiltInQuota := splitToolCallQuota(planned.Config.Policy.ToolCallQuota)
+	collectionQuota = starlarkToolQuota(collectionQuota)
 	collectionTypedQuotaState := newToolCallQuota(collectionQuota)
 	collectionBuiltInQuotaState := newToolCallQuota(collectionBuiltInQuota)
 	collectionTools, _, err := f.buildTools(ctx, executionAddress, debuglog.SessionCollection, workspace,
@@ -353,6 +354,13 @@ func (f *runtimeFactory) newResearchBlock(
 		return nil, err
 	}
 	collectionTools = wrapCollectionAcquisitionTools(collectionTools, collectionContext)
+	collectionTools, err = f.appendStarlarkTool(
+		ctx, executionAddress, debuglog.SessionCollection, planned.Config.EffectiveStarlark(),
+		collectionTools, collectionTypedQuotaState,
+	)
+	if err != nil {
+		return nil, err
+	}
 	collectionArtifactTools, err := evidenceToolsWithArtifactRegistry(
 		workspace, planned.Config.Artifacts, true, artifactsRegistry, currentArtifactIDs, collectionContext.EvidenceArtifactIDs, f.ensureQuoteRegistry(),
 	)
@@ -421,6 +429,7 @@ func (f *runtimeFactory) newResearchBlock(
 
 	// Research is closed-world synthesis over registered evidence artifacts.
 	researchTypedQuota, researchBuiltInQuota := splitToolCallQuota(planned.Config.Policy.ToolCallQuota)
+	researchTypedQuota = starlarkToolQuota(researchTypedQuota)
 	researchTypedQuotaState := newToolCallQuota(researchTypedQuota)
 	researchBuiltInQuotaState := newToolCallQuota(researchBuiltInQuota)
 	terminal := researchruntime.NewTerminalRecorder()
@@ -430,6 +439,13 @@ func (f *runtimeFactory) newResearchBlock(
 	}
 	researchTools, terminalType, err := f.buildTools(ctx, executionAddress, debuglog.SessionResearch, workspace,
 		planned.Config.Policy.ToolIDs, planned.Config.TerminateToolID, terminal, researchTypedQuotaState)
+	if err != nil {
+		return cleanupSetup(err)
+	}
+	researchTools, err = f.appendStarlarkTool(
+		ctx, executionAddress, debuglog.SessionResearch, planned.Config.EffectiveStarlark(),
+		researchTools, researchTypedQuotaState,
+	)
 	if err != nil {
 		return cleanupSetup(err)
 	}
@@ -555,6 +571,7 @@ func (f *runtimeFactory) newResearchBlock(
 			return cleanupSetup(effectiveErr)
 		}
 		finalTypedQuota, finalBuiltInQuota := splitToolCallQuota(effectiveFinalQC.ToolCallQuota)
+		finalTypedQuota = starlarkToolQuota(finalTypedQuota)
 		finalTypedQuotaState := newToolCallQuota(finalTypedQuota)
 		finalBuiltInQuotaState := newToolCallQuota(finalBuiltInQuota)
 		finalTools, _, toolsErr := f.buildTools(ctx, executionAddress, debuglog.SessionFinalQC, workspace,
@@ -562,13 +579,14 @@ func (f *runtimeFactory) newResearchBlock(
 		if toolsErr != nil {
 			return cleanupSetup(toolsErr)
 		}
-		finalTools, finalCalculatorID, toolsErr := f.ensureFinalQCCalculator(finalQCCalculatorOptions{
-			ctx: ctx, blockAddress: executionAddress, sessionKind: debuglog.SessionFinalQC,
-			configuredToolIDs: effectiveFinalQC.ToolIDs, tools: finalTools, typedQuota: finalTypedQuota,
-		})
+		finalTools, toolsErr = f.appendStarlarkTool(
+			ctx, executionAddress, debuglog.SessionFinalQC, planned.Config.EffectiveStarlark(),
+			finalTools, finalTypedQuotaState,
+		)
 		if toolsErr != nil {
 			return cleanupSetup(toolsErr)
 		}
+		finalCalculatorID := researchspec.StarlarkToolName
 		finalEvidenceTools, toolsErr := evidenceToolsWithDynamicArtifacts(
 			workspace, planned.Config.Artifacts, false, artifactsRegistry, researchArtifactIDs, collectionContext.EvidenceArtifactIDs, f.ensureQuoteRegistry(),
 		)
@@ -706,9 +724,17 @@ func (f *runtimeFactory) newCollectionOnlyBlock(
 	}
 	toolIDs := append(slices.Clone(planned.Config.CollectionToolIDs), planned.Config.Policy.ToolIDs...)
 	typedQuota, builtInQuota := splitToolCallQuota(planned.Config.Policy.ToolCallQuota)
+	typedQuota = starlarkToolQuota(typedQuota)
+	typedQuotaState := newToolCallQuota(typedQuota)
 	terminal := researchruntime.NewTerminalRecorder()
 	tools, terminalType, err := f.buildTools(ctx, executionAddress, debuglog.SessionCollection, workspace,
-		toolIDs, planned.Config.TerminateToolID, terminal, newToolCallQuota(typedQuota))
+		toolIDs, planned.Config.TerminateToolID, terminal, typedQuotaState)
+	if err != nil {
+		return nil, err
+	}
+	tools, err = f.appendStarlarkTool(
+		ctx, executionAddress, debuglog.SessionCollection, planned.Config.EffectiveStarlark(), tools, typedQuotaState,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -818,9 +844,17 @@ func (f *runtimeFactory) newResearchOnlyBlock(
 	}
 
 	typedQuota, builtInQuota := splitToolCallQuota(planned.Config.Policy.ToolCallQuota)
+	typedQuota = starlarkToolQuota(typedQuota)
+	typedQuotaState := newToolCallQuota(typedQuota)
 	terminal := researchruntime.NewTerminalRecorder()
 	researchTools, terminalType, err := f.buildTools(ctx, executionAddress, debuglog.SessionResearch, workspace,
-		planned.Config.Policy.ToolIDs, planned.Config.TerminateToolID, terminal, newToolCallQuota(typedQuota))
+		planned.Config.Policy.ToolIDs, planned.Config.TerminateToolID, terminal, typedQuotaState)
+	if err != nil {
+		return nil, err
+	}
+	researchTools, err = f.appendStarlarkTool(
+		ctx, executionAddress, debuglog.SessionResearch, planned.Config.EffectiveStarlark(), researchTools, typedQuotaState,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -896,18 +930,21 @@ func (f *runtimeFactory) newResearchOnlyBlock(
 		return cleanupSetup(err)
 	}
 	finalTypedQuota, finalBuiltInQuota := splitToolCallQuota(effectiveFinalQC.ToolCallQuota)
+	finalTypedQuota = starlarkToolQuota(finalTypedQuota)
+	finalTypedQuotaState := newToolCallQuota(finalTypedQuota)
 	finalTools, _, err := f.buildTools(ctx, executionAddress, debuglog.SessionFinalQC, workspace,
-		effectiveFinalQC.ToolIDs, nil, researchruntime.NewTerminalRecorder(), newToolCallQuota(finalTypedQuota))
+		effectiveFinalQC.ToolIDs, nil, researchruntime.NewTerminalRecorder(), finalTypedQuotaState)
 	if err != nil {
 		return cleanupSetup(err)
 	}
-	finalTools, finalCalculatorID, err := f.ensureFinalQCCalculator(finalQCCalculatorOptions{
-		ctx: ctx, blockAddress: executionAddress, sessionKind: debuglog.SessionFinalQC,
-		configuredToolIDs: effectiveFinalQC.ToolIDs, tools: finalTools, typedQuota: finalTypedQuota,
-	})
+	finalTools, err = f.appendStarlarkTool(
+		ctx, executionAddress, debuglog.SessionFinalQC, planned.Config.EffectiveStarlark(),
+		finalTools, finalTypedQuotaState,
+	)
 	if err != nil {
 		return cleanupSetup(err)
 	}
+	finalCalculatorID := researchspec.StarlarkToolName
 	finalEvidenceTools, err := evidenceToolsWithDynamicArtifacts(
 		workspace, planned.Config.Artifacts, false, artifactsRegistry, researchArtifactIDs, nil, f.ensureQuoteRegistry(),
 	)

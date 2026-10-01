@@ -265,6 +265,149 @@ research "static" "strict" {
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockStarlarkDefaultsAndOverrides(t *testing.T) {
+	registerResearchSchemaBlocks()
+	config := parseResearchConfig(t, `
+research "static" "defaults" {
+  model         = "model"
+  system_prompt = "prompt"
+}
+
+research "static" "custom" {
+  model         = "model"
+  system_prompt = "prompt"
+
+  starlark {
+    description      = "Calculate audited values."
+    max_steps        = 42
+    timeout          = "6s"
+    max_source_bytes = 99
+    max_data_bytes   = 100
+    max_result_bytes = 101
+    max_stdout_bytes = 102
+    memory_limit     = 103
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	blocks := golden.Blocks[*researchspec.ResearchBlock](config)
+	require.Len(t, blocks, 2)
+
+	defaults := blocks[0].ResearchConfig().Starlark
+	assert.Equal(t, "Execute isolated, resource-bounded numerical Starlark programs.", defaults.Description)
+	assert.Equal(t, 1_000_000, defaults.MaxSteps)
+	assert.Equal(t, 5*time.Second, defaults.Timeout)
+	assert.Equal(t, 65_536, defaults.MaxSourceBytes)
+	assert.Equal(t, 1_048_576, defaults.MaxDataBytes)
+	assert.Equal(t, 1_048_576, defaults.MaxResultBytes)
+	assert.Equal(t, 16_384, defaults.MaxStdoutBytes)
+	assert.Equal(t, 134_217_728, defaults.MemoryLimit)
+
+	custom := blocks[1].ResearchConfig().Starlark
+	assert.Equal(t, "Calculate audited values.", custom.Description)
+	assert.Equal(t, 42, custom.MaxSteps)
+	assert.Equal(t, 6*time.Second, custom.Timeout)
+	assert.Equal(t, 99, custom.MaxSourceBytes)
+	assert.Equal(t, 100, custom.MaxDataBytes)
+	assert.Equal(t, 101, custom.MaxResultBytes)
+	assert.Equal(t, 102, custom.MaxStdoutBytes)
+	assert.Equal(t, 103, custom.MemoryLimit)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestResearchBlockRejectsInvalidStarlarkBlocks(t *testing.T) {
+	registerResearchSchemaBlocks()
+	tests := []struct {
+		name          string
+		blocks        string
+		expectedError string
+	}{
+		{
+			name:          "multiple blocks",
+			blocks:        "starlark {}\nstarlark {}",
+			expectedError: "research must have at most one starlark block",
+		},
+		{
+			name:          "steps over hard limit",
+			blocks:        "starlark { max_steps = 10000001 }",
+			expectedError: "research starlark max_steps must not exceed 10000000",
+		},
+		{
+			name:          "blank description",
+			blocks:        `starlark { description = " " }`,
+			expectedError: "research starlark description must not be empty",
+		},
+		{
+			name:          "non-positive steps",
+			blocks:        "starlark { max_steps = 0 }",
+			expectedError: "research starlark max_steps must be a positive integer",
+		},
+		{
+			name:          "invalid timeout",
+			blocks:        `starlark { timeout = "invalid" }`,
+			expectedError: "research starlark timeout must be a positive duration",
+		},
+		{
+			name:          "non-positive timeout",
+			blocks:        `starlark { timeout = "0s" }`,
+			expectedError: "research starlark timeout must be positive",
+		},
+		{
+			name:          "timeout over hard limit",
+			blocks:        `starlark { timeout = "31s" }`,
+			expectedError: "research starlark timeout must not exceed 30s",
+		},
+		{
+			name:          "source bytes over hard limit",
+			blocks:        "starlark { max_source_bytes = 262145 }",
+			expectedError: "research starlark max_source_bytes must not exceed 262144",
+		},
+		{
+			name:          "data bytes over hard limit",
+			blocks:        "starlark { max_data_bytes = 8388609 }",
+			expectedError: "research starlark max_data_bytes must not exceed 8388608",
+		},
+		{
+			name:          "result bytes over hard limit",
+			blocks:        "starlark { max_result_bytes = 8388609 }",
+			expectedError: "research starlark max_result_bytes must not exceed 8388608",
+		},
+		{
+			name:          "stdout bytes over hard limit",
+			blocks:        "starlark { max_stdout_bytes = 65537 }",
+			expectedError: "research starlark max_stdout_bytes must not exceed 65536",
+		},
+		{
+			name:          "memory over hard limit",
+			blocks:        "starlark { memory_limit = 268435457 }",
+			expectedError: "research starlark memory_limit must not exceed 268435456",
+		},
+		{
+			name: "starlark cannot terminate",
+			blocks: `tool_use "finish" {
+  tool_id   = "r42_starlark"
+  terminate = true
+}`,
+			expectedError: "the builtin starlark tool cannot terminate research",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := parseResearchConfig(t, `
+research "static" "subject" {
+  model         = "model"
+  system_prompt = "prompt"
+`+tt.blocks+`
+}
+`)
+			assert.ErrorContains(t, config.RunPlan(), tt.expectedError)
+		})
+	}
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
 func TestResearchBlockPlansUnifiedToolCallQuota(t *testing.T) {
 	registerResearchSchemaBlocks()
 	config := parseResearchConfig(t, `
@@ -314,6 +457,11 @@ research "static" "summary" {
   prompt            = research.static.source.result
   terminate_tool_id = fixture_tool.finish.id
 
+  starlark {
+    description = "Calculate summary values."
+    max_steps   = 42
+  }
+
   artifact "report" {
     type = "file"
     path = "${block_wd()}/report.md"
@@ -345,6 +493,11 @@ research "static" "summary" {
 	assert.Equal(t, "model", value.GetAttr("profile").AsString())
 	assert.False(t, value.GetAttr("prompt").IsKnown())
 	assert.False(t, value.GetAttr("result").IsKnown())
+	starlark := value.GetAttr("starlark")
+	require.True(t, starlark.Type().IsTupleType())
+	require.Equal(t, 1, starlark.LengthInt())
+	assert.Equal(t, "Calculate summary values.", starlark.Index(cty.NumberIntVal(0)).GetAttr("description").AsString())
+	assert.True(t, starlark.Index(cty.NumberIntVal(0)).GetAttr("max_steps").RawEquals(cty.NumberIntVal(42)))
 	artifacts := value.GetAttr("artifact")
 	require.Equal(t, 2, artifacts.LengthInt())
 	assert.Equal(t, "report", artifacts.Index(cty.StringVal("report")).GetAttr("name").AsString())

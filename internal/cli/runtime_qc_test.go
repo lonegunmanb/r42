@@ -13,6 +13,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/cli"
 	"github.com/lonegunmanb/r42/internal/copilot"
 	"github.com/lonegunmanb/r42/internal/executor"
+	"github.com/lonegunmanb/r42/internal/tool/starlarktool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -44,22 +45,25 @@ research "static" "source" {
 	assert.Equal(t, "gpt-5.4", opener.configs[0].Profile)
 	assert.Equal(t, "gpt-5.4", opener.configs[3].Profile)
 	assert.Contains(t, toolNamesFromConfig(opener.configs[0]), "r42_collection_checkpoint")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[0]), "r42_starlark")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[0]), "r42_read_information_needs")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[1]), "r42_collection_qc_verdict")
+	assert.NotContains(t, toolNamesFromConfig(opener.configs[1]), "r42_starlark")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[1]), "r42_read_information_needs")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[2]), "r42_starlark")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_complete")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_update_issues")
 	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_qc_expand_quote")
-	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_final_qc_calculator")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[3]), "r42_starlark")
 	var calculator sdk.Tool
 	for _, tool := range opener.configs[3].Tools {
-		if tool.Name == "r42_final_qc_calculator" {
+		if tool.Name == "r42_starlark" {
 			calculator = tool
 			break
 		}
 	}
 	assert.Contains(t, calculator.Description, "at most 20 accepted calls")
-	assert.Contains(t, opener.configs[3].SystemPrompt, "r42_final_qc_calculator")
+	assert.Contains(t, opener.configs[3].SystemPrompt, "r42_starlark")
 	assert.Contains(t, opener.configs[3].SystemPrompt, "r42_qc_expand_quote")
 	assert.NotContains(t, opener.configs[0].ExcludedTools, "powershell")
 	assert.Contains(t, opener.configs[0].ExcludedTools, "shell")
@@ -81,6 +85,47 @@ research "static" "source" {
 	assert.Equal(t, 1, opener.collectionQC.closeCalls)
 	assert.Equal(t, 1, opener.research.closeCalls)
 	assert.Equal(t, 1, opener.qc.closeCalls)
+}
+
+func TestProductionRuntimeCollectionStarlarkIsNotAnAcquisitionCall(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+research "static" "source" {
+  model         = "test-model"
+  system_prompt = "Collect evidence."
+}
+`), 0o600))
+	runner := &phaseModeStarlarkRunner{responses: []starlarktool.WorkerResponse{{
+		Result: &starlarktool.Result{ResultJSON: `42`, Steps: 1},
+	}}}
+	opener := &qcOpener{}
+	opener.beforeCollection = func(config copilot.SessionConfig) error {
+		for _, tool := range config.Tools {
+			if tool.Name != "r42_starlark" {
+				continue
+			}
+			result, err := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{
+				"code": "result = 42", "data_json": "null",
+			}})
+			if err != nil {
+				return err
+			}
+			opener.collectionStarlarkResult = result.TextResultForLLM
+			return nil
+		}
+		return errors.New("collection session did not receive r42_starlark")
+	}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener, StarlarkRunner: runner})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+
+	require.NoError(t, err)
+	assert.Contains(t, opener.collectionStarlarkResult, `"accepted":true`)
+	require.Len(t, runner.requests, 1)
 }
 
 func TestProductionRuntimeExposesCollectionQCCriteriaBeforePlan(t *testing.T) {
@@ -414,12 +459,14 @@ research "static" "source" {
 }
 
 type qcOpener struct {
-	mu           sync.Mutex
-	configs      []copilot.SessionConfig
-	collection   countingSession
-	collectionQC countingSession
-	research     countingSession
-	qc           qcSession
+	mu                       sync.Mutex
+	configs                  []copilot.SessionConfig
+	collection               countingSession
+	collectionQC             countingSession
+	research                 countingSession
+	qc                       qcSession
+	beforeCollection         func(copilot.SessionConfig) error
+	collectionStarlarkResult string
 }
 
 func (o *qcOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Session, error) {
@@ -428,7 +475,11 @@ func (o *qcOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Se
 	o.mu.Unlock()
 	switch workflowSessionKind(config) {
 	case "collection":
-		return &protocolFixtureSession{config: config, session: &o.collection}, nil
+		fixture := &protocolFixtureSession{config: config, session: &o.collection}
+		if o.beforeCollection == nil {
+			return fixture, nil
+		}
+		return &beforeSendSession{before: func() error { return o.beforeCollection(config) }, session: fixture}, nil
 	case "collection_qc":
 		return &protocolFixtureSession{config: config, session: &o.collectionQC}, nil
 	case "research":
@@ -437,6 +488,24 @@ func (o *qcOpener) Open(_ context.Context, config copilot.SessionConfig) (cli.Se
 	o.qc.config = config
 	return &o.qc, nil
 }
+
+type beforeSendSession struct {
+	before  func() error
+	session cli.Session
+}
+
+func (s *beforeSendSession) SendAndWait(ctx context.Context, options sdk.MessageOptions) (*sdk.SessionEvent, error) {
+	if s.before != nil {
+		before := s.before
+		s.before = nil
+		if err := before(); err != nil {
+			return nil, err
+		}
+	}
+	return s.session.SendAndWait(ctx, options)
+}
+
+func (s *beforeSendSession) Close(ctx context.Context) error { return s.session.Close(ctx) }
 
 type countingSession struct {
 	mu                    sync.Mutex

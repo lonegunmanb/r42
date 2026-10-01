@@ -361,7 +361,6 @@ func registerResearchBlocks() {
 		golden.RegisterBlock(new(mcpspec.ServerBlock))
 		golden.RegisterBlock(new(toolspec.GoToolBlock))
 		golden.RegisterBlock(new(toolspec.ExternalToolBlock))
-		golden.RegisterBlock(new(toolspec.StarlarkToolBlock))
 		golden.RegisterBlock(new(researchspec.ResearchBlock))
 		golden.RegisterBlock(new(researchspec.DynamicResearchBlock))
 		golden.RegisterBlock(new(s3spec.ProviderBlock))

@@ -67,6 +67,7 @@ type ResearchBlock struct {
 	CollectionBatchSize             *int                  `hcl:"collection_batch_size,optional"`
 	MaxCollectionRounds             *int                  `hcl:"max_collection_rounds,optional"`
 	CollectionQCBlocks              []CollectionQCBlock   `hcl:"collection_qc,block"`
+	StarlarkBlocks                  []StarlarkBlock       `hcl:"starlark,block"`
 
 	planned                Config
 	plannedPath            cty.Value
@@ -421,6 +422,7 @@ func (b *ResearchBlock) Values() map[string]cty.Value {
 		"collection_batch_size":               optionalIntValue(b.CollectionBatchSize),
 		"max_collection_rounds":               optionalIntValue(b.MaxCollectionRounds),
 		"collection_qc":                       collectionQCBlockValues(b.CollectionQCBlocks),
+		"starlark":                            starlarkBlockValues(b.StarlarkBlocks),
 	}
 	if b.planned.TerminateToolID != nil {
 		values["result"] = cty.UnknownVal(cty.String)
@@ -672,6 +674,9 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 	if len(b.CollectionQCBlocks) > 1 {
 		return Config{}, errors.New("research must have at most one collection_qc block")
 	}
+	if len(b.StarlarkBlocks) > 1 {
+		return Config{}, errors.New("research must have at most one starlark block")
+	}
 	timeout, err := optionalDuration(b.Timeout, "timeout")
 	if err != nil {
 		return Config{}, err
@@ -722,6 +727,13 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 		CollectionBatchSizeSet:          b.CollectionBatchSize != nil,
 		MaxCollectionRounds:             defaultMaxCollectionRounds(b.MaxCollectionRounds),
 		MaxCollectionRoundsSet:          b.MaxCollectionRounds != nil,
+		Starlark:                        DefaultStarlarkConfig(),
+	}
+	if len(b.StarlarkBlocks) == 1 {
+		config.Starlark, err = b.StarlarkBlocks[0].config()
+		if err != nil {
+			return Config{}, err
+		}
 	}
 	if config.Policy.DisallowedTools == nil {
 		config.Policy.DisallowedTools = []string{"ask_user"}
@@ -756,8 +768,13 @@ func (b *ResearchBlock) toConfig() (Config, error) {
 		config.ToolUses = make([]ToolUse, len(b.ToolUseBlocks))
 		for index, block := range b.ToolUseBlocks {
 			config.ToolUses[index] = block.toToolUse()
-			config.Policy.ToolIDs = append(config.Policy.ToolIDs, block.ToolID)
+			if block.ToolID != StarlarkToolName {
+				config.Policy.ToolIDs = append(config.Policy.ToolIDs, block.ToolID)
+			}
 			if block.Terminate {
+				if block.ToolID == StarlarkToolName {
+					return Config{}, errors.New("the builtin starlark tool cannot terminate research")
+				}
 				toolID := block.ToolID
 				config.TerminateToolID = &toolID
 			}

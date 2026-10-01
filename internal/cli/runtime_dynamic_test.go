@@ -83,6 +83,13 @@ output "followup_results" {
 		cty.StringVal("beta"),
 	})))
 	assert.ElementsMatch(t, []string{"alpha", "beta"}, opener.Prompts())
+	for _, config := range opener.Configs() {
+		if workflowSessionKind(config) == "collection_qc" {
+			assert.NotContains(t, toolNamesFromConfig(config), "r42_starlark")
+			continue
+		}
+		assert.Contains(t, toolNamesFromConfig(config), "r42_starlark")
+	}
 
 	resumedOpener := &dynamicTestOpener{topics: []string{"changed"}}
 	resumedRuntime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: resumedOpener})

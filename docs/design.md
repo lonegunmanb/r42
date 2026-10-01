@@ -1,13 +1,9 @@
 # r42 Research DAG DSL Design
 
-Status: current contract plus approved `phase_mode`/`starlark_tool` and
-`--ui=jsonl` targets
+Status: current contract plus approved `--ui=jsonl` target
 
-This document is the normative r42 execution contract. The `phase_mode`,
-`starlark_tool`, and revised SecJury sections describe the approved target that
-is not implemented yet; their delivery sequence is tracked in
-[phase-modes-starlark-development-plan.md](phase-modes-starlark-development-plan.md).
-The `--ui=jsonl` machine-progress target is tracked in
+This document is the normative r42 execution contract. The `--ui=jsonl`
+machine-progress target is tracked in
 [jsonl-progress-implementation.md](jsonl-progress-implementation.md).
 When this document and an example disagree, the explicit rules here win.
 
@@ -118,7 +114,6 @@ The first version has these root-level declarations:
   declarations.
 - `go_tool`: a typed tool implemented by inline Go source.
 - `external_tool`: a typed tool implemented by a child process.
-- `starlark_tool`: an isolated, resource-bounded numerical scratchpad.
 - `research`: a `full`, `collection_only`, or `research_only` workflow, with
   optional Final QC where the selected mode permits it.
 - `module`: a statically planned child directory.
@@ -577,7 +572,7 @@ set, or tuple returns null, one element returns that element, and more than one
 element is an error.
 
 The generated ID is also the SDK registration name. It has the form
-`tool_<go_tool|external_tool|starlark_tool>_<name>_<uuid>`, is at most 64
+`tool_<go_tool|external_tool>_<name>_<uuid>`, is at most 64
 characters, and is derived from the canonical address so module instances
 cannot collide.
 
@@ -706,25 +701,42 @@ the original error.
 Without `--debug`, a failed tool includes at most the final 64 KiB of stderr in
 the CLI diagnostic and does not persist full stderr. Debug mode persists it.
 
-### Isolated `starlark_tool`
+### Built-in `r42_starlark`
 
-`starlark_tool` is a generic numerical scratchpad for LLM-generated programs.
-It is not a DCF engine and has no business-specific input or output schema. It
-uses `github.com/google/starlark-go` through the `go.starlark.net` module and is
-declared as follows:
+`r42_starlark` is a generic numerical scratchpad for LLM-generated programs.
+It is a built-in typed tool owned by every static research block and materialized
+dynamic task, rather than a root declaration. It is automatically registered in
+Collection, Research, and Final QC, but not Collection QC. It is not a DCF
+engine and has no business-specific input or output schema. It uses
+`github.com/google/starlark-go` through the `go.starlark.net` module.
+
+A static research block may omit `starlark` to use the bounded defaults or
+declare at most one nested block to override them:
 
 ```hcl
-starlark_tool "calculator" {
-  description      = "Execute isolated numerical Starlark programs."
-  max_steps        = 1000000
-  timeout          = "5s"
-  max_source_bytes = 65536
-  max_data_bytes   = 1048576
-  max_result_bytes = 1048576
-  max_stdout_bytes = 16384
-  memory_limit     = 134217728
+research "static" "calculator" {
+  model         = "gpt-5.6-sol"
+  system_prompt = "Calculate values."
+
+  starlark {
+    description      = "Execute isolated numerical Starlark programs."
+    max_steps        = 1000000
+    timeout          = "5s"
+    max_source_bytes = 65536
+    max_data_bytes   = 1048576
+    max_result_bytes = 1048576
+    max_stdout_bytes = 16384
+    memory_limit     = 134217728
+  }
 }
 ```
+
+A dynamic task uses one optional `starlark` object with the same fields. The
+fixed tool name is `r42_starlark`; it is never listed in `collection_tool_ids`
+or `tool_ids`. It may be referenced by `tool_use` with
+`tool_id = "r42_starlark"`, but it cannot terminate research. Each eligible
+session defaults to 20 accepted calls; `tool_call_quota = { r42_starlark = N }`
+overrides that session's limit.
 
 The registered typed-tool input is fixed:
 
@@ -794,12 +806,8 @@ and data never become temporary source files; diagnostics use the virtual name
 no filesystem, environment, network, subprocess, clock, randomness, or mutable
 host object. Cancellation and timeout terminate the worker process tree.
 
-Final QC always has a numerical calculator available. If the QC configuration
-does not include a `starlark_tool`, r42 injects `r42_final_qc_calculator` with
-the bounded defaults above (1,000,000 steps, 5 seconds, 64 KiB source, 1 MiB
-input and result, 16 KiB stdout, and 128 MiB memory). If a QC configuration
-already provides a Starlark tool, that configured tool is reused instead of
-adding a second calculator.
+Final QC always receives the same `r42_starlark` configuration as its owning
+research unit. There is exactly one calculator in each eligible session.
 
 The execution environment predeclares:
 
@@ -1119,7 +1127,7 @@ value, equity bridge, implied return, and a complete odd square WACC/terminal
 growth sensitivity grid. It is not upgraded to a different DCF version.
 
 Acquisition and calculation happen in the same Collection context. All derived
-numeric work must be performed through the configured `starlark_tool`; the LLM
+numeric work must be performed through the built-in `r42_starlark`; the LLM
 may write the program required by the data available at that moment, inspect a
 repairable rejection, and retry. Raw source retrieval and extraction are not
 numerical calculations. If a calculation exposes a missing raw input, the same
@@ -1628,7 +1636,7 @@ Plan validates all information that is structurally available:
 - Typed-tool IDs, registry membership, and `tool_name()` argument kind.
 - Duration syntax and non-negative retry/attempt/concurrency values.
 - `phase_mode` and all mode-specific required/forbidden field combinations.
-- `starlark_tool` resource values and hard caps.
+- Nested `starlark` resource values and hard caps.
 
 Plan deliberately does not validate:
 

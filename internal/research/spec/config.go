@@ -103,6 +103,7 @@ type Config struct {
 	MaxCollectionRounds             *int
 	MaxCollectionRoundsSet          bool
 	CollectionQC                    *CollectionQCConfig
+	Starlark                        StarlarkConfig
 }
 
 const (
@@ -179,6 +180,13 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.SystemPrompt) == "" {
 		return errors.New("research system prompt is required")
+	}
+	starlark := c.Starlark
+	if starlark == (StarlarkConfig{}) {
+		starlark = DefaultStarlarkConfig()
+	}
+	if err := starlark.validate(); err != nil {
+		return err
 	}
 	if err := validateFinalQCStrictness(defaultFinalQCStrictness(c.FinalQCStrictness)); err != nil {
 		return fmt.Errorf("research: %w", err)

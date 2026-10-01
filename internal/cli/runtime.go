@@ -317,68 +317,50 @@ type runtimeFactory struct {
 	s3EnvLookup           internals3.EnvLookup
 }
 
-const (
-	finalQCCalculatorToolID            = "r42_final_qc_calculator"
-	finalQCCalculatorTimeout           = 5 * time.Second
-	finalQCCalculatorMemoryLimit int64 = 128 << 20
-)
+const defaultStarlarkToolCallQuota = 20
 
-func defaultFinalQCCalculatorDefinition() plan.ToolSpec {
-	defaults := starlarktool.DefaultConfig()
+func builtinStarlarkDefinition(settings researchspec.StarlarkConfig) plan.ToolSpec {
 	return plan.ToolSpec{
-		ID:      finalQCCalculatorToolID,
-		Address: "r42.starlark.final_qc_calculator",
-		Kind:    string(config.AddressKindStarlark),
-		Description: "Perform isolated, resource-bounded numerical calculations for Final QC. " +
-			"code is Starlark source and data_json is one JSON value; read it as data " +
-			"and assign a JSON-compatible value to top-level result. Available values " +
-			"are data, math, stats, matrix, and fail; imports, files, network, and " +
-			"processes are unavailable.",
+		ID:          researchspec.StarlarkToolName,
+		Address:     "builtin.starlark",
+		Kind:        string(config.AddressKindBuiltin),
+		Description: settings.Description + starlarktool.UsageContract,
 		Starlark: &plan.StarlarkToolSpec{
-			MaxSteps:       defaults.MaxSteps,
-			TimeoutNanos:   int64(finalQCCalculatorTimeout),
-			MaxSourceBytes: defaults.MaxSourceBytes,
-			MaxDataBytes:   defaults.MaxDataBytes,
-			MaxResultBytes: defaults.MaxResultBytes,
-			MaxStdoutBytes: defaults.MaxStdoutBytes,
-			MemoryLimit:    int(finalQCCalculatorMemoryLimit),
+			MaxSteps: settings.MaxSteps, TimeoutNanos: int64(settings.Timeout),
+			MaxSourceBytes: settings.MaxSourceBytes, MaxDataBytes: settings.MaxDataBytes,
+			MaxResultBytes: settings.MaxResultBytes, MaxStdoutBytes: settings.MaxStdoutBytes,
+			MemoryLimit: settings.MemoryLimit,
 		},
 	}
 }
 
-type finalQCCalculatorOptions struct {
-	ctx               context.Context
-	blockAddress      string
-	sessionKind       debuglog.SessionKind
-	configuredToolIDs []string
-	tools             []sdk.Tool
-	typedQuota        map[string]int
+func starlarkToolQuota(limits map[string]int) map[string]int {
+	result := maps.Clone(limits)
+	if result == nil {
+		result = make(map[string]int)
+	}
+	if _, configured := result[researchspec.StarlarkToolName]; !configured {
+		result[researchspec.StarlarkToolName] = defaultStarlarkToolCallQuota
+	}
+	return result
 }
 
-func (f *runtimeFactory) ensureFinalQCCalculator(
-	opts finalQCCalculatorOptions,
-) ([]sdk.Tool, string, error) {
-	definitions, err := f.resolveToolDefinitions(opts.configuredToolIDs, nil)
-	if err != nil {
-		return nil, "", err
-	}
-	for _, definition := range definitions {
-		if definition.Kind == string(config.AddressKindStarlark) {
-			return opts.tools, definition.ID, nil
-		}
-	}
-	definition := defaultFinalQCCalculatorDefinition()
-	if opts.typedQuota == nil {
-		opts.typedQuota = make(map[string]int)
-	}
-	opts.typedQuota[definition.ID] = 20
+func (f *runtimeFactory) appendStarlarkTool(
+	ctx context.Context,
+	blockAddress string,
+	sessionKind debuglog.SessionKind,
+	settings researchspec.StarlarkConfig,
+	tools []sdk.Tool,
+	quota *toolCallQuota,
+) ([]sdk.Tool, error) {
+	definition := builtinStarlarkDefinition(settings)
 	calculator, err := f.buildStarlarkTool(
-		opts.ctx, opts.blockAddress, opts.sessionKind, definition, newToolCallQuota(opts.typedQuota),
+		ctx, blockAddress, sessionKind, definition, quota,
 	)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	return append(opts.tools, calculator), definition.ID, nil
+	return append(tools, calculator), nil
 }
 
 type starlarkRunner interface {
@@ -605,7 +587,7 @@ func (f *runtimeFactory) buildTools(
 	result := make([]sdk.Tool, 0, len(definitions))
 	terminalType := cty.NilType
 	for _, definition := range definitions {
-		if definition.Kind == string(config.AddressKindStarlark) {
+		if definition.Starlark != nil {
 			tool, err := f.buildStarlarkTool(ctx, blockAddress, sessionKind, definition, quota)
 			if err != nil {
 				return nil, cty.NilType, err
@@ -1131,7 +1113,7 @@ func splitToolCallQuota(limits map[string]int) (map[string]int, map[string]int) 
 	typed := make(map[string]int)
 	builtIn := make(map[string]int)
 	for name, limit := range limits {
-		if plan.IsToolID(name) {
+		if plan.IsToolID(name) || name == researchspec.StarlarkToolName {
 			typed[name] = limit
 			continue
 		}

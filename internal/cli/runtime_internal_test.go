@@ -447,7 +447,7 @@ func TestStarlarkToolHandlerReturnsRepairableFailuresAndRecordsCalls(t *testing.
 	recorder, err := debuglog.NewRecorder(t.TempDir(), true)
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, recorder.Close()) })
-	const toolID = "tool_starlark_tool_calculator_12345678-1234-8234-9234-123456789abc"
+	const toolID = "r42_starlark"
 	runner := &fakeStarlarkRunner{responses: []starlarktool.WorkerResponse{
 		{Error: &starlarktool.WorkerError{
 			Code: "starlark_parse_error", Message: "calculator.star:1:10: got EOF", Stdout: "partial output\n",
@@ -457,7 +457,7 @@ func TestStarlarkToolHandlerReturnsRepairableFailuresAndRecordsCalls(t *testing.
 	factory := &runtimeFactory{
 		recorder: recorder, state: new(runtimeState), starlarkRunner: runner,
 		tools: map[string]plan.ToolSpec{toolID: {
-			ID: toolID, Address: "starlark_tool.calculator", Kind: "starlark", Description: "Calculate values.",
+			ID: toolID, Address: "builtin.starlark", Kind: "builtin", Description: "Calculate values.",
 			Starlark: &plan.StarlarkToolSpec{MaxSteps: 100, TimeoutNanos: int64(time.Second), MaxSourceBytes: 1000, MaxDataBytes: 1000, MaxResultBytes: 1000, MaxStdoutBytes: 100, MemoryLimit: 1024},
 		}},
 	}
@@ -485,6 +485,34 @@ func TestStarlarkToolHandlerReturnsRepairableFailuresAndRecordsCalls(t *testing.
 
 	_, err = tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{"code": "result = 1", "data_json": "null"}})
 	assert.ErrorContains(t, err, "per-session call quota exhausted")
+}
+
+func TestStarlarkToolQuotaUsesDefaultUnlessExplicitlyConfigured(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    map[string]int
+		expected int
+	}{
+		{name: "default", expected: 20},
+		{name: "override", input: map[string]int{"r42_starlark": 7}, expected: 7},
+		{name: "disabled", input: map[string]int{"r42_starlark": 0}, expected: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := starlarkToolQuota(tt.input)
+
+			assert.Equal(t, tt.expected, result["r42_starlark"])
+			if tt.input == nil {
+				return
+			}
+			assert.Equal(t, tt.expected, tt.input["r42_starlark"])
+			result["other"] = 1
+			assert.NotContains(t, tt.input, "other")
+		})
+	}
 }
 
 func TestStarlarkToolIssueProvidesBoundedRepairGuidance(t *testing.T) {
@@ -517,12 +545,12 @@ func TestStarlarkToolHandlerKeepsWorkerExitRepairable(t *testing.T) {
 	}}}
 	factory := &runtimeFactory{
 		recorder: recorder, state: new(runtimeState), starlarkRunner: runner,
-		tools: map[string]plan.ToolSpec{"tool_calculator": {
-			ID: "tool_calculator", Address: "starlark_tool.calculator", Kind: "starlark", Description: "Calculate values.",
+		tools: map[string]plan.ToolSpec{"r42_starlark": {
+			ID: "r42_starlark", Address: "builtin.starlark", Kind: "builtin", Description: "Calculate values.",
 			Starlark: &plan.StarlarkToolSpec{MaxSteps: 100, TimeoutNanos: int64(time.Second), MaxSourceBytes: 1000, MaxDataBytes: 1000, MaxResultBytes: 1000, MaxStdoutBytes: 100, MemoryLimit: 1024},
 		}},
 	}
-	tools, _, err := factory.buildTools(t.Context(), "research.static.source", debuglog.SessionResearch, t.TempDir(), []string{"tool_calculator"}, nil, nil, newToolCallQuota(nil))
+	tools, _, err := factory.buildTools(t.Context(), "research.static.source", debuglog.SessionResearch, t.TempDir(), []string{"r42_starlark"}, nil, nil, newToolCallQuota(nil))
 	require.NoError(t, err)
 
 	result, err := tools[0].Handler(sdk.ToolInvocation{Arguments: map[string]any{"code": "result = 1", "data_json": "null"}})
