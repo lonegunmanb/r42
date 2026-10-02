@@ -294,7 +294,14 @@ research "static" "custom" {
 	blocks := golden.Blocks[*researchspec.ResearchBlock](config)
 	require.Len(t, blocks, 2)
 
-	defaults := blocks[0].ResearchConfig().Starlark
+	configs := make(map[string]researchspec.StarlarkConfig, len(blocks))
+	for _, block := range blocks {
+		configs[block.Name()] = block.ResearchConfig().Starlark
+	}
+	require.Contains(t, configs, "defaults")
+	require.Contains(t, configs, "custom")
+
+	defaults := configs["defaults"]
 	assert.Equal(t, "Execute isolated, resource-bounded numerical Starlark programs.", defaults.Description)
 	assert.Equal(t, 1_000_000, defaults.MaxSteps)
 	assert.Equal(t, 5*time.Second, defaults.Timeout)
@@ -304,7 +311,7 @@ research "static" "custom" {
 	assert.Equal(t, 16_384, defaults.MaxStdoutBytes)
 	assert.Equal(t, 134_217_728, defaults.MemoryLimit)
 
-	custom := blocks[1].ResearchConfig().Starlark
+	custom := configs["custom"]
 	assert.Equal(t, "Calculate audited values.", custom.Description)
 	assert.Equal(t, 42, custom.MaxSteps)
 	assert.Equal(t, 6*time.Second, custom.Timeout)
