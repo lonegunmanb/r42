@@ -569,15 +569,6 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = directory.Close() }()
-	return directory.Sync()
-}
-
 func validateCheckpointID(id string) error {
 	if strings.TrimSpace(id) == "" || filepath.Base(id) != id || strings.Contains(id, string(filepath.Separator)) {
 		return fmt.Errorf("invalid checkpoint id %q", id)

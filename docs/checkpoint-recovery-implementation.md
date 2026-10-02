@@ -2,6 +2,8 @@
 
 Status: P1-T24 complete
 
+Windows checkpoint directory-sync compatibility fix: complete.
+
 ## Assumptions
 
 - A registered artifact is modified by at most one session at a time, and a
@@ -40,6 +42,9 @@ Success criteria:
   though it has no internal workflow handoff.
 - The checkpoint snapshot only controls local files and host state. Calls to
   external services must be independently idempotent.
+- Windows syncs checkpoint files before publication but skips directory sync:
+  the read-only directory handles opened by Go cannot be flushed. Directory
+  metadata therefore has no explicit sync guarantee against power loss.
 
 ## Block/task recovery protocol
 

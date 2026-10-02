@@ -13,6 +13,39 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestStoreCommitPublishesLatestCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"empty workspace", "populated workspace"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			runDirectory := t.TempDir()
+			workspace := filepath.Join(runDirectory, "workspace")
+			require.NoError(t, os.MkdirAll(workspace, 0o700))
+			if name == "populated workspace" {
+				require.NoError(t, os.WriteFile(filepath.Join(workspace, "report.md"), []byte("report"), 0o600))
+			}
+			store := checkpoint.NewStore(runDirectory)
+			for _, id := range []string{"first", "second"} {
+				payload := json.RawMessage(`{"checkpoint":"` + id + `"}`)
+				require.NoError(t, store.Commit(checkpoint.State{
+					CheckpointID: id, Payload: payload, WorkspaceRoots: []string{workspace},
+				}))
+
+				loaded, err := checkpoint.NewStore(runDirectory).Load()
+				require.NoError(t, err)
+				assert.Equal(t, id, loaded.CheckpointID)
+				assert.JSONEq(t, string(payload), string(loaded.Payload))
+				assert.Len(t, loaded.Workspaces, 1)
+			}
+			entries, err := os.ReadDir(filepath.Join(runDirectory, "checkpoints"))
+			require.NoError(t, err)
+			assert.Len(t, entries, 3, "only two committed checkpoints and the latest pointer remain")
+		})
+	}
+}
+
 func TestStoreRestoreReinstatesCommittedArtifactWorkspace(t *testing.T) {
 	t.Parallel()
 
