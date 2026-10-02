@@ -281,7 +281,79 @@ func TestCollectionBuiltInHooksEnforceCheckpointGate(t *testing.T) {
 
 	unrelated, err := hooks.OnPreToolUse(sdk.PreToolUseHookInput{ToolName: "some_read_only_tool"}, sdk.HookInvocation{})
 	require.NoError(t, err)
-	assert.Equal(t, "allow", unrelated.PermissionDecision)
+	assert.Equal(t, "deny", unrelated.PermissionDecision)
+}
+
+func TestCollectionHooksRejectAllToolsAfterCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{
+		"view", "grep", "powershell", "web_search", "web_fetch", "mcp:market-quote",
+		"r42_read_artifact", "r42_read_information_needs", "r42_starlark",
+		"r42_register_artifact", "r42_collection_checkpoint", "unknown_tool",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			context := collection.NewContext(t.TempDir(), 10, nil)
+			freezeTestInformationNeeds(t, context)
+			hooks := collectionBuiltInHooks(newToolCallQuota(map[string]int{name: 1}), context)
+			checkpoint := collection.NewCheckpointHandler(context).Submit(collection.CheckpointArgs{
+				EmptyReason: "no evidence found",
+				NeedDispositions: []collection.NeedDisposition{{
+					InformationNeedID: "NEED-001", SearchDisposition: collection.SearchDispositionContinue,
+				}},
+			})
+			require.True(t, checkpoint.Accepted)
+
+			denied, err := hooks.OnPreToolUse(sdk.PreToolUseHookInput{ToolName: name}, sdk.HookInvocation{})
+			require.NoError(t, err)
+			assert.Equal(t, "deny", denied.PermissionDecision)
+			assert.Contains(t, denied.PermissionDecisionReason, "r42_collection_checkpoint")
+			assert.Contains(t, denied.PermissionDecisionReason, "End your current assistant reply immediately")
+			assert.Contains(t, denied.PermissionDecisionReason, "only after this reply ends")
+
+			context.BeginNextCollectionRound()
+			allowed, err := hooks.OnPreToolUse(sdk.PreToolUseHookInput{ToolName: name}, sdk.HookInvocation{})
+			require.NoError(t, err)
+			assert.Equal(t, "allow", allowed.PermissionDecision, "checkpoint rejection must not consume quota")
+			_, err = hooks.OnPostToolUse(sdk.PostToolUseHookInput{ToolName: name}, sdk.HookInvocation{})
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestCollectionRoundToolsBlockHandlerExecutionAfterCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	context := collection.NewContext(t.TempDir(), 10, nil)
+	calls := 0
+	tools := wrapCollectionRoundTools([]sdk.Tool{{
+		Name: "read", Handler: func(sdk.ToolInvocation) (sdk.ToolResult, error) {
+			calls++
+			return sdk.ToolResult{}, assert.AnError
+		},
+	}}, context)
+	_, err := tools[0].Handler(sdk.ToolInvocation{})
+	require.ErrorIs(t, err, assert.AnError, "reads before freezing the plan must still reach their handler")
+	freezeTestInformationNeeds(t, context)
+	checkpoint := collection.NewCheckpointHandler(context).Submit(collection.CheckpointArgs{
+		EmptyReason: "no evidence found",
+		NeedDispositions: []collection.NeedDisposition{{
+			InformationNeedID: "NEED-001", SearchDisposition: collection.SearchDispositionContinue,
+		}},
+	})
+	require.True(t, checkpoint.Accepted)
+
+	result, err := tools[0].Handler(sdk.ToolInvocation{})
+	require.NoError(t, err)
+	assert.Equal(t, "failure", result.ResultType)
+	assert.Contains(t, result.TextResultForLLM, "collection_round_complete")
+	assert.Equal(t, 1, calls, "rejected calls must not execute the handler")
+
+	context.BeginNextCollectionRound()
+	_, err = tools[0].Handler(sdk.ToolInvocation{})
+	require.ErrorIs(t, err, assert.AnError)
+	assert.Equal(t, 2, calls)
 }
 
 func TestCollectionMarkdownWriterHonorsPlanAndCheckpointGate(t *testing.T) {

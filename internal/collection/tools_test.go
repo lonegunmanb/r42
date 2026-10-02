@@ -11,6 +11,56 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCollectionRoundGate(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		freeze     bool
+		accept     bool
+		nextRound  bool
+		nilContext bool
+	}{
+		{name: "before information needs"},
+		{name: "rejected checkpoint", freeze: true},
+		{name: "accepted checkpoint", freeze: true, accept: true},
+		{name: "next round", freeze: true, accept: true, nextRound: true},
+		{name: "nil context", nilContext: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var context *Context
+			if !tc.nilContext {
+				context = NewContext(t.TempDir(), 10, nil)
+				if tc.freeze {
+					context = newPlannedContext(t, context.Workspace, 10, nil)
+					args := CheckpointArgs{NeedDispositions: testNeedDispositions()}
+					if tc.accept {
+						args.EmptyReason = "no sources found"
+					}
+					response := NewCheckpointHandler(context).Submit(args)
+					require.Equal(t, tc.accept, response.Accepted)
+				}
+				if tc.nextRound {
+					context.BeginNextCollectionRound()
+				}
+			}
+
+			err := context.CollectionRoundGate()
+			switch {
+			case tc.nilContext:
+				require.ErrorContains(t, err, "collection context is required")
+			case tc.accept && !tc.nextRound:
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "End your current assistant reply immediately")
+				assert.Contains(t, err.Error(), "only after this reply ends")
+			default:
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestRegisterToolHandler(t *testing.T) {
 	t.Parallel()
 

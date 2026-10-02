@@ -146,6 +146,45 @@ research "static" "source" {
 	assert.True(t, strings.HasSuffix(opener.configs[2].SystemPrompt, plannedWorkingDirectory))
 }
 
+func TestProductionRuntimeCollectionToolsStopAfterCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(`
+research "static" "source" {
+  model = "test-model"
+  system_prompt = "Collect evidence."
+}
+`), 0o600))
+	opener := &fakeSessionOpener{}
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	planned, err := planRuntime(runtime, t.Context(), directory, nil)
+	require.NoError(t, err)
+	_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+	require.NoError(t, err)
+	require.Len(t, opener.configs, 3)
+	assert.Contains(t, opener.configs[0].SystemPrompt, "End your current assistant reply immediately")
+
+	for _, tool := range opener.configs[0].Tools {
+		t.Run(tool.Name, func(t *testing.T) {
+			t.Parallel()
+			result, callErr := tool.Handler(sdk.ToolInvocation{Arguments: map[string]any{}})
+			require.NoError(t, callErr)
+			assert.Equal(t, "failure", result.ResultType)
+			assert.Contains(t, result.TextResultForLLM, "collection_round_complete")
+			assert.Contains(t, result.TextResultForLLM, "End your current assistant reply immediately")
+			assert.Contains(t, result.TextResultForLLM, "only after this reply ends")
+		})
+	}
+	for _, tool := range opener.configs[1].Tools {
+		if tool.Name == "r42_read_information_needs" {
+			result, callErr := tool.Handler(sdk.ToolInvocation{})
+			require.NoError(t, callErr)
+			assert.Equal(t, "success", result.ResultType, "Collection QC must retain read access")
+		}
+	}
+}
+
 func TestProductionRuntimeUsesPlanKnownFunctionOutputWithoutReevaluation(t *testing.T) {
 	t.Setenv("R42_TEST_PLAN_OUTPUT", "planned-value")
 	directory := t.TempDir()

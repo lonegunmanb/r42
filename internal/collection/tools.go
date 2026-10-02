@@ -23,6 +23,11 @@ const ReadInformationNeedsToolName = "r42_read_information_needs"
 const readInformationNeedsInstruction = "call " + ReadInformationNeedsToolName +
 	" to read active_information_need_states and use the returned canonical information-need IDs"
 
+const collectionRoundCompleteMessage = "r42_collection_checkpoint already accepted for this round. " +
+	"End your current assistant reply immediately without any further tool calls. " +
+	"Ending this reply is how you wait for Collection QC: the host can start Collection QC only after this reply ends. " +
+	"Do not poll for QC or call checkpoint again"
+
 // Context wires the workflow state machine and Artifact Registry for one
 // Collection phase. Checkpoint and review state are deliberately transient.
 type Context struct {
@@ -396,6 +401,20 @@ func (c *Context) informationNeedsFrozen() bool {
 	return len(c.informationNeeds) > 0
 }
 
+// CollectionRoundGate rejects every subsequent Collection tool call after an
+// accepted checkpoint until the host begins the next Collection round.
+func (c *Context) CollectionRoundGate() error {
+	if c == nil {
+		return errors.New("collection context is required")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.checkpointAccepted {
+		return errors.New(collectionRoundCompleteMessage)
+	}
+	return nil
+}
+
 // CollectionToolGate permits a non-read-only Collection tool call only after
 // the plan is frozen and before this round's accepted checkpoint. This is a
 // formal protocol invariant, not an optional switch.
@@ -413,7 +432,7 @@ func (c *Context) collectionToolGateLocked() error {
 		return errors.New("call r42_set_information_needs before any non-read-only Collection tool")
 	}
 	if c.checkpointAccepted {
-		return errors.New("collection checkpoint already accepted for this round; wait for Collection QC")
+		return errors.New(collectionRoundCompleteMessage)
 	}
 	return nil
 }
@@ -881,7 +900,7 @@ func (h *RegisterHandler) Register(args RegisterArgs) corespec.ToolResponse[Regi
 		return rejection[RegistrationOutput]("information_needs_required", "call r42_set_information_needs before collecting evidence")
 	}
 	if h.context.checkpointAccepted {
-		return rejection[RegistrationOutput]("collection_round_complete", "collection checkpoint already accepted for this round; wait for Collection QC")
+		return rejection[RegistrationOutput]("collection_round_complete", collectionRoundCompleteMessage)
 	}
 	hasPath := args.Path != ""
 	hasToolCall := args.SourceToolCallID != ""
@@ -968,7 +987,7 @@ func (h *CheckpointHandler) Submit(args CheckpointArgs) corespec.ToolResponse[Ch
 		return rejection[CheckpointOutput]("information_needs_required", "call r42_set_information_needs before submitting a collection checkpoint")
 	}
 	if h.context.checkpointAccepted {
-		return rejection[CheckpointOutput]("collection_round_complete", "r42_collection_checkpoint may be accepted exactly once in each Collection round")
+		return rejection[CheckpointOutput]("collection_round_complete", collectionRoundCompleteMessage)
 	}
 	if h.context.activeToolCalls > 0 {
 		return rejection[CheckpointOutput]("collection_tools_in_flight", "wait for active Collection tool calls to finish before submitting the checkpoint")

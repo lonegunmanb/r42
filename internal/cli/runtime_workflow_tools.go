@@ -154,6 +154,15 @@ func collectionBuiltInHooks(quota *toolCallQuota, collectionContext *collection.
 	}
 	return &sdk.SessionHooks{
 		OnPreToolUse: func(input sdk.PreToolUseHookInput, _ sdk.HookInvocation) (*sdk.PreToolUseHookOutput, error) {
+			if collectionContext != nil {
+				if err := collectionContext.CollectionRoundGate(); err != nil {
+					//nolint:nilerr // Protocol rejection is a model-visible deny decision, not a hook failure.
+					return &sdk.PreToolUseHookOutput{
+						PermissionDecision:       "deny",
+						PermissionDecisionReason: err.Error(),
+					}, nil
+				}
+			}
 			if (input.ToolName == "web_search" || input.ToolName == "web_fetch") && collectionContext != nil {
 				release, denialReason := beginCollectionAcquisition(collectionContext)
 				if denialReason != "" {
@@ -199,6 +208,22 @@ func beginCollectionAcquisition(collectionContext *collection.Context) (func(), 
 		return nil, err.Error()
 	}
 	return release, ""
+}
+
+func wrapCollectionRoundTools(tools []sdk.Tool, collectionContext *collection.Context) []sdk.Tool {
+	result := slices.Clone(tools)
+	for index := range result {
+		original := result[index].Handler
+		result[index].Handler = func(invocation sdk.ToolInvocation) (sdk.ToolResult, error) {
+			if err := collectionContext.CollectionRoundGate(); err != nil {
+				denied, resultErr := rejectedToolResult("collection_round_complete", err.Error())
+				denied.ResultType = "failure"
+				return denied, resultErr
+			}
+			return original(invocation)
+		}
+	}
+	return result
 }
 
 func wrapCollectionMutationTools(tools []sdk.Tool, collectionContext *collection.Context) []sdk.Tool {
@@ -304,7 +329,9 @@ func collectionProtocolTools(context *collection.Context, checkpoints *collectio
 		},
 		{
 			Name: "r42_collection_checkpoint", Description: "Exactly once in each Collection round, submit all unreviewed evidence artifacts and one continue or stalled disposition for every active information need. " +
-				"This is the final valid tool call of this round; after acceptance Collection QC starts. stalled means you made a genuine search effort for that need and found no productive next search action.",
+				"This is the final valid tool call of this round. After acceptance, end your current assistant reply immediately without any further tool calls. " +
+				"Ending the reply is how you wait for Collection QC; the host starts QC only after the reply ends. " +
+				"stalled means you made a genuine search effort for that need and found no productive next search action.",
 			Parameters: objectSchema(map[string]any{
 				"empty_reason": map[string]any{"type": "string", "description": "Required only when this round added no evidence artifacts"},
 				"need_dispositions": map[string]any{"type": "array", "items": objectSchema(map[string]any{

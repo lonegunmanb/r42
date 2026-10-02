@@ -977,9 +977,14 @@ Path-based source immutability is not guaranteed.
 
 Each Collection round must call `r42_collection_checkpoint` exactly once with
 one `continue` or `stalled` disposition for every active need; it is the final
-valid tool call of the round, after which Collection's non-read-only tools
-lock. `stalled` means Collection made a genuine search effort for that need and
-found no productive next search action. A checkpoint includes every newly
+valid tool call of the round. After acceptance, every subsequent Collection
+tool call is rejected, including read-only, calculator, built-in, MCP, and
+protocol tools. The rejection tells Collection to end its current reply
+immediately without further tool calls: ending the reply is how it waits for
+Collection QC, which the host starts only after the reply ends. A rejected
+checkpoint does not lock the round. Tools reopen only when the host begins a
+new Collection round after QC. `stalled` means Collection made a genuine search
+effort for that need and found no productive next search action. A checkpoint includes every newly
 registered evidence artifact. An empty checkpoint is valid only with a
 non-empty `empty_reason`. Reaching `collection_batch_size` sets
 `checkpoint_pending`: new acquisition calls are rejected, but already in-flight
