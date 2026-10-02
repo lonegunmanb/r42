@@ -145,7 +145,8 @@ func (r *probeRuntime) serve() {
 			result["messageId"] = fmt.Sprintf("message-%d", messageCount)
 		case "session.options.update":
 			result["success"] = true
-		case "session.destroy":
+		case "session.detach":
+			result["success"] = true
 		default:
 			r.report(fmt.Errorf("unexpected rpc method %q", request.Method))
 			return

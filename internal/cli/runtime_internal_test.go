@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -874,6 +875,37 @@ func TestRecordingSessionRecordsSessionLifecycleAndWaitState(t *testing.T) {
 	lifecycleError := findEvent(t, events, "session.error", debuglog.StatusFailed)
 	assert.Equal(t, "provider unavailable", lifecycleError.Error)
 	assert.Equal(t, "provider unavailable", lifecycleError.Content)
+}
+
+func TestRecordingSessionRecordsTaskCompletionWithoutRemovedSDKFields(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	recorder, err := debuglog.NewRecorder(directory, true)
+	require.NoError(t, err)
+	recorded := &recordingSession{
+		recorder: recorder, address: "research.source", kind: debuglog.SessionResearch,
+	}
+	event := &sdk.SessionEvent{
+		ID:   "task-complete",
+		Data: &sdk.SessionTaskCompleteData{},
+	}
+
+	require.NoError(t, recorded.recordSessionEvent(event))
+	require.NoError(t, recorder.Close())
+
+	content, err := os.ReadFile(filepath.Join(directory, debuglog.EventsFileName))
+	require.NoError(t, err)
+	var lifecycle debuglog.Event
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(content), &lifecycle))
+	assert.Equal(t, debuglog.EventLifecycle, lifecycle.Kind)
+	assert.Equal(t, "session.task_complete", lifecycle.Action)
+	assert.Equal(t, debuglog.StatusCompleted, lifecycle.Status)
+	assert.Empty(t, lifecycle.Content)
+	assert.Empty(t, lifecycle.Error)
+	var stored sdk.SessionEvent
+	require.NoError(t, json.Unmarshal(lifecycle.SDKEvent, &stored))
+	assert.Equal(t, sdk.SessionEventTypeSessionTaskComplete, stored.Type())
 }
 
 func TestRecordingSessionWaitStateIsScopedToEachSend(t *testing.T) {
