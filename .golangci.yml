@@ -31,9 +31,18 @@ linters:
     - unused
     - usetesting
   settings:
+    modernize:
+      disable:
+        - newexpr
+        - stditerators
     nolintlint:
       require-explanation: true
       require-specific: true
+  exclusions:
+    rules:
+      - linters:
+          - staticcheck
+        text: '^SA1019:.*github\.com/aws/aws-sdk-go/'
 
 formatters:
   enable:

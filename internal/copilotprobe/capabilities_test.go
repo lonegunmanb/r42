@@ -170,12 +170,12 @@ func TestOfficialSDKReusesSessionAndDisconnects(t *testing.T) {
 	assert.Equal(t, "second turn", second.Params["prompt"])
 
 	require.NoError(t, session.Disconnect())
-	destroy := runtime.nextRequest(t, "session.destroy")
-	assert.Equal(t, session.SessionID, destroy.Params["sessionId"])
+	detach := runtime.nextRequest(t, "session.detach")
+	assert.Equal(t, session.SessionID, detach.Params["sessionId"])
 
 	require.NoError(t, client.Stop())
-	repeatedDestroy := runtime.nextRequest(t, "session.destroy")
-	assert.Equal(t, session.SessionID, repeatedDestroy.Params["sessionId"])
+	repeatedDetach := runtime.nextRequest(t, "session.detach")
+	assert.Equal(t, session.SessionID, repeatedDetach.Params["sessionId"])
 
 	sessionType := reflect.TypeFor[*copilot.Session]()
 	_, hasDisconnect := sessionType.MethodByName("Disconnect")

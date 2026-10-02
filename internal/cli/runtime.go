@@ -2530,13 +2530,6 @@ func (s *recordingSession) recordSessionEvent(event *sdk.SessionEvent) error {
 		recorded.Error = data.Message
 	case *sdk.SessionWarningData:
 		recorded.Content = data.Message
-	case *sdk.SessionTaskCompleteData:
-		if data.Summary != nil {
-			recorded.Content = *data.Summary
-		}
-		if data.Success != nil && !*data.Success {
-			recorded.Status = debuglog.StatusFailed
-		}
 	}
 	return s.recorder.Record(recorded)
 }
