@@ -164,6 +164,65 @@ func TestUploadFilesWithOptionsRejectsEmptyMultipartResponses(t *testing.T) {
 	}
 }
 
+func TestUploadFilesSetsContentTypeFromFileContent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		filename string
+		contents string
+		want     string
+	}{
+		{name: "markdown", filename: "report.md", contents: "# Report\n\nbody\n", want: "text/markdown"},
+		{name: "plain text", filename: "notes.txt", contents: "plain words\n", want: "text/plain"},
+		{name: "json", filename: "snapshot.json", contents: `{"key": "value"}`, want: "application/json"},
+		{name: "json array without extension", filename: "data", contents: `[1, 2, 3]`, want: "application/json"},
+		{name: "unknown binary", filename: "blob", contents: "\x00\x01\x02\xff", want: "application/octet-stream"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			file := writeSourceFile(t, root, tt.filename, tt.contents)
+			client := &fakeClient{put: func(input *awss3.PutObjectInput) (*awss3.PutObjectOutput, error) {
+				assert.Equal(t, tt.want, aws.StringValue(input.ContentType))
+				contents, err := io.ReadAll(input.Body)
+				require.NoError(t, err)
+				assert.Equal(t, tt.contents, string(contents), "detection must not consume or alter uploaded bytes")
+				return &awss3.PutObjectOutput{}, nil
+			}}
+			_, err := internals3.UploadFiles(t.Context(), client, "bucket", "", []s3spec.SourceFile{file}, internals3.RetryPolicy{})
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestUploadFilesWithOptionsSetsContentTypeOnMultipartCreation(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	markdown := "# Report\n\nbody\n"
+	file := writeSourceFile(t, root, "report.md", markdown)
+	client := multipartSuccessClient()
+	var contentType string
+	created := 0
+	client.create = func(input *awss3.CreateMultipartUploadInput) (*awss3.CreateMultipartUploadOutput, error) {
+		created++
+		contentType = aws.StringValue(input.ContentType)
+		return &awss3.CreateMultipartUploadOutput{UploadId: aws.String("upload")}, nil
+	}
+	uploaded := make([]byte, 0, len(markdown))
+	client.uploadPart = func(input *awss3.UploadPartInput) (*awss3.UploadPartOutput, error) {
+		contents, err := io.ReadAll(input.Body)
+		require.NoError(t, err)
+		uploaded = append(uploaded, contents...)
+		return &awss3.UploadPartOutput{ETag: aws.String("etag")}, nil
+	}
+	_, err := internals3.UploadFilesWithOptions(t.Context(), client, "bucket", "", []s3spec.SourceFile{file}, internals3.RetryPolicy{}, internals3.UploadOptions{MultipartThreshold: 1, PartSize: 4})
+	require.NoError(t, err)
+	assert.Equal(t, 1, created)
+	assert.Equal(t, "text/markdown", contentType)
+	assert.Equal(t, markdown, string(uploaded), "detection must not alter multipart uploaded bytes")
+}
+
 func multipartSuccessClient() *fakeClient {
 	return &fakeClient{
 		create: func(*awss3.CreateMultipartUploadInput) (*awss3.CreateMultipartUploadOutput, error) {
