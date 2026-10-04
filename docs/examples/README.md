@@ -134,7 +134,9 @@ secret_key_ref    = "ALIBABA_CLOUD_ACCESS_KEY_SECRET"
 ```
 
 Set `region` to the endpoint's signing region, such as `cn-hangzhou` for this
-OSS endpoint. Optional `force_path_style` defaults to `false`; optional
+OSS endpoint. HTTP endpoints are also accepted for local S3 services; for
+example, set `endpoint = "http://127.0.0.1:9000"` and `force_path_style = true`.
+Optional `force_path_style` defaults to `false`; optional
 `exclude` defaults to `[]`. The default uploads every eligible regular file,
 including saved plans, checkpoints, session files, and debug events when
 present; these may contain sensitive research or configuration data. Set

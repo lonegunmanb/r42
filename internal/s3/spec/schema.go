@@ -61,8 +61,8 @@ func (c ProviderConfig) Validate() error {
 	}
 	if c.Endpoint != "" {
 		endpoint, err := url.Parse(c.Endpoint)
-		if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" {
-			return errors.New("s3 provider endpoint must be an HTTPS URL")
+		if err != nil || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.Host == "" {
+			return errors.New("s3 provider endpoint must be an HTTP or HTTPS URL")
 		}
 	}
 	for name, pair := range map[string][2]*string{

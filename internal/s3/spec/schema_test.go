@@ -17,7 +17,17 @@ func TestS3ProviderConfigValidate(t *testing.T) {
 		want string
 	}{
 		{name: "region required", cfg: s3spec.ProviderConfig{}, want: "region is required"},
-		{name: "endpoint must be https", cfg: s3spec.ProviderConfig{Region: "cn", Endpoint: "http://oss.example.test"}, want: "HTTPS URL"},
+		{name: "default endpoint", cfg: s3spec.ProviderConfig{Region: "cn"}},
+		{name: "https endpoint", cfg: s3spec.ProviderConfig{Region: "cn", Endpoint: "https://oss.example.test"}},
+		{name: "http localhost endpoint", cfg: s3spec.ProviderConfig{Region: "cn", Endpoint: "http://localhost:9000"}},
+		{name: "http ipv4 endpoint", cfg: s3spec.ProviderConfig{Region: "cn", Endpoint: "http://127.0.0.1:9000"}},
+		{name: "http ipv6 endpoint", cfg: s3spec.ProviderConfig{Region: "cn", Endpoint: "http://[::1]:9000"}},
+		{name: "http remote endpoint", cfg: s3spec.ProviderConfig{Region: "cn", Endpoint: "http://minio.example.test:9000"}},
+		{name: "unsupported endpoint scheme", cfg: s3spec.ProviderConfig{Region: "cn", Endpoint: "ftp://localhost:9000"}, want: "HTTP or HTTPS URL"},
+		{name: "endpoint scheme required", cfg: s3spec.ProviderConfig{Region: "cn", Endpoint: "localhost:9000"}, want: "HTTP or HTTPS URL"},
+		{name: "endpoint host required", cfg: s3spec.ProviderConfig{Region: "cn", Endpoint: "http:///bucket"}, want: "HTTP or HTTPS URL"},
+		{name: "https endpoint host required", cfg: s3spec.ProviderConfig{Region: "cn", Endpoint: "https:///bucket"}, want: "HTTP or HTTPS URL"},
+		{name: "malformed endpoint", cfg: s3spec.ProviderConfig{Region: "cn", Endpoint: "http://[::1"}, want: "HTTP or HTTPS URL"},
 		{name: "credential pair", cfg: s3spec.ProviderConfig{Region: "cn", AccessKey: str("a"), AccessKeyRef: str("A")}, want: "access_key and access_key_ref"},
 		{name: "secret pair", cfg: s3spec.ProviderConfig{Region: "cn", SecretKey: str("s"), SecretKeyRef: str("S")}, want: "secret_key and secret_key_ref"},
 		{name: "token pair", cfg: s3spec.ProviderConfig{Region: "cn", SessionToken: str("t"), SessionTokenRef: str("T")}, want: "session_token and session_token_ref"},
@@ -28,6 +38,10 @@ func TestS3ProviderConfigValidate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			err := tt.cfg.Validate()
+			if tt.want == "" {
+				require.NoError(t, err)
+				return
+			}
 			require.Error(t, err)
 			assert.ErrorContains(t, err, tt.want)
 		})

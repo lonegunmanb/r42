@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/aws/aws-sdk-go/aws"
+	awss3 "github.com/aws/aws-sdk-go/service/s3"
 	internals3 "github.com/lonegunmanb/r42/internal/s3"
 	s3spec "github.com/lonegunmanb/r42/internal/s3/spec"
 	"github.com/stretchr/testify/assert"
@@ -38,6 +39,27 @@ func TestNewClientConfiguresS3CompatibleEndpointAndCredentials(t *testing.T) {
 	assert.Equal(t, "access", credentials.AccessKeyID)
 	assert.Equal(t, "secret", credentials.SecretAccessKey)
 	assert.Equal(t, "token", credentials.SessionToken)
+}
+
+func TestNewClientPreservesEndpointSchemeInRequests(t *testing.T) {
+	t.Parallel()
+	for _, scheme := range []string{"http", "https"} {
+		t.Run(scheme, func(t *testing.T) {
+			t.Parallel()
+			client, err := internals3.NewClient(s3spec.ProviderConfig{
+				Endpoint: scheme + "://127.0.0.1:9000", Region: "us-east-1", ForcePathStyle: true,
+				AccessKey: stringp("test-access"), SecretKey: stringp("test-secret"),
+			}, nil, nil)
+			require.NoError(t, err)
+			awsClient, ok := client.(*awss3.S3)
+			require.True(t, ok)
+			request, _ := awsClient.GetBucketVersioningRequest(&awss3.GetBucketVersioningInput{Bucket: aws.String("reports")})
+			require.NoError(t, request.Build())
+			assert.Equal(t, scheme, request.HTTPRequest.URL.Scheme)
+			assert.Equal(t, "127.0.0.1:9000", request.HTTPRequest.URL.Host)
+			assert.Equal(t, "/reports", request.HTTPRequest.URL.Path)
+		})
+	}
 }
 
 func TestNewClientUsesDefaultCredentialChainWhenCredentialsAreUnset(t *testing.T) {

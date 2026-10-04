@@ -43,6 +43,7 @@ func TestExamplesOptionalS3RunUpload(t *testing.T) {
 				{name: "default disabled"},
 				{name: "explicit null", config: "null"},
 				{name: "aws", config: `{ region = "us-east-1", bucket = "reports", prefix = "runs/test" }`},
+				{name: "local http", config: `{ region = "us-east-1", bucket = "reports", prefix = "runs/test", endpoint = "http://127.0.0.1:9000", force_path_style = true }`, endpoint: "http://127.0.0.1:9000"},
 				{name: "oss", config: `{ region = "cn-hangzhou", bucket = "reports", prefix = "runs/test", endpoint = "https://oss-cn-hangzhou.aliyuncs.com", access_key_ref = "S3_TEST_ACCESS", secret_key_ref = "S3_TEST_SECRET" }`, endpoint: "https://oss-cn-hangzhou.aliyuncs.com"},
 				{name: "invalid enabled config", config: `{ region = "", bucket = "reports", prefix = "runs/test" }`, wantError: true},
 			} {
