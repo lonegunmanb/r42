@@ -63,7 +63,7 @@ provider configuration needed at Apply.
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `endpoint` | No | Custom HTTPS endpoint. Omitted means the AWS SDK default endpoint. OSS uses its regional endpoint. |
+| `endpoint` | No | Custom HTTP or HTTPS endpoint. Omitted means the AWS SDK default endpoint. OSS uses its regional endpoint. |
 | `region` | Yes | Signing region. AWS and OSS deployments must provide the region used by the endpoint. |
 | `access_key` / `access_key_ref` | One of each pair, optional | Static access key or environment variable name. At most one may be set. Ref values are resolved only during Apply. |
 | `secret_key` / `secret_key_ref` | One of each pair, optional | Static secret key or environment variable name. At most one may be set. Ref values are resolved only during Apply. |
