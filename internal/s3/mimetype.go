@@ -39,7 +39,7 @@ func detectContentType(filename string) (string, error) {
 	}
 	sample = sample[:n]
 	detected := http.DetectContentType(sample)
-	if detected == "text/plain; charset=utf-8" && json.Valid(sample) {
+	if detected == "text/plain; charset=utf-8" && isJSONObjectOrArray(sample) {
 		return "application/json", nil
 	}
 	ext := strings.ToLower(filepath.Ext(filename))
@@ -52,4 +52,15 @@ func detectContentType(filename string) (string, error) {
 		return hint, nil
 	}
 	return detected, nil
+}
+
+// isJSONObjectOrArray reports whether the sample holds a complete JSON document
+// rooted at an object or array; JSON scalars (numbers, booleans, quoted strings)
+// are treated as plain text rather than JSON.
+func isJSONObjectOrArray(sample []byte) bool {
+	trimmed := strings.TrimLeft(string(sample), " \t\r\n")
+	if !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
+		return false
+	}
+	return json.Valid(sample)
 }
