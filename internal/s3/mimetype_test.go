@@ -26,6 +26,8 @@ func TestDetectContentType(t *testing.T) {
 		{name: "json object", filename: "snapshot.json", contents: []byte(`{"key": "value"}`), want: "application/json"},
 		{name: "json array without extension", filename: "data", contents: []byte(`[1, 2, 3]`), want: "application/json"},
 		{name: "json content with misleading text extension", filename: "data.txt", contents: []byte(`{"key": "value"}`), want: "application/json"},
+		{name: "json scalar number is plain text", filename: "notes.txt", contents: []byte("42"), want: "text/plain"},
+		{name: "json scalar string is plain text", filename: "notes.txt", contents: []byte(`"just a quoted string"`), want: "text/plain"},
 		{name: "non-json text with json extension hint", filename: "report.json", contents: []byte("# Report\n\nnot json at all\n"), want: "application/json"},
 		{name: "png image", filename: "image.png", contents: png, want: "image/png"},
 		{name: "binary content with misleading markdown extension", filename: "image.md", contents: png, want: "image/png"},
