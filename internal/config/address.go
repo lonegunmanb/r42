@@ -72,6 +72,19 @@ func Functions() map[string]function.Function {
 	}
 }
 
+// RunFunctions adds functions bound to the active run directory.
+func RunFunctions(directory string) map[string]function.Function {
+	functions := Functions()
+	functions["run_wd"] = function.New(&function.Spec{
+		Params: []function.Parameter{},
+		Type:   function.StaticReturnType(cty.String),
+		Impl: func([]cty.Value, cty.Type) (cty.Value, error) {
+			return cty.StringVal(filepath.ToSlash(directory)), nil
+		},
+	})
+	return functions
+}
+
 func localTimestampFunction() function.Function {
 	return function.New(&function.Spec{
 		Params: []function.Parameter{},

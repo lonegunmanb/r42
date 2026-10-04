@@ -1288,7 +1288,7 @@ func (f *runtimeFactory) ResolveOutputs(planned *plan.Plan) (map[string]cty.Valu
 	}
 	f.mu.Unlock()
 	functions := hclfuncs.Functions(planned.Directory())
-	maps.Copy(functions, config.Functions())
+	maps.Copy(functions, config.RunFunctions(f.run.Directory()))
 	evaluationContext := &hcl.EvalContext{Variables: contextValues, Functions: functions}
 	if err := evaluateLocals(evaluationContext, planned.LocalExpressions()); err != nil {
 		return nil, err

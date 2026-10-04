@@ -179,7 +179,7 @@ func (f *runtimeFactory) evaluateResearchExpression(address, source, description
 	}
 	f.mu.Unlock()
 	functions := hclfuncs.Functions(f.directory)
-	maps.Copy(functions, config.Functions())
+	maps.Copy(functions, config.RunFunctions(f.run.Directory()))
 	functions["artifact"] = researchspec.ArtifactReferenceFunction(nil)
 	workspace, err := f.run.WorkspacePath(f.CanonicalAddress(address))
 	if err != nil {
