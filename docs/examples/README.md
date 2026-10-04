@@ -87,8 +87,62 @@ cost warnings. See [`morning/README.md`](morning/README.md).
 
 ## S3-compatible upload
 
-[`s3-folder`](s3-folder/README.md) shows a configuration-only `s3_provider`
-and a DAG-managed `s3_folder` that uploads a research workspace to AWS S3 or
-Alibaba Cloud OSS. It documents environment credential references, run-root
-source confinement, version-aware rollback, and exclusion of sensitive debug
-events.
+Every top-level example (`basic`, `multi-step`, `deep-research`, `chokepoint`,
+`secjury`, and `morning`) includes `s3.r42.hcl`. Its optional `s3` variable
+defaults to `null`: neither the provider nor the upload node is instantiated,
+and Apply does not resolve S3 credentials or contact S3.
+
+To enable upload, include this object in the variable file passed to Plan or
+direct Apply, alongside any other variables required by the example:
+
+```hcl
+s3 = {
+  region = "ap-southeast-1"
+  bucket = "research-results"
+  prefix = "runs/basic/2026-10-04-001"
+}
+```
+
+For example, after initializing the `basic` example:
+
+```powershell
+go run ./cmd/r42 plan -var-file ./basic.tfvars --out ./basic.r42plan
+go run ./cmd/r42 apply ./basic.r42plan
+```
+
+Both S3 blocks use conditional `for_each`. The upload explicitly waits for all
+research and module nodes in the example to succeed. `source = run_wd()` uploads
+the current `.r42/runs/<run-id>/` directory, including nested files; it does
+not upload other historical runs. `run_wd()` takes no arguments and returns
+the run's absolute path with `/` separators without creating its directory
+during Plan. Root and child-module configurations share that path, and saved
+Plan Apply retains it. It is also available in locals, outputs, and dynamic
+task expressions evaluated during Apply. Unlike `block_wd()`, its result is
+shared across blocks. Relative paths become keys below `prefix`.
+Use a distinct prefix for each run to keep previous results: this is a full
+upload, with no incremental comparison or deletion of remote extra objects.
+
+Credentials use the AWS SDK default chain unless environment references are
+provided. Alibaba Cloud OSS can use the same object with these additional
+fields:
+
+```hcl
+endpoint          = "https://oss-cn-hangzhou.aliyuncs.com"
+access_key_ref    = "ALIBABA_CLOUD_ACCESS_KEY_ID"
+secret_key_ref    = "ALIBABA_CLOUD_ACCESS_KEY_SECRET"
+# session_token_ref = "ALIBABA_CLOUD_SECURITY_TOKEN"
+```
+
+Set `region` to the endpoint's signing region, such as `cn-hangzhou` for this
+OSS endpoint. Optional `force_path_style` defaults to `false`; optional
+`exclude` defaults to `[]`. The default uploads every eligible regular file,
+including saved plans, checkpoints, session files, and debug events when
+present; these may contain sensitive research or configuration data. Set
+`exclude`, for example `["events.jsonl", "copilot/**", "**/*.tmp"]`, when these
+files should be omitted. Symlinks and special files are skipped.
+
+Upload is the last workflow DAG node, not a process-exit archive hook: runtime
+logs can still receive entries after it uploads. Invalid enabled configuration
+or an upload failure fails the run. See the
+[S3 upload contract](../s3-folder-design.md) for retry and version-aware rollback
+behavior.

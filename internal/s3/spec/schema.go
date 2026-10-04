@@ -13,9 +13,10 @@ import (
 )
 
 var (
-	_ golden.SingleValueBlock = (*ProviderBlock)(nil)
-	_ golden.PlanBlock        = (*FolderBlock)(nil)
-	_ golden.ApplyBlock       = (*FolderBlock)(nil)
+	_ golden.Valuable   = (*ProviderBlock)(nil)
+	_ golden.Valuable   = (*FolderBlock)(nil)
+	_ golden.PlanBlock  = (*FolderBlock)(nil)
+	_ golden.ApplyBlock = (*FolderBlock)(nil)
 )
 
 type RetryOverride struct {
@@ -189,7 +190,9 @@ func (*ProviderBlock) BlockType() string       { return "s3_provider" }
 func (*ProviderBlock) AddressLength() int      { return 2 }
 func (*ProviderBlock) CanExecutePrePlan() bool { return false }
 
-func (b *ProviderBlock) Value() cty.Value { return ProviderBlockValue(b.Address(), b.planned) }
+func (b *ProviderBlock) Values() map[string]cty.Value {
+	return ProviderBlockValue(b.Address(), b.planned).AsValueMap()
+}
 
 func (b *ProviderBlock) ExecuteDuringPlan() error {
 	if len(b.RetryBlocks) > 1 {
@@ -255,7 +258,9 @@ func (b *FolderBlock) Apply() error {
 	return applier.ApplyBlock(b.Address())
 }
 func (b *FolderBlock) FolderConfig() FolderConfig { return b.planned }
-func (b *FolderBlock) Value() cty.Value           { return FolderBlockValue(b.Address(), b.planned) }
+func (b *FolderBlock) Values() map[string]cty.Value {
+	return FolderBlockValue(b.Address(), b.planned).AsValueMap()
+}
 
 var resultType = cty.Object(map[string]cty.Type{"bucket": cty.String, "prefix": cty.String, "root": cty.String, "object_count": cty.Number})
 

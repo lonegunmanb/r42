@@ -214,6 +214,14 @@ func (c *ResearchConfig) EvalContext() *hcl.EvalContext {
 	if context.Variables == nil {
 		context.Variables = make(map[string]cty.Value)
 	}
+	for _, kind := range []string{"s3_provider", "s3_folder"} {
+		if value, exists := context.Variables[kind]; exists {
+			context.Variables[kind] = value.GetAttr("")
+		}
+	}
+	if activeRun := c.Run(); activeRun != nil {
+		maps.Copy(context.Functions, config.RunFunctions(activeRun.Directory()))
+	}
 	context.Variables["path"] = cty.ObjectVal(map[string]cty.Value{
 		"module": cty.StringVal(filepath.ToSlash(c.directory)),
 	})
