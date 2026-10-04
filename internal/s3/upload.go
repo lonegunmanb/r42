@@ -96,13 +96,17 @@ func uploadFile(ctx context.Context, client Client, bucket, key, filename string
 	if err != nil {
 		return "", fmt.Errorf("stat source file: %w", err)
 	}
-	if info.Size() >= options.MultipartThreshold {
-		return uploadMultipart(ctx, client, bucket, key, filename, info.Size(), retry, options.PartSize)
+	contentType, err := detectContentType(filename)
+	if err != nil {
+		return "", fmt.Errorf("detect content type: %w", err)
 	}
-	return uploadSinglePut(ctx, client, bucket, key, filename, retry)
+	if info.Size() >= options.MultipartThreshold {
+		return uploadMultipart(ctx, client, bucket, key, filename, info.Size(), retry, options.PartSize, contentType)
+	}
+	return uploadSinglePut(ctx, client, bucket, key, filename, retry, contentType)
 }
 
-func uploadSinglePut(ctx context.Context, client Client, bucket, key, filename string, retry RetryPolicy) (string, error) {
+func uploadSinglePut(ctx context.Context, client Client, bucket, key, filename string, retry RetryPolicy, contentType string) (string, error) {
 	var versionID string
 	err := Retry(ctx, retry, func(ctx context.Context) error {
 		file, err := os.Open(filename)
@@ -111,7 +115,7 @@ func uploadSinglePut(ctx context.Context, client Client, bucket, key, filename s
 		}
 		defer func() { _ = file.Close() }()
 		result, err := client.PutObjectWithContext(ctx, &awss3.PutObjectInput{
-			Bucket: aws.String(bucket), Key: aws.String(key), Body: file,
+			Bucket: aws.String(bucket), Key: aws.String(key), Body: file, ContentType: aws.String(contentType),
 		})
 		if err != nil {
 			return err
@@ -125,7 +129,7 @@ func uploadSinglePut(ctx context.Context, client Client, bucket, key, filename s
 	return versionID, err
 }
 
-func uploadMultipart(ctx context.Context, client Client, bucket, key, filename string, size int64, retry RetryPolicy, partSize int64) (string, error) {
+func uploadMultipart(ctx context.Context, client Client, bucket, key, filename string, size int64, retry RetryPolicy, partSize int64, contentType string) (string, error) {
 	file, err := os.Open(filename)
 	if err != nil {
 		return "", fmt.Errorf("open source file: %w", err)
@@ -133,7 +137,7 @@ func uploadMultipart(ctx context.Context, client Client, bucket, key, filename s
 	defer func() { _ = file.Close() }()
 	var uploadID string
 	err = Retry(ctx, retry, func(ctx context.Context) error {
-		result, err := client.CreateMultipartUploadWithContext(ctx, &awss3.CreateMultipartUploadInput{Bucket: aws.String(bucket), Key: aws.String(key)})
+		result, err := client.CreateMultipartUploadWithContext(ctx, &awss3.CreateMultipartUploadInput{Bucket: aws.String(bucket), Key: aws.String(key), ContentType: aws.String(contentType)})
 		if err != nil {
 			return err
 		}
