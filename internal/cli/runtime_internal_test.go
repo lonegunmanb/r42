@@ -1051,7 +1051,7 @@ func TestRecordingSessionRecoversAllKindsOfSessionInactivity(t *testing.T) {
 			t.Cleanup(func() { require.NoError(t, recorder.Close()) })
 			recorded := &recordingSession{
 				Session: session, recorder: recorder, address: "research.static.source", kind: debuglog.SessionResearch,
-				stallTimeout: 5 * time.Millisecond, terminationTimeout: 20 * time.Millisecond,
+				stallTimeout: 50 * time.Millisecond, terminationTimeout: 20 * time.Millisecond,
 			}
 			ctx, cancel := context.WithTimeout(t.Context(), 250*time.Millisecond)
 			defer cancel()
