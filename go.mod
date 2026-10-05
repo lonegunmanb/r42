@@ -9,7 +9,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/charmbracelet/x/term v0.2.2
-	github.com/github/copilot-sdk/go v1.0.14
+	github.com/github/copilot-sdk/go v1.0.16
 	github.com/google/uuid v1.6.0
 	github.com/hashicorp/go-getter/v2 v2.2.4
 	github.com/hashicorp/hcl/v2 v2.25.0
