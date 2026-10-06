@@ -37,6 +37,7 @@ import (
 	"github.com/lonegunmanb/r42/internal/run"
 	internals3 "github.com/lonegunmanb/r42/internal/s3"
 	corespec "github.com/lonegunmanb/r42/internal/spec"
+	"github.com/lonegunmanb/r42/internal/tool/document"
 	externaltool "github.com/lonegunmanb/r42/internal/tool/external"
 	"github.com/lonegunmanb/r42/internal/tool/gotool"
 	toolspec "github.com/lonegunmanb/r42/internal/tool/spec"
@@ -67,6 +68,7 @@ type RuntimeOptions struct {
 	StarlarkRunner   starlarkRunner
 	S3ServiceFactory internals3.ServiceFactory
 	S3EnvLookup      internals3.EnvLookup
+	DocumentRunner   documentRunner
 }
 
 type Engine struct {
@@ -216,6 +218,10 @@ func (e *Engine) apply(
 	if sessions == nil {
 		sessions = newOfficialSessionOpener()
 	}
+	documentRunner := e.options.DocumentRunner
+	if documentRunner == nil {
+		documentRunner = document.NewRunner()
+	}
 	factory := &runtimeFactory{
 		results: make(map[string]cty.Value), run: activeRun, sessions: sessions, recorder: recorder,
 		state: new(runtimeState), tools: planned.Tools(), directory: planned.Directory(),
@@ -228,6 +234,7 @@ func (e *Engine) apply(
 		starlarkRunner:        e.options.StarlarkRunner,
 		s3ServiceFactory:      e.options.S3ServiceFactory,
 		s3EnvLookup:           e.options.S3EnvLookup,
+		documentRunner:        documentRunner,
 	}
 	runner := executor.New(factory, nil)
 	outputs, applyErr := runner.Apply(ctx, planned, options.Parallelism)
@@ -315,6 +322,7 @@ type runtimeFactory struct {
 	starlarkRunner        starlarkRunner
 	s3ServiceFactory      internals3.ServiceFactory
 	s3EnvLookup           internals3.EnvLookup
+	documentRunner        documentRunner
 }
 
 const defaultStarlarkToolCallQuota = 20
@@ -516,6 +524,7 @@ func (f *runtimeFactory) newModuleBlock(
 		starlarkRunner:        f.starlarkRunner,
 		s3ServiceFactory:      f.s3ServiceFactory,
 		s3EnvLookup:           f.s3EnvLookup,
+		documentRunner:        f.documentRunner,
 	}
 	return &moduleApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address,

@@ -71,7 +71,7 @@ research "static" "builder" {
 `), 0o600))
 
 	opener := &collectionOnlyOpener{}
-	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener})
+	runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{Sessions: opener, DocumentRunner: startupDocumentRunner{installed: true}})
 	planned, err := planRuntime(runtime, t.Context(), directory, nil)
 	require.NoError(t, err)
 
@@ -84,6 +84,8 @@ research "static" "builder" {
 	require.Len(t, opener.configs[0].MCPResources, 1)
 	assert.Equal(t, "quote://codes", opener.configs[0].MCPResources[0].URI)
 	assert.Contains(t, opener.configs[0].AvailableTools, "mcp:mcp_server.market_data-get_quote")
+	assert.Contains(t, opener.configs[0].AvailableTools, "r42_read_document")
+	assert.Contains(t, toolNamesFromConfig(opener.configs[0]), "r42_read_document")
 	assert.NotContains(t, opener.configs[0].AvailableTools, "mcp:mcp_server.market_data-get_kline")
 	assert.Contains(t, opener.configs[0].SystemPrompt, "sole Collection session")
 	assert.NotContains(t, toolNamesFromConfig(opener.configs[0]), "r42_set_information_needs")
