@@ -120,7 +120,9 @@ Plan Apply retains it. It is also available in locals, outputs, and dynamic
 task expressions evaluated during Apply. Unlike `block_wd()`, its result is
 shared across blocks. Relative paths become keys below `prefix`.
 Use a distinct prefix for each run to keep previous results: this is a full
-upload, with no incremental comparison or deletion of remote extra objects.
+upload, with no incremental comparison or deletion of remote extra objects. The
+root output `report_s3_prefix` exposes the actual uploaded prefix from the
+successful `s3_folder` result; it is `null` when S3 is disabled.
 
 Credentials use the AWS SDK default chain unless environment references are
 provided. Alibaba Cloud OSS can use the same object with these additional

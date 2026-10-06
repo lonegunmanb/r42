@@ -68,6 +68,8 @@ func TestExamplesOptionalS3RunUpload(t *testing.T) {
 						return
 					}
 					require.NoError(t, err)
+					_, hasS3ReportPrefix := planned.SavedPlan().Outputs()["report_s3_prefix"]
+					assert.True(t, hasS3ReportPrefix, "root output report_s3_prefix is required for all examples")
 					var upload *plan.NodeSpec
 					work := []string{}
 					for _, node := range planned.SavedPlan().Nodes() {
