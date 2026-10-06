@@ -354,6 +354,7 @@ func (f *runtimeFactory) newResearchBlock(
 		return nil, err
 	}
 	collectionTools = wrapCollectionAcquisitionTools(collectionTools, collectionContext)
+	collectionTools = append(collectionTools, wrapCollectionAcquisitionTools(f.documentTools(ctx, workspace), collectionContext)...)
 	collectionTools, err = f.appendStarlarkTool(
 		ctx, executionAddress, debuglog.SessionCollection, planned.Config.EffectiveStarlark(),
 		collectionTools, collectionTypedQuotaState,
@@ -758,6 +759,7 @@ func (f *runtimeFactory) newCollectionOnlyBlock(
 		return nil, err
 	}
 	tools = append(tools, artifactTools...)
+	tools = append(tools, f.documentTools(ctx, workspace)...)
 	targets := make([]artifactpkg.Record, 0, len(currentArtifactIDs))
 	for _, id := range currentArtifactIDs {
 		record, recordErr := artifactsRegistry.Record(id)

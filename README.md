@@ -752,6 +752,53 @@ shell, PowerShell, write/edit tools, or network acquisition. Built-in typed
 tools return structured rejection issues so the model can correct an
 invocation without guessing paths or IDs.
 
+### Optional document conversion
+
+At the start of Apply, r42 checks the current process PATH for `markitdown`
+once. When present, Collection (including `collection_only` tasks and child
+modules) receives the `r42_read_document` typed tool. When absent, the tool is
+omitted and the workflow continues. r42 does not install MarkItDown, start an
+MCP server, or poll for changes during a run. Restart Apply after installing it.
+
+The tool converts PDF, Word, Excel, PowerPoint, HTML, CSV, JSON, XML, text,
+archives, and other formats supported by the installed MarkItDown into
+Markdown. Actual support depends on that installation's version and optional
+dependencies; scanned PDFs are not guaranteed to produce OCR text. The tool
+description names these uses so the model can choose document conversion
+instead of reading binary files as text.
+
+All input fields are optional in the schema. A conversion requires exactly one
+of `filename` or text `stdin`; `help`, `version`, and `list_plugins` need no
+document. CLI aliases map to the same canonical typed field:
+
+| Typed input | Type | MarkItDown argument |
+| --- | --- | --- |
+| `filename` | string | Positional input file, relative to the task workspace |
+| `output` | string | `--output`, `-o`; relative workspace output file |
+| `extension` | string | `--extension`, `-x` |
+| `mime_type` | string | `--mime-type`, `-m` |
+| `charset` | string | `--charset`, `-c` |
+| `use_docintel` | bool | `--use-docintel`, `-d`; requires `filename` |
+| `endpoint` | string | `--endpoint`, `-e` |
+| `use_cu` | bool | `--use-cu`, `--use-content-understanding` |
+| `cu_endpoint` | string | `--cu-endpoint` |
+| `cu_analyzer` | string | `--cu-analyzer` |
+| `cu_file_types` | string | `--cu-file-types`; comma-separated types |
+| `use_plugins` | bool | `--use-plugins`, `-p` |
+| `list_plugins` | bool | `--list-plugins` |
+| `keep_data_uris` | bool | `--keep-data-uris` |
+| `version` | bool | `--version`, `-v` |
+| `help` | bool | `--help`, `-h` |
+| `stdin` | string | Text supplied to CLI stdin when `filename` is omitted |
+
+The result contains complete text in `content` and, when a converted file was
+saved, its relative path in `output`. Save/register converted source material
+with the existing evidence tools before another acquisition. Research and QC
+read that saved evidence; they do not receive the conversion tool. File I/O is
+confined to the workspace, input is limited to 64 MiB, output to 8 MiB, stderr
+to 4 KiB, and each call to two minutes. Cloud modes are mutually exclusive;
+cloud conversion and installed third-party plugins run only when requested.
+
 ### `collection_qc`
 
 Collection QC is mandatory and persistent. An optional `collection_qc` block

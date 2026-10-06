@@ -262,6 +262,8 @@ output "report_id" { value = research.static.source.artifact.report.id }
 	assert.Equal(t, "quote://codes", opener.configs[0].MCPResources[0].URI)
 	assert.Contains(t, opener.configs[0].AvailableTools, "mcp:mcp_server.market_data-get_quote")
 	assert.Contains(t, opener.configs[0].AvailableTools, "r42_read_information_needs")
+	assert.NotContains(t, toolNamesFromConfig(opener.configs[1]), "r42_read_document")
+	assert.NotContains(t, toolNamesFromConfig(opener.configs[2]), "r42_read_document")
 	assert.NotContains(t, opener.configs[0].AvailableTools, "mcp:mcp_server.market_data-get_kline")
 	assert.NotContains(t, opener.configs[0].AvailableTools, opener.configs[0].MCPServers[0].Tools[0])
 	assert.Contains(t, opener.configs[0].ExcludedTools, "mcp:mcp_server.market_data-get_quote")
