@@ -136,7 +136,14 @@ func TestBasicExampleOptionalS3UploadAfterSuccess(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			if !test.enabled || test.failResearch {
+			if !test.enabled {
+				require.Contains(t, result.Outputs, "report_s3_prefix")
+				assert.True(t, result.Outputs["report_s3_prefix"].IsNull())
+				assert.Zero(t, clientCalls.Load())
+				assert.Empty(t, client.Keys())
+				return
+			}
+			if test.failResearch {
 				assert.Zero(t, clientCalls.Load())
 				assert.Empty(t, client.Keys())
 				return
@@ -144,6 +151,7 @@ func TestBasicExampleOptionalS3UploadAfterSuccess(t *testing.T) {
 			assert.Equal(t, int64(1), clientCalls.Load())
 			assert.Equal(t, 1, opener.calls("research"))
 			assert.Contains(t, client.Keys(), "runs/test/nested/report.md")
+			assert.Equal(t, cty.StringVal("runs/test"), result.Outputs["report_s3_prefix"])
 			assert.Contains(t, client.Keys(), "runs/test/saved-plan.r42plan")
 			manifests, err := filepath.Glob(filepath.Join(planned.RunDirectory(), "unit-checkpoints", "*", "checkpoints", "*", "manifest.json"))
 			require.NoError(t, err)
