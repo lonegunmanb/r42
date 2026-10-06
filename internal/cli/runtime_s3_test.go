@@ -130,7 +130,7 @@ func TestBasicExampleOptionalS3UploadAfterSuccess(t *testing.T) {
 			nested := filepath.Join(planned.RunDirectory(), "nested")
 			require.NoError(t, os.MkdirAll(nested, 0o700))
 			require.NoError(t, os.WriteFile(filepath.Join(nested, "report.md"), []byte("report"), 0o600))
-			_, err = applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 2})
+			result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 2})
 			if test.failResearch {
 				require.ErrorContains(t, err, "forced research failure")
 			} else {

@@ -46,3 +46,8 @@ s3_folder "runs" {
     research.static.publisher_editor,
   ]
 }
+
+output "report_s3_prefix" {
+  description = "Actual uploaded S3 prefix for this run, or null when S3 is disabled."
+  value       = var.s3 == null ? null : s3_folder.runs["current"].result.prefix
+}
