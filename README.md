@@ -1486,6 +1486,29 @@ response envelope, and tests. r42 still validates the declared types during Plan
 and every actual value during Apply. The executable itself is required only at
 Apply time, keeping runtime dependencies explicit.
 
+## S3 folder uploads
+
+An `s3_folder` block uploads a directory under the active run to an S3-compatible
+bucket. Reference an `s3_provider` for connection settings and credentials:
+
+```hcl
+s3_folder "reports" {
+  provider            = s3_provider.oss
+  bucket              = "research-results"
+  source              = research.static.summary.path
+  prefix              = "reports"
+  use_run_id_subfolder = true
+  exclude             = ["**/*.tmp"]
+}
+```
+
+`use_run_id_subfolder` defaults to `false`. Setting it to `true` uploads to
+`s3://research-results/reports/<run-id>/<relative-file-path>`; an empty `prefix`
+uses just `<run-id>`. The block's `.result.prefix` and `.result.root` report the
+effective destination. Saved plans and resumed runs keep their original run ID.
+See [S3-compatible folder uploads](docs/s3-folder-design.md) for provider fields,
+path restrictions, retries, and rollback behavior.
+
 ## Workspaces
 
 Each applied research block gets a workspace below

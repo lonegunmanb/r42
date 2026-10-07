@@ -98,6 +98,21 @@ func TestS3FolderValueShape(t *testing.T) {
 	assert.True(t, value.GetAttr("result").Type().HasAttribute("object_count"))
 }
 
+func TestS3FolderValueExposesRunIDSubfolderOption(t *testing.T) {
+	t.Parallel()
+	for _, enabled := range []bool{false, true} {
+		name := "disabled"
+		if enabled {
+			name = "enabled"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			value := s3spec.FolderBlockValue("s3_folder.out", s3spec.FolderConfig{UseRunIDSubfolder: enabled})
+			assert.Equal(t, enabled, value.GetAttr("use_run_id_subfolder").True())
+		})
+	}
+}
+
 func str(value string) *string { return &value }
 func intp(value int) *int      { return &value }
 
