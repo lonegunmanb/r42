@@ -14,17 +14,22 @@ type folderPlanSnapshot struct {
 }
 
 type folderConfigSnapshot struct {
-	Bucket  string        `json:"bucket"`
-	Source  string        `json:"source"`
-	Prefix  string        `json:"prefix"`
-	Exclude []string      `json:"exclude,omitempty"`
-	Retry   RetryOverride `json:"retry"`
+	Bucket            string        `json:"bucket"`
+	Source            string        `json:"source"`
+	Prefix            string        `json:"prefix"`
+	UseRunIDSubfolder bool          `json:"use_run_id_subfolder,omitempty"`
+	Exclude           []string      `json:"exclude,omitempty"`
+	Retry             RetryOverride `json:"retry"`
 }
 
 func EncodeFolderPlan(provider ProviderConfig, folder FolderConfig) (cty.Value, error) {
 	payload, err := json.Marshal(folderPlanSnapshot{
 		Provider: provider,
-		Folder:   folderConfigSnapshot{Bucket: folder.Bucket, Source: folder.Source, Prefix: folder.Prefix, Exclude: append([]string(nil), folder.Exclude...), Retry: folder.Retry},
+		Folder: folderConfigSnapshot{
+			Bucket: folder.Bucket, Source: folder.Source, Prefix: folder.Prefix,
+			UseRunIDSubfolder: folder.UseRunIDSubfolder,
+			Exclude:           append([]string(nil), folder.Exclude...), Retry: folder.Retry,
+		},
 	})
 	if err != nil {
 		return cty.NilVal, fmt.Errorf("encode S3 folder plan: %w", err)
@@ -49,7 +54,11 @@ func DecodeFolderPlan(value cty.Value) (ProviderConfig, FolderConfig, error) {
 	if err := json.Unmarshal([]byte(payload.AsString()), &snapshot); err != nil {
 		return ProviderConfig{}, FolderConfig{}, fmt.Errorf("decode S3 folder plan: %w", err)
 	}
-	folder := FolderConfig{Bucket: snapshot.Folder.Bucket, Source: snapshot.Folder.Source, Prefix: snapshot.Folder.Prefix, Exclude: snapshot.Folder.Exclude, Retry: snapshot.Folder.Retry}
+	folder := FolderConfig{
+		Bucket: snapshot.Folder.Bucket, Source: snapshot.Folder.Source, Prefix: snapshot.Folder.Prefix,
+		UseRunIDSubfolder: snapshot.Folder.UseRunIDSubfolder,
+		Exclude:           snapshot.Folder.Exclude, Retry: snapshot.Folder.Retry,
+	}
 	if err := snapshot.Provider.Validate(); err != nil {
 		return ProviderConfig{}, FolderConfig{}, fmt.Errorf("S3 provider snapshot: %w", err)
 	}

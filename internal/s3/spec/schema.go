@@ -93,12 +93,13 @@ func (c ProviderConfig) Validate() error {
 }
 
 type FolderConfig struct {
-	Provider cty.Value
-	Bucket   string
-	Source   string
-	Prefix   string
-	Exclude  []string
-	Retry    RetryOverride
+	Provider          cty.Value
+	Bucket            string
+	Source            string
+	Prefix            string
+	UseRunIDSubfolder bool
+	Exclude           []string
+	Retry             RetryOverride
 }
 
 func (c FolderConfig) Validate() error {
@@ -217,13 +218,14 @@ func (b *ProviderBlock) ProviderConfig() ProviderConfig { return b.planned }
 
 type FolderBlock struct {
 	*golden.BaseBlock
-	Provider    cty.Value    `hcl:"provider"`
-	Bucket      string       `hcl:"bucket"`
-	Source      string       `hcl:"source"`
-	Prefix      string       `hcl:"prefix,optional"`
-	Exclude     []string     `hcl:"exclude,optional"`
-	RetryBlocks []RetryBlock `hcl:"retry,block"`
-	planned     FolderConfig
+	Provider          cty.Value    `hcl:"provider"`
+	Bucket            string       `hcl:"bucket"`
+	Source            string       `hcl:"source"`
+	Prefix            string       `hcl:"prefix,optional"`
+	UseRunIDSubfolder bool         `hcl:"use_run_id_subfolder,optional"`
+	Exclude           []string     `hcl:"exclude,optional"`
+	RetryBlocks       []RetryBlock `hcl:"retry,block"`
+	planned           FolderConfig
 }
 
 func (*FolderBlock) Type() string            { return "" }
@@ -235,7 +237,10 @@ func (b *FolderBlock) ExecuteDuringPlan() error {
 	if len(b.RetryBlocks) > 1 {
 		return errors.New("s3 folder must have at most one retry block")
 	}
-	c := FolderConfig{Provider: b.Provider, Bucket: b.Bucket, Source: b.Source, Prefix: b.Prefix, Exclude: append([]string(nil), b.Exclude...)}
+	c := FolderConfig{
+		Provider: b.Provider, Bucket: b.Bucket, Source: b.Source, Prefix: b.Prefix,
+		UseRunIDSubfolder: b.UseRunIDSubfolder, Exclude: append([]string(nil), b.Exclude...),
+	}
 	var err error
 	if len(b.RetryBlocks) == 1 {
 		c.Retry, err = b.RetryBlocks[0].override()
@@ -280,6 +285,7 @@ func FolderBlockValue(address string, c FolderConfig) cty.Value {
 		"address": cty.StringVal(address), "kind": cty.StringVal("s3_folder"),
 		"provider": c.Provider, "bucket": cty.StringVal(c.Bucket), "source": cty.StringVal(c.Source),
 		"prefix": cty.StringVal(c.Prefix), "exclude": stringList(c.Exclude), "result": cty.UnknownVal(resultType),
+		"use_run_id_subfolder": cty.BoolVal(c.UseRunIDSubfolder),
 	})
 }
 

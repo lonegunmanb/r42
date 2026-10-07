@@ -332,9 +332,92 @@ s3_folder "upload" {
 	assert.Equal(t, []string{"research.static.result"}, dependencies["s3_folder.upload"])
 }
 
+func TestRuntimeS3FolderRunIDSubfolder(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name    string
+		prefix  string
+		option  string
+		enabled bool
+		empty   bool
+		fail    bool
+	}{
+		{name: "omitted", prefix: "reports/day"},
+		{name: "disabled", prefix: "reports/day", option: "use_run_id_subfolder = false"},
+		{name: "enabled", prefix: "reports/day", option: "use_run_id_subfolder = true", enabled: true},
+		{name: "empty prefix", option: "use_run_id_subfolder = true", enabled: true},
+		{name: "empty source", prefix: "reports/day", option: "use_run_id_subfolder = true", enabled: true, empty: true},
+		{name: "upload failure", prefix: "reports/day", option: "use_run_id_subfolder = true", enabled: true, fail: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			directory := t.TempDir()
+			source := fmt.Sprintf(`
+s3_provider "upload" { region = "us-east-1" }
+s3_folder "upload" {
+  provider = s3_provider.upload
+  bucket = "bucket"
+  source = "reports"
+  prefix = %q
+  %s
+}
+output "uploaded" { value = s3_folder.upload.result }
+`, test.prefix, test.option)
+			require.NoError(t, os.WriteFile(filepath.Join(directory, "main.r42.hcl"), []byte(source), 0o600))
+			client := &runtimeS3Client{}
+			runtime := cli.NewRuntimeWithOptions(cli.RuntimeOptions{
+				S3ServiceFactory: func(*aws.Config) (internals3.Client, error) { return client, nil },
+			})
+			planned, err := planRuntime(runtime, t.Context(), directory, nil)
+			require.NoError(t, err)
+			expectedPrefix := test.prefix
+			if test.enabled {
+				if expectedPrefix != "" {
+					expectedPrefix += "/"
+				}
+				expectedPrefix += filepath.Base(planned.RunDirectory())
+			}
+			savedPath := filepath.Join(t.TempDir(), "saved.r42plan")
+			_, err = plan.Save(savedPath, planned)
+			require.NoError(t, err)
+			planned, err = plan.Load(savedPath)
+			require.NoError(t, err)
+			workspace := filepath.Join(planned.RunDirectory(), "reports", "nested")
+			require.NoError(t, os.MkdirAll(workspace, 0o700))
+			if !test.empty {
+				require.NoError(t, os.WriteFile(filepath.Join(workspace, "a.txt"), []byte("first"), 0o600))
+				require.NoError(t, os.WriteFile(filepath.Join(workspace, "b.txt"), []byte("second"), 0o600))
+			}
+			if test.fail {
+				client.failKey = expectedPrefix + "/nested/b.txt"
+			}
+			result, err := applyRuntime(runtime, t.Context(), planned, executor.ResearchConfigOptions{Parallelism: 1})
+			if test.fail {
+				require.ErrorContains(t, err, "s3://bucket/"+expectedPrefix)
+				require.ErrorContains(t, err, expectedPrefix+"/nested/b.txt")
+				assert.Equal(t, []string{expectedPrefix + "/nested/a.txt"}, client.deletedKeys)
+				return
+			}
+			require.NoError(t, err)
+			uploaded := result.Outputs["uploaded"]
+			assert.Equal(t, expectedPrefix, uploaded.GetAttr("prefix").AsString())
+			assert.Equal(t, "s3://bucket/"+expectedPrefix, uploaded.GetAttr("root").AsString())
+			if test.empty {
+				assert.Empty(t, client.Keys())
+				assert.True(t, uploaded.GetAttr("object_count").RawEquals(cty.NumberIntVal(0)))
+				return
+			}
+			assert.Equal(t, []string{expectedPrefix + "/nested/a.txt", expectedPrefix + "/nested/b.txt"}, client.Keys())
+			assert.True(t, uploaded.GetAttr("object_count").RawEquals(cty.NumberIntVal(2)))
+		})
+	}
+}
+
 type runtimeS3Client struct {
-	mu   sync.Mutex
-	keys []string
+	mu          sync.Mutex
+	keys        []string
+	failKey     string
+	deletedKeys []string
 }
 
 func (c *runtimeS3Client) Keys() []string {
@@ -348,6 +431,9 @@ func (*runtimeS3Client) GetBucketVersioningWithContext(aws.Context, *awss3.GetBu
 }
 
 func (c *runtimeS3Client) PutObjectWithContext(_ aws.Context, input *awss3.PutObjectInput, _ ...request.Option) (*awss3.PutObjectOutput, error) {
+	if aws.StringValue(input.Key) == c.failKey {
+		return nil, fmt.Errorf("forced upload failure")
+	}
 	_, _ = io.ReadAll(input.Body)
 	c.mu.Lock()
 	c.keys = append(c.keys, aws.StringValue(input.Key))
@@ -371,7 +457,10 @@ func (*runtimeS3Client) AbortMultipartUploadWithContext(aws.Context, *awss3.Abor
 	return nil, nil
 }
 
-func (*runtimeS3Client) DeleteObjectWithContext(aws.Context, *awss3.DeleteObjectInput, ...request.Option) (*awss3.DeleteObjectOutput, error) {
+func (c *runtimeS3Client) DeleteObjectWithContext(_ aws.Context, input *awss3.DeleteObjectInput, _ ...request.Option) (*awss3.DeleteObjectOutput, error) {
+	c.mu.Lock()
+	c.deletedKeys = append(c.deletedKeys, aws.StringValue(input.Key))
+	c.mu.Unlock()
 	return nil, nil
 }
 

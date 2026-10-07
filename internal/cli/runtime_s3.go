@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 
 	"github.com/lonegunmanb/golden"
 	"github.com/lonegunmanb/r42/internal/plan"
@@ -17,6 +18,9 @@ func (f *runtimeFactory) newS3FolderBlock(ctx context.Context, node plan.NodeSpe
 	providerConfig, folderConfig, err := s3spec.DecodeFolderPlan(node.Config)
 	if err != nil {
 		return nil, err
+	}
+	if folderConfig.UseRunIDSubfolder {
+		folderConfig.Prefix = path.Join(folderConfig.Prefix, f.run.ID())
 	}
 	return &s3FolderApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address, run: f.run,

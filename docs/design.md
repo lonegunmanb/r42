@@ -294,6 +294,11 @@ and skips symbolic links and special files. An empty directory after excludes
 is a successful no-op. Object keys always use `/` separators and are formed by
 joining the validated prefix with the relative file path.
 
+`use_run_id_subfolder` defaults to `false`. When enabled, the effective prefix
+is `<prefix>/<run-id>`, or just `<run-id>` when `prefix` is empty. Uploads,
+rollback diagnostics, and result prefix/root use that same effective prefix.
+Saved plans and resumed runs retain their original run ID.
+
 Uploads are streamed and may use multipart transfer. Files are uploaded in a
 deterministic order. The first failed PUT or multipart operation stops further
 uploads. When the target bucket has versioning `Enabled`, previously uploaded

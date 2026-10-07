@@ -99,6 +99,7 @@ are permanent.
 | `bucket` | Yes | Destination bucket name. |
 | `source` | Yes | Local directory. Relative paths are below the active run root; absolute paths must also remain below it after cleaning. A research `path` reference is the normal source form. |
 | `prefix` | No | Object key prefix. Empty is allowed. It must not start or end with `/`, contain empty segments, `.` or `..` segments, backslashes, or control characters. |
+| `use_run_id_subfolder` | No | Defaults to `false`. When `true`, append the active run ID to `prefix`; an empty prefix becomes the run ID. |
 | `exclude` | No | Glob patterns relative to source root. `**` matches zero or more directory components and may match directories. |
 | `retry` | No | Optional folder-level override layered over provider retry policy. At most one nested block. |
 
@@ -116,6 +117,12 @@ s3_folder.market_result.result = {
 
 `object_keys` and `bytes_uploaded` are intentionally not part of the result.
 An empty file set after excludes is a successful no-op with `object_count = 0`.
+
+With `use_run_id_subfolder = true`, a configured prefix `reports` becomes
+`reports/<run-id>`. Upload keys, rollback diagnostics, and `.result.prefix` and
+`.result.root` all use this effective prefix, including an empty upload. Files
+still retain their paths relative to `source`. Saved plans and resumed runs use
+their original run ID; the option does not generate a separate upload ID.
 
 ## Research `path`
 
