@@ -65,18 +65,19 @@ func NewCompiler() (*Compiler, error) {
 	}, nil
 }
 
-func (c *Compiler) Compile(ctx context.Context, source string) (*Program, error) {
+func (c *Compiler) Compile(ctx context.Context, source string, dependencies ...string) (*Program, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return nil, fmt.Errorf("inline Go compiler is closed")
 	}
 
-	key := sourceKey(source)
+	declaredDependencies := dependencies
+	key := sourceKey(source, declaredDependencies)
 	if cached, ok := c.programs[key]; ok {
 		return cached, nil
 	}
-	analysis, err := Analyze(source)
+	analysis, err := AnalyzeWithDependencies(source, declaredDependencies)
 	if err != nil {
 		return nil, err
 	}
@@ -86,13 +87,22 @@ func (c *Compiler) Compile(ctx context.Context, source string) (*Program, error)
 		return nil, fmt.Errorf("creating inline Go build directory: %w", err)
 	}
 	sourcePath := filepath.Join(buildDirectory, "main.go")
+	if err = os.WriteFile(filepath.Join(buildDirectory, "go.mod"), []byte(moduleFile()), 0o600); err != nil {
+		_ = c.removeAll(buildDirectory)
+		return nil, fmt.Errorf("writing inline Go module: %w", err)
+	}
 	if err = os.WriteFile(sourcePath, []byte(wrapperSource(source)), 0o600); err != nil {
 		_ = c.removeAll(buildDirectory)
 		return nil, fmt.Errorf("writing inline Go wrapper: %w", err)
 	}
+	if err = runGoGets(ctx, buildDirectory, declaredDependencies); err != nil {
+		_ = c.removeAll(buildDirectory)
+		return nil, err
+	}
 	executable := filepath.Join(buildDirectory, executableName())
 	command := exec.CommandContext(ctx, "go", "build", "-o", executable, sourcePath)
 	command.Dir = buildDirectory
+	command.Env = append(os.Environ(), "GO111MODULE=on", "GOWORK=off", "GOFLAGS=-mod=mod")
 	output, err := command.CombinedOutput()
 	if err != nil {
 		_ = c.removeAll(buildDirectory)
@@ -106,6 +116,30 @@ func (c *Compiler) Compile(ctx context.Context, source string) (*Program, error)
 	program := &Program{path: absolute, analysis: analysis}
 	c.programs[key] = program
 	return program, nil
+}
+
+func moduleFile() string {
+	version := runtime.Version()
+	version = strings.TrimPrefix(version, "go")
+	if index := strings.IndexByte(version, '.'); index >= 0 {
+		if second := strings.IndexByte(version[index+1:], '.'); second >= 0 {
+			version = version[:index+1+second]
+		}
+	}
+	lines := []string{"module r42.inline.tool", "", "go " + version}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func runGoGets(ctx context.Context, directory string, dependencies []string) error {
+	for _, dependency := range dependencies {
+		command := exec.CommandContext(ctx, "go", "get", dependency)
+		command.Dir = directory
+		command.Env = append(os.Environ(), "GO111MODULE=on", "GOWORK=off", "GOFLAGS=-mod=mod")
+		if output, err := command.CombinedOutput(); err != nil {
+			return fmt.Errorf("running go get %q for inline Go tool: %w: %s", dependency, err, strings.TrimSpace(string(output)))
+		}
+	}
+	return nil
 }
 
 func (c *Compiler) Close() error {
@@ -182,8 +216,16 @@ func invocationError(cause error, stdout, stderr string) error {
 	return &InvocationError{cause: cause, stdout: stdout, stderr: stderr}
 }
 
-func sourceKey(source string) string {
-	digest := sha256.Sum256([]byte(runtime.Version() + "\x00" + source))
+func sourceKey(source string, dependencies []string) string {
+	var builder strings.Builder
+	builder.WriteString(runtime.Version())
+	builder.WriteString("\x00")
+	builder.WriteString(source)
+	for _, dependency := range dependencies {
+		builder.WriteString("\x00")
+		builder.WriteString(dependency)
+	}
+	digest := sha256.Sum256([]byte(builder.String()))
 	return hex.EncodeToString(digest[:])
 }
 

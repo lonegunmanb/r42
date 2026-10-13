@@ -87,6 +87,24 @@ func TestAnalyze(t *testing.T) {
 	}
 }
 
+func TestAnalyzeWithDependenciesAllowsModuleSubpackages(t *testing.T) {
+	t.Parallel()
+
+	_, err := AnalyzeWithDependencies(`
+import (
+    "context"
+    "github.com/google/uuid"
+)
+type Input struct{}
+type Output string
+func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+    output := Output(uuid.NewString())
+    return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+}
+`, []string{"github.com/google/uuid@v1.6.0"})
+	require.NoError(t, err)
+}
+
 func TestAnalyzeMapsSupportedGoTypeFamilies(t *testing.T) {
 	t.Parallel()
 

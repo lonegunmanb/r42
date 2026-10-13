@@ -1271,15 +1271,41 @@ when the tool schema requires them.
 A `go_tool` keeps its implementation directly in HCL as an inline Go source
 fragment. It declares `Input`, `Output`, and a typed `Invoke` function. Plan
 parses and type-checks the source, validates its signature and cty compatibility,
-and permits only Go standard-library imports. Apply generates a small executable,
-compiles it once per r42 process, and starts a fresh child process for each tool
-call.
+and permits standard-library imports plus modules listed in `dependencies`.
+Each dependency string is passed, in order, to a separate `go get` command.
+Apply creates an isolated temporary Go module, runs those commands, compiles it
+once per r42 process, and starts a fresh child process for each tool call.
+
+```hcl
+go_tool "uuid" {
+  description = "Generate a UUID."
+  dependencies = [
+    "github.com/google/uuid@v1.6.0",
+    "golang.org/x/text@v0.3.0",
+  ]
+  source = <<-GO
+    import (
+      "context"
+      "github.com/google/uuid"
+    )
+
+    type Input struct{}
+    type Output string
+
+    func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+      output := Output(uuid.NewString())
+      return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+    }
+  GO
+}
+```
 
 Use a `go_tool` for portable validation and transformation logic that should be
 planned together with the research contract: validating a citation record,
 normalizing a structured result, enforcing allowed enum combinations, or
-accepting the final payload that ends a stage. Its implementation has no
-third-party Go dependencies and needs no separately deployed script.
+accepting the final payload that ends a stage. Declared module dependencies are
+added in order with `go get` in its isolated temporary build; no separately
+deployed script is needed.
 
 ### `external_tool`
 

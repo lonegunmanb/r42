@@ -647,7 +647,7 @@ func (f *runtimeFactory) buildTools(
 		if err != nil {
 			return nil, cty.NilType, err
 		}
-		program, err := compiler.Compile(ctx, definition.Source)
+		program, err := compiler.Compile(ctx, definition.Source, definition.Dependencies...)
 		if err != nil {
 			return nil, cty.NilType, fmt.Errorf("compile %s: %w", definition.Address, err)
 		}

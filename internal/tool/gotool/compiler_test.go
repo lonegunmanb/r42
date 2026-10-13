@@ -91,6 +91,54 @@ func TestCompilerReportsBuildErrors(t *testing.T) {
 	assert.ErrorContains(t, err, "compiling inline Go tool")
 }
 
+func TestCompilerBuildsDeclaredGoModuleDependencies(t *testing.T) {
+	t.Parallel()
+	compiler, err := NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = compiler.Close() })
+
+	program, err := compiler.Compile(t.Context(), `
+import (
+    "context"
+    "github.com/google/uuid"
+)
+
+type Input struct{}
+type Output string
+
+func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+    output := Output(uuid.NewString())
+    return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+}
+`, "github.com/google/uuid@v1.6.0")
+	require.NoError(t, err)
+
+	response, err := program.Invoke(t.Context(), json.RawMessage(`{}`), t.TempDir())
+	require.NoError(t, err)
+	require.NotNil(t, response.Output)
+	var output string
+	require.NoError(t, json.Unmarshal(*response.Output, &output))
+	assert.Regexp(t, `^[0-9a-f-]{36}$`, output)
+}
+
+func TestCompilerDoesNotReuseProgramAcrossDependencySets(t *testing.T) {
+	t.Parallel()
+	compiler, err := NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = compiler.Close() })
+
+	source := readFixture(t, "decision.go.txt")
+	withoutDependencies, err := compiler.Compile(t.Context(), source)
+	require.NoError(t, err)
+	withDependencies, err := compiler.Compile(t.Context(), source, "github.com/google/uuid@v1.6.0")
+	require.NoError(t, err)
+	assert.NotEqual(t, withoutDependencies.Path(), withDependencies.Path())
+
+	withReversedDependencies, err := compiler.Compile(t.Context(), source, "golang.org/x/text@v0.3.0", "github.com/google/uuid@v1.6.0")
+	require.NoError(t, err)
+	assert.NotEqual(t, withDependencies.Path(), withReversedDependencies.Path())
+}
+
 func TestProgramInvokeUsesWorkingDirectory(t *testing.T) {
 	t.Parallel()
 	compiler, err := NewCompiler()
