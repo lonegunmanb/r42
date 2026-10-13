@@ -2053,7 +2053,7 @@ func (s *recordingSession) SendAndWait(ctx context.Context, options sdk.MessageO
 			event.Type() == sdk.SessionEventTypeToolUserRequested ||
 			event.Type() == sdk.SessionEventTypeToolExecutionStart ||
 			event.Type() == sdk.SessionEventTypeToolExecutionProgress ||
-			event.Type() == sdk.SessionEventTypeToolExecutionPartialResult ||
+			event.Type() == sdk.SessionEventTypeToolShellOutput ||
 			event.Type() == sdk.SessionEventTypeToolExecutionComplete:
 			err = s.recordToolEvent(&event)
 		default:
@@ -2605,10 +2605,10 @@ func (s *recordingSession) normalizeToolEvent(recorded *debuglog.Event, event *s
 		recorded.ToolCallID = data.ToolCallID
 		recorded.ToolName = s.toolName[data.ToolCallID]
 		recorded.Content = data.ProgressMessage
-	case *sdk.ToolExecutionPartialResultData:
+	case *sdk.ToolShellOutputData:
 		recorded.ToolCallID = data.ToolCallID
 		recorded.ToolName = s.toolName[data.ToolCallID]
-		recorded.Content = data.PartialOutput
+		recorded.Content = data.Text
 	case *sdk.ToolExecutionCompleteData:
 		recorded.ToolCallID = data.ToolCallID
 		recorded.ToolName = s.toolName[data.ToolCallID]

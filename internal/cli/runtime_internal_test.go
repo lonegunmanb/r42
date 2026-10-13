@@ -1883,9 +1883,9 @@ func TestRecordingSessionRecordsToolEventsDuringSend(t *testing.T) {
 			},
 		},
 		{
-			ID: "tool-partial-result",
-			Data: &sdk.ToolExecutionPartialResultData{
-				PartialOutput: "updated report.md", ToolCallID: "call-1",
+			ID: "tool-shell-output",
+			Data: &sdk.ToolShellOutputData{
+				Text: "updated report.md", ToolCallID: "call-1",
 			},
 		},
 		{
@@ -1939,6 +1939,11 @@ func TestRecordingSessionRecordsToolEventsDuringSend(t *testing.T) {
 		expected, marshalErr := json.Marshal(sdkEvent)
 		require.NoError(t, marshalErr)
 		assert.JSONEq(t, string(expected), string(event.SDKEvent))
+		if sdkEvent.Type() == sdk.SessionEventTypeToolShellOutput {
+			assert.Equal(t, "updated report.md", event.Content)
+			assert.Equal(t, "call-1", event.ToolCallID)
+			assert.Equal(t, toolName, event.ToolName)
+		}
 	}
 }
 
