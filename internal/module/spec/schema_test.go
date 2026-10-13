@@ -400,6 +400,36 @@ func TestResearchConfigRejectsInvalidModuleBoundaries(t *testing.T) {
 			expectedError: `module input "topic" is required`,
 		},
 		{
+			name:  "unknown scalar input is rejected",
+			child: `variable "topic" { type = string }`,
+			root: `planning_fixture "unknown" { value = "unknown" }
+module "child" {
+  source = "./child"
+  topic = planning_fixture.unknown
+}`,
+			expectedError: `module input "topic" must be wholly known during plan`,
+		},
+		{
+			name:  "unknown object without artifact kind is rejected",
+			child: `variable "topic" { type = any }`,
+			root: `planning_fixture "unknown" { value = "unknown" }
+module "child" {
+  source = "./child"
+  topic = { id = planning_fixture.unknown }
+}`,
+			expectedError: `module input "topic" must be wholly known during plan`,
+		},
+		{
+			name:  "unknown object with non-artifact kind is rejected",
+			child: `variable "topic" { type = any }`,
+			root: `planning_fixture "unknown" { value = "unknown" }
+module "child" {
+  source = "./child"
+  topic = { kind = "result", id = planning_fixture.unknown }
+}`,
+			expectedError: `module input "topic" must be wholly known during plan`,
+		},
+		{
 			name: "variable sensitive is a bool",
 			child: `variable "topic" {
   type      = string

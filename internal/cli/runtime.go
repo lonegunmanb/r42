@@ -518,6 +518,7 @@ func (f *runtimeFactory) newModuleBlock(
 		recorder: f.recorder, state: f.state, prefix: executionAddress, tools: node.Module.Plan.Tools(),
 		directory: node.Module.Plan.Directory(), contextValues: node.Module.Plan.Context(),
 		localExpressions:      node.Module.Plan.LocalExpressions(),
+		artifactRegistry:      f.ensureArtifactRegistry(),
 		sessionStallTimeout:   f.sessionStallTimeout,
 		sessionStoreDirectory: f.sessionStoreDirectory,
 		resume:                f.resume,
@@ -525,6 +526,28 @@ func (f *runtimeFactory) newModuleBlock(
 		s3ServiceFactory:      f.s3ServiceFactory,
 		s3EnvLookup:           f.s3EnvLookup,
 		documentRunner:        f.documentRunner,
+	}
+	if variables, ok := childFactory.contextValues["var"]; ok && !variables.IsWhollyKnown() {
+		file, diagnostics := hclsyntax.ParseConfig([]byte(node.Origin.Source), "saved-module", hcl.InitialPos)
+		if diagnostics.HasErrors() {
+			return nil, diagnostics
+		}
+		//nolint:forcetypeassert // hclsyntax.ParseConfig always returns a syntax body.
+		body := file.Body.(*hclsyntax.Body)
+		inputs := variables.AsValueMap()
+		for name, input := range inputs {
+			if input.IsWhollyKnown() {
+				continue
+			}
+			attribute := body.Blocks[0].Body.Attributes[name]
+			source := string(attribute.Expr.Range().SliceBytes([]byte(node.Origin.Source)))
+			value, err := f.evaluateResearchExpression(node.Address, source, "module input")
+			if err != nil {
+				return nil, err
+			}
+			inputs[name] = value.WithMarks(input.Marks())
+		}
+		childFactory.contextValues["var"] = cty.ObjectVal(inputs)
 	}
 	return &moduleApplyBlock{
 		BaseBlock: new(golden.BaseBlock), ctx: ctx, address: node.Address,
@@ -1291,6 +1314,9 @@ func (f *runtimeFactory) Close() error {
 
 func (f *runtimeFactory) ResolveOutputs(planned *plan.Plan) (map[string]cty.Value, error) {
 	contextValues := planned.Context()
+	if variables, ok := f.contextValues["var"]; ok {
+		contextValues["var"] = variables
+	}
 	f.mu.Lock()
 	for address, value := range f.results {
 		setBlockResult(contextValues, address, value)

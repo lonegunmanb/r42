@@ -1007,6 +1007,11 @@ output "report_path" {
   value       = research.static.synthesize.artifact.report.path
 }
 
+output "final_report_artifact" {
+  description = "Final company-first research-priority report artifact for downstream research."
+  value       = research.static.synthesize.artifact.report
+}
+
 output "scope_path" {
   description = "Machine-readable product boundary and coverage inventory."
   value       = research.static.brainstorm.artifact.scope.path

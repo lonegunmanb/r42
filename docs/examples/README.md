@@ -85,6 +85,48 @@ sentiment, and strategy reviewers then inspect the same packet before a typed
 tool renders the final Markdown with mandatory diversification, leverage, and
 cost warnings. See [`morning/README.md`](morning/README.md).
 
+## Final report artifacts
+
+The `deep-research`, `chokepoint`, `secjury`, and `morning` examples export
+`final_report_artifact`, the complete artifact object containing the final
+Markdown report. Its `path` matches `report_path`; it also includes `id`, `name`,
+`kind`, `type`, `description`, `required`, and `non_empty`. Artifact IDs resolve
+during Apply. The `basic` example has no report artifact, and `multi-step`
+exports a fetched source document rather than a final report.
+
+When using one of these examples as a module, a downstream research block can
+import its report directly (with `previous` naming that module):
+
+```hcl
+research "static" "follow_up" {
+  model         = "gpt-5.6-sol"
+  system_prompt = "Investigate a follow-up question using the imported final report."
+  prompt        = "Identify the most important unresolved question in the previous report."
+
+  import_artifact "previous_report" {
+    desc    = "Final report from the previous research module."
+    sources = [module.previous.final_report_artifact]
+  }
+}
+```
+
+The module reference establishes the dependency so follow-up research waits for
+the previous module to complete. To pass the artifact to another child module,
+set its input to `module.previous.final_report_artifact`, and use that variable
+in the child's `import_artifact` sources.
+
+```hcl
+module "next" {
+  source          = "./modules/follow_up"
+  previous_report = module.previous.final_report_artifact
+}
+```
+
+In `modules/follow_up`, declare `variable "previous_report" { type = any }`
+and set the research block's import sources to `[var.previous_report]`. The
+artifact input is resolved during Apply from the previous module's completed
+output; both modules share the run's artifact registry.
+
 ## S3-compatible upload
 
 Every top-level example (`basic`, `multi-step`, `deep-research`, `chokepoint`,
