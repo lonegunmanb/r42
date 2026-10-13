@@ -133,6 +133,11 @@ func Evaluate(ctx context.Context, config Config, code, dataJSON string) (Result
 
 	modules, err := bundledModules(thread)
 	if err != nil {
+		// Module setup also runs on the cancellable thread; a timeout firing during
+		// setup must still surface as a repairable timeout, not a runtime error.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return Result{}, evaluationFailure("starlark_timeout", "evaluation exceeded timeout", ctx.Err(), stdout.String(), thread.ExecutionSteps())
+		}
 		return Result{}, failure("starlark_runtime_error", "initialize numerical modules", err)
 	}
 	thread.SetMaxExecutionSteps(thread.ExecutionSteps() + uint64(config.MaxSteps))
