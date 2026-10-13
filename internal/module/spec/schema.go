@@ -68,7 +68,11 @@ func (b *ModuleBlock) Decode(block *golden.HclBlock, context *hcl.EvalContext) e
 			return diagnostics
 		}
 		if !value.IsWhollyKnown() {
-			return fmt.Errorf("module input %q must be wholly known during plan", name)
+			unmarked, _ := value.UnmarkDeep()
+			isArtifact := unmarked.IsKnown() && unmarked.Type().IsObjectType() && unmarked.Type().HasAttribute("kind")
+			if !isArtifact || !unmarked.GetAttr("kind").RawEquals(cty.StringVal("artifact")) {
+				return fmt.Errorf("module input %q must be wholly known during plan", name)
+			}
 		}
 		inputs[name] = value
 	}

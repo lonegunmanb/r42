@@ -72,6 +72,7 @@ type ResearchBlock struct {
 	planned                Config
 	plannedPath            cty.Value
 	deferredTaskExpression string
+	deferredImportsOnly    bool
 	plannedTaskValue       cty.Value
 }
 
@@ -165,7 +166,7 @@ func declaredArtifactReferences(block *golden.BaseBlock, context *hcl.EvalContex
 
 func (b *ResearchBlock) ExecuteDuringPlan() error {
 	return debuglog.PlanBlock(b.Context(), b.Address(), b.BlockType(), func() error {
-		if b.deferredTaskExpression != "" {
+		if b.deferredTaskExpression != "" && !b.deferredImportsOnly {
 			return nil
 		}
 		if err := b.validateNativeStringFields(); err != nil {

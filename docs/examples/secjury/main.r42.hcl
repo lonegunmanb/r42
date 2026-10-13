@@ -811,3 +811,8 @@ output "report_path" {
   description = "Final synthesized Markdown report."
   value       = research.static.synthesize.artifact.report.path
 }
+
+output "final_report_artifact" {
+  description = "Final synthesized Markdown report artifact for downstream research."
+  value       = research.static.synthesize.artifact.report
+}

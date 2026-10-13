@@ -863,3 +863,8 @@ output "report_path" {
   description = "最终面向普通读者的财经早餐 Markdown。"
   value       = research.static.publisher_editor.artifact.report_markdown.path
 }
+
+output "final_report_artifact" {
+  description = "包含最终财经早餐 Markdown 报告的 artifact，可供后续研究直接导入。"
+  value       = research.static.publisher_editor.artifact.report_markdown
+}

@@ -28,6 +28,7 @@ var researchAttributeNames = map[string]struct{}{
 
 func (b *ResearchBlock) Decode(block *golden.HclBlock, context *hcl.EvalContext) error {
 	b.deferredTaskExpression = ""
+	b.deferredImportsOnly = false
 	b.plannedTaskValue = cty.NilVal
 	expanded := block
 	var err error
@@ -38,11 +39,21 @@ func (b *ResearchBlock) Decode(block *golden.HclBlock, context *hcl.EvalContext)
 		}
 	}
 	diagnostics := gohcl.DecodeBody(researchDecodeBody(expanded), context, b)
+	unknownImports := false
+	for _, imported := range b.ImportArtifactBlocks {
+		if !imported.Sources.IsWhollyKnown() {
+			unknownImports = true
+			break
+		}
+	}
 	if !diagnostics.HasErrors() {
 		if err := decodeToolUseValidations(expanded, context, b); err != nil {
 			return err
 		}
-		return nil
+		if !unknownImports {
+			return nil
+		}
+		b.deferredImportsOnly = true
 	}
 	expression, err := staticResearchTaskExpression(expanded)
 	if err != nil {
@@ -478,6 +489,12 @@ func artifactMapValue(value cty.Value) cty.Value {
 	attributes := unmarked.AsValueMap()
 	if len(attributes) == 0 {
 		return cty.MapValEmpty(artifactValueType).WithMarks(marks)
+	}
+	for name, artifact := range attributes {
+		fields := artifact.AsValueMap()
+		fields["id"] = cty.UnknownVal(cty.String)
+		fields["kind"] = cty.StringVal("artifact")
+		attributes[name] = cty.ObjectVal(fields)
 	}
 	return cty.MapVal(attributes).WithMarks(marks)
 }
