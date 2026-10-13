@@ -55,6 +55,7 @@ type ToolSpec struct {
 	Kind                 string               `json:"kind"`
 	Description          string               `json:"description"`
 	Source               string               `json:"source,omitempty"`
+	Dependencies         []string             `json:"dependencies,omitempty"`
 	Program              []string             `json:"program,omitempty"`
 	WorkingDir           string               `json:"working_dir,omitempty"`
 	InputTypeExpression  string               `json:"input_type_expression,omitempty"`
@@ -284,6 +285,7 @@ func clonePlan(source *Plan) *Plan {
 func cloneTools(source map[string]ToolSpec) map[string]ToolSpec {
 	result := make(map[string]ToolSpec, len(source))
 	for id, tool := range source {
+		tool.Dependencies = slices.Clone(tool.Dependencies)
 		tool.Program = slices.Clone(tool.Program)
 		tool.Postconditions = slices.Clone(tool.Postconditions)
 		if tool.Starlark != nil {

@@ -656,7 +656,8 @@ values that cannot be represented by the implementation type.
 ### Inline `go_tool`
 
 `source` is a Go file fragment without a `package` clause or `main` function. It
-may import Go standard-library packages only and must declare:
+may import Go standard-library packages and modules listed in the optional
+`dependencies` list, and must declare:
 
 ```go
 type Input ...
@@ -666,9 +667,10 @@ func Invoke(context.Context, Input) (ToolResponse[Output], error)
 
 During Plan, r42 uses Go parser/AST/type checking to verify the declarations,
 signature, imports, ToolResponse invariants that can be checked statically, and
-cty compatibility. During Apply, r42 injects the package, shared response types,
-and a JSON stdin/stdout `main`, then compiles an executable into an r42 temporary
-directory. It does not run `go install` or download non-standard dependencies.
+cty compatibility. During Apply, r42 creates an isolated temporary `go.mod` and
+runs `go get` once for each dependency string in list order, then injects the
+package, shared response types, and a JSON stdin/stdout `main`, then compiles an executable into
+an r42 temporary directory.
 
 Compiled tools are cached within one r42 process, invoked by absolute path as a
 fresh child process per call, and deleted best-effort before r42 exits.

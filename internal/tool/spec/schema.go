@@ -28,6 +28,7 @@ type GoToolBlock struct {
 	*golden.BaseBlock
 	Description    string `hcl:"description"`
 	Source         string `hcl:"source"`
+	Dependencies   []string
 	Postconditions []corespec.Condition
 }
 
@@ -48,12 +49,21 @@ func (b *GoToolBlock) BaseValues() map[string]cty.Value {
 }
 
 func (b *GoToolBlock) Value() cty.Value {
+	dependencies := cty.ListValEmpty(cty.String)
+	if len(b.Dependencies) > 0 {
+		values := make([]cty.Value, len(b.Dependencies))
+		for index, dependency := range b.Dependencies {
+			values[index] = cty.StringVal(dependency)
+		}
+		dependencies = cty.ListVal(values)
+	}
 	return cty.ObjectVal(map[string]cty.Value{
-		"id":          cty.StringVal(b.Id()),
-		"address":     cty.StringVal(b.Address()),
-		"kind":        cty.StringVal(string(config.AddressKindGo)),
-		"description": cty.StringVal(b.Description),
-		"source":      cty.StringVal(b.Source),
+		"id":           cty.StringVal(b.Id()),
+		"address":      cty.StringVal(b.Address()),
+		"kind":         cty.StringVal(string(config.AddressKindGo)),
+		"description":  cty.StringVal(b.Description),
+		"source":       cty.StringVal(b.Source),
+		"dependencies": dependencies,
 	})
 }
 
@@ -69,12 +79,17 @@ func (b *GoToolBlock) Decode(block *golden.HclBlock, context *hcl.EvalContext) e
 	if err != nil {
 		return err
 	}
+	dependencies, err := decodeGoDependencies(block, context)
+	if err != nil {
+		return err
+	}
 	b.Description = description
 	b.Source = source
+	b.Dependencies = dependencies
 	if !hasNestedBlock(block, "postcondition") {
 		return nil
 	}
-	analysis, err := gotool.Analyze(source)
+	analysis, err := gotool.AnalyzeWithDependencies(source, b.Dependencies)
 	if err != nil {
 		return fmt.Errorf("go tool postcondition types: %w", err)
 	}
@@ -92,7 +107,7 @@ func (b *GoToolBlock) Decode(block *golden.HclBlock, context *hcl.EvalContext) e
 
 func validateGoToolSchema(block *golden.HclBlock) error {
 	for name := range block.Attributes() {
-		if name == "description" || name == "source" || golden.MetaAttributeNames.Contains(name) {
+		if name == "description" || name == "source" || name == "dependencies" || golden.MetaAttributeNames.Contains(name) {
 			continue
 		}
 		return fmt.Errorf("unsupported argument; An argument named %q is not expected here", name)
@@ -104,6 +119,34 @@ func validateGoToolSchema(block *golden.HclBlock) error {
 		return fmt.Errorf("unsupported block type; Blocks of type %q are not expected here", nested.Type)
 	}
 	return nil
+}
+
+func decodeGoDependencies(block *golden.HclBlock, context *hcl.EvalContext) ([]string, error) {
+	attribute, ok := block.Attributes()["dependencies"]
+	if !ok {
+		return []string{}, nil
+	}
+	value, diagnostics := attribute.Expr.Value(context)
+	if diagnostics.HasErrors() {
+		return nil, diagnostics
+	}
+	if value.IsNull() || !value.IsWhollyKnown() {
+		return nil, fmt.Errorf("go tool dependencies must be a known list of strings")
+	}
+	value, err := convert.Convert(value, cty.List(cty.String))
+	if err != nil {
+		return nil, fmt.Errorf("go tool dependencies must be a list of strings: %w", err)
+	}
+	result := make([]string, 0, value.LengthInt())
+	for iterator := value.ElementIterator(); iterator.Next(); {
+		_, dependencyValue := iterator.Element()
+		dependency := dependencyValue.AsString()
+		if strings.TrimSpace(dependency) == "" {
+			return nil, fmt.Errorf("go tool dependencies must not contain empty entries")
+		}
+		result = append(result, dependency)
+	}
+	return result, nil
 }
 
 func decodeGoRequiredString(

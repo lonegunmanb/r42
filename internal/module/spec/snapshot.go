@@ -716,7 +716,7 @@ func BuildToolRegistry(
 	for _, block := range golden.Blocks[*toolspec.GoToolBlock](planning) {
 		definition := internalplan.ToolSpec{
 			ID: block.Id(), Address: block.CanonicalAddress(), Kind: string(config.AddressKindGo),
-			Description: block.Description, Source: block.Source,
+			Description: block.Description, Source: block.Source, Dependencies: slices.Clone(block.Dependencies),
 			Postconditions: slices.Clone(block.Postconditions), Origin: BlockOrigin(block.HclBlock()),
 		}
 		registry[definition.ID] = definition

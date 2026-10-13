@@ -350,6 +350,14 @@ func TestGoToolBlockValidation(t *testing.T) {
 }`,
 		},
 		{
+			name: "declared Go module dependencies",
+			source: `go_tool "finish" {
+  description = "Finish research"
+  dependencies = ["github.com/google/uuid@v1.6.0"]
+  source = "type Input struct{}"
+}`,
+		},
+		{
 			name: "empty description",
 			source: `go_tool "finish" {
   description = " "
@@ -378,6 +386,54 @@ func TestGoToolBlockValidation(t *testing.T) {
 			assert.ErrorContains(t, err, tt.expectedError)
 		})
 	}
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestGoToolDecodesModuleDependencies(t *testing.T) {
+	config := parseToolConfig(t, `
+go_tool "finish" {
+  description = "Finish research"
+  dependencies = [
+    "github.com/google/uuid@v1.6.0",
+    "golang.org/x/text@v0.3.0",
+  ]
+  source = "type Input struct{}"
+}
+`)
+
+	require.NoError(t, config.RunPlan())
+	blocks := golden.Blocks[*toolspec.GoToolBlock](config)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, []string{"github.com/google/uuid@v1.6.0", "golang.org/x/text@v0.3.0"}, blocks[0].Dependencies)
+}
+
+//nolint:paralleltest // Golden's block registry is process-global.
+func TestGoToolPostconditionAllowsDeclaredModuleDependencies(t *testing.T) {
+	config := parseToolConfig(t, `
+go_tool "finish" {
+  description = "Finish research"
+  dependencies = ["github.com/google/uuid@v1.6.0"]
+  source = <<-GO
+    import (
+      "context"
+      "github.com/google/uuid"
+    )
+    type Input struct{}
+    type Output string
+    func Invoke(context.Context, Input) (ToolResponse[Output], error) {
+      output := Output(uuid.NewString())
+      return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+    }
+  GO
+
+  postcondition {
+    condition     = output != ""
+    error_message = "output is required"
+  }
+}
+`)
+
+	require.NoError(t, config.RunPlan())
 }
 
 //nolint:paralleltest // Golden's block registry is process-global.

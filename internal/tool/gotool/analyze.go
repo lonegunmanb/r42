@@ -1,6 +1,7 @@
 package gotool
 
 import (
+	"context"
 	"fmt"
 	"go/ast"
 	"go/build"
@@ -9,6 +10,8 @@ import (
 	"go/scanner"
 	"go/token"
 	"go/types"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -16,6 +19,7 @@ import (
 	"unicode"
 
 	"github.com/zclconf/go-cty/cty"
+	"golang.org/x/tools/go/packages"
 )
 
 const injectedTypes = `
@@ -42,6 +46,14 @@ type Analysis struct {
 }
 
 func Analyze(source string) (Analysis, error) {
+	return analyze(source, nil)
+}
+
+func AnalyzeWithDependencies(source string, dependencies []string) (Analysis, error) {
+	return analyze(source, dependencies)
+}
+
+func analyze(source string, dependencies []string) (Analysis, error) {
 	if containsPackageClause(source) {
 		return Analysis{}, fmt.Errorf("package clause is not allowed")
 	}
@@ -54,14 +66,13 @@ func Analyze(source string) (Analysis, error) {
 	if err = validateDeclarations(file); err != nil {
 		return Analysis{}, err
 	}
-	if err = validateImports(file); err != nil {
+	if err = validateImports(file, dependencies); err != nil {
 		return Analysis{}, err
 	}
 
-	configuration := types.Config{Importer: importer.Default()}
-	checked, err := configuration.Check("r42.inline.tool", fileSet, []*ast.File{file}, nil)
+	checked, err := checkPackage(source, dependencies, fileSet, file)
 	if err != nil {
-		return Analysis{}, fmt.Errorf("type checking inline Go tool: %w", err)
+		return Analysis{}, err
 	}
 
 	input, err := requiredNamedType(checked, "Input")
@@ -103,6 +114,46 @@ func Analyze(source string) (Analysis, error) {
 	return Analysis{InputType: inputType, OutputType: outputType, QuotePaths: quotePaths}, nil
 }
 
+func checkPackage(source string, dependencies []string, fileSet *token.FileSet, file *ast.File) (*types.Package, error) {
+	if len(dependencies) == 0 {
+		configuration := types.Config{Importer: importer.Default()}
+		checked, err := configuration.Check("r42.inline.tool", fileSet, []*ast.File{file}, nil)
+		if err != nil {
+			return nil, fmt.Errorf("type checking inline Go tool: %w", err)
+		}
+		return checked, nil
+	}
+	directory, err := os.MkdirTemp("", "r42-go-analyze-")
+	if err != nil {
+		return nil, fmt.Errorf("creating Go module analysis directory: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(directory) }()
+	if err = os.WriteFile(filepath.Join(directory, "go.mod"), []byte(moduleFile()), 0o600); err != nil {
+		return nil, fmt.Errorf("writing Go module analysis file: %w", err)
+	}
+	if err = os.WriteFile(filepath.Join(directory, "main.go"), []byte(wrapperSource(source)), 0o600); err != nil {
+		return nil, fmt.Errorf("writing Go module analysis source: %w", err)
+	}
+	if err = runGoGets(context.Background(), directory, dependencies); err != nil {
+		return nil, err
+	}
+	loaded, err := packages.Load(&packages.Config{
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedImports | packages.NeedDeps | packages.NeedTypes,
+		Dir:  directory,
+		Env:  append(os.Environ(), "GO111MODULE=on", "GOWORK=off", "GOFLAGS=-mod=mod"),
+	}, "./")
+	if err != nil {
+		return nil, fmt.Errorf("loading inline Go module: %w", err)
+	}
+	if len(loaded) != 1 || loaded[0].Types == nil {
+		return nil, fmt.Errorf("loading inline Go module: no type information")
+	}
+	if len(loaded[0].Errors) > 0 {
+		return nil, fmt.Errorf("type checking inline Go tool (package=%s id=%s): %w", loaded[0].Name, loaded[0].ID, loaded[0].Errors[0])
+	}
+	return loaded[0].Types, nil
+}
+
 func containsPackageClause(source string) bool {
 	fileSet := token.NewFileSet()
 	file := fileSet.AddFile("tool.go", -1, len(source))
@@ -129,18 +180,37 @@ func validateDeclarations(file *ast.File) error {
 	return nil
 }
 
-func validateImports(file *ast.File) error {
+func validateImports(file *ast.File, dependencies []string) error {
 	for _, importSpec := range file.Imports {
 		path, err := strconv.Unquote(importSpec.Path.Value)
 		if err != nil {
 			return fmt.Errorf("invalid import path %s: %w", importSpec.Path.Value, err)
 		}
 		imported, err := build.Default.Import(path, "", build.FindOnly)
+		if err == nil && imported.Goroot {
+			continue
+		}
+		if dependencyDeclared(path, dependencies) {
+			continue
+		}
 		if err != nil || !imported.Goroot {
 			return fmt.Errorf("import must be from the Go standard library: %q", path)
 		}
 	}
 	return nil
+}
+
+func dependencyDeclared(importPath string, dependencies []string) bool {
+	for _, dependency := range dependencies {
+		module := dependency
+		if at := strings.LastIndexByte(module, '@'); at >= 0 {
+			module = module[:at]
+		}
+		if importPath == module || strings.HasPrefix(importPath, module+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func requiredNamedType(pkg *types.Package, name string) (*types.Named, error) {
