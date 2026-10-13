@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -2736,6 +2737,25 @@ func newOfficialSessionOpener() *officialSessionOpener {
 	return &officialSessionOpener{}
 }
 
+func copilotClientOptions(
+	baseDirectory string,
+	lookupEnv func(string) (string, bool),
+	lookPath func(string) (string, error),
+) (sdk.ClientOptions, error) {
+	cliPath, configured := lookupEnv("COPILOT_CLI_PATH")
+	if !configured || strings.TrimSpace(cliPath) == "" {
+		var err error
+		cliPath, err = lookPath("copilot")
+		if err != nil {
+			return sdk.ClientOptions{}, fmt.Errorf("find system copilot executable: %w", err)
+		}
+	}
+	return sdk.ClientOptions{
+		BaseDirectory: baseDirectory,
+		Connection:    sdk.StdioConnection{Path: cliPath},
+	}, nil
+}
+
 func (o *officialSessionOpener) Open(ctx context.Context, config copilot.SessionConfig) (Session, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -2744,7 +2764,11 @@ func (o *officialSessionOpener) Open(ctx context.Context, config copilot.Session
 	}
 	if o.client == nil {
 		o.baseDirectory = config.SessionStoreDirectory
-		o.client = sdk.NewClient(&sdk.ClientOptions{BaseDirectory: o.baseDirectory})
+		options, err := copilotClientOptions(o.baseDirectory, os.LookupEnv, exec.LookPath)
+		if err != nil {
+			return nil, err
+		}
+		o.client = sdk.NewClient(&options)
 		if err := o.client.Start(ctx); err != nil {
 			o.client = nil
 			return nil, fmt.Errorf("start copilot client: %w", err)
