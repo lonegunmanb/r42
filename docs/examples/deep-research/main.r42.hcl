@@ -285,7 +285,7 @@ research "dynamic" "parallel_deep_dive" {
         source metadata. Then call
         ${go_tool.submit_knowledge.id}; r42 binds its declared knowledge
         artifact_id and the subquestion exactly as assigned above. Supply short
-        local knowledge claim IDs; the tool returns task-prefixed claim_ids.
+        local knowledge claim IDs; the tool returns unambiguous task-scoped claim_ids.
         Use those returned IDs for patches and all downstream knowledge
         references. Do not finish with prose or a JSON code block.
       PROMPT
@@ -396,7 +396,7 @@ research "dynamic" "independent_serial_deep_dive" {
         source metadata. Then call ${go_tool.submit_knowledge.id}
         with its declared knowledge artifact_id and subquestion exactly
         as assigned above. Supply short local knowledge claim IDs; the tool
-        returns task-prefixed claim_ids. Use those returned IDs for patches
+        returns unambiguous task-scoped claim_ids. Use those returned IDs for patches
         and all downstream knowledge references. Do not finish with prose or
         a JSON code block.
       PROMPT
@@ -534,7 +534,7 @@ research "dynamic" "final_serial_deep_dive" {
         ${go_tool.submit_knowledge.id}
         with its declared knowledge artifact_id, subquestion exactly as
         assigned above. Supply short local knowledge claim IDs; the tool
-        returns task-prefixed claim_ids. Use those returned IDs for patches,
+        returns unambiguous task-scoped claim_ids. Use those returned IDs for patches,
         conflict references, and all downstream knowledge references. Do not
         finish with prose or a JSON code block.
       PROMPT

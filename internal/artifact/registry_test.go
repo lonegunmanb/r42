@@ -1,14 +1,17 @@
 package artifact_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	artifactpkg "github.com/lonegunmanb/r42/internal/artifact"
 	researchspec "github.com/lonegunmanb/r42/internal/research/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 )
 
 func TestRegistryDeclaresAndReadsExistingArtifactByOpaqueID(t *testing.T) {
@@ -98,6 +101,82 @@ func TestRegistrySnapshotWorkspaceExcludesOtherWorkflowArtifacts(t *testing.T) {
 	require.Len(t, snapshot.Entries, 1)
 	assert.Equal(t, artifactB.ID, snapshot.Entries[0].Record.ID)
 	assert.NotEqual(t, artifactA.ID, snapshot.Entries[0].Record.ID)
+}
+
+func TestRegistryRestoreWorkspacePreservesConcurrentRestorations(t *testing.T) {
+	t.Parallel()
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+	const count = 64
+	root := t.TempDir()
+	workspaces := make([]string, count)
+	snapshots := make([]artifactpkg.Snapshot, count)
+	ids := make([]string, count)
+	for index := range workspaces {
+		workspaces[index] = filepath.Join(root, fmt.Sprintf("task-%d", index))
+		registry := artifactpkg.NewRegistry()
+		record, err := registry.Declare(workspaces[index], researchspec.Artifact{
+			Name: "claims", Type: researchspec.ArtifactTypeFile, Path: "claims.json", Description: "Claims",
+		})
+		require.NoError(t, err)
+		ids[index] = record.ID
+		snapshots[index] = registry.SnapshotWorkspace(workspaces[index])
+	}
+
+	resumed := artifactpkg.NewRegistry()
+	start := make(chan struct{})
+	errors := make(chan error, count)
+	var workers sync.WaitGroup
+	for index := range workspaces {
+		workers.Add(1)
+		go func(index int) {
+			defer workers.Done()
+			<-start
+			errors <- resumed.RestoreWorkspace(workspaces[index], snapshots[index])
+		}(index)
+	}
+	close(start)
+	workers.Wait()
+	close(errors)
+	for err := range errors {
+		require.NoError(t, err)
+	}
+	var missing []string
+	for _, id := range ids {
+		if _, err := resumed.Record(id); err != nil {
+			missing = append(missing, id)
+		}
+	}
+	assert.Empty(t, missing, "concurrent restorations lost artifact IDs")
+}
+
+func TestRegistryRestoreWorkspaceRejectsConflictingIDWithoutChangingRegistry(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	workspaceA := filepath.Join(root, "a")
+	workspaceB := filepath.Join(root, "b")
+	sourceA := artifactpkg.NewRegistry()
+	sourceB := artifactpkg.NewRegistry()
+	recordA, err := sourceA.Declare(workspaceA, researchspec.Artifact{
+		Name: "a", Type: researchspec.ArtifactTypeFile, Path: "a.md", Description: "A",
+	})
+	require.NoError(t, err)
+	_, err = sourceB.Declare(workspaceB, researchspec.Artifact{
+		Name: "b", Type: researchspec.ArtifactTypeFile, Path: "b.md", Description: "B",
+	})
+	require.NoError(t, err)
+	conflicting := sourceB.SnapshotWorkspace(workspaceB)
+	conflicting.Entries[0].Record.ID = recordA.ID
+
+	resumed := artifactpkg.NewRegistry()
+	require.NoError(t, resumed.RestoreWorkspace(workspaceA, sourceA.SnapshotWorkspace(workspaceA)))
+	err = resumed.RestoreWorkspace(workspaceB, conflicting)
+	require.ErrorContains(t, err, "conflicts with existing id")
+	restored, err := resumed.Record(recordA.ID)
+	require.NoError(t, err)
+	assert.Equal(t, recordA, restored)
+	assert.Len(t, resumed.RecordsByPurpose(artifactpkg.PurposeOutput), 1)
 }
 
 func TestRegistryRegisterEvidenceRecordsSourceAndPurpose(t *testing.T) {

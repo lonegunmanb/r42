@@ -267,8 +267,8 @@ func TestSubmitKnowledgeAcceptsBuiltinUUIDArtifactID(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(*response.Output), &encoded))
 	require.NoError(t, json.Unmarshal([]byte(encoded), &payload))
 	require.Len(t, payload.Knowledge, 1)
-	assert.Equal(t, []string{"research-task-kb-1"}, payload.ClaimIDs)
-	assert.Equal(t, "research-task-kb-1", payload.Knowledge[0].ID)
+	assert.Equal(t, []string{"13-research-task-kb-1"}, payload.ClaimIDs)
+	assert.Equal(t, "13-research-task-kb-1", payload.Knowledge[0].ID)
 	assert.Len(t, payload.Knowledge[0].QuoteIDs, 1)
 	require.Len(t, payload.Quotes, 1)
 	assert.Equal(t, "quote-ref-1", payload.Quotes[0].QuoteRef)
@@ -282,7 +282,52 @@ func TestSubmitKnowledgeAcceptsBuiltinUUIDArtifactID(t *testing.T) {
 	savedPayload, readErr := os.ReadFile(artifactPath)
 	require.NoError(t, readErr)
 	require.NoError(t, json.Unmarshal(savedPayload, &saved))
-	assert.Equal(t, "research-task-kb-1", saved.Knowledge[0].ID)
+	assert.Equal(t, "13-research-task-kb-1", saved.Knowledge[0].ID)
+}
+
+func TestSubmitKnowledgeSeparatesAmbiguousTaskAndLocalIDs(t *testing.T) {
+	t.Parallel()
+
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "submit_knowledge"))
+	require.NoError(t, err)
+
+	tests := []struct {
+		taskID string
+		local  string
+	}{
+		{taskID: "a", local: "b-c"},
+		{taskID: "a-b", local: "c"},
+	}
+	claimIDs := make([]string, 0, len(tests))
+	for index, tt := range tests {
+		workspace := filepath.Join(t.TempDir(), ".r42", "runs", "current", "blocks", "knowledge")
+		require.NoError(t, os.MkdirAll(workspace, 0o700))
+		response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+			"_r42_artifact_path": filepath.Join(workspace, "knowledge.json"),
+			"task_id":            tt.taskID,
+			"quote_id_prefix":    "task-quote-",
+			"subquestion":        "What happened?",
+			"knowledge": []any{map[string]any{
+				"id": tt.local, "claim": "A claim", "confidence": "high", "citations": []any{trustedCitation("quote-ref-1")},
+			}},
+		}), workspace)
+		require.NoError(t, invokeErr)
+		require.True(t, response.Accepted, "case %d issues: %#v", index, response.Issues)
+		require.NotNil(t, response.Output)
+		var payload struct {
+			ClaimIDs []string `json:"claim_ids"`
+		}
+		var encoded string
+		require.NoError(t, json.Unmarshal([]byte(*response.Output), &encoded))
+		require.NoError(t, json.Unmarshal([]byte(encoded), &payload))
+		require.Len(t, payload.ClaimIDs, 1)
+		claimIDs = append(claimIDs, payload.ClaimIDs[0])
+	}
+
+	assert.NotEqual(t, claimIDs[0], claimIDs[1], "different task/local ID pairs must have distinct final IDs")
 }
 
 func TestSubmitKnowledgeRejectsInvalidTaskScopedIDs(t *testing.T) {
@@ -301,7 +346,7 @@ func TestSubmitKnowledgeRejectsInvalidTaskScopedIDs(t *testing.T) {
 	}{
 		{name: "missing task", ids: []string{"kb-1"}, wantCode: "task_id"},
 		{name: "empty local ID", taskID: "research-task", ids: []string{""}, wantCode: "knowledge_id"},
-		{name: "prefixed alias", taskID: "research-task", ids: []string{"kb-1", "research-task-kb-1"}, wantCode: "knowledge_id"},
+		{name: "duplicate local ID", taskID: "research-task", ids: []string{"kb-1", "kb-1"}, wantCode: "knowledge_id"},
 		{name: "final ID too long", taskID: "research-task", ids: []string{"k" + strings.Repeat("b", 127)}, wantCode: "knowledge_id"},
 	}
 	for _, tt := range tests {
@@ -337,7 +382,7 @@ func TestConflictResolutionRequiresFinalKnowledgeIDs(t *testing.T) {
 	resolutionPath := filepath.Join(workspace, "resolution.json")
 	require.NoError(t, os.MkdirAll(workspace, 0o700))
 	require.NoError(t, os.MkdirAll(filepath.Dir(upstream), 0o700))
-	require.NoError(t, os.WriteFile(upstream, []byte(`{"knowledge":[{"id":"task-a-kb-1"},{"id":"task-b-kb-1"}]}`), 0o600))
+	require.NoError(t, os.WriteFile(upstream, []byte(`{"knowledge":[{"id":"1-a-kb-1"},{"id":"1-b-kb-1"}]}`), 0o600))
 	compiler, err := gotool.NewCompiler()
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
@@ -348,7 +393,7 @@ func TestConflictResolutionRequiresFinalKnowledgeIDs(t *testing.T) {
 		"topic":              "Topic", "reviewed_artifacts": []string{upstream},
 		"synthesis_guidance": "Preserve uncertainty.",
 		"conflicts": []any{map[string]any{
-			"id": "conflict-1", "knowledge_ids": []string{"kb-1", "task-b-kb-1"},
+			"id": "conflict-1", "knowledge_ids": []string{"kb-1", "1-b-kb-1"},
 			"description": "Claims disagree.", "status": "unresolved", "resolution": "Remain uncertain.",
 			"rationale": "Quotes differ.", "preferred_knowledge_ids": []string{"kb-1"},
 			"supporting_quote_ids": []string{"quote-1"},
@@ -368,8 +413,8 @@ func TestConflictResolutionRequiresFinalKnowledgeIDs(t *testing.T) {
 	require.True(t, ok)
 	conflict, ok := conflicts[0].(map[string]any)
 	require.True(t, ok)
-	conflict["knowledge_ids"] = []string{"task-a-kb-1", "task-b-kb-1"}
-	conflict["preferred_knowledge_ids"] = []string{"task-a-kb-1"}
+	conflict["knowledge_ids"] = []string{"1-a-kb-1", "1-b-kb-1"}
+	conflict["preferred_knowledge_ids"] = []string{"1-a-kb-1"}
 	response, err = program.Invoke(t.Context(), marshalInput(t, input), workspace)
 	require.NoError(t, err)
 	assert.True(t, response.Accepted, "issues: %#v", response.Issues)

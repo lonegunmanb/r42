@@ -188,17 +188,45 @@ func (r *Registry) RestoreWorkspace(workspace string, snapshot Snapshot) error {
 		return errors.New("artifact registry is required")
 	}
 	cleaned := filepath.Clean(workspace)
-	for _, entry := range snapshot.Entries {
-		if filepath.Clean(entry.Workspace) != cleaned {
-			return fmt.Errorf("artifact workspace snapshot contains foreign artifact %q", entry.Record.ID)
+	for _, saved := range snapshot.Entries {
+		if filepath.Clean(saved.Workspace) != cleaned {
+			return fmt.Errorf("artifact workspace snapshot contains foreign artifact %q", saved.Record.ID)
 		}
 	}
-	current := r.Snapshot()
-	current.Entries = slices.DeleteFunc(current.Entries, func(entry SnapshotEntry) bool {
-		return filepath.Clean(entry.Workspace) == cleaned
+	staged := NewRegistry()
+	if err := staged.Restore(snapshot); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, id := range staged.order {
+		if existing, found := r.entries[id]; found && filepath.Clean(existing.workspace) != cleaned {
+			return fmt.Errorf("artifact checkpoint conflicts with existing id %q", id)
+		}
+	}
+	r.order = slices.DeleteFunc(r.order, func(id string) bool {
+		item := r.entries[id]
+		if filepath.Clean(item.workspace) != cleaned {
+			return false
+		}
+		delete(r.entries, id)
+		delete(r.paths, artifactPathKey(item.workspace, item.Path))
+		if item.directoryRoot != "" && item.relativePath != "" {
+			delete(r.children, artifactPathKey(item.workspace, item.directoryRoot)+"\x00"+filepath.Clean(item.relativePath))
+		}
+		return true
 	})
-	current.Entries = append(current.Entries, snapshot.Entries...)
-	return r.Restore(current)
+	for _, id := range staged.order {
+		item := staged.entries[id]
+		r.entries[id] = item
+		r.order = append(r.order, id)
+		r.paths[artifactPathKey(item.workspace, item.Path)] = id
+		if item.directoryRoot != "" && item.relativePath != "" {
+			r.children[artifactPathKey(item.workspace, item.directoryRoot)+"\x00"+filepath.Clean(item.relativePath)] = id
+		}
+	}
+	return nil
 }
 
 // Merge adds checkpoint state for one workflow to this run-wide registry.
