@@ -74,8 +74,13 @@ related-product company, or unverified lead. An empty company list is valid.
 The report uses one evidence layer. There are no secondary RPT claims, report
 manifest, reconciliation sessions, or composite chokepoint scores.
 
+`submit_claim_cards` receives the current block or dynamic task name. The `id`
+inside each submitted card is local to that task; the tool prefixes it with the
+task name and returns the final ID in `claim_ids`. Always use that returned ID
+for `derived_from`, revisions, downstream references, and report citations.
+
     {
-      "id": "C-012",
+      "id": "primary_source_baseline-C-012",
       "statement": "The company outsources all chip packaging.",
       "status": "confirmed",
       "scope": "DDR5 die packaging",

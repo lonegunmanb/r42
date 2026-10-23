@@ -133,8 +133,10 @@ submits only the chosen `quote_ref` values. Final QC can call
 quote; this is read-only and does not modify the candidate artifact. The host
 injects canonical artifact, source,
 locator, digest, and exact-quote fields before the typed tool runs. The tool
-validates unique knowledge IDs and confidence values, derives quote IDs and
-the quote list from citations, and deduplicates repeated references before
+prefixes each local knowledge ID with the bound task ID, returns the final
+`claim_ids`, and validates their uniqueness and confidence values. Use the
+returned IDs for patches and all downstream references. It derives quote IDs
+and the quote list from citations, and deduplicates repeated references before
 writing `knowledge.json` under that task's workspace. There is no separately
 submitted quote list, so unused quote records cannot be created. Before
 submitting knowledge, Collection must retain the complete fetched material

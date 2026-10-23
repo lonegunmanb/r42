@@ -99,7 +99,7 @@ go_tool "submit_morning_scan" {
 }
 
 go_tool "submit_morning_evidence" {
-  description = "Submit one gathering track's atomic evidence during closed Research only. `claims.category` is optional and may be `source_fact` (the default when omitted), `analysis` (a reasoned, conditional interpretation grounded in the cited facts), or `mixed` (the same claim combines a sourced fact with its clearly marked analysis). Copy each `quotes.exact_quote` verbatim from its referenced artifact; a quote may include the complete sentence or necessary adjacent context, but do not paraphrase, combine separate passages, or add unrelated text. This tool performs mechanical checks only (fields, IDs, dates, artifact membership, quote presence, claim/quote references, and required watchlist coverage); it does not judge whether a quote semantically supports a claim or whether a search was sufficiently broad. Final QC performs that semantic check. `claims.as_of` and `quotes.publication_date` must use `YYYY-MM-DD`. `claims.confidence` must be `high`, `medium`, or `low`; every claim must reference at least one quote and every quote must be used. A watchlist item with no worthwhile news must use `news_status = no_material_news` and explain the check in `summary`; this is a valid result, not a claim."
+  description = "Submit one gathering track's atomic evidence during closed Research only. `task_id` identifies the current track. Supply local `claims.id` values; the tool prefixes them with task_id, updates same-call `coverage.claim_ids`, and returns final `claim_ids` alongside the evidence JSON. Use returned IDs in all later references. Already-prefixed IDs are not prefixed again. `claims.category` is optional and may be `source_fact` (the default when omitted), `analysis` (a reasoned, conditional interpretation grounded in the cited facts), or `mixed` (the same claim combines a sourced fact with its clearly marked analysis). Copy each `quotes.exact_quote` verbatim from its referenced artifact; a quote may include the complete sentence or necessary adjacent context, but do not paraphrase, combine separate passages, or add unrelated text. This tool performs mechanical checks only (fields, IDs, dates, artifact membership, quote presence, claim/quote references, and required watchlist coverage); it does not judge whether a quote semantically supports a claim or whether a search was sufficiently broad. Final QC performs that semantic check. `claims.as_of` and `quotes.publication_date` must use `YYYY-MM-DD`. `claims.confidence` must be `high`, `medium`, or `low`; every claim must reference at least one quote and every quote must be used. A watchlist item with no worthwhile news must use `news_status = no_material_news` and explain the check in `summary`; this is a valid result, not a claim."
 
   source = <<-GO
     import (
@@ -108,6 +108,7 @@ go_tool "submit_morning_evidence" {
       "fmt"
       "os"
       "path/filepath"
+      "regexp"
       "strings"
       "time"
     )
@@ -165,8 +166,38 @@ go_tool "submit_morning_evidence" {
 
     type Output string
 
+    var evidenceTaskID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
+    var evidenceClaimID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
+
+    func finalEvidenceClaimID(taskID, id string) string {
+      prefix := taskID + "-"
+      if strings.HasPrefix(id, prefix) { return id }
+      return prefix + id
+    }
+
     func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
+      localIDs := make(map[string]string, len(input.Claims))
+      claimIDs := make([]string, 0, len(input.Claims))
+      idIssues := []Issue{}
+      for index := range input.Claims {
+        id := strings.TrimSpace(input.Claims[index].ID)
+        finalID := finalEvidenceClaimID(input.TaskID, id)
+        if !evidenceClaimID.MatchString(id) {
+          idIssues = append(idIssues, morningIssue("claim_id", fmt.Sprintf("claims[%d].id", index), "local claim ID must be a valid identifier of at most 128 characters"))
+        }
+        localIDs[id] = finalID
+        input.Claims[index].ID = finalID
+        claimIDs = append(claimIDs, finalID)
+      }
+      for index := range input.Coverage {
+        for claimIndex, id := range input.Coverage[index].ClaimIDs {
+          if finalID, exists := localIDs[id]; exists {
+            input.Coverage[index].ClaimIDs[claimIndex] = finalID
+          }
+        }
+      }
       issues := validateEvidence(input)
+      issues = append(issues, idIssues...)
       if len(issues) > 0 {
         return ToolResponse[Output]{Accepted: false, Issues: issues}, nil
       }
@@ -181,7 +212,12 @@ go_tool "submit_morning_evidence" {
       if err := writeMorningFile(artifactPath, payload); err != nil {
         return ToolResponse[Output]{}, err
       }
-      output := Output(payload)
+      result, err := json.Marshal(struct {
+        Input
+        ClaimIDs []string `json:"claim_ids"`
+      }{input, claimIDs})
+      if err != nil { return ToolResponse[Output]{}, fmt.Errorf("encode morning evidence result: %w", err) }
+      output := Output(result)
       return ToolResponse[Output]{Accepted: true, Output: &output}, nil
     }
 
@@ -193,8 +229,8 @@ go_tool "submit_morning_evidence" {
       if !validArtifactID(input.ArtifactID) {
         issues = append(issues, morningIssue("artifact_id", "artifact_id", "must be an r42 artifact ID"))
       }
-      if strings.TrimSpace(input.TaskID) == "" {
-        issues = append(issues, morningIssue("task_id", "task_id", "must not be empty"))
+      if !evidenceTaskID.MatchString(input.TaskID) {
+        issues = append(issues, morningIssue("task_id", "task_id", "must be a valid task identifier of at most 64 characters"))
       }
       if strings.TrimSpace(input.Question) == "" {
         issues = append(issues, morningIssue("question", "question", "must not be empty"))
@@ -258,8 +294,8 @@ go_tool "submit_morning_evidence" {
       for index, claim := range input.Claims {
         path := fmt.Sprintf("claims[%d]", index)
         id := strings.TrimSpace(claim.ID)
-        if id == "" {
-          issues = append(issues, morningIssue("claim_id", path+".id", "must not be empty"))
+        if !evidenceClaimID.MatchString(id) {
+          issues = append(issues, morningIssue("claim_id", path+".id", "task-prefixed claim ID must be a valid identifier of at most 128 characters"))
         } else if _, exists := claimIDs[id]; exists {
           issues = append(issues, morningIssue("claim_id", path+".id", "must be unique"))
         } else {

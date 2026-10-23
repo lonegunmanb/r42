@@ -284,9 +284,10 @@ research "dynamic" "parallel_deep_dive" {
         quote_ref values in each claim's citations; do not copy quote text or
         source metadata. Then call
         ${go_tool.submit_knowledge.id}; r42 binds its declared knowledge
-        artifact_id and the subquestion exactly as assigned above, with atomic
-        knowledge claim IDs prefixed "${task.id}-kb-". Do not finish with prose
-        or a JSON code block.
+        artifact_id and the subquestion exactly as assigned above. Supply short
+        local knowledge claim IDs; the tool returns task-prefixed claim_ids.
+        Use those returned IDs for patches and all downstream knowledge
+        references. Do not finish with prose or a JSON code block.
       PROMPT
       tool_use = {
         calculate = {
@@ -308,6 +309,7 @@ research "dynamic" "parallel_deep_dive" {
           input = {
             artifact_id            = artifact("knowledge").id
             _r42_artifact_path     = ""
+            task_id                = task.id
             subquestion            = task.subquestion
             quote_id_prefix        = "${task.id}-quote-"
           }
@@ -393,8 +395,10 @@ research "dynamic" "independent_serial_deep_dive" {
         quote_ref values in each claim's citations; do not copy quote text or
         source metadata. Then call ${go_tool.submit_knowledge.id}
         with its declared knowledge artifact_id and subquestion exactly
-        as assigned above, with atomic knowledge claim IDs prefixed
-        "${task.id}-kb-". Do not finish with prose or a JSON code block.
+        as assigned above. Supply short local knowledge claim IDs; the tool
+        returns task-prefixed claim_ids. Use those returned IDs for patches
+        and all downstream knowledge references. Do not finish with prose or
+        a JSON code block.
       PROMPT
       tool_use = {
         calculate = {
@@ -416,6 +420,7 @@ research "dynamic" "independent_serial_deep_dive" {
           input = {
             artifact_id            = artifact("knowledge").id
             _r42_artifact_path     = ""
+            task_id                = task.id
             subquestion            = task.subquestion
             quote_id_prefix        = "${task.id}-quote-"
           }
@@ -528,8 +533,10 @@ research "dynamic" "final_serial_deep_dive" {
         metadata. Then call
         ${go_tool.submit_knowledge.id}
         with its declared knowledge artifact_id, subquestion exactly as
-        assigned above, with atomic knowledge claim IDs prefixed
-        "${task.id}-kb-". Do not finish with prose or a JSON code block.
+        assigned above. Supply short local knowledge claim IDs; the tool
+        returns task-prefixed claim_ids. Use those returned IDs for patches,
+        conflict references, and all downstream knowledge references. Do not
+        finish with prose or a JSON code block.
       PROMPT
       tool_use = {
         calculate = {
@@ -551,6 +558,7 @@ research "dynamic" "final_serial_deep_dive" {
           input = {
             artifact_id            = artifact("knowledge").id
             _r42_artifact_path     = ""
+            task_id                = task.id
             subquestion            = task.subquestion
             quote_id_prefix        = "${task.id}-quote-"
           }
@@ -653,7 +661,9 @@ research "static" "resolve_conflicts" {
       [for item in research.dynamic.final_serial_deep_dive.tasks : "- ${item.artifact.knowledge.path}"],
     ))}
 
-    Compare every included knowledge item and quote record. Call
+    Compare every included knowledge item and quote record. Use the final
+    claim_ids in each task result for knowledge_ids and preferred_knowledge_ids;
+    do not reconstruct IDs from local labels. Call
     ${go_tool.submit_conflict_resolution.id}; r42 binds the declared resolution
     artifact_id and reviewed_artifacts containing every path
     above, all detected conflicts and decisions, and synthesis_guidance for the
