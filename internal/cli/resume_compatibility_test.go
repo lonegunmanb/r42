@@ -7,6 +7,7 @@ import (
 
 	"github.com/lonegunmanb/r42/internal/executor"
 	"github.com/lonegunmanb/r42/internal/plan"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -44,6 +45,36 @@ func TestValidateResumeCompatibilityRejectsChangedArtifactSchema(t *testing.T) {
 	err := validateResumeCompatibility(current, original)
 
 	require.ErrorContains(t, err, "artifact schema changed")
+}
+
+func TestDebugResumePlansInOriginalRun(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	runRoot := t.TempDir()
+	reservedRun := filepath.Join(runRoot, ".r42", "runs", "run-original")
+	writeResumeCompatibilityResearch(t, directory, "${block_wd()}/report.md")
+	runtime := NewRuntime()
+	originalConfig, err := runtime.Config(directory, executor.ResearchConfigOptions{
+		Context: t.Context(), RunDirectory: runRoot, ReservedRunDirectory: reservedRun, Resume: true,
+	})
+	require.NoError(t, err)
+	original, err := executor.RunResearchPlan(originalConfig)
+	require.NoError(t, err)
+
+	state := &debugRun{enabled: true}
+	t.Cleanup(func() { require.NoError(t, state.close()) })
+	debugConfig, err := runtime.Config(directory, executor.ResearchConfigOptions{
+		Context: withDebugRun(t.Context(), state), RunDirectory: runRoot,
+		ReservedRunDirectory: reservedRun, Resume: true, Debug: true,
+	})
+	require.NoError(t, err)
+	current, err := executor.RunResearchPlan(debugConfig)
+	require.NoError(t, err)
+
+	assert.Equal(t, reservedRun, debugConfig.Run().Directory())
+	assert.Equal(t, filepath.Join(reservedRun, "events.jsonl"), state.path())
+	assert.NoError(t, validateResumeCompatibility(current.SavedPlan(), original.SavedPlan()))
 }
 
 func writeResumeCompatibilityResearch(t *testing.T, directory, artifactPath string) {

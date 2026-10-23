@@ -108,7 +108,7 @@ go_tool "submit_research_plan" {
 }
 
 go_tool "submit_knowledge" {
-  description = "Submit one subquestion's knowledge claims using trusted quote_ref values returned by r42_search_artifact or r42_capture_quote, then write the declared knowledge artifact. The workflow binds `task_id`; supply local `knowledge[].id` values. The tool prefixes each claim ID with task_id and returns final `claim_ids` alongside the knowledge JSON. Use the returned IDs for patches, conflict references, and downstream claims. An already-prefixed ID is not prefixed again. `knowledge.confidence` allowed values: `high`, `medium`, `low`."
+  description = "Submit one subquestion's knowledge claims using trusted quote_ref values returned by r42_search_artifact or r42_capture_quote, then write the declared knowledge artifact. The workflow binds `task_id`; supply local `knowledge[].id` values. The tool encodes task_id and each local claim ID into an unambiguous task-scoped ID and returns final `claim_ids` alongside the knowledge JSON. Use the returned IDs for patches, conflict references, and downstream claims. `knowledge.confidence` allowed values: `high`, `medium`, `low`."
 
   source = <<-GO
     import (
@@ -216,8 +216,7 @@ go_tool "submit_knowledge" {
     }
 
     func finalKnowledgeID(taskID, id string) string {
-      prefix := taskID + "-"
-      if strings.HasPrefix(id, prefix) { return id }
+      prefix := fmt.Sprintf("%d-%s-", len(taskID), taskID)
       return prefix + id
     }
 
@@ -281,7 +280,7 @@ go_tool "submit_knowledge" {
         id := strings.TrimSpace(item.ID)
         finalID := finalKnowledgeID(taskID, id)
         if !knowledgeID.MatchString(id) || !knowledgeID.MatchString(finalID) {
-          issues = append(issues, newIssue("knowledge_id", path+".id", "local and task-prefixed IDs must be valid identifiers of at most 128 characters"))
+          issues = append(issues, newIssue("knowledge_id", path+".id", "local and task-scoped IDs must be valid identifiers of at most 128 characters"))
         } else if _, exists := knowledgeIDs[finalID]; exists {
           issues = append(issues, newIssue("knowledge_id", path+".id", "must be unique"))
         } else {

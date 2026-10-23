@@ -121,7 +121,15 @@ func (e *Engine) Config(
 	if state := debugRunFromContext(ctx); state != nil {
 		var activeRun *run.Run
 		var err error
-		ctx, activeRun, _, err = state.ensure(ctx, runDirectory(directory, options.RunDirectory))
+		if options.ReservedRunDirectory != "" {
+			activeRun, err = run.Open(options.ReservedRunDirectory)
+			if err != nil {
+				return nil, err
+			}
+			ctx, activeRun, _, err = state.ensureRun(ctx, activeRun)
+		} else {
+			ctx, activeRun, _, err = state.ensure(ctx, runDirectory(directory, options.RunDirectory))
+		}
 		if err != nil {
 			return nil, err
 		}

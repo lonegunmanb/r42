@@ -133,7 +133,7 @@ submits only the chosen `quote_ref` values. Final QC can call
 quote; this is read-only and does not modify the candidate artifact. The host
 injects canonical artifact, source,
 locator, digest, and exact-quote fields before the typed tool runs. The tool
-prefixes each local knowledge ID with the bound task ID, returns the final
+encodes each local knowledge ID with the bound task ID, returns the final
 `claim_ids`, and validates their uniqueness and confidence values. Use the
 returned IDs for patches and all downstream references. It derives quote IDs
 and the quote list from citations, and deduplicates repeated references before
