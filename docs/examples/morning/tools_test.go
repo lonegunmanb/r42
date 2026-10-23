@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hashicorp/hcl/v2/hclparse"
@@ -175,6 +176,114 @@ func TestSubmitMorningEvidenceAcceptsExplicitEmptyResult(t *testing.T) {
 	assert.Empty(t, document["claims"])
 	assert.Empty(t, document["quotes"])
 	assert.Equal(t, "No verifiable events were found in the assigned time window.", document["empty_reason"])
+}
+
+func TestSubmitMorningEvidenceReturnsTaskScopedClaimIDs(t *testing.T) {
+	t.Parallel()
+	program := compileTool(t, "submit_morning_evidence")
+	workspace := blockDirectory(t, "task-scoped-evidence")
+	artifactPath := filepath.Join(workspace, "track", "evidence.json")
+	input := validMorningEvidenceInput(artifactPath)
+	input["claims"] = []any{map[string]any{
+		"id": "kb-1", "statement": "The index rose.", "as_of": "2026-08-28",
+		"confidence": "high", "quote_ids": []string{"quote-1"},
+	}}
+	input["required_coverage"] = []any{map[string]any{"id": "market", "name": "Market", "kind": "index"}}
+	input["coverage"] = []any{map[string]any{
+		"object_id": "market", "name": "Market", "kind": "index", "quote_status": "observed",
+		"news_status": "material_news_found", "checked_until": "2026-08-28", "summary": "The index rose.",
+		"claim_ids": []string{"kb-1"},
+	}}
+
+	response, err := program.Invoke(t.Context(), marshalInput(t, input), workspace)
+	require.NoError(t, err)
+	require.True(t, response.Accepted, "issues: %#v", response.Issues)
+	var encoded string
+	require.NoError(t, json.Unmarshal(*response.Output, &encoded))
+	var output map[string]any
+	require.NoError(t, json.Unmarshal([]byte(encoded), &output))
+	assert.Equal(t, []any{"overnight-market-kb-1"}, output["claim_ids"])
+	var saved map[string]any
+	payload, err := os.ReadFile(artifactPath)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(payload, &saved))
+	savedClaims, ok := saved["claims"].([]any)
+	require.True(t, ok)
+	savedClaim, ok := savedClaims[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "overnight-market-kb-1", savedClaim["id"])
+	savedCoverage, ok := saved["coverage"].([]any)
+	require.True(t, ok)
+	savedRecord, ok := savedCoverage[0].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, []any{"overnight-market-kb-1"}, savedRecord["claim_ids"])
+}
+
+func TestSubmitMorningEvidenceRejectsInvalidTaskScopedIDs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		taskID   string
+		ids      []string
+		wantCode string
+	}{
+		{name: "invalid task", taskID: "overnight.market", ids: []string{"kb-1"}, wantCode: "task_id"},
+		{name: "empty local ID", taskID: "overnight-market", ids: []string{""}, wantCode: "claim_id"},
+		{name: "prefixed alias", taskID: "overnight-market", ids: []string{"kb-1", "overnight-market-kb-1"}, wantCode: "claim_id"},
+		{name: "final ID too long", taskID: "overnight-market", ids: []string{"k" + strings.Repeat("b", 127)}, wantCode: "claim_id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			program := compileTool(t, "submit_morning_evidence")
+			workspace := blockDirectory(t, tt.name)
+			artifactPath := filepath.Join(workspace, "track", "evidence.json")
+			input := validMorningEvidenceInput(artifactPath)
+			input["task_id"] = tt.taskID
+			claims := make([]any, 0, len(tt.ids))
+			for _, id := range tt.ids {
+				claims = append(claims, map[string]any{
+					"id": id, "statement": "The index rose.", "as_of": "2026-08-28",
+					"confidence": "high", "quote_ids": []string{"quote-1"},
+				})
+			}
+			input["claims"] = claims
+			response, err := program.Invoke(t.Context(), marshalInput(t, input), workspace)
+			require.NoError(t, err)
+			assert.False(t, response.Accepted)
+			assert.Contains(t, issueCodes(response), tt.wantCode)
+			assert.NoFileExists(t, artifactPath)
+		})
+	}
+}
+
+func TestMorningEvidenceFinalIDCanBeUsedByPacket(t *testing.T) {
+	t.Parallel()
+	workspace := blockDirectory(t, "evidence-to-packet")
+	evidencePath := filepath.Join(workspace, "evidence.json")
+	evidence := validMorningEvidenceInput(evidencePath)
+	evidence["task_id"] = "overnight"
+	evidence["claims"] = []any{map[string]any{
+		"id": "kb-1", "statement": "A sourced claim.", "as_of": "2026-08-28",
+		"confidence": "high", "quote_ids": []string{"quote-1"},
+	}}
+	response, err := compileTool(t, "submit_morning_evidence").Invoke(t.Context(), marshalInput(t, evidence), workspace)
+	require.NoError(t, err)
+	require.True(t, response.Accepted, "issues: %#v", response.Issues)
+	var encoded string
+	require.NoError(t, json.Unmarshal(*response.Output, &encoded))
+	var output struct {
+		ClaimIDs []string `json:"claim_ids"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(encoded), &output))
+	assert.Equal(t, []string{"overnight-kb-1"}, output.ClaimIDs)
+
+	packetPath := filepath.Join(workspace, "breakfast-packet.json")
+	packet := validPacketInput(packetPath)
+	packet["reviewed_artifacts"] = []string{evidencePath}
+	response, err = compileTool(t, "submit_breakfast_packet").Invoke(t.Context(), marshalInput(t, packet), workspace)
+	require.NoError(t, err)
+	assert.True(t, response.Accepted, "issues: %#v", response.Issues)
 }
 
 func TestSubmitMorningEvidenceSupportsClaimCategories(t *testing.T) {

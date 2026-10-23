@@ -36,8 +36,11 @@ research "static" "primary_source_baseline" {
     and workspace_dir "${block_wd()}".
 
     Submit atomic cards in batches of at most five with
-    ${go_tool.submit_claim_cards.id}. During revision, use remove_claim_ids in
-    the same call to remove an earlier staged card. Use confirmed only when an authoritative
+    ${go_tool.submit_claim_cards.id}. Supply short local card IDs; the tool
+    returns final task-prefixed claim_ids. Use those returned IDs for every
+    derived_from reference, removal, downstream reference, and report citation.
+    During revision, use remove_claim_ids in the same call to remove an earlier
+    staged card. Use confirmed only when an authoritative
     primary source directly states the claim. Use reported for direct published
     reporting. A direct card must use the same artifact_id as its registered
     source. Use inferred only for a conclusion derived from existing card IDs;
@@ -69,6 +72,7 @@ research "static" "primary_source_baseline" {
     input = {
       workspace_dir = block_wd()
       claims_path   = "${artifact("claims").path}"
+      task_name     = "primary_source_baseline"
     }
   }
   tool_use "finalize_claims" {
@@ -287,8 +291,10 @@ research "dynamic" "graph_track" {
         Submit one independently auditable claim per card with
         ${go_tool.submit_claim_cards.id}, in batches of at most five. During
         revision, use remove_claim_ids in the same call to remove an earlier
-        staged card. Prefix IDs
-        with "${track_key}-". Use confirmed, reported, and inferred exactly as
+        staged card. Supply short local card IDs; the tool returns final
+        task-prefixed claim_ids. Use those returned IDs for derived_from,
+        removal, downstream references, and report citations. Use confirmed,
+        reported, and inferred exactly as
         described by the tool; record unresolved questions in the track narrative,
         not as fake claims.
 
@@ -324,6 +330,7 @@ research "dynamic" "graph_track" {
           input = {
             workspace_dir = "${block_wd()}/${index}"
             claims_path   = artifact("claims").path
+            task_name     = "graph_track_${index}"
           }
           input_from_agent = {
             cards = {
@@ -694,8 +701,11 @@ research "dynamic" "prioritize_companies" {
         using the authorized artifact_id and workspace_dir above.
         Submit atomic relationship, capability, and economic-exposure cards with
         ${go_tool.submit_claim_cards.id}, using the registered source's same
-        artifact_id for every direct card. If revision removes an earlier card,
-        include its ID in remove_claim_ids in the same call; missing removal IDs
+        artifact_id for every direct card. Supply short local card IDs; the
+        tool returns final task-prefixed claim_ids. Use only those returned IDs
+        for derived_from, removal, company priorities, and report citations.
+        If revision removes an earlier card,
+        include its returned ID in remove_claim_ids in the same call; missing removal IDs
         are harmless. Different claims may share a source, artifact, and quote.
         Never claim that a related product proves adoption, qualification, market
         share, revenue, or profit impact.
@@ -771,6 +781,7 @@ research "dynamic" "prioritize_companies" {
           input = {
             workspace_dir = "${block_wd()}/${index}"
             claims_path   = artifact("claims").path
+            task_name     = "prioritize_companies_${index}"
           }
           input_from_agent = {
             cards = {

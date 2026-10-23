@@ -1,5 +1,5 @@
 go_tool "submit_claim_cards" {
-  description = "Submit up to five atomic fact cards and optionally remove staged cards by ID. `cards.status` allowed values: `confirmed`, `reported`, `inferred`. `confirmed` requires a direct authoritative primary source; `reported` requires a retained published source; `inferred` requires premise claim IDs and no direct quotation. `remove_claim_ids` is idempotent: missing IDs are ignored. Unknowns are gaps, not claim cards. All validation errors are returned together."
+  description = "Submit up to five atomic fact cards. `task_name` is bound by the workflow. Supply a short local `cards.id`; the tool prefixes it with task_name and returns the final IDs in `claim_ids`. Use only returned final IDs in `derived_from`, `remove_claim_ids`, downstream tools, and report citations. A returned final ID can also be reused as `cards.id` when revising a card; it will not be prefixed again. `cards.status` allowed values: `confirmed`, `reported`, `inferred`. `confirmed` requires a direct authoritative primary source; `reported` requires a retained published source; `inferred` requires premise claim IDs and no direct quotation. `remove_claim_ids` is idempotent: missing IDs are ignored. Unknowns are gaps, not claim cards. All validation errors are returned together."
 
   source = <<-GO
     import (
@@ -37,6 +37,7 @@ go_tool "submit_claim_cards" {
     type Input struct {
       WorkspaceDir string `json:"workspace_dir"`
       ClaimsPath string `json:"claims_path"`
+      TaskName string `json:"task_name"`
       Cards []Card `json:"cards"`
       RemoveClaimIDs []string `json:"remove_claim_ids"`
     }
@@ -47,6 +48,7 @@ go_tool "submit_claim_cards" {
     }
 
     var cardID = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{0,127}$`)
+    var cardTaskName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 
     func Invoke(_ context.Context, input Input) (ToolResponse[Output], error) {
       cwd, err := os.Getwd()
@@ -54,6 +56,10 @@ go_tool "submit_claim_cards" {
       workspace, issues := cardWorkspace(input.WorkspaceDir, cwd)
       claimsPath, pathIssues := cardArtifactPath(input.ClaimsPath, workspace, "claims.json")
       issues = append(issues, pathIssues...)
+      taskName := strings.TrimSpace(input.TaskName)
+      if !cardTaskName.MatchString(taskName) || len(taskName) > 127 {
+        issues = append(issues, cardIssue("task_name", "task_name", "task_name must be a short identifier using letters, digits, underscores, or hyphens"))
+      }
       if len(input.Cards) == 0 && len(input.RemoveClaimIDs) == 0 || len(input.Cards) > 5 {
         issues = append(issues, cardIssue("batch_size", "cards", "cards must contain from one through five items unless remove_claim_ids is provided"))
       }
@@ -63,9 +69,10 @@ go_tool "submit_claim_cards" {
       for index, card := range input.Cards {
         path := fmt.Sprintf("cards[%d]", index)
         id := strings.TrimSpace(card.ID)
-        if !cardID.MatchString(id) { issues = append(issues, cardIssue("claim_id", path+".id", "id must be a short stable identifier")) }
-        if _, exists := seen[id]; exists { issues = append(issues, cardIssue("claim_id", path+".id", "claim IDs must be unique in the batch")) }
-        seen[id] = struct{}{}
+        finalID := cardFinalID(taskName, id)
+        if !cardID.MatchString(id) || !cardID.MatchString(finalID) { issues = append(issues, cardIssue("claim_id", path+".id", "id and task-prefixed ID must be valid identifiers of at most 128 characters")) }
+        if _, exists := seen[finalID]; exists { issues = append(issues, cardIssue("claim_id", path+".id", "claim IDs must be unique in the batch")) }
+        seen[finalID] = struct{}{}
         for field, value := range map[string]string{"statement": card.Statement, "scope": card.Scope} {
           if strings.TrimSpace(value) == "" { issues = append(issues, cardIssue("claim", path+"."+field, field+" must not be empty")) }
         }
@@ -114,12 +121,15 @@ go_tool "submit_claim_cards" {
       }
       ids := make([]string, 0, len(input.Cards))
       for _, card := range input.Cards {
+        card.ID = cardFinalID(taskName, strings.TrimSpace(card.ID))
         if err = cardWriteJSON(filepath.Join(directory, card.ID+".json"), card); err != nil { return ToolResponse[Output]{}, fmt.Errorf("stage claim card: %w", err) }
         ids = append(ids, card.ID)
       }
       output := Output{ClaimIDs:ids, Staged:len(ids), Removed:removed}
       return ToolResponse[Output]{Accepted:true, Output:&output}, nil
     }
+
+    func cardFinalID(taskName, id string) string { prefix := taskName+"-"; if strings.HasPrefix(id, prefix) { return id }; return prefix+id }
 
     func cardSources(directory string) (map[string]Source, error) {
       paths, err := filepath.Glob(filepath.Join(directory, "*.json")); if err != nil { return nil, err }

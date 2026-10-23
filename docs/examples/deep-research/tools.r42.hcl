@@ -108,7 +108,7 @@ go_tool "submit_research_plan" {
 }
 
 go_tool "submit_knowledge" {
-  description = "Submit one subquestion's knowledge claims using trusted quote_ref values returned by r42_search_artifact or r42_capture_quote, then write the declared knowledge artifact. `knowledge.confidence` allowed values: `high`, `medium`, `low`."
+  description = "Submit one subquestion's knowledge claims using trusted quote_ref values returned by r42_search_artifact or r42_capture_quote, then write the declared knowledge artifact. The workflow binds `task_id`; supply local `knowledge[].id` values. The tool prefixes each claim ID with task_id and returns final `claim_ids` alongside the knowledge JSON. Use the returned IDs for patches, conflict references, and downstream claims. An already-prefixed ID is not prefixed again. `knowledge.confidence` allowed values: `high`, `medium`, `low`."
 
   source = <<-GO
     import (
@@ -118,6 +118,7 @@ go_tool "submit_knowledge" {
       "fmt"
       "os"
       "path/filepath"
+      "regexp"
       "strings"
     )
 
@@ -133,6 +134,7 @@ go_tool "submit_knowledge" {
     type Input struct {
       ArtifactID    string           `json:"artifact_id"`
       ArtifactPath  string           `json:"_r42_artifact_path"`
+      TaskID        string           `json:"task_id"`
       QuoteIDPrefix string           `json:"quote_id_prefix"`
       Subquestion   string           `json:"subquestion"`
       Knowledge     []KnowledgeInput `json:"knowledge"`
@@ -165,6 +167,9 @@ go_tool "submit_knowledge" {
 
     type Output string
 
+    var knowledgeTaskID = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+    var knowledgeID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
+
     func decodeQuote(raw Quote) (QuoteRecord, error) {
       var quote QuoteRecord
       if err := json.Unmarshal([]byte(raw), &quote); err != nil {
@@ -195,8 +200,25 @@ go_tool "submit_knowledge" {
       if err := os.WriteFile(artifactPath, payload, 0600); err != nil {
         return ToolResponse[Output]{}, fmt.Errorf("write knowledge artifact: %w", err)
       }
-      output := Output(payload)
+      result, err := json.Marshal(struct {
+        KnowledgeArtifact
+        ClaimIDs []string `json:"claim_ids"`
+      }{artifact, knowledgeClaimIDs(artifact.Knowledge)})
+      if err != nil { return ToolResponse[Output]{}, fmt.Errorf("encode knowledge result: %w", err) }
+      output := Output(result)
       return ToolResponse[Output]{Accepted: true, Output: &output}, nil
+    }
+
+    func knowledgeClaimIDs(items []KnowledgeItem) []string {
+      ids := make([]string, 0, len(items))
+      for _, item := range items { ids = append(ids, item.ID) }
+      return ids
+    }
+
+    func finalKnowledgeID(taskID, id string) string {
+      prefix := taskID + "-"
+      if strings.HasPrefix(id, prefix) { return id }
+      return prefix + id
     }
 
     func buildKnowledgeArtifact(input Input) KnowledgeArtifact {
@@ -208,7 +230,7 @@ go_tool "submit_knowledge" {
       }
       quoteIDs := make(map[string]string)
       for _, item := range input.Knowledge {
-        outputItem := KnowledgeItem{ID: item.ID, Claim: item.Claim, Confidence: item.Confidence, QuoteIDs: make([]string, 0, len(item.Citations))}
+        outputItem := KnowledgeItem{ID: finalKnowledgeID(input.TaskID, strings.TrimSpace(item.ID)), Claim: item.Claim, Confidence: item.Confidence, QuoteIDs: make([]string, 0, len(item.Citations))}
         seen := make(map[string]struct{}, len(item.Citations))
         for _, rawQuote := range item.Citations {
           citation, _ := decodeQuote(rawQuote)
@@ -236,6 +258,10 @@ go_tool "submit_knowledge" {
 
     func validateKnowledge(input Input) []Issue {
       issues := make([]Issue, 0)
+      taskID := input.TaskID
+      if !knowledgeTaskID.MatchString(taskID) {
+        issues = append(issues, newIssue("task_id", "task_id", "must be a valid task identifier of at most 64 characters"))
+      }
       if !validBlockArtifactPath(input.ArtifactPath, "knowledge.json") {
         issues = append(issues, newIssue("artifact_path", "artifact_path", "must be the absolute block_wd() path ending in knowledge.json"))
       }
@@ -253,12 +279,13 @@ go_tool "submit_knowledge" {
       for index, item := range input.Knowledge {
         path := fmt.Sprintf("knowledge[%d]", index)
         id := strings.TrimSpace(item.ID)
-        if id == "" {
-          issues = append(issues, newIssue("knowledge_id", path+".id", "must not be empty"))
-        } else if _, exists := knowledgeIDs[id]; exists {
+        finalID := finalKnowledgeID(taskID, id)
+        if !knowledgeID.MatchString(id) || !knowledgeID.MatchString(finalID) {
+          issues = append(issues, newIssue("knowledge_id", path+".id", "local and task-prefixed IDs must be valid identifiers of at most 128 characters"))
+        } else if _, exists := knowledgeIDs[finalID]; exists {
           issues = append(issues, newIssue("knowledge_id", path+".id", "must be unique"))
         } else {
-          knowledgeIDs[id] = struct{}{}
+          knowledgeIDs[finalID] = struct{}{}
         }
         if strings.TrimSpace(item.Claim) == "" {
           issues = append(issues, newIssue("claim", path+".claim", "must be a complete, falsifiable claim"))
@@ -365,7 +392,7 @@ go_tool "submit_knowledge" {
 }
 
 go_tool "patch_knowledge" {
-  description = "Patch one knowledge item in an existing knowledge.json by stable item ID. Only supplied fields change; citations must be trusted quote JSON returned by the host, unused quotes are removed, and the tool returns a change summary rather than the full artifact. Call again for another item."
+  description = "Patch one knowledge item in an existing knowledge.json by the final item ID returned by submit_knowledge. Use that same final ID for patch.id or remove_id. Only supplied fields change; citations must be trusted quote JSON returned by the host, unused quotes are removed, and the tool returns a change summary rather than the full artifact. Call again for another item."
 
   source = <<-GO
     import (
@@ -787,7 +814,7 @@ go_tool "generate_source_table" {
 }
 
 go_tool "submit_conflict_resolution" {
-  description = "Submit detected cross-subquestion conflicts and their evidence-backed resolutions, then write the declared resolution artifact identified by artifact_id. `conflicts.status` allowed values: `resolved`, `unresolved`."
+  description = "Submit detected cross-subquestion conflicts and their evidence-backed resolutions, then write the declared resolution artifact identified by artifact_id. Use final knowledge claim IDs returned by submit_knowledge in `conflicts.knowledge_ids` and `conflicts.preferred_knowledge_ids`; both fields are checked against reviewed knowledge artifacts. Use quote IDs in `conflicts.supporting_quote_ids`. `conflicts.status` allowed values: `resolved`, `unresolved`."
 
   source = <<-GO
     import (
@@ -853,6 +880,7 @@ go_tool "submit_conflict_resolution" {
         issues = append(issues, resolutionIssue("reviewed_artifacts", "reviewed_artifacts", "list every upstream knowledge.json artifact"))
       }
       seenArtifacts := make(map[string]struct{}, len(input.ReviewedArtifacts))
+      knowledgeIDs := make(map[string]struct{})
       for index, raw := range input.ReviewedArtifacts {
         path := fmt.Sprintf("reviewed_artifacts[%d]", index)
         clean := filepath.Clean(strings.TrimSpace(raw))
@@ -865,6 +893,17 @@ go_tool "submit_conflict_resolution" {
           continue
         }
         seenArtifacts[clean] = struct{}{}
+        payload, readErr := os.ReadFile(clean)
+        if readErr != nil {
+          issues = append(issues, resolutionIssue("reviewed_artifact", path, "cannot read knowledge artifact"))
+          continue
+        }
+        var document struct { Knowledge []struct { ID string `json:"id"` } `json:"knowledge"` }
+        if err := json.Unmarshal(payload, &document); err != nil {
+          issues = append(issues, resolutionIssue("reviewed_artifact", path, "cannot decode knowledge artifact"))
+          continue
+        }
+        for _, item := range document.Knowledge { knowledgeIDs[item.ID] = struct{}{} }
       }
 
       seenConflicts := make(map[string]struct{}, len(input.Conflicts))
@@ -880,6 +919,16 @@ go_tool "submit_conflict_resolution" {
         }
         if len(conflict.KnowledgeIDs) < 2 {
           issues = append(issues, resolutionIssue("knowledge_ids", path+".knowledge_ids", "identify at least two conflicting knowledge items"))
+        }
+        for idIndex, id := range conflict.KnowledgeIDs {
+          if _, exists := knowledgeIDs[id]; !exists {
+            issues = append(issues, resolutionIssue("knowledge_id", fmt.Sprintf("%s.knowledge_ids[%d]", path, idIndex), "must reference a final knowledge ID in reviewed_artifacts"))
+          }
+        }
+        for idIndex, id := range conflict.PreferredKnowledgeIDs {
+          if _, exists := knowledgeIDs[id]; !exists {
+            issues = append(issues, resolutionIssue("knowledge_id", fmt.Sprintf("%s.preferred_knowledge_ids[%d]", path, idIndex), "must reference a final knowledge ID in reviewed_artifacts"))
+          }
         }
         if strings.TrimSpace(conflict.Description) == "" {
           issues = append(issues, resolutionIssue("description", path+".description", "describe the contradiction precisely"))

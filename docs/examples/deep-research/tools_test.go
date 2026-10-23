@@ -78,6 +78,14 @@ func TestDeepResearchPlanPromptUsesResearchDesignFramework(t *testing.T) {
 	assert.Contains(t, normalized, "Do not finish with prose or a JSON code block; the accepted typed-tool call is the only valid completion.")
 }
 
+func TestDeepDiveSubmitKnowledgeBindsTaskID(t *testing.T) {
+	t.Parallel()
+	payload, err := os.ReadFile("main.r42.hcl")
+	require.NoError(t, err)
+	assert.Equal(t, 3, strings.Count(string(payload), "task_id                = task.id"))
+	assert.NotContains(t, string(payload), `knowledge claim IDs prefixed "${task.id}-kb-"`)
+}
+
 func TestDeepResearchSynthesisPromptDefinesQuoteCitationFormat(t *testing.T) {
 	t.Parallel()
 
@@ -230,6 +238,7 @@ func TestSubmitKnowledgeAcceptsBuiltinUUIDArtifactID(t *testing.T) {
 
 	response, err := program.Invoke(t.Context(), marshalInput(t, map[string]any{
 		"_r42_artifact_path": artifactPath,
+		"task_id":            "research-task",
 		"quote_id_prefix":    "task-quote-",
 		"subquestion":        "What happened?",
 		"knowledge": []any{map[string]any{
@@ -244,7 +253,9 @@ func TestSubmitKnowledgeAcceptsBuiltinUUIDArtifactID(t *testing.T) {
 	require.NotNil(t, response.Output)
 	assert.NotContains(t, string(*response.Output), artifactPath)
 	var payload struct {
+		ClaimIDs  []string `json:"claim_ids"`
 		Knowledge []struct {
+			ID       string   `json:"id"`
 			QuoteIDs []string `json:"quote_ids"`
 		} `json:"knowledge"`
 		Quotes []struct {
@@ -256,11 +267,112 @@ func TestSubmitKnowledgeAcceptsBuiltinUUIDArtifactID(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(*response.Output), &encoded))
 	require.NoError(t, json.Unmarshal([]byte(encoded), &payload))
 	require.Len(t, payload.Knowledge, 1)
+	assert.Equal(t, []string{"research-task-kb-1"}, payload.ClaimIDs)
+	assert.Equal(t, "research-task-kb-1", payload.Knowledge[0].ID)
 	assert.Len(t, payload.Knowledge[0].QuoteIDs, 1)
 	require.Len(t, payload.Quotes, 1)
 	assert.Equal(t, "quote-ref-1", payload.Quotes[0].QuoteRef)
 	assert.Equal(t, payload.Quotes[0].ID, payload.Knowledge[0].QuoteIDs[0])
 	assert.FileExists(t, artifactPath)
+	var saved struct {
+		Knowledge []struct {
+			ID string `json:"id"`
+		} `json:"knowledge"`
+	}
+	savedPayload, readErr := os.ReadFile(artifactPath)
+	require.NoError(t, readErr)
+	require.NoError(t, json.Unmarshal(savedPayload, &saved))
+	assert.Equal(t, "research-task-kb-1", saved.Knowledge[0].ID)
+}
+
+func TestSubmitKnowledgeRejectsInvalidTaskScopedIDs(t *testing.T) {
+	t.Parallel()
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "submit_knowledge"))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		taskID   string
+		ids      []string
+		wantCode string
+	}{
+		{name: "missing task", ids: []string{"kb-1"}, wantCode: "task_id"},
+		{name: "empty local ID", taskID: "research-task", ids: []string{""}, wantCode: "knowledge_id"},
+		{name: "prefixed alias", taskID: "research-task", ids: []string{"kb-1", "research-task-kb-1"}, wantCode: "knowledge_id"},
+		{name: "final ID too long", taskID: "research-task", ids: []string{"k" + strings.Repeat("b", 127)}, wantCode: "knowledge_id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			workspace := filepath.Join(t.TempDir(), ".r42", "runs", "current", "blocks", "knowledge")
+			require.NoError(t, os.MkdirAll(workspace, 0o700))
+			artifactPath := filepath.Join(workspace, "knowledge.json")
+			items := make([]any, 0, len(tt.ids))
+			for _, id := range tt.ids {
+				items = append(items, map[string]any{
+					"id": id, "claim": "A claim", "confidence": "high", "citations": []any{trustedCitation("quote-ref-1")},
+				})
+			}
+			response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
+				"_r42_artifact_path": artifactPath, "task_id": tt.taskID,
+				"quote_id_prefix": "task-quote-", "subquestion": "What happened?", "knowledge": items,
+			}), workspace)
+			require.NoError(t, invokeErr)
+			assert.False(t, response.Accepted)
+			require.NotEmpty(t, response.Issues)
+			assert.Equal(t, tt.wantCode, response.Issues[0].Code)
+			assert.NoFileExists(t, artifactPath)
+		})
+	}
+}
+
+func TestConflictResolutionRequiresFinalKnowledgeIDs(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), ".r42", "runs", "current", "blocks")
+	workspace := filepath.Join(root, "resolution")
+	upstream := filepath.Join(root, "knowledge", "knowledge.json")
+	resolutionPath := filepath.Join(workspace, "resolution.json")
+	require.NoError(t, os.MkdirAll(workspace, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Dir(upstream), 0o700))
+	require.NoError(t, os.WriteFile(upstream, []byte(`{"knowledge":[{"id":"task-a-kb-1"},{"id":"task-b-kb-1"}]}`), 0o600))
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	program, err := compiler.Compile(t.Context(), goToolSource(t, "submit_conflict_resolution"))
+	require.NoError(t, err)
+	input := map[string]any{
+		"_r42_artifact_path": resolutionPath,
+		"topic":              "Topic", "reviewed_artifacts": []string{upstream},
+		"synthesis_guidance": "Preserve uncertainty.",
+		"conflicts": []any{map[string]any{
+			"id": "conflict-1", "knowledge_ids": []string{"kb-1", "task-b-kb-1"},
+			"description": "Claims disagree.", "status": "unresolved", "resolution": "Remain uncertain.",
+			"rationale": "Quotes differ.", "preferred_knowledge_ids": []string{"kb-1"},
+			"supporting_quote_ids": []string{"quote-1"},
+		}},
+	}
+	response, err := program.Invoke(t.Context(), marshalInput(t, input), workspace)
+	require.NoError(t, err)
+	assert.False(t, response.Accepted)
+	assert.NoFileExists(t, resolutionPath)
+	var codes []string
+	for _, issue := range response.Issues {
+		codes = append(codes, issue.Code)
+	}
+	assert.Contains(t, codes, "knowledge_id")
+
+	conflicts, ok := input["conflicts"].([]any)
+	require.True(t, ok)
+	conflict, ok := conflicts[0].(map[string]any)
+	require.True(t, ok)
+	conflict["knowledge_ids"] = []string{"task-a-kb-1", "task-b-kb-1"}
+	conflict["preferred_knowledge_ids"] = []string{"task-a-kb-1"}
+	response, err = program.Invoke(t.Context(), marshalInput(t, input), workspace)
+	require.NoError(t, err)
+	assert.True(t, response.Accepted, "issues: %#v", response.Issues)
 }
 
 func TestGenerateSourceTableGoToolUsesCanonicalKnowledgeMetadata(t *testing.T) {

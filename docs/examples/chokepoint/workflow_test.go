@@ -138,6 +138,7 @@ func TestClaimCardsKeepOneEvidenceLayer(t *testing.T) {
 	response, err := stage.Invoke(t.Context(), marshalInput(t, map[string]any{
 		"workspace_dir": workspace,
 		"claims_path":   claimsPath,
+		"task_name":     "claim_cards",
 		"cards": []any{
 			map[string]any{
 				"id": "C-001", "statement": "CXMT outsources chip packaging.",
@@ -149,7 +150,7 @@ func TestClaimCardsKeepOneEvidenceLayer(t *testing.T) {
 			map[string]any{
 				"id": "I-001", "statement": "Outsourcing creates external capacity dependency.",
 				"status": "inferred", "scope": "DDR5 die packaging", "as_of": "2025-12-31",
-				"source_id": "", "artifact_id": "", "exact_quote": "", "locator": "", "derived_from": []string{"C-001"},
+				"source_id": "", "artifact_id": "", "exact_quote": "", "locator": "", "derived_from": []string{"claim_cards-C-001"},
 			},
 		},
 	}), workspace)
@@ -195,6 +196,107 @@ func TestClaimCardsKeepOneEvidenceLayer(t *testing.T) {
 	assert.NotContains(t, source, "artifact_path")
 	assert.NotContains(t, source, "artifact_sha256")
 	assert.NotContains(t, source, "content_fingerprint")
+}
+
+func TestSubmitClaimCardsNamespacesIDsAndReturnsFinalIDs(t *testing.T) {
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	stage, err := compiler.Compile(t.Context(), goToolSource(t, "submit_claim_cards"))
+	require.NoError(t, err)
+	finalize, err := compiler.Compile(t.Context(), goToolSource(t, "finalize_claim_cards"))
+	require.NoError(t, err)
+
+	for _, task := range []struct {
+		name string
+		id   string
+	}{
+		{name: "primary_source_baseline", id: "primary_source_baseline-C-001"},
+		{name: "prioritize_companies_7", id: "prioritize_companies_7-C-001"},
+	} {
+		t.Run(task.name, func(t *testing.T) {
+			workspace, claimsPath, registryPath := claimCardFixture(t, task.name)
+			input := map[string]any{
+				"workspace_dir": workspace, "claims_path": claimsPath, "task_name": task.name,
+				"cards": []any{directClaimCard("C-001", "The facility cost $91 million.", "The facility cost $91 million.")},
+			}
+			response, invokeErr := stage.Invoke(t.Context(), marshalInput(t, input), workspace)
+			require.NoError(t, invokeErr)
+			require.True(t, response.Accepted, "issues: %#v", response.Issues)
+			var output map[string]any
+			require.NoError(t, json.Unmarshal(*response.Output, &output))
+			assert.Equal(t, []any{task.id}, output["claim_ids"])
+			input["cards"] = []any{directClaimCard(task.id, "The facility cost $92 million.", "The facility cost $92 million.")}
+			response, invokeErr = stage.Invoke(t.Context(), marshalInput(t, input), workspace)
+			require.NoError(t, invokeErr)
+			require.True(t, response.Accepted, "issues: %#v", response.Issues)
+			require.NoError(t, json.Unmarshal(*response.Output, &output))
+			assert.Equal(t, []any{task.id}, output["claim_ids"])
+
+			input["cards"] = []any{map[string]any{
+				"id": "I-001", "statement": "The investment implies new capacity.",
+				"status": "inferred", "scope": "facility investment", "as_of": "2026-01-02",
+				"derived_from": []string{task.id},
+			}}
+			response, invokeErr = stage.Invoke(t.Context(), marshalInput(t, input), workspace)
+			require.NoError(t, invokeErr)
+			require.True(t, response.Accepted, "issues: %#v", response.Issues)
+			require.NoError(t, json.Unmarshal(*response.Output, &output))
+			assert.Equal(t, []any{task.name + "-I-001"}, output["claim_ids"])
+
+			finalized, finalizeErr := finalize.Invoke(t.Context(), marshalInput(t, map[string]any{
+				"workspace_dir": workspace, "claims_path": claimsPath,
+				"source_registry_path": registryPath, "as_of_date": "2026-08-09",
+			}), workspace)
+			require.NoError(t, finalizeErr)
+			require.True(t, finalized.Accepted, "issues: %#v", finalized.Issues)
+			var document map[string]any
+			require.NoError(t, readJSON(claimsPath, &document))
+			cards := mapValue[[]any](t, document, "claims")
+			require.Len(t, cards, 2)
+			assert.Equal(t, task.id, valueAs[map[string]any](t, cards[0])["id"])
+			assert.Equal(t, []any{task.id}, valueAs[map[string]any](t, cards[1])["derived_from"])
+
+			input["cards"] = []any{}
+			input["remove_claim_ids"] = []string{task.id}
+			response, invokeErr = stage.Invoke(t.Context(), marshalInput(t, input), workspace)
+			require.NoError(t, invokeErr)
+			require.True(t, response.Accepted, "issues: %#v", response.Issues)
+			require.NoError(t, json.Unmarshal(*response.Output, &output))
+			assert.InEpsilon(t, float64(1), output["removed"], 0)
+		})
+	}
+}
+
+func TestSubmitClaimCardsRejectsInvalidTaskScopedIDs(t *testing.T) {
+	compiler, err := gotool.NewCompiler()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, compiler.Close()) })
+	stage, err := compiler.Compile(t.Context(), goToolSource(t, "submit_claim_cards"))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name         string
+		taskName     string
+		localID      string
+		expectedCode string
+	}{
+		{name: "missing task name", localID: "C-001", expectedCode: "task_name"},
+		{name: "invalid task name", taskName: "graph.track[0]", localID: "C-001", expectedCode: "task_name"},
+		{name: "final ID too long", taskName: "graph_track_0", localID: "C" + strings.Repeat("a", 127), expectedCode: "claim_id"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace, claimsPath, _ := claimCardFixture(t, test.name)
+			response, invokeErr := stage.Invoke(t.Context(), marshalInput(t, map[string]any{
+				"workspace_dir": workspace, "claims_path": claimsPath, "task_name": test.taskName,
+				"cards": []any{directClaimCard(test.localID, "The facility cost $91 million.", "The facility cost $91 million.")},
+			}), workspace)
+			require.NoError(t, invokeErr)
+			assert.False(t, response.Accepted)
+			assert.Contains(t, issueCodes(response), test.expectedCode)
+		})
+	}
 }
 
 func TestClaimCardsRejectUnsupportedStatusAndLeadOnlyEvidence(t *testing.T) {
@@ -266,7 +368,7 @@ func TestClaimCardsRejectUnsupportedStatusAndLeadOnlyEvidence(t *testing.T) {
 			test.mutate(card)
 
 			response, invokeErr := program.Invoke(t.Context(), marshalInput(t, map[string]any{
-				"workspace_dir": workspace, "claims_path": claimsPath, "cards": []any{card},
+				"workspace_dir": workspace, "claims_path": claimsPath, "task_name": "claim_cards", "cards": []any{card},
 			}), workspace)
 
 			require.NoError(t, invokeErr)
@@ -310,6 +412,7 @@ func TestClaimCardsCanRemoveAStagedClaim(t *testing.T) {
 	response, err := stage.Invoke(t.Context(), marshalInput(t, map[string]any{
 		"workspace_dir": workspace,
 		"claims_path":   claimsPath,
+		"task_name":     "claim_cards",
 		"cards":         []any{directClaimCard("C-001", "The facility cost $91 million.", "The facility cost $91 million.")},
 	}), workspace)
 	require.NoError(t, err)
@@ -318,8 +421,9 @@ func TestClaimCardsCanRemoveAStagedClaim(t *testing.T) {
 	response, err = stage.Invoke(t.Context(), marshalInput(t, map[string]any{
 		"workspace_dir":    workspace,
 		"claims_path":      claimsPath,
+		"task_name":        "claim_cards",
 		"cards":            []any{directClaimCard("C-001", "The facility cost $92 million.", "The facility cost $92 million.")},
-		"remove_claim_ids": []string{"C-001", "C-missing"},
+		"remove_claim_ids": []string{"claim_cards-C-001", "claim_cards-C-missing"},
 	}), workspace)
 	require.NoError(t, err)
 	require.True(t, response.Accepted, "issues: %#v", response.Issues)
@@ -329,7 +433,8 @@ func TestClaimCardsCanRemoveAStagedClaim(t *testing.T) {
 	response, err = stage.Invoke(t.Context(), marshalInput(t, map[string]any{
 		"workspace_dir":    workspace,
 		"claims_path":      claimsPath,
-		"remove_claim_ids": []string{"C-001"},
+		"task_name":        "claim_cards",
+		"remove_claim_ids": []string{"claim_cards-C-001"},
 	}), workspace)
 	require.NoError(t, err)
 	require.True(t, response.Accepted, "issues: %#v", response.Issues)
